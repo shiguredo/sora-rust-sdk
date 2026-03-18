@@ -1,0 +1,581 @@
+use std::collections::HashSet;
+use std::io;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::time::Duration;
+
+use e2e_tests::{
+    FakeVideoCapturer, FakeVideoCapturerConfig, build_metadata_with_access_token,
+    build_sender_tracks, generate_channel_id, load_env, secret_key, signaling_urls,
+    sum_stats_field_for_type, verify_stats_field_positive,
+};
+use shiguredo_http11::{RequestDecoder, Response, host::Host, uri::Uri};
+use sora_sdk::{ProxyInfo, Role, SoraClient, SoraClientContext};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::task::JoinHandle;
+
+fn test_channel_id(suffix: &str) -> String {
+    let base = generate_channel_id();
+    format!("{}-{}", base, suffix)
+}
+
+const MIN_PROXY_TRANSFER_BYTES_PER_DIRECTION: u64 = 4 * 1024;
+const MIN_PROXY_TRANSFER_BYTES_TOTAL: u64 = 12 * 1024;
+const MIN_RTP_BYTES_PER_CLIENT: u64 = 4 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ConnectTarget {
+    host: String,
+    port: u16,
+}
+
+#[derive(Debug, Default)]
+struct ProxyTrafficStats {
+    downstream_to_upstream: AtomicU64,
+    upstream_to_downstream: AtomicU64,
+}
+
+impl ProxyTrafficStats {
+    fn add(&self, downstream_to_upstream: u64, upstream_to_downstream: u64) {
+        self.downstream_to_upstream
+            .fetch_add(downstream_to_upstream, Ordering::SeqCst);
+        self.upstream_to_downstream
+            .fetch_add(upstream_to_downstream, Ordering::SeqCst);
+    }
+
+    fn snapshot(&self) -> (u64, u64) {
+        (
+            self.downstream_to_upstream.load(Ordering::SeqCst),
+            self.upstream_to_downstream.load(Ordering::SeqCst),
+        )
+    }
+}
+
+type Result<T> = std::result::Result<T, ProxyHarnessError>;
+
+#[derive(Debug)]
+enum ProxyHarnessError {
+    Io(io::Error),
+    Http11(shiguredo_http11::Error),
+    UnsupportedMethod(String),
+    InvalidAuthority,
+    PrematureClose,
+}
+
+impl ProxyHarnessError {
+    fn io_kind(&self) -> Option<io::ErrorKind> {
+        match self {
+            Self::Io(err) => Some(err.kind()),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ProxyHarnessError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProxyHarnessError::Io(err) => write!(f, "I/O エラー: {err}"),
+            ProxyHarnessError::Http11(err) => write!(f, "HTTP 解析エラー: {err}"),
+            ProxyHarnessError::UnsupportedMethod(method) => {
+                write!(f, "CONNECT 以外のメソッドはサポートしません: {method}")
+            }
+            ProxyHarnessError::InvalidAuthority => {
+                f.write_str("CONNECT リクエストの authority が不正です")
+            }
+            ProxyHarnessError::PrematureClose => {
+                f.write_str("CONNECT リクエスト受信前に接続が閉じられました")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ProxyHarnessError {}
+
+impl From<io::Error> for ProxyHarnessError {
+    fn from(err: io::Error) -> Self {
+        Self::Io(err)
+    }
+}
+
+impl From<shiguredo_http11::Error> for ProxyHarnessError {
+    fn from(err: shiguredo_http11::Error) -> Self {
+        Self::Http11(err)
+    }
+}
+
+fn parse_authority(authority: &str, default_port: Option<u16>) -> Option<ConnectTarget> {
+    let host = Host::parse(authority).ok()?;
+    let port = host.port().or(default_port)?;
+    let host = host
+        .host()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string();
+    if host.is_empty() {
+        return None;
+    }
+    Some(ConnectTarget { host, port })
+}
+
+fn parse_signaling_target(url: &str) -> Option<ConnectTarget> {
+    let uri = Uri::parse(url).ok()?;
+    let scheme = uri.scheme()?;
+    let default_port = if scheme.eq_ignore_ascii_case("wss") {
+        443
+    } else if scheme.eq_ignore_ascii_case("ws") {
+        80
+    } else {
+        return None;
+    };
+    let host = uri.host()?;
+    let port = uri.port().unwrap_or(default_port);
+    if host.is_empty() || port == 0 {
+        return None;
+    }
+    Some(ConnectTarget {
+        host: host.to_string(),
+        port,
+    })
+}
+
+async fn decode_connect_request(stream: &mut TcpStream) -> Result<ConnectTarget> {
+    let mut decoder = RequestDecoder::new();
+    let mut buf = [0u8; 2048];
+    loop {
+        if let Some((head, _body_kind)) = decoder.decode_headers()? {
+            if !head.method.eq_ignore_ascii_case("CONNECT") {
+                return Err(ProxyHarnessError::UnsupportedMethod(head.method));
+            }
+            return parse_authority(&head.uri, None).ok_or(ProxyHarnessError::InvalidAuthority);
+        }
+
+        let n = stream.read(&mut buf).await?;
+        if n == 0 {
+            return Err(ProxyHarnessError::PrematureClose);
+        }
+        decoder.feed(&buf[..n])?;
+    }
+}
+
+async fn handle_proxy_connection(
+    mut downstream: TcpStream,
+    connect_log: Arc<Mutex<Vec<ConnectTarget>>>,
+    traffic_stats: Arc<ProxyTrafficStats>,
+) -> Result<()> {
+    let target = decode_connect_request(&mut downstream).await?;
+    connect_log.lock().unwrap().push(target.clone());
+
+    let mut upstream = TcpStream::connect((target.host.as_str(), target.port)).await?;
+    let response = Response::new(200, "Connection Established");
+    downstream.write_all(&response.encode()).await?;
+    let (mut downstream_reader, mut downstream_writer) = downstream.split();
+    let (mut upstream_reader, mut upstream_writer) = upstream.split();
+    let (downstream_to_upstream, upstream_to_downstream) = tokio::join!(
+        relay_proxy_traffic(&mut downstream_reader, &mut upstream_writer),
+        relay_proxy_traffic(&mut upstream_reader, &mut downstream_writer),
+    );
+    let downstream_to_upstream = downstream_to_upstream?;
+    let upstream_to_downstream = upstream_to_downstream?;
+    traffic_stats.add(downstream_to_upstream, upstream_to_downstream);
+    Ok(())
+}
+
+fn is_connection_closed_error(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::BrokenPipe
+            | io::ErrorKind::UnexpectedEof
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::NotConnected
+    )
+}
+
+async fn relay_proxy_traffic<R, W>(reader: &mut R, writer: &mut W) -> io::Result<u64>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut total = 0u64;
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        let n = match reader.read(&mut buf).await {
+            Ok(0) => {
+                let _ = writer.shutdown().await;
+                break;
+            }
+            Ok(n) => n,
+            Err(err) if is_connection_closed_error(&err) => {
+                let _ = writer.shutdown().await;
+                break;
+            }
+            Err(err) => return Err(err),
+        };
+
+        if let Err(err) = writer.write_all(&buf[..n]).await {
+            if is_connection_closed_error(&err) {
+                break;
+            }
+            return Err(err);
+        }
+        total += n as u64;
+    }
+    Ok(total)
+}
+
+struct ProxyHarness {
+    proxy_url: String,
+    connect_log: Arc<Mutex<Vec<ConnectTarget>>>,
+    traffic_stats: Arc<ProxyTrafficStats>,
+    active_connection_count: Arc<AtomicUsize>,
+    accept_task: JoinHandle<()>,
+}
+
+impl ProxyHarness {
+    async fn start() -> Result<Self> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let connect_log = Arc::new(Mutex::new(Vec::new()));
+        let traffic_stats = Arc::new(ProxyTrafficStats::default());
+        let active_connection_count = Arc::new(AtomicUsize::new(0));
+        let connect_log_for_task = connect_log.clone();
+        let traffic_stats_for_task = traffic_stats.clone();
+        let active_connection_count_for_task = active_connection_count.clone();
+
+        let accept_task = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _peer_addr)) = listener.accept().await else {
+                    break;
+                };
+                active_connection_count_for_task.fetch_add(1, Ordering::SeqCst);
+                let connect_log = connect_log_for_task.clone();
+                let traffic_stats = traffic_stats_for_task.clone();
+                let active_connection_count = active_connection_count_for_task.clone();
+                tokio::spawn(async move {
+                    let result = handle_proxy_connection(stream, connect_log, traffic_stats).await;
+                    if let Err(err) = result
+                        && !matches!(
+                            err.io_kind(),
+                            Some(io::ErrorKind::BrokenPipe)
+                                | Some(io::ErrorKind::UnexpectedEof)
+                                | Some(io::ErrorKind::ConnectionReset)
+                        )
+                    {
+                        eprintln!("proxy connection error: {err}");
+                    }
+                    active_connection_count.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+        });
+
+        Ok(Self {
+            proxy_url: format!("http://127.0.0.1:{}", addr.port()),
+            connect_log,
+            traffic_stats,
+            active_connection_count,
+            accept_task,
+        })
+    }
+
+    fn proxy_info(&self) -> ProxyInfo {
+        ProxyInfo {
+            url: self.proxy_url.clone(),
+            ..Default::default()
+        }
+    }
+
+    fn connect_targets(&self) -> Vec<ConnectTarget> {
+        self.connect_log.lock().unwrap().clone()
+    }
+
+    fn transferred_bytes(&self) -> (u64, u64) {
+        self.traffic_stats.snapshot()
+    }
+
+    fn active_connection_count(&self) -> usize {
+        self.active_connection_count.load(Ordering::SeqCst)
+    }
+
+    async fn wait_for_all_connections_closed(&self, timeout: Duration) -> bool {
+        tokio::time::timeout(timeout, async {
+            loop {
+                if self.active_connection_count() == 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+}
+
+impl Drop for ProxyHarness {
+    fn drop(&mut self) {
+        self.accept_task.abort();
+    }
+}
+
+#[tokio::test]
+async fn test_sendrecv_bidirectional_via_proxy() {
+    load_env();
+
+    let urls = signaling_urls().expect("TEST_SIGNALING_URLS が必要");
+    let expected_signaling_targets: HashSet<ConnectTarget> = urls
+        .iter()
+        .filter_map(|url| parse_signaling_target(url))
+        .collect();
+    assert!(
+        !expected_signaling_targets.is_empty(),
+        "TEST_SIGNALING_URLS の解析に失敗しました"
+    );
+    let proxy = ProxyHarness::start()
+        .await
+        .expect("テスト用 Proxy の起動に失敗しました");
+    let proxy_info = proxy.proxy_info();
+    let channel_id = test_channel_id("sendrecv-via-proxy");
+
+    let client1_connected = Arc::new(AtomicBool::new(false));
+    let client1_connected_clone = client1_connected.clone();
+    let client1_track_received = Arc::new(AtomicUsize::new(0));
+    let client1_track_received_clone = client1_track_received.clone();
+
+    let client2_connected = Arc::new(AtomicBool::new(false));
+    let client2_connected_clone = client2_connected.clone();
+    let client2_track_received = Arc::new(AtomicUsize::new(0));
+    let client2_track_received_clone = client2_track_received.clone();
+
+    let context1 = SoraClientContext::new().expect("クライアント 1 コンテキスト作成失敗");
+    let mut capturer1 = FakeVideoCapturer::new(FakeVideoCapturerConfig::default())
+        .expect("FakeVideoCapturer 1 作成失敗");
+    let (video_track1, audio_track1) =
+        build_sender_tracks(&context1, &mut capturer1).expect("送信用トラック作成失敗");
+
+    let mut builder1 =
+        SoraClient::builder(context1, urls.clone(), channel_id.clone(), Role::SendRecv)
+            .sender_video_track(video_track1)
+            .sender_audio_track(audio_track1)
+            .proxy(proxy_info.clone())
+            .data_channel_signaling(true)
+            .on_notify(move |_| {
+                client1_connected_clone.store(true, Ordering::SeqCst);
+            })
+            .on_track(move |_track| {
+                client1_track_received_clone.fetch_add(1, Ordering::SeqCst);
+            });
+
+    if let Some(token) = secret_key() {
+        builder1 = builder1.metadata(build_metadata_with_access_token(&token));
+    }
+
+    let (client1, handle1) = builder1.build().expect("SoraClient 1 の作成に失敗しました");
+    let client1_task = tokio::spawn(async move {
+        let _ = tokio::time::timeout(Duration::from_secs(30), client1.run()).await;
+    });
+
+    let client1_connected_for_wait = client1_connected.clone();
+    let client1_wait = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if client1_connected_for_wait.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    assert!(
+        client1_wait.is_ok(),
+        "クライアント 1 の接続がタイムアウトしました"
+    );
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let context2 = SoraClientContext::new().expect("クライアント 2 コンテキスト作成失敗");
+    let mut capturer2 = FakeVideoCapturer::new(FakeVideoCapturerConfig::default())
+        .expect("FakeVideoCapturer 2 作成失敗");
+    let (video_track2, audio_track2) =
+        build_sender_tracks(&context2, &mut capturer2).expect("送信用トラック作成失敗");
+
+    let mut builder2 = SoraClient::builder(context2, urls, channel_id, Role::SendRecv)
+        .sender_video_track(video_track2)
+        .sender_audio_track(audio_track2)
+        .proxy(proxy_info)
+        .data_channel_signaling(true)
+        .on_notify(move |_| {
+            client2_connected_clone.store(true, Ordering::SeqCst);
+        })
+        .on_track(move |_track| {
+            client2_track_received_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+    if let Some(token) = secret_key() {
+        builder2 = builder2.metadata(build_metadata_with_access_token(&token));
+    }
+
+    let (client2, handle2) = builder2.build().expect("SoraClient 2 の作成に失敗しました");
+    let client2_task = tokio::spawn(async move {
+        let _ = tokio::time::timeout(Duration::from_secs(30), client2.run()).await;
+    });
+
+    let client2_connected_for_wait = client2_connected.clone();
+    let client2_wait = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if client2_connected_for_wait.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    assert!(
+        client2_wait.is_ok(),
+        "クライアント 2 の接続がタイムアウトしました"
+    );
+
+    let client1_track_for_wait = client1_track_received.clone();
+    let client2_track_for_wait = client2_track_received.clone();
+    let track_wait = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let tracks1 = client1_track_for_wait.load(Ordering::SeqCst);
+            let tracks2 = client2_track_for_wait.load(Ordering::SeqCst);
+            if tracks1 > 0 && tracks2 > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+
+    let tracks1 = client1_track_received.load(Ordering::SeqCst);
+    let tracks2 = client2_track_received.load(Ordering::SeqCst);
+    assert!(
+        track_wait.is_ok() && tracks1 > 0 && tracks2 > 0,
+        "相互のトラック受信に失敗しました (client1={}, client2={}, timeout={})",
+        tracks1,
+        tracks2,
+        track_wait.is_err()
+    );
+
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let stats1 = handle1
+        .get_stats()
+        .await
+        .expect("クライアント 1 の get_stats に失敗しました");
+    let stats2 = handle2
+        .get_stats()
+        .await
+        .expect("クライアント 2 の get_stats に失敗しました");
+
+    assert!(
+        verify_stats_field_positive(&stats1, "outbound-rtp", "packetsSent"),
+        "クライアント 1 の outbound-rtp packetsSent が 0 より大きくありません"
+    );
+    assert!(
+        verify_stats_field_positive(&stats2, "outbound-rtp", "packetsSent"),
+        "クライアント 2 の outbound-rtp packetsSent が 0 より大きくありません"
+    );
+    assert!(
+        verify_stats_field_positive(&stats1, "inbound-rtp", "packetsReceived"),
+        "クライアント 1 の inbound-rtp packetsReceived が 0 より大きくありません"
+    );
+    assert!(
+        verify_stats_field_positive(&stats2, "inbound-rtp", "packetsReceived"),
+        "クライアント 2 の inbound-rtp packetsReceived が 0 より大きくありません"
+    );
+    let client1_outbound_rtp_bytes = sum_stats_field_for_type(&stats1, "outbound-rtp", "bytesSent");
+    let client2_outbound_rtp_bytes = sum_stats_field_for_type(&stats2, "outbound-rtp", "bytesSent");
+    let client1_inbound_rtp_bytes =
+        sum_stats_field_for_type(&stats1, "inbound-rtp", "bytesReceived");
+    let client2_inbound_rtp_bytes =
+        sum_stats_field_for_type(&stats2, "inbound-rtp", "bytesReceived");
+    assert!(
+        client1_outbound_rtp_bytes >= MIN_RTP_BYTES_PER_CLIENT,
+        "クライアント 1 の outbound-rtp bytesSent が不足しています: bytes={}, min={}",
+        client1_outbound_rtp_bytes,
+        MIN_RTP_BYTES_PER_CLIENT
+    );
+    assert!(
+        client2_outbound_rtp_bytes >= MIN_RTP_BYTES_PER_CLIENT,
+        "クライアント 2 の outbound-rtp bytesSent が不足しています: bytes={}, min={}",
+        client2_outbound_rtp_bytes,
+        MIN_RTP_BYTES_PER_CLIENT
+    );
+    assert!(
+        client1_inbound_rtp_bytes >= MIN_RTP_BYTES_PER_CLIENT,
+        "クライアント 1 の inbound-rtp bytesReceived が不足しています: bytes={}, min={}",
+        client1_inbound_rtp_bytes,
+        MIN_RTP_BYTES_PER_CLIENT
+    );
+    assert!(
+        client2_inbound_rtp_bytes >= MIN_RTP_BYTES_PER_CLIENT,
+        "クライアント 2 の inbound-rtp bytesReceived が不足しています: bytes={}, min={}",
+        client2_inbound_rtp_bytes,
+        MIN_RTP_BYTES_PER_CLIENT
+    );
+    println!(
+        "クライアント 1: outbound-rtp bytesSent={}, inbound-rtp bytesReceived={}",
+        client1_outbound_rtp_bytes, client1_inbound_rtp_bytes
+    );
+    println!(
+        "クライアント 2: outbound-rtp bytesSent={}, inbound-rtp bytesReceived={}",
+        client2_outbound_rtp_bytes, client2_inbound_rtp_bytes
+    );
+
+    handle1
+        .disconnect()
+        .await
+        .expect("クライアント 1 の disconnect に失敗しました");
+    handle2
+        .disconnect()
+        .await
+        .expect("クライアント 2 の disconnect に失敗しました");
+    client1_task.abort();
+    client2_task.abort();
+    assert!(
+        proxy
+            .wait_for_all_connections_closed(Duration::from_secs(5))
+            .await,
+        "Proxy 接続がクローズされませんでした: active_connection_count={}",
+        proxy.active_connection_count()
+    );
+
+    // 2 クライアントが WS + TURN の 2 回接続してるので、合計 4 回となるはず
+    let connect_targets = proxy.connect_targets();
+    assert!(
+        connect_targets.len() >= 4,
+        "Proxy の CONNECT 回数が不足しています: count={}",
+        connect_targets.len()
+    );
+    let signaling_connect_count = connect_targets
+        .iter()
+        .filter(|target| expected_signaling_targets.contains(*target))
+        .count();
+    assert!(
+        signaling_connect_count >= 2,
+        "シグナリング宛先への CONNECT 回数が不足しています: signaling_connect_count={}",
+        signaling_connect_count
+    );
+    let (downstream_to_upstream_bytes, upstream_to_downstream_bytes) = proxy.transferred_bytes();
+    assert!(
+        downstream_to_upstream_bytes >= MIN_PROXY_TRANSFER_BYTES_PER_DIRECTION,
+        "Proxy の下流→上流バイト数が不足しています: bytes={}, min={}",
+        downstream_to_upstream_bytes,
+        MIN_PROXY_TRANSFER_BYTES_PER_DIRECTION
+    );
+    assert!(
+        upstream_to_downstream_bytes >= MIN_PROXY_TRANSFER_BYTES_PER_DIRECTION,
+        "Proxy の上流→下流バイト数が不足しています: bytes={}, min={}",
+        upstream_to_downstream_bytes,
+        MIN_PROXY_TRANSFER_BYTES_PER_DIRECTION
+    );
+    assert!(
+        downstream_to_upstream_bytes + upstream_to_downstream_bytes
+            >= MIN_PROXY_TRANSFER_BYTES_TOTAL,
+        "Proxy の総転送バイト数が不足しています: downstream_to_upstream={}, upstream_to_downstream={}, total_min={}",
+        downstream_to_upstream_bytes,
+        upstream_to_downstream_bytes,
+        MIN_PROXY_TRANSFER_BYTES_TOTAL
+    );
+}

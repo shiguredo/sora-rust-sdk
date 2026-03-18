@@ -1,0 +1,384 @@
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+use shiguredo_webrtc::{
+    EnvironmentRef, SdpVideoFormat, SdpVideoFormatRef, VideoCodecType, VideoDecoderFactoryHandler,
+    VideoDecoderHandler, VideoEncoderFactoryHandler, VideoEncoderHandler,
+};
+
+use crate::video_codec_capability::{
+    CodecDirection, VideoCodecCapability, VideoCodecImplementation,
+};
+use crate::video_codec_preference::VideoCodecPreference;
+
+type VideoCodecCapabilities = Vec<Box<dyn VideoCodecCapability>>;
+type SharedVideoCodecCapabilities = Arc<Mutex<VideoCodecCapabilities>>;
+
+pub struct SoraVideoEncoderFactory {
+    preference: VideoCodecPreference,
+    capabilities: SharedVideoCodecCapabilities,
+}
+
+pub struct SoraVideoDecoderFactory {
+    preference: VideoCodecPreference,
+    capabilities: SharedVideoCodecCapabilities,
+}
+
+impl SoraVideoEncoderFactory {
+    pub(crate) fn new(
+        preference: VideoCodecPreference,
+        capabilities: SharedVideoCodecCapabilities,
+    ) -> Self {
+        Self {
+            preference,
+            capabilities,
+        }
+    }
+}
+
+impl SoraVideoDecoderFactory {
+    pub(crate) fn new(
+        preference: VideoCodecPreference,
+        capabilities: SharedVideoCodecCapabilities,
+    ) -> Self {
+        Self {
+            preference,
+            capabilities,
+        }
+    }
+}
+
+impl VideoEncoderFactoryHandler for SoraVideoEncoderFactory {
+    fn get_supported_formats(&mut self) -> Vec<SdpVideoFormat> {
+        let capabilities = self.capabilities.lock().unwrap();
+        collect_supported_formats(&self.preference, &capabilities, CodecDirection::Encoder)
+    }
+
+    #[expect(unused_variables)]
+    fn create(
+        &mut self,
+        env: EnvironmentRef<'_>,
+        format: SdpVideoFormatRef<'_>,
+    ) -> Option<Box<dyn VideoEncoderHandler>> {
+        let format_name = format.name().ok()?;
+        let codec_type = VideoCodecType::try_from(format_name.as_str()).ok()?;
+        let preference = self.preference.find(CodecDirection::Encoder, codec_type)?;
+        let capabilities = self.capabilities.lock().unwrap();
+        let capability = find_capability(&capabilities, preference.implementation())?;
+        let mut format_owned = format.to_owned();
+        let input_parameters = format_owned
+            .parameters_mut()
+            .iter()
+            .collect::<HashMap<String, String>>();
+        let input_scalability_mode = format_owned
+            .scalability_modes()
+            .into_iter()
+            .next()
+            .and_then(|mode| mode.as_str().ok());
+        let resolved = capability.resolve_sdp_format(
+            CodecDirection::Encoder,
+            codec_type,
+            &input_parameters,
+            input_scalability_mode.as_deref(),
+        )?;
+        capability.create_video_encoder(&resolved)
+    }
+}
+
+impl VideoDecoderFactoryHandler for SoraVideoDecoderFactory {
+    fn get_supported_formats(&mut self) -> Vec<SdpVideoFormat> {
+        let capabilities = self.capabilities.lock().unwrap();
+        collect_supported_formats(&self.preference, &capabilities, CodecDirection::Decoder)
+    }
+
+    #[expect(unused_variables)]
+    fn create(
+        &mut self,
+        env: EnvironmentRef<'_>,
+        format: SdpVideoFormatRef<'_>,
+    ) -> Option<Box<dyn VideoDecoderHandler>> {
+        let format_name = format.name().ok()?;
+        let codec_type = VideoCodecType::try_from(format_name.as_str()).ok()?;
+        let preference = self.preference.find(CodecDirection::Decoder, codec_type)?;
+        let capabilities = self.capabilities.lock().unwrap();
+        let capability = find_capability(&capabilities, preference.implementation())?;
+        let mut format_owned = format.to_owned();
+        let input_parameters = format_owned
+            .parameters_mut()
+            .iter()
+            .collect::<HashMap<String, String>>();
+        let input_scalability_mode = format_owned
+            .scalability_modes()
+            .into_iter()
+            .next()
+            .and_then(|mode| mode.as_str().ok());
+        let resolved = capability.resolve_sdp_format(
+            CodecDirection::Decoder,
+            codec_type,
+            &input_parameters,
+            input_scalability_mode.as_deref(),
+        )?;
+        capability.create_video_decoder(&resolved)
+    }
+}
+
+fn collect_supported_formats(
+    preference: &VideoCodecPreference,
+    capabilities: &[Box<dyn VideoCodecCapability>],
+    direction: CodecDirection,
+) -> Vec<SdpVideoFormat> {
+    let mut formats = Vec::new();
+    for codec in preference.codecs() {
+        if codec.direction() != direction {
+            continue;
+        }
+        let Some(capability) = find_capability(capabilities, codec.implementation()) else {
+            continue;
+        };
+        let resolved = capability.resolve_sdp_format(
+            codec.direction(),
+            codec.codec_type(),
+            codec.parameters(),
+            codec.scalability_mode(),
+        );
+        let Some(format) = resolved else {
+            continue;
+        };
+        if !formats
+            .iter()
+            .any(|existing: &SdpVideoFormat| existing.is_equal(format.as_ref()))
+        {
+            formats.push(format);
+        }
+    }
+    formats
+}
+
+fn find_capability<'a>(
+    capabilities: &'a [Box<dyn VideoCodecCapability>],
+    implementation: &VideoCodecImplementation,
+) -> Option<&'a dyn VideoCodecCapability> {
+    capabilities
+        .iter()
+        .map(|capability| capability.as_ref())
+        .find(|capability| capability.get_implementation() == implementation.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::video_codec_preference::PreferenceCodec;
+    use shiguredo_webrtc::ScalabilityMode;
+
+    struct MockCapability {
+        implementation: VideoCodecImplementation,
+        encoder_supported: Vec<VideoCodecType>,
+        decoder_supported: Vec<VideoCodecType>,
+    }
+
+    impl MockCapability {
+        fn new(
+            implementation: VideoCodecImplementation,
+            encoder_supported: Vec<VideoCodecType>,
+            decoder_supported: Vec<VideoCodecType>,
+        ) -> Self {
+            Self {
+                implementation,
+                encoder_supported,
+                decoder_supported,
+            }
+        }
+    }
+
+    impl VideoCodecCapability for MockCapability {
+        fn get_implementation(&self) -> VideoCodecImplementation {
+            self.implementation.clone()
+        }
+
+        fn is_supported(&self, direction: CodecDirection, codec_type: VideoCodecType) -> bool {
+            match direction {
+                CodecDirection::Encoder => self.encoder_supported.contains(&codec_type),
+                CodecDirection::Decoder => self.decoder_supported.contains(&codec_type),
+            }
+        }
+
+        fn resolve_sdp_format(
+            &self,
+            direction: CodecDirection,
+            codec_type: VideoCodecType,
+            parameters: &HashMap<String, String>,
+            scalability_mode: Option<&str>,
+        ) -> Option<SdpVideoFormat> {
+            if !self.is_supported(direction, codec_type) {
+                return None;
+            }
+            match codec_type {
+                VideoCodecType::H264 => {
+                    let mut candidates = vec![
+                        SdpVideoFormat::new_with_parameters(
+                            "H264",
+                            &HashMap::from([(
+                                String::from("packetization-mode"),
+                                String::from("1"),
+                            )]),
+                            &[ScalabilityMode::L1T2],
+                        ),
+                        SdpVideoFormat::new_with_parameters(
+                            "H264",
+                            &HashMap::from([(
+                                String::from("packetization-mode"),
+                                String::from("0"),
+                            )]),
+                            &[ScalabilityMode::L1T1],
+                        ),
+                    ];
+                    let fallback = candidates.first().cloned()?;
+                    for candidate in &mut candidates {
+                        let params = candidate
+                            .parameters_mut()
+                            .iter()
+                            .collect::<HashMap<String, String>>();
+                        let params_match = parameters
+                            .iter()
+                            .all(|(k, v)| params.get(k).is_some_and(|value| value == v));
+                        if !params_match {
+                            continue;
+                        }
+                        let mode_match = match scalability_mode {
+                            Some(mode) => {
+                                candidate.scalability_modes().iter().any(|candidate_mode| {
+                                    candidate_mode.as_str().is_ok_and(|candidate_mode_text| {
+                                        candidate_mode_text == mode
+                                    })
+                                })
+                            }
+                            None => true,
+                        };
+                        if mode_match {
+                            return Some(candidate.clone());
+                        }
+                    }
+                    Some(fallback)
+                }
+                VideoCodecType::Vp8 => Some(SdpVideoFormat::new("VP8")),
+                _ => None,
+            }
+        }
+
+        fn create_video_encoder(
+            &self,
+            format: &SdpVideoFormat,
+        ) -> Option<Box<dyn VideoEncoderHandler>> {
+            let codec_type = format
+                .name()
+                .ok()
+                .and_then(|name| VideoCodecType::try_from(name.as_str()).ok())?;
+            if self.is_supported(CodecDirection::Encoder, codec_type) {
+                Some(Box::new(()))
+            } else {
+                None
+            }
+        }
+
+        fn create_video_decoder(
+            &self,
+            format: &SdpVideoFormat,
+        ) -> Option<Box<dyn VideoDecoderHandler>> {
+            let codec_type = format
+                .name()
+                .ok()
+                .and_then(|name| VideoCodecType::try_from(name.as_str()).ok())?;
+            if self.is_supported(CodecDirection::Decoder, codec_type) {
+                Some(Box::new(()))
+            } else {
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn encoder_factory_uses_preference_order() {
+        let preference = VideoCodecPreference::new(vec![
+            PreferenceCodec::new(
+                CodecDirection::Encoder,
+                VideoCodecType::Vp8,
+                VideoCodecImplementation::new("impl-b", "Implementation B"),
+                None,
+                HashMap::new(),
+            ),
+            PreferenceCodec::new(
+                CodecDirection::Encoder,
+                VideoCodecType::H264,
+                VideoCodecImplementation::new("impl-a", "Implementation A"),
+                None,
+                HashMap::new(),
+            ),
+        ]);
+        let capabilities: Vec<Box<dyn VideoCodecCapability>> = vec![
+            Box::new(MockCapability::new(
+                VideoCodecImplementation::new("impl-a", "Implementation A"),
+                vec![VideoCodecType::H264],
+                Vec::new(),
+            )),
+            Box::new(MockCapability::new(
+                VideoCodecImplementation::new("impl-b", "Implementation B"),
+                vec![VideoCodecType::Vp8],
+                Vec::new(),
+            )),
+        ];
+
+        let shared = Arc::new(Mutex::new(capabilities));
+        let mut factory = SoraVideoEncoderFactory::new(preference, shared);
+        let formats = VideoEncoderFactoryHandler::get_supported_formats(&mut factory);
+        assert_eq!(formats.len(), 2);
+        assert_eq!(formats[0].name().expect("name 取得失敗"), "VP8");
+        assert_eq!(formats[1].name().expect("name 取得失敗"), "H264");
+    }
+
+    #[test]
+    fn decoder_factory_create_requires_supported_codec_type() {
+        let preference = VideoCodecPreference::new(vec![PreferenceCodec::new(
+            CodecDirection::Decoder,
+            VideoCodecType::H264,
+            VideoCodecImplementation::new("impl-a", "Implementation A"),
+            Some(String::from("L1T2")),
+            HashMap::from([(String::from("packetization-mode"), String::from("1"))]),
+        )]);
+        let capabilities: Vec<Box<dyn VideoCodecCapability>> = vec![Box::new(MockCapability::new(
+            VideoCodecImplementation::new("impl-a", "Implementation A"),
+            Vec::new(),
+            vec![VideoCodecType::H264],
+        ))];
+
+        let shared = Arc::new(Mutex::new(capabilities));
+        let mut factory = SoraVideoDecoderFactory::new(preference, shared);
+        let env = shiguredo_webrtc::Environment::new();
+
+        let mut unmatched = SdpVideoFormat::new_with_parameters(
+            "H264",
+            &HashMap::from([(String::from("packetization-mode"), String::from("0"))]),
+            &[ScalabilityMode::L1T1],
+        );
+        unmatched.parameters_mut().set("packetization-mode", "0");
+        assert!(
+            VideoDecoderFactoryHandler::create(&mut factory, env.as_ref(), unmatched.as_ref())
+                .is_some()
+        );
+
+        let mut matched = SdpVideoFormat::new_with_parameters(
+            "H264",
+            &HashMap::from([(String::from("packetization-mode"), String::from("1"))]),
+            &[ScalabilityMode::L1T2],
+        );
+        matched.parameters_mut().set("packetization-mode", "1");
+        assert!(
+            VideoDecoderFactoryHandler::create(&mut factory, env.as_ref(), matched.as_ref())
+                .is_some()
+        );
+
+        let vp8 = SdpVideoFormat::new("VP8");
+        assert!(
+            VideoDecoderFactoryHandler::create(&mut factory, env.as_ref(), vp8.as_ref()).is_none()
+        );
+    }
+}

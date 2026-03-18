@@ -1,0 +1,28 @@
+[package]
+name = "e2e-tests"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+
+[features]
+default = []
+nvcodec = ["sora_sdk/nvcodec", "dep:shiguredo_nvcodec"]
+
+[dependencies]
+sora_sdk = { path = ".." }
+shiguredo_webrtc = { workspace = true }
+raden = { version = "2026.1.0-canary.0" }
+shiguredo_video_device = { version = "2026.1.0-canary.3" }
+tokio = { version = "1", features = ["full"] }
+nojson = "0.3"
+aws-lc-rs = "1"
+base64 = "0.22"
+shiguredo_http11 = "2026.1.1"
+shiguredo_nvcodec = { version = "2025.2.2", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+shiguredo_audio_device = { version = "2026.1.0-canary.0" }
+
+[dev-dependencies]
+serial_test = "3"

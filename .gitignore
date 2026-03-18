@@ -1,0 +1,15 @@
+/target
+
+target/
+
+# Agents
+.claude/
+.codex/
+
+# macos
+.DS_Store
+
+# blend2d
+*.png
+
+.cargo/config.toml

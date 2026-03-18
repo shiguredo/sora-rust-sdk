@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    paths-ignore:
+      - "**.md"
+
+env:
+  TEST_SIGNALING_URLS: ${{ secrets.TEST_SIGNALING_URLS }}
+  TEST_CHANNEL_ID_PREFIX: ${{ secrets.TEST_CHANNEL_ID_PREFIX }}
+  TEST_SECRET_KEY: ${{ secrets.TEST_SECRET_KEY }}
+  TEST_API_URL: ${{ secrets.TEST_API_URL }}
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  ci:
+    strategy:
+      matrix:
+        os:
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
+          - ubuntu-22.04
+          - ubuntu-22.04-arm
+          - macos-26
+          - macos-15
+          # - windows-2025
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v6
+      - name: Install build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential \
+            libx11-dev libxext-dev libxrandr-dev libxi-dev libxfixes-dev libxcursor-dev libxss-dev libxtst-dev \
+            libwayland-dev libxkbcommon-dev \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev \
+            libvulkan-dev \
+            libdbus-1-dev libudev-dev libdrm-dev libgbm-dev
+      - run: rustup update stable
+      - uses: shiguredo/github-actions/.github/actions/rust-cache@main
+        with:
+          os: ${{ matrix.os }}
+          toolchain: stable
+      - run: cp .cargo/config.toml.ci .cargo/config.toml
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace -- -D warnings
+      - run: cargo test --workspace
+
+  slack_notify:
+    needs: [ci]
+    runs-on: ubuntu-slim
+    if: ${{ !cancelled() }}
+    steps:
+      - name: Slack Notification
+        uses: shiguredo/github-actions/.github/actions/slack-notify@main
+        with:
+          status: ${{ job.status }}
+          slack_webhook: ${{ secrets.SLACK_WEBHOOK }}
+          slack_channel: sora-rust-sdk
+          notify_mode: failure_and_fixed
+        env:
+          GH_TOKEN: ${{ github.token }}

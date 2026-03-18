@@ -1,0 +1,32 @@
+[package]
+name = "sumomo"
+version = "0.0.0"
+edition = "2024"
+# Linux では以下のパッケージが必要:
+#   sudo apt install libssl-dev pkg-config
+
+[dependencies]
+noargs = "0.4"
+nojson = "0.3"
+rustls-pki-types = "1"
+sora_sdk = { path = "../.." }
+shiguredo_webrtc = { workspace = true }
+raw_player = { version = "2026.1.0-canary.0", optional = true }
+shiguredo_video_device = { version = "2026.1.0-canary.3", optional = true }
+shiguredo_audio_device = { version = "2026.1.0-canary.0", optional = true }
+tokio = { version = "1", features = [
+    "io-util",
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "sync",
+    "time",
+] }
+
+[features]
+default = []
+nvcodec = ["sora_sdk/nvcodec"]
+raw-player = ["dep:raw_player"]
+# Linux では追加で pipewire-pulse と libpulse-dev が必要:
+#   sudo apt install pipewire-pulse libpulse-dev
+media-device = ["dep:shiguredo_video_device", "dep:shiguredo_audio_device"]

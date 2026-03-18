@@ -1,0 +1,2 @@
+[patch.crates-io]
+shiguredo_webrtc = { git = "https://github.com/shiguredo/webrtc-rs.git", branch = "develop" }

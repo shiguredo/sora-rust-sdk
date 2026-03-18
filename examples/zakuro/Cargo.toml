@@ -1,0 +1,21 @@
+[package]
+name = "zakuro"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+noargs = "0.4"
+nojson = "0.3"
+sora_sdk = { path = "../.." }
+shiguredo_webrtc = { workspace = true }
+raden = { version = "2026.1.0-canary.0" }
+tokio = { version = "1", features = [
+    "io-util",
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
+tokio-util = "0.7"
