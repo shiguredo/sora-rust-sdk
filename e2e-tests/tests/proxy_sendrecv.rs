@@ -473,7 +473,7 @@ async fn test_sendrecv_bidirectional_via_proxy() {
     let (video_track2, audio_track2) =
         build_sender_tracks(&context2, &mut capturer2).expect("送信用トラック作成失敗");
 
-    let mut builder2 = SoraClient::builder(context2, urls, channel_id, Role::SendRecv)
+    let mut builder2 = SoraClient::builder(context2, urls.clone(), channel_id, Role::SendRecv)
         .sender_video_track(video_track2)
         .sender_audio_track(audio_track2)
         .proxy(proxy_info)
@@ -620,8 +620,9 @@ async fn test_sendrecv_bidirectional_via_proxy() {
     // 2 クライアントが urls.len() + TURN 回接続しているはず
     let connect_targets = proxy.connect_targets();
     assert!(
-        connect_targets.len() == urls.len() + 2,
-        "Proxy の CONNECT 回数が不足しています: count={}",
+        connect_targets.len() == urls.len() * 2 + 2,
+        "Proxy の CONNECT 回数が期待値と異なります: expected={}, actual={}",
+        urls.len() * 2 + 2,
         connect_targets.len()
     );
     let signaling_connect_count = connect_targets
