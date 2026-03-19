@@ -483,6 +483,14 @@ async fn test_sendrecv_bidirectional_via_proxy() {
         })
         .on_track(move |_track| {
             client2_track_received_clone.fetch_add(1, Ordering::SeqCst);
+        })
+        .ice_server_url_configurer(|server, urls| {
+            for url in urls {
+                // 必ず TURN-TCP または TURN-TLS に接続してほしいので、transport=tcp を含む URL のみ追加する
+                if url.contains("transport=tcp") {
+                    server.add_url(url);
+                }
+            }
         });
 
     if let Some(token) = secret_key() {
