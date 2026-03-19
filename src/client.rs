@@ -64,6 +64,22 @@ pub struct TlsConfig {
     pub ca_cert: Option<String>,
 }
 
+type IceServerUrlConfigurer = dyn Fn(&mut IceServer, &[String]) + Send + Sync;
+
+fn configure_ice_server_urls(
+    server_entry: &mut IceServer,
+    urls: &[String],
+    configurer: Option<&Arc<IceServerUrlConfigurer>>,
+) {
+    if let Some(configurer) = configurer {
+        configurer(server_entry, urls);
+        return;
+    }
+    for url in urls {
+        server_entry.add_url(url);
+    }
+}
+
 pub struct SoraClientBuilder {
     context: Arc<SoraClientContext>,
     signaling_urls: Vec<String>,
@@ -111,6 +127,7 @@ pub struct SoraClientBuilder {
     forwarding_filters: Option<Vec<ForwardingFilter>>,
     turn_tls_insecure: bool,
     turn_tls_ca_cert: Option<Vec<u8>>,
+    ice_server_url_configurer: Option<Arc<IceServerUrlConfigurer>>,
     proxy: Option<ProxyInfo>,
     websocket_connection_timeout: Duration,
     websocket_close_timeout: Duration,
@@ -162,6 +179,7 @@ impl SoraClientBuilder {
             forwarding_filters: None,
             turn_tls_insecure: false,
             turn_tls_ca_cert: None,
+            ice_server_url_configurer: None,
             proxy: None,
             websocket_connection_timeout: Duration::from_secs(30),
             websocket_close_timeout: Duration::from_secs(3),
@@ -360,6 +378,14 @@ impl SoraClientBuilder {
     /// TURN-TLS の CA 証明書を DER エンコードで設定する。
     pub fn turn_tls_ca_cert(mut self, der: Vec<u8>) -> Self {
         self.turn_tls_ca_cert = Some(der);
+        self
+    }
+
+    pub fn ice_server_url_configurer<F>(mut self, configurer: F) -> Self
+    where
+        F: Fn(&mut IceServer, &[String]) + Send + Sync + 'static,
+    {
+        self.ice_server_url_configurer = Some(Arc::new(configurer));
         self
     }
 
@@ -1314,12 +1340,6 @@ impl SoraClient {
         let mut config = PeerConnectionRtcConfiguration::new();
         for server in servers {
             let mut server_entry = IceServer::new();
-            for url in &server.urls {
-                if !url.contains("transport=tcp") {
-                    continue;
-                }
-                server_entry.add_url(url);
-            }
             if let Some(user) = &server.username {
                 server_entry.set_username(user);
             }
@@ -1328,6 +1348,14 @@ impl SoraClient {
             }
             if self.config.turn_tls_insecure {
                 server_entry.set_tls_cert_policy(TlsCertPolicy::InsecureNoCheck);
+            }
+            configure_ice_server_urls(
+                &mut server_entry,
+                &server.urls,
+                self.config.ice_server_url_configurer.as_ref(),
+            );
+            if server_entry.urls_len() == 0 {
+                continue;
             }
             config.servers().push(&server_entry);
         }
@@ -2435,6 +2463,72 @@ mod tests {
             .build()
             .expect("テスト用 runtime の構築に失敗しました");
         runtime.block_on(fut);
+    }
+
+    fn is_turn_tcp_or_udp_url(url: &str) -> bool {
+        let lower = url.to_ascii_lowercase();
+        let Some((scheme, _)) = lower.split_once(':') else {
+            return false;
+        };
+        if scheme != "turn" && scheme != "turns" {
+            return false;
+        }
+
+        lower
+            .split('?')
+            .nth(1)
+            .and_then(|query| {
+                query
+                    .split('&')
+                    .find_map(|param| param.strip_prefix("transport="))
+            })
+            .is_some_and(|transport| transport == "tcp" || transport == "udp")
+    }
+
+    #[test]
+    fn ice_server_url_configurer_none_adds_all_urls() {
+        let mut server_entry = IceServer::new();
+        let urls = vec![
+            "stun:stun.example.com:3478".to_string(),
+            "turn:turn.example.com:3478?transport=udp".to_string(),
+            "turns:turn.example.com:443?transport=tcp".to_string(),
+        ];
+        configure_ice_server_urls(&mut server_entry, &urls, None);
+
+        assert_eq!(server_entry.urls_len(), urls.len());
+    }
+
+    #[test]
+    fn ice_server_url_configurer_can_add_only_turn_tcp_udp_urls() {
+        let mut server_entry = IceServer::new();
+        let urls = vec![
+            "stun:stun.example.com:3478".to_string(),
+            "turn:turn.example.com:3478?transport=udp".to_string(),
+            "turn:turn.example.com:3478?transport=tcp".to_string(),
+            "turn:turn.example.com:3478".to_string(),
+            "turns:turn.example.com:443?transport=tcp".to_string(),
+        ];
+        let configurer: Arc<IceServerUrlConfigurer> = Arc::new(|server_entry, urls| {
+            for url in urls {
+                if is_turn_tcp_or_udp_url(url) {
+                    server_entry.add_url(url);
+                }
+            }
+        });
+        configure_ice_server_urls(&mut server_entry, &urls, Some(&configurer));
+        assert_eq!(server_entry.urls_len(), 3);
+    }
+
+    #[test]
+    fn ice_server_url_configurer_skips_server_when_no_url_is_added() {
+        let mut server_entry = IceServer::new();
+        let urls = vec![
+            "stun:stun.example.com:3478".to_string(),
+            "stuns:stun.example.com:5349".to_string(),
+        ];
+        let configurer: Arc<IceServerUrlConfigurer> = Arc::new(|_, _| {});
+        configure_ice_server_urls(&mut server_entry, &urls, Some(&configurer));
+        assert_eq!(server_entry.urls_len(), 0);
     }
 
     proptest! {
