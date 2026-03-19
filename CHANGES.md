@@ -11,5 +11,7 @@
 
 ## develop
 
-### misc
+- [ADD] Windows に対応する
+  - @melpon
 
+### misc

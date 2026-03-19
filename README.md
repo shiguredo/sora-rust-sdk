@@ -383,6 +383,8 @@ cargo build
 - Ubuntu 24.04 LTS arm64
 - Ubuntu 22.04 LTS x86_64
 - Ubuntu 22.04 LTS arm64
+- Windows 11 x86_64
+- Windows Server 2025 x86_64
 - macOS Tahoe 26 arm64
 - macOS Sequoia 15 arm64
 
@@ -394,10 +396,9 @@ cargo build
 
 直近の 2 バージョンをサポートします。
 
-### 将来対応予定
+### Windows の対応バージョン
 
-- Windows 11 x86_64
-- Windows Server 2025 x86_64
+直近のバージョンをサポートします。
 
 ## 優先実装
 
@@ -407,7 +408,6 @@ cargo build
 
 **詳細は Discord やメールなどでお気軽にお問い合わせください**
 
-- Windows x86_64 対応
 - Windows arm64 対応
 
 ## サポートについて
