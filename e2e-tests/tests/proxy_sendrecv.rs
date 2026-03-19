@@ -620,10 +620,10 @@ async fn test_sendrecv_bidirectional_via_proxy() {
     // 2 クライアントが urls.len() + TURN 回以上接続しているはず
     let connect_targets = proxy.connect_targets();
     assert!(
-        connect_targets.len() >= urls.len() * 2 + 2,
+        connect_targets.len() >= (urls.len() + 1) * 2,
         "Proxy の CONNECT 回数が不足しています: actual({}) >= expected({})",
         connect_targets.len(),
-        urls.len() * 2 + 2
+        (urls.len() + 1) * 2
     );
     let signaling_connect_count = connect_targets
         .iter()
