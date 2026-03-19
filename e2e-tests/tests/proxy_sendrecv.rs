@@ -260,6 +260,7 @@ impl ProxyHarness {
                             Some(io::ErrorKind::BrokenPipe)
                                 | Some(io::ErrorKind::UnexpectedEof)
                                 | Some(io::ErrorKind::ConnectionReset)
+                                | Some(io::ErrorKind::ConnectionAborted)
                         )
                     {
                         eprintln!("proxy connection error: {err}");
