@@ -1315,6 +1315,9 @@ impl SoraClient {
         for server in servers {
             let mut server_entry = IceServer::new();
             for url in &server.urls {
+                if !url.contains("transport=tcp") {
+                    continue;
+                }
                 server_entry.add_url(url);
             }
             if let Some(user) = &server.username {
