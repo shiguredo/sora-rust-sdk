@@ -320,14 +320,13 @@ impl ProxyHarness {
 /// - Windows 環境では、`libwebrtc` 側が non-loopback のローカル IP に bind した
 ///   ソケットで `127.0.0.1` へ connect しようとすると失敗するケースがある
 ///   (`WSAEADDRNOTAVAIL / 10049`)。
+///   - 実際に bind している場所: https://source.chromium.org/chromium/chromium/src/+/main:third_party/webrtc/p2p/base/basic_packet_socket_factory.cc;l=156;drc=61721239a70cffde6dd7b56241f1e3360fb3d6ee
 /// - そのため proxy URL を常に `127.0.0.1` に固定すると、環境によっては
 ///   `CONNECT` が proxy まで到達せず、テストが不安定になる。
 ///
 /// 目的:
 /// - `libwebrtc` が実際に使いそうな経路に合わせて、proxy URL に使うホスト IP を
 ///   できるだけ妥当に選ぶ。
-/// - 外部固定 IP (`1.1.1.1`) への依存を避けるため、テストで既に使う
-///   `TEST_SIGNALING_URLS` を経路判定の入力に使う。
 ///
 /// 方式:
 /// - 各 signaling URL から `host:port` を取り出す。
@@ -618,10 +617,10 @@ async fn test_sendrecv_bidirectional_via_proxy() {
         proxy.active_connection_count()
     );
 
-    // 2 クライアントが WS + TURN の 2 回接続してるので、合計 4 回となるはず
+    // 2 クライアントが urls.len() + TURN 回接続しているはず
     let connect_targets = proxy.connect_targets();
     assert!(
-        connect_targets.len() >= 4,
+        connect_targets.len() == urls.len() + 2,
         "Proxy の CONNECT 回数が不足しています: count={}",
         connect_targets.len()
     );
