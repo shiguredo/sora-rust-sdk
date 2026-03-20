@@ -66,20 +66,6 @@ pub struct TlsConfig {
 
 type IceServerUrlConfigurer = dyn Fn(&mut IceServer, &[String]) + Send + Sync;
 
-fn configure_ice_server_urls(
-    server_entry: &mut IceServer,
-    urls: &[String],
-    configurer: Option<&Arc<IceServerUrlConfigurer>>,
-) {
-    if let Some(configurer) = configurer {
-        configurer(server_entry, urls);
-        return;
-    }
-    for url in urls {
-        server_entry.add_url(url);
-    }
-}
-
 pub struct SoraClientBuilder {
     context: Arc<SoraClientContext>,
     signaling_urls: Vec<String>,
@@ -1332,6 +1318,20 @@ impl SoraClient {
         Ok(())
     }
 
+    fn configure_ice_server_urls(
+        server_entry: &mut IceServer,
+        urls: &[String],
+        configurer: Option<&Arc<IceServerUrlConfigurer>>,
+    ) {
+        if let Some(configurer) = configurer {
+            configurer(server_entry, urls);
+            return;
+        }
+        for url in urls {
+            server_entry.add_url(url);
+        }
+    }
+
     fn apply_pc_configuration(&mut self, servers: &[IceServerConfig]) -> Result<()> {
         if servers.is_empty() {
             return Ok(());
@@ -1349,7 +1349,7 @@ impl SoraClient {
             if self.config.turn_tls_insecure {
                 server_entry.set_tls_cert_policy(TlsCertPolicy::InsecureNoCheck);
             }
-            configure_ice_server_urls(
+            Self::configure_ice_server_urls(
                 &mut server_entry,
                 &server.urls,
                 self.config.ice_server_url_configurer.as_ref(),
@@ -2493,7 +2493,7 @@ mod tests {
             "turn:turn.example.com:3478?transport=udp".to_string(),
             "turns:turn.example.com:443?transport=tcp".to_string(),
         ];
-        configure_ice_server_urls(&mut server_entry, &urls, None);
+        SoraClient::configure_ice_server_urls(&mut server_entry, &urls, None);
 
         assert_eq!(server_entry.urls_len(), urls.len());
     }
@@ -2515,7 +2515,7 @@ mod tests {
                 }
             }
         });
-        configure_ice_server_urls(&mut server_entry, &urls, Some(&configurer));
+        SoraClient::configure_ice_server_urls(&mut server_entry, &urls, Some(&configurer));
         assert_eq!(server_entry.urls_len(), 3);
     }
 
@@ -2527,7 +2527,7 @@ mod tests {
             "stuns:stun.example.com:5349".to_string(),
         ];
         let configurer: Arc<IceServerUrlConfigurer> = Arc::new(|_, _| {});
-        configure_ice_server_urls(&mut server_entry, &urls, Some(&configurer));
+        SoraClient::configure_ice_server_urls(&mut server_entry, &urls, Some(&configurer));
         assert_eq!(server_entry.urls_len(), 0);
     }
 
