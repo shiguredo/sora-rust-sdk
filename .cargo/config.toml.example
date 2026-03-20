@@ -1,2 +1,7 @@
-[patch.crates-io]
-shiguredo_webrtc = { path = "crates/webrtc-rs" }
+﻿[patch.crates-io]
+shiguredo_webrtc = { path = "../webrtc-rs" }
+
+[env]
+CARGO_FEATURE_LOCAL_EXPORT = "1"
+CARGO_FEATURE_SOURCE_BUILD = "1"
+

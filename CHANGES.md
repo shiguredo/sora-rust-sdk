@@ -11,5 +11,9 @@
 
 ## develop
 
-### misc
+- [ADD] Windows に対応する
+  - @melpon
+- [ADD] `SoraClientBuilder::ice_server_url_configurer` を追加する
+  - @melpon
 
+### misc

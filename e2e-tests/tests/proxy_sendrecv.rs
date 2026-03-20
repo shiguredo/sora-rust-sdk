@@ -13,7 +13,7 @@ use e2e_tests::{
 use shiguredo_http11::{RequestDecoder, Response, host::Host, uri::Uri};
 use sora_sdk::{ProxyInfo, Role, SoraClient, SoraClientContext};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::task::JoinHandle;
 
 fn test_channel_id(suffix: &str) -> String {
@@ -233,9 +233,10 @@ struct ProxyHarness {
 }
 
 impl ProxyHarness {
-    async fn start() -> Result<Self> {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
+    async fn start(signaling_urls: &[String]) -> Result<Self> {
+        let listener = TcpListener::bind("0.0.0.0:0").await?;
         let addr = listener.local_addr()?;
+        let proxy_host = detect_proxy_host(signaling_urls).await;
         let connect_log = Arc::new(Mutex::new(Vec::new()));
         let traffic_stats = Arc::new(ProxyTrafficStats::default());
         let active_connection_count = Arc::new(AtomicUsize::new(0));
@@ -260,6 +261,7 @@ impl ProxyHarness {
                             Some(io::ErrorKind::BrokenPipe)
                                 | Some(io::ErrorKind::UnexpectedEof)
                                 | Some(io::ErrorKind::ConnectionReset)
+                                | Some(io::ErrorKind::ConnectionAborted)
                         )
                     {
                         eprintln!("proxy connection error: {err}");
@@ -270,7 +272,7 @@ impl ProxyHarness {
         });
 
         Ok(Self {
-            proxy_url: format!("http://127.0.0.1:{}", addr.port()),
+            proxy_url: format!("http://{}:{}", proxy_host, addr.port()),
             connect_log,
             traffic_stats,
             active_connection_count,
@@ -311,6 +313,80 @@ impl ProxyHarness {
     }
 }
 
+/// Proxy 用 URL に設定するホスト IP を推定する。
+///
+/// 背景:
+/// - このテストは `libwebrtc` に HTTP Proxy を設定して通信させる。
+/// - Windows 環境では、`libwebrtc` 側が non-loopback のローカル IP に bind した
+///   ソケットで `127.0.0.1` へ connect しようとすると失敗するケースがある
+///   (`WSAEADDRNOTAVAIL / 10049`)。
+///   - 実際に bind している場所: https://source.chromium.org/chromium/chromium/src/+/main:third_party/webrtc/p2p/base/basic_packet_socket_factory.cc;l=156;drc=61721239a70cffde6dd7b56241f1e3360fb3d6ee
+/// - そのため proxy URL を常に `127.0.0.1` に固定すると、環境によっては
+///   `CONNECT` が proxy まで到達せず、テストが不安定になる。
+///
+/// 目的:
+/// - `libwebrtc` が実際に使いそうな経路に合わせて、proxy URL に使うホスト IP を
+///   できるだけ妥当に選ぶ。
+///
+/// 方式:
+/// - 各 signaling URL から `host:port` を取り出す。
+/// - `UdpSocket::bind("0.0.0.0:0")` でローカル UDP ソケットを作成し、
+///   その宛先へ `connect` する。
+/// - UDP の `connect` は TCP のような接続確立ではなく、主に「その宛先へ送るなら
+///   どのローカル IP / NIC を使うか」を OS に選ばせるために使う。
+/// - 直後に `local_addr()` を読むと、OS が選んだ送信元ローカル IP が取れる。
+/// - loopback ではない IP が得られたら、それを proxy URL の host として返す。
+///
+/// 失敗時方針:
+/// - URL 解析失敗、ソケット作成失敗、`connect` 失敗、`local_addr` 取得失敗は
+///   すべて「その URL では判定できない」とみなして次候補へ進む。
+/// - 最後まで有効な候補が得られない場合のみ `127.0.0.1` にフォールバックする。
+///   これは「最悪でもローカルだけで動かす」という保険であり、上記 Windows 問題を
+///   完全回避する保証ではない。
+async fn detect_proxy_host(signaling_urls: &[String]) -> String {
+    for url in signaling_urls {
+        // `ws://` / `wss://` を `host:port` へ変換できない URL は、
+        // 経路判定の入力として使えないためスキップする。
+        let Some(target) = parse_signaling_target(url) else {
+            continue;
+        };
+
+        // `0.0.0.0:0` は「任意インターフェース + 任意空きポート」で bind する指定。
+        // ここで重要なのは、特定 NIC を固定せず OS の経路選択に任せること。
+        let Ok(socket) = UdpSocket::bind("0.0.0.0:0").await else {
+            continue;
+        };
+
+        // signaling 宛先へ UDP connect して、OS に送信経路を選ばせる。
+        // ここで得たいのは通信成功ではなく「どのローカル IP が選ばれるか」。
+        if socket
+            .connect((target.host.as_str(), target.port))
+            .await
+            .is_err()
+        {
+            continue;
+        }
+
+        // 上記 connect の結果、OS が決めたローカル側の `IP:port` を取得する。
+        let Ok(addr) = socket.local_addr() else {
+            continue;
+        };
+
+        // loopback 以外のアドレスが得られた場合、その IP を proxy URL に採用する。
+        // - v4 / v6 の両方に対応する
+        // - loopback (`127.0.0.1` / `::1`) は意図的に除外する
+        //   (Windows の `non-loopback bind -> loopback connect` 問題を避けるため)
+        match addr.ip() {
+            std::net::IpAddr::V4(ip) if !ip.is_loopback() => return ip.to_string(),
+            std::net::IpAddr::V6(ip) if !ip.is_loopback() => return ip.to_string(),
+            _ => {}
+        }
+    }
+
+    // 候補が 1 つも得られない場合の最終フォールバック。
+    "127.0.0.1".to_string()
+}
+
 impl Drop for ProxyHarness {
     fn drop(&mut self) {
         self.accept_task.abort();
@@ -330,7 +406,7 @@ async fn test_sendrecv_bidirectional_via_proxy() {
         !expected_signaling_targets.is_empty(),
         "TEST_SIGNALING_URLS の解析に失敗しました"
     );
-    let proxy = ProxyHarness::start()
+    let proxy = ProxyHarness::start(&urls)
         .await
         .expect("テスト用 Proxy の起動に失敗しました");
     let proxy_info = proxy.proxy_info();
@@ -397,7 +473,7 @@ async fn test_sendrecv_bidirectional_via_proxy() {
     let (video_track2, audio_track2) =
         build_sender_tracks(&context2, &mut capturer2).expect("送信用トラック作成失敗");
 
-    let mut builder2 = SoraClient::builder(context2, urls, channel_id, Role::SendRecv)
+    let mut builder2 = SoraClient::builder(context2, urls.clone(), channel_id, Role::SendRecv)
         .sender_video_track(video_track2)
         .sender_audio_track(audio_track2)
         .proxy(proxy_info)
@@ -407,6 +483,14 @@ async fn test_sendrecv_bidirectional_via_proxy() {
         })
         .on_track(move |_track| {
             client2_track_received_clone.fetch_add(1, Ordering::SeqCst);
+        })
+        .ice_server_url_configurer(|server, urls| {
+            for url in urls {
+                // 必ず TURN-TCP または TURN-TLS に接続してほしいので、transport=tcp を含む URL のみ追加する
+                if url.contains("transport=tcp") {
+                    server.add_url(url);
+                }
+            }
         });
 
     if let Some(token) = secret_key() {
@@ -541,12 +625,13 @@ async fn test_sendrecv_bidirectional_via_proxy() {
         proxy.active_connection_count()
     );
 
-    // 2 クライアントが WS + TURN の 2 回接続してるので、合計 4 回となるはず
+    // 2 クライアントが urls.len() + TURN 回以上接続しているはず
     let connect_targets = proxy.connect_targets();
     assert!(
-        connect_targets.len() >= 4,
-        "Proxy の CONNECT 回数が不足しています: count={}",
-        connect_targets.len()
+        connect_targets.len() >= (urls.len() + 1) * 2,
+        "Proxy の CONNECT 回数が不足しています: actual({}) >= expected({})",
+        connect_targets.len(),
+        (urls.len() + 1) * 2
     );
     let signaling_connect_count = connect_targets
         .iter()

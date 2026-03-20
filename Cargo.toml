@@ -50,7 +50,7 @@ rustls-webpki = { version = "0.103", default-features = false, features = [
 members = ["examples/sumomo", "examples/zakuro", "e2e-tests"]
 
 [workspace.dependencies]
-shiguredo_webrtc = { version = "=0.146.0" }
+shiguredo_webrtc = { version = "=0.146.1-canary.1" }
 
 [dev-dependencies]
 proptest = "1"
