@@ -1465,8 +1465,16 @@ impl Mp4VideoCapturer {
 
                     let sample = reader.get_sample(i);
                     // エンコード済みデータをエンコーダーに送信する
-                    if sample_tx.send(sample).is_err() {
-                        return;
+                    // エンコーダーが未作成 (SDP ネゴシエーション前) の場合はチャネルが
+                    // 満杯になるので、その場合はフレームをスキップする
+                    match sample_tx.try_send(sample) {
+                        Ok(()) => {}
+                        Err(std_mpsc::TrySendError::Full(_)) => {
+                            // エンコーダーが追いついていないのでスキップする
+                        }
+                        Err(std_mpsc::TrySendError::Disconnected(_)) => {
+                            return;
+                        }
                     }
 
                     // ダミー I420 フレームを送信して encode() をトリガーする
@@ -1879,7 +1887,7 @@ async fn main() -> Result<()> {
     let mp4_state = if let Some(ref mp4_path) = args.input_mp4 {
         let reader = Mp4SampleReader::new(mp4_path).map_err(ErrorMessage::new)?;
         let codec_type = reader.track_info.codec_type;
-        let (sample_tx, sample_rx) = std_mpsc::sync_channel::<EncodedSample>(2);
+        let (sample_tx, sample_rx) = std_mpsc::sync_channel::<EncodedSample>(4);
         Some((reader, sample_tx, sample_rx, codec_type))
     } else {
         None
