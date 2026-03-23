@@ -10,15 +10,26 @@ use std::thread;
 #[cfg(feature = "media-device")]
 use shiguredo_webrtc::VideoFrame as WebrtcVideoFrame;
 use shiguredo_webrtc::{
-    AdaptFrameResult, AdaptedVideoTrackSource, I420Buffer, LibyuvFourcc, VideoFrameRef, VideoSink,
-    VideoSinkHandler, VideoSinkWants, VideoTrackSource, convert_from_i420, log, rtc_log_info,
-    rtc_log_warning,
+    AdaptFrameResult, AdaptedVideoTrackSource, CodecSpecificInfo, EncodedImage, EncodedImageBuffer,
+    H264PacketizationMode, I420Buffer, LibyuvFourcc, SdpVideoFormat, TimestampAligner,
+    VideoCodecRef, VideoCodecStatus, VideoCodecType as WebrtcVideoCodecType,
+    VideoEncoderEncodedImageCallbackPtr, VideoEncoderEncodedImageCallbackRef,
+    VideoEncoderEncodedImageCallbackResultError, VideoEncoderEncoderInfo, VideoEncoderHandler,
+    VideoEncoderRateControlParametersRef, VideoEncoderSettingsRef, VideoFrame, VideoFrameRef,
+    VideoFrameType, VideoFrameTypeVectorRef, VideoSink, VideoSinkHandler, VideoSinkWants,
+    VideoTrackSource, convert_from_i420, log, rtc_log_info, rtc_log_warning,
+};
+use sora_sdk::{
+    CodecDirection, Role, SoraClient, SoraClientContext, SoraClientContextConfig,
+    VideoCodecImplementation,
 };
 #[cfg(feature = "nvcodec")]
 use sora_sdk::{NvCodecVideoCodecCapability, VideoCodecCapability, VideoCodecPreference};
-use sora_sdk::{Role, SoraClient, SoraClientContext, SoraClientContextConfig};
+#[cfg(not(feature = "nvcodec"))]
+use sora_sdk::{VideoCodecCapability, VideoCodecPreference};
 #[cfg(feature = "media-device")]
 use std::sync::Mutex;
+use std::sync::mpsc as std_mpsc;
 use tokio::sync::mpsc;
 
 struct Args {
@@ -28,6 +39,7 @@ struct Args {
     audio: Option<bool>,
     video: Option<bool>,
     video_codec_type: Option<String>,
+    input_mp4: Option<String>,
     data_channel_signaling: Option<bool>,
     ignore_disconnect_websocket: Option<bool>,
     simulcast: Option<bool>,
@@ -202,6 +214,7 @@ fn parse_args() -> Result<Args> {
             duration: None,
             turn_tls_insecure: false,
             turn_tls_ca_cert: None,
+            input_mp4: None,
             #[cfg(feature = "raw-player")]
             use_raw_player: false,
             video_input_device: None,
@@ -253,6 +266,11 @@ fn parse_args() -> Result<Args> {
             "vp8" | "vp9" | "av1" | "h264" | "h265" => Ok(o.value().to_string()),
             _ => Err("video-codec-type は vp8/vp9/av1/h264/h265 で指定してください"),
         })?;
+
+    let input_mp4: Option<String> = noargs::opt("input-mp4")
+        .doc("MP4 ファイルからエンコード済み映像をそのまま送信する")
+        .take(&mut args)
+        .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
 
     let data_channel_signaling: Option<bool> = noargs::opt("data-channel-signaling")
         .doc("DataChannel 経由でシグナリングを行う (true/false)")
@@ -357,6 +375,7 @@ fn parse_args() -> Result<Args> {
         audio,
         video,
         video_codec_type,
+        input_mp4,
         data_channel_signaling,
         ignore_disconnect_websocket,
         simulcast,
@@ -1047,6 +1066,455 @@ fn list_devices() -> Result<()> {
     Ok(())
 }
 
+// --- MP4 パススルー送信 ---
+
+/// MP4 から抽出したエンコード済みビデオサンプル
+struct EncodedSample {
+    data: Vec<u8>,
+    is_keyframe: bool,
+    width: u32,
+    height: u32,
+    codec_type: WebrtcVideoCodecType,
+}
+
+/// MP4 のビデオトラック情報
+struct Mp4VideoTrackInfo {
+    codec_type: WebrtcVideoCodecType,
+    width: u16,
+    height: u16,
+    timescale: u32,
+    /// H.264 の場合の SPS/PPS (Annex B 形式)
+    h264_parameter_sets: Option<Vec<u8>>,
+}
+
+/// MP4 ファイルからビデオサンプルを読み出す
+struct Mp4SampleReader {
+    file_data: Vec<u8>,
+    track_info: Mp4VideoTrackInfo,
+    /// (data_offset, data_size, keyframe, timestamp, duration) のリスト
+    samples: Vec<(u64, usize, bool, u64, u32)>,
+}
+
+impl Mp4SampleReader {
+    fn new(path: &str) -> std::result::Result<Self, String> {
+        use shiguredo_mp4::demux::{Input, Mp4FileDemuxer};
+
+        let file_data = std::fs::read(path)
+            .map_err(|e| format!("MP4 ファイルの読み込みに失敗しました: {e}"))?;
+
+        let mut demuxer = Mp4FileDemuxer::new();
+
+        // ファイル全体を入力として渡す
+        while let Some(required) = demuxer.required_input() {
+            let start = required.position as usize;
+            let end = match required.size {
+                Some(size) => (start + size).min(file_data.len()),
+                None => file_data.len(),
+            };
+            let data = &file_data[start..end];
+            demuxer.handle_input(Input {
+                position: required.position,
+                data,
+            });
+        }
+
+        let tracks = demuxer
+            .tracks()
+            .map_err(|e| format!("MP4 トラック情報の取得に失敗しました: {e}"))?;
+
+        // ビデオトラックを探す
+        let video_track = tracks
+            .iter()
+            .find(|t| t.kind == shiguredo_mp4::TrackKind::Video)
+            .ok_or("MP4 にビデオトラックが見つかりません")?;
+
+        let video_track_id = video_track.track_id;
+        let timescale = video_track.timescale.get();
+
+        // サンプルを全て読み出してトラック情報を取得する
+        let mut track_info: Option<Mp4VideoTrackInfo> = None;
+        let mut samples = Vec::new();
+
+        loop {
+            match demuxer.next_sample() {
+                Ok(Some(sample)) => {
+                    if sample.track.track_id != video_track_id {
+                        continue;
+                    }
+
+                    // 最初のサンプルからコーデック情報を取得する
+                    if track_info.is_none()
+                        && let Some(entry) = sample.sample_entry
+                    {
+                        track_info = Some(Self::extract_track_info(entry, timescale)?);
+                    }
+
+                    samples.push((
+                        sample.data_offset,
+                        sample.data_size,
+                        sample.keyframe,
+                        sample.timestamp,
+                        sample.duration,
+                    ));
+                }
+                Ok(None) => break,
+                Err(e) => return Err(format!("MP4 サンプルの読み出しに失敗しました: {e}")),
+            }
+        }
+
+        let track_info = track_info.ok_or("MP4 にビデオサンプルが見つかりません")?;
+
+        if samples.is_empty() {
+            return Err("MP4 にビデオサンプルが見つかりません".to_string());
+        }
+
+        Ok(Self {
+            file_data,
+            track_info,
+            samples,
+        })
+    }
+
+    fn extract_track_info(
+        entry: &shiguredo_mp4::boxes::SampleEntry,
+        timescale: u32,
+    ) -> std::result::Result<Mp4VideoTrackInfo, String> {
+        use shiguredo_mp4::boxes::SampleEntry;
+
+        match entry {
+            SampleEntry::Avc1(avc1) => {
+                let (width, height) = (avc1.visual.width, avc1.visual.height);
+                // SPS/PPS を Annex B 形式で結合する
+                let mut parameter_sets = Vec::new();
+                for sps in &avc1.avcc_box.sps_list {
+                    parameter_sets.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+                    parameter_sets.extend_from_slice(sps);
+                }
+                for pps in &avc1.avcc_box.pps_list {
+                    parameter_sets.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+                    parameter_sets.extend_from_slice(pps);
+                }
+                Ok(Mp4VideoTrackInfo {
+                    codec_type: WebrtcVideoCodecType::H264,
+                    width,
+                    height,
+                    timescale,
+                    h264_parameter_sets: Some(parameter_sets),
+                })
+            }
+            SampleEntry::Vp08(vp08) => Ok(Mp4VideoTrackInfo {
+                codec_type: WebrtcVideoCodecType::Vp8,
+                width: vp08.visual.width,
+                height: vp08.visual.height,
+                timescale,
+                h264_parameter_sets: None,
+            }),
+            SampleEntry::Vp09(vp09) => Ok(Mp4VideoTrackInfo {
+                codec_type: WebrtcVideoCodecType::Vp9,
+                width: vp09.visual.width,
+                height: vp09.visual.height,
+                timescale,
+                h264_parameter_sets: None,
+            }),
+            _ => Err("MP4 のビデオコーデックが H.264, VP8, VP9 のいずれでもありません".to_string()),
+        }
+    }
+
+    /// 指定インデックスのサンプルデータを取得する
+    fn get_sample(&self, index: usize) -> EncodedSample {
+        let (data_offset, data_size, keyframe, _, _) = self.samples[index];
+        let raw_data = &self.file_data[data_offset as usize..data_offset as usize + data_size];
+
+        let data = if self.track_info.codec_type == WebrtcVideoCodecType::H264 {
+            let mut annex_b = Vec::new();
+            // キーフレームの場合は SPS/PPS を先頭に付与する
+            if keyframe && let Some(ref ps) = self.track_info.h264_parameter_sets {
+                annex_b.extend_from_slice(ps);
+            }
+            // AVCC → Annex B 変換
+            annex_b.extend_from_slice(&avcc_to_annex_b(raw_data));
+            annex_b
+        } else {
+            raw_data.to_vec()
+        };
+
+        EncodedSample {
+            data,
+            is_keyframe: keyframe,
+            width: self.track_info.width as u32,
+            height: self.track_info.height as u32,
+            codec_type: self.track_info.codec_type,
+        }
+    }
+
+    /// サンプル数を返す
+    fn len(&self) -> usize {
+        self.samples.len()
+    }
+
+    /// フレーム間隔をマイクロ秒で返す
+    fn frame_duration_us(&self, index: usize) -> u64 {
+        let (_, _, _, _, duration) = self.samples[index];
+        (duration as u64 * 1_000_000) / self.track_info.timescale as u64
+    }
+}
+
+/// AVCC フォーマット (length-prefixed NAL units) を Annex B フォーマット (start code prefixed) に変換する
+fn avcc_to_annex_b(data: &[u8]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(data.len());
+    let mut offset = 0;
+    while offset + 4 <= data.len() {
+        let nal_size = u32::from_be_bytes([
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+        ]) as usize;
+        offset += 4;
+        if offset + nal_size > data.len() {
+            break;
+        }
+        result.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+        result.extend_from_slice(&data[offset..offset + nal_size]);
+        offset += nal_size;
+    }
+    result
+}
+
+/// MP4 パススルーエンコーダー
+///
+/// encode() が呼ばれるたびにチャネルからエンコード済みサンプルを取り出し、
+/// EncodedImage として WebRTC に渡す。
+struct Mp4PassthroughEncoder {
+    callback: Option<VideoEncoderEncodedImageCallbackPtr>,
+    sample_rx: std_mpsc::Receiver<EncodedSample>,
+}
+
+impl VideoEncoderHandler for Mp4PassthroughEncoder {
+    fn init_encode(
+        &mut self,
+        _codec: VideoCodecRef<'_>,
+        _settings: VideoEncoderSettingsRef<'_>,
+    ) -> VideoCodecStatus {
+        VideoCodecStatus::Ok
+    }
+
+    fn encode(
+        &mut self,
+        frame: VideoFrameRef<'_>,
+        _frame_types: Option<VideoFrameTypeVectorRef<'_>>,
+    ) -> VideoCodecStatus {
+        let callback = match self.callback {
+            Some(callback) => callback,
+            None => return VideoCodecStatus::Uninitialized,
+        };
+
+        let sample = match self.sample_rx.try_recv() {
+            Ok(sample) => sample,
+            Err(_) => return VideoCodecStatus::NoOutput,
+        };
+
+        let mut encoded_image = EncodedImage::new();
+        let encoded_buffer = EncodedImageBuffer::from_bytes(&sample.data);
+        encoded_image.set_encoded_data(&encoded_buffer);
+        encoded_image.set_rtp_timestamp(frame.rtp_timestamp());
+        encoded_image.set_encoded_width(sample.width);
+        encoded_image.set_encoded_height(sample.height);
+        encoded_image.set_frame_type(if sample.is_keyframe {
+            VideoFrameType::Key
+        } else {
+            VideoFrameType::Delta
+        });
+
+        let mut codec_specific_info = CodecSpecificInfo::new();
+        codec_specific_info.set_codec_type(sample.codec_type);
+        if sample.codec_type == WebrtcVideoCodecType::H264 {
+            codec_specific_info.set_h264_packetization_mode(H264PacketizationMode::NonInterleaved);
+            codec_specific_info.set_h264_idr_frame(sample.is_keyframe);
+        }
+
+        let result = unsafe {
+            callback.on_encoded_image(encoded_image.as_ref(), Some(codec_specific_info.as_ref()))
+        };
+        if result.error() != VideoEncoderEncodedImageCallbackResultError::Ok {
+            return VideoCodecStatus::Error;
+        }
+
+        VideoCodecStatus::Ok
+    }
+
+    fn register_encode_complete_callback(
+        &mut self,
+        callback: Option<VideoEncoderEncodedImageCallbackRef<'_>>,
+    ) -> VideoCodecStatus {
+        self.callback = callback
+            .map(|callback| unsafe { VideoEncoderEncodedImageCallbackPtr::from_ref(callback) });
+        VideoCodecStatus::Ok
+    }
+
+    fn release(&mut self) -> VideoCodecStatus {
+        self.callback = None;
+        VideoCodecStatus::Ok
+    }
+
+    fn set_rates(&mut self, _parameters: VideoEncoderRateControlParametersRef<'_>) {
+        // パススルーなのでビットレート制御は無視する
+    }
+
+    fn get_encoder_info(&mut self) -> VideoEncoderEncoderInfo {
+        let mut info = VideoEncoderEncoderInfo::new();
+        info.set_implementation_name("MP4Passthrough");
+        info.set_is_hardware_accelerated(false);
+        info
+    }
+}
+
+/// MP4 パススルー用の VideoCodecCapability
+struct Mp4PassthroughVideoCodecCapability {
+    codec_type: WebrtcVideoCodecType,
+    sample_rx: std::sync::Mutex<Option<std_mpsc::Receiver<EncodedSample>>>,
+}
+
+impl Mp4PassthroughVideoCodecCapability {
+    fn new(codec_type: WebrtcVideoCodecType, sample_rx: std_mpsc::Receiver<EncodedSample>) -> Self {
+        Self {
+            codec_type,
+            sample_rx: std::sync::Mutex::new(Some(sample_rx)),
+        }
+    }
+}
+
+impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
+    fn get_implementation(&self) -> VideoCodecImplementation {
+        VideoCodecImplementation::new("mp4-passthrough", "MP4 Passthrough")
+    }
+
+    fn is_supported(&self, direction: CodecDirection, codec_type: WebrtcVideoCodecType) -> bool {
+        direction == CodecDirection::Encoder && codec_type == self.codec_type
+    }
+
+    fn resolve_sdp_format(
+        &self,
+        direction: CodecDirection,
+        codec_type: WebrtcVideoCodecType,
+        _parameters: &HashMap<String, String>,
+        _scalability_mode: Option<&str>,
+    ) -> Option<SdpVideoFormat> {
+        if !self.is_supported(direction, codec_type) {
+            return None;
+        }
+        match codec_type {
+            WebrtcVideoCodecType::H264 => {
+                let mut format = SdpVideoFormat::new("H264");
+                format.parameters_mut().set("packetization-mode", "1");
+                Some(format)
+            }
+            WebrtcVideoCodecType::Vp8 => Some(SdpVideoFormat::new("VP8")),
+            WebrtcVideoCodecType::Vp9 => Some(SdpVideoFormat::new("VP9")),
+            _ => None,
+        }
+    }
+
+    fn create_video_encoder(
+        &self,
+        _format: &SdpVideoFormat,
+    ) -> Option<Box<dyn VideoEncoderHandler>> {
+        let rx = self.sample_rx.lock().ok()?.take()?;
+        Some(Box::new(Mp4PassthroughEncoder {
+            callback: None,
+            sample_rx: rx,
+        }))
+    }
+
+    fn create_video_decoder(
+        &self,
+        _format: &SdpVideoFormat,
+    ) -> Option<Box<dyn shiguredo_webrtc::VideoDecoderHandler>> {
+        None
+    }
+}
+
+/// MP4 ファイルからビデオフレームを送信するキャプチャラー
+struct Mp4VideoCapturer {
+    video_source: VideoTrackSource,
+    stop: Arc<AtomicBool>,
+    thread_handle: Option<thread::JoinHandle<()>>,
+}
+
+impl Mp4VideoCapturer {
+    fn new(
+        reader: Mp4SampleReader,
+        sample_tx: std_mpsc::SyncSender<EncodedSample>,
+    ) -> std::result::Result<Self, String> {
+        let width = reader.track_info.width as i32;
+        let height = reader.track_info.height as i32;
+
+        let source = AdaptedVideoTrackSource::new();
+        let video_source = source.cast_to_video_track_source();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = stop.clone();
+
+        let thread_handle = thread::spawn(move || {
+            let mut source = source;
+            let mut aligner = TimestampAligner::new();
+            loop {
+                for i in 0..reader.len() {
+                    if stop_clone.load(Ordering::Acquire) {
+                        return;
+                    }
+
+                    let sample = reader.get_sample(i);
+                    // エンコード済みデータをエンコーダーに送信する
+                    if sample_tx.send(sample).is_err() {
+                        return;
+                    }
+
+                    // ダミー I420 フレームを送信して encode() をトリガーする
+                    let timestamp_us = shiguredo_webrtc::time_millis() * 1000;
+                    let AdaptFrameResult { applied, .. } =
+                        source.adapt_frame(width, height, timestamp_us);
+                    if applied {
+                        let buffer = I420Buffer::new(width, height);
+                        let ts =
+                            aligner.translate(timestamp_us, shiguredo_webrtc::time_millis() * 1000);
+                        let video_frame = VideoFrame::from_i420(&buffer, ts, 0);
+                        source.on_frame(&video_frame);
+                    }
+
+                    // フレーム間隔だけ待機する
+                    let duration_us = reader.frame_duration_us(i);
+                    if duration_us > 0 {
+                        thread::sleep(std::time::Duration::from_micros(duration_us));
+                    }
+                }
+                // ループ再生: 先頭に戻る
+                rtc_log_info!("MP4 の末尾に到達しました。先頭に戻りループ再生します");
+            }
+        });
+
+        Ok(Self {
+            video_source,
+            stop,
+            thread_handle: Some(thread_handle),
+        })
+    }
+
+    fn video_source(&self) -> VideoTrackSource {
+        self.video_source.clone()
+    }
+}
+
+impl Drop for Mp4VideoCapturer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(handle) = self.thread_handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+// --- MP4 パススルー送信ここまで ---
+
 #[cfg(feature = "media-device")]
 struct VideoDeviceCapturer {
     capture: shiguredo_video_device::VideoCapture,
@@ -1135,6 +1603,7 @@ impl VideoDeviceCapturer {
 }
 
 enum VideoCapturerHolder {
+    Mp4(Mp4VideoCapturer),
     Fake(FakeVideoCapturer),
     #[cfg(feature = "media-device")]
     Device(VideoDeviceCapturer),
@@ -1143,6 +1612,9 @@ enum VideoCapturerHolder {
 impl VideoCapturerHolder {
     fn start(&mut self) -> Result<()> {
         match self {
+            VideoCapturerHolder::Mp4(_) => {
+                // Mp4VideoCapturer はコンストラクタでスレッドを開始済み
+            }
             VideoCapturerHolder::Fake(capturer) => capturer.start()?,
             #[cfg(feature = "media-device")]
             VideoCapturerHolder::Device(capturer) => capturer.start()?,
@@ -1152,6 +1624,7 @@ impl VideoCapturerHolder {
 
     fn video_source(&self) -> VideoTrackSource {
         match self {
+            VideoCapturerHolder::Mp4(capturer) => capturer.video_source(),
             VideoCapturerHolder::Fake(capturer) => capturer.video_source(),
             #[cfg(feature = "media-device")]
             VideoCapturerHolder::Device(capturer) => capturer.video_source(),
@@ -1402,7 +1875,17 @@ async fn main() -> Result<()> {
         None
     };
 
-    let context_config = SoraClientContextConfig {
+    // --input-mp4 が指定されている場合は MP4 を読み込んでパススルーの準備をする
+    let mp4_state = if let Some(ref mp4_path) = args.input_mp4 {
+        let reader = Mp4SampleReader::new(mp4_path).map_err(ErrorMessage::new)?;
+        let codec_type = reader.track_info.codec_type;
+        let (sample_tx, sample_rx) = std_mpsc::sync_channel::<EncodedSample>(2);
+        Some((reader, sample_tx, sample_rx, codec_type))
+    } else {
+        None
+    };
+
+    let mut context_config = SoraClientContextConfig {
         #[cfg(feature = "media-device")]
         adm_config: if external_adm.is_some() {
             sora_sdk::AdmConfig::UseExternal(external_adm.as_ref().unwrap().audio_device_module())
@@ -1414,9 +1897,26 @@ async fn main() -> Result<()> {
         ..Default::default()
     };
 
+    // --input-mp4 が指定されている場合はパススルー capability を追加する
+    let mp4_state = if let Some((reader, sample_tx, sample_rx, codec_type)) = mp4_state {
+        let passthrough_capability: Box<dyn VideoCodecCapability> = Box::new(
+            Mp4PassthroughVideoCodecCapability::new(codec_type, sample_rx),
+        );
+        let passthrough_preference =
+            VideoCodecPreference::new_from_capability(passthrough_capability.as_ref());
+        context_config
+            .video_codec_preference
+            .merge(&passthrough_preference);
+        context_config
+            .video_codec_capabilities
+            .push(passthrough_capability);
+        Some((reader, sample_tx, codec_type))
+    } else {
+        None
+    };
+
     #[cfg(feature = "nvcodec")]
-    let context_config = {
-        let mut context_config = context_config;
+    {
         let nvcodec_capability: Box<dyn VideoCodecCapability> =
             Box::new(NvCodecVideoCodecCapability::new());
         let nvcodec_preference =
@@ -1427,8 +1927,7 @@ async fn main() -> Result<()> {
         context_config
             .video_codec_capabilities
             .push(nvcodec_capability);
-        context_config
-    };
+    }
 
     let context = SoraClientContext::new_with_config(context_config)?;
 
@@ -1511,30 +2010,31 @@ async fn main() -> Result<()> {
 
     let mut _video_capturer: Option<VideoCapturerHolder> = None;
     if args.role.wants_send() && video_enabled {
-        #[cfg(feature = "media-device")]
-        {
-            let mut capturer = if let Some(ref device_id) = args.video_input_device {
-                VideoCapturerHolder::Device(VideoDeviceCapturer::new(Some(device_id.clone()))?)
-            } else {
+        let mut capturer = if let Some((reader, sample_tx, _codec_type)) = mp4_state {
+            // --input-mp4 が最優先
+            let mp4_capturer =
+                Mp4VideoCapturer::new(reader, sample_tx).map_err(ErrorMessage::new)?;
+            VideoCapturerHolder::Mp4(mp4_capturer)
+        } else {
+            #[cfg(feature = "media-device")]
+            {
+                if let Some(ref device_id) = args.video_input_device {
+                    VideoCapturerHolder::Device(VideoDeviceCapturer::new(Some(device_id.clone()))?)
+                } else {
+                    let fake = FakeVideoCapturer::new(FakeVideoCapturerConfig::default())?;
+                    VideoCapturerHolder::Fake(fake)
+                }
+            }
+            #[cfg(not(feature = "media-device"))]
+            {
                 let fake = FakeVideoCapturer::new(FakeVideoCapturerConfig::default())?;
                 VideoCapturerHolder::Fake(fake)
-            };
-            capturer.start()?;
-            let video_track = context.create_video_track(&capturer.video_source())?;
-            builder = builder.sender_video_track(video_track);
-            _video_capturer = Some(capturer);
-        }
-
-        #[cfg(not(feature = "media-device"))]
-        {
-            let mut capturer = VideoCapturerHolder::Fake(FakeVideoCapturer::new(
-                FakeVideoCapturerConfig::default(),
-            )?);
-            capturer.start()?;
-            let video_track = context.create_video_track(&capturer.video_source())?;
-            builder = builder.sender_video_track(video_track);
-            _video_capturer = Some(capturer);
-        }
+            }
+        };
+        capturer.start()?;
+        let video_track = context.create_video_track(&capturer.video_source())?;
+        builder = builder.sender_video_track(video_track);
+        _video_capturer = Some(capturer);
     }
 
     if args.role.wants_send() {

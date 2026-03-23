@@ -11,6 +11,7 @@ nojson = "0.3"
 rustls-pki-types = "1"
 sora_sdk = { path = "../.." }
 shiguredo_webrtc = { workspace = true }
+shiguredo_mp4 = "2026.2"
 raw_player = { version = "2026.1.0-canary.0", optional = true }
 shiguredo_video_device = { version = "2026.1.0-canary.3", optional = true }
 shiguredo_audio_device = { version = "2026.1.0-canary.0", optional = true }
