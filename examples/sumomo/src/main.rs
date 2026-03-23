@@ -1296,9 +1296,16 @@ struct Mp4PassthroughEncoder {
 impl VideoEncoderHandler for Mp4PassthroughEncoder {
     fn init_encode(
         &mut self,
-        _codec: VideoCodecRef<'_>,
+        codec: VideoCodecRef<'_>,
         _settings: VideoEncoderSettingsRef<'_>,
     ) -> VideoCodecStatus {
+        rtc_log_info!(
+            "MP4Passthrough: init_encode() codec_type={:?} {}x{} bitrate={}kbps",
+            codec.codec_type(),
+            codec.width(),
+            codec.height(),
+            codec.start_bitrate_kbps()
+        );
         VideoCodecStatus::Ok
     }
 
@@ -1315,10 +1322,19 @@ impl VideoEncoderHandler for Mp4PassthroughEncoder {
         let sample = match self.sample_rx.lock() {
             Ok(rx) => match rx.try_recv() {
                 Ok(sample) => sample,
-                Err(_) => return VideoCodecStatus::NoOutput,
+                Err(_) => {
+                    rtc_log_info!("MP4Passthrough: encode() チャネルが空です");
+                    return VideoCodecStatus::NoOutput;
+                }
             },
             Err(_) => return VideoCodecStatus::Error,
         };
+
+        rtc_log_info!(
+            "MP4Passthrough: encode() keyframe={} size={} bytes",
+            sample.is_keyframe,
+            sample.data.len()
+        );
 
         let mut encoded_image = EncodedImage::new();
         let encoded_buffer = EncodedImageBuffer::from_bytes(&sample.data);
@@ -1359,12 +1375,17 @@ impl VideoEncoderHandler for Mp4PassthroughEncoder {
     }
 
     fn release(&mut self) -> VideoCodecStatus {
+        rtc_log_info!("MP4Passthrough: release()");
         self.callback = None;
         VideoCodecStatus::Ok
     }
 
-    fn set_rates(&mut self, _parameters: VideoEncoderRateControlParametersRef<'_>) {
-        // パススルーなのでビットレート制御は無視する
+    fn set_rates(&mut self, parameters: VideoEncoderRateControlParametersRef<'_>) {
+        rtc_log_info!(
+            "MP4Passthrough: set_rates() bitrate={}bps fps={}",
+            parameters.bitrate_sum_bps(),
+            parameters.framerate_fps()
+        );
     }
 
     fn get_encoder_info(&mut self) -> VideoEncoderEncoderInfo {
