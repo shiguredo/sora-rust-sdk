@@ -1285,9 +1285,12 @@ fn avcc_to_annex_b(data: &[u8]) -> Vec<u8> {
 ///
 /// encode() が呼ばれるたびにチャネルからエンコード済みサンプルを取り出し、
 /// EncodedImage として WebRTC に渡す。
+///
+/// WebRTC はビットレート変更時などにエンコーダーを release → 再作成するため、
+/// Receiver は Arc<Mutex<>> で共有して再作成に耐えられるようにする。
 struct Mp4PassthroughEncoder {
     callback: Option<VideoEncoderEncodedImageCallbackPtr>,
-    sample_rx: std_mpsc::Receiver<EncodedSample>,
+    sample_rx: Arc<std::sync::Mutex<std_mpsc::Receiver<EncodedSample>>>,
 }
 
 impl VideoEncoderHandler for Mp4PassthroughEncoder {
@@ -1309,9 +1312,12 @@ impl VideoEncoderHandler for Mp4PassthroughEncoder {
             None => return VideoCodecStatus::Uninitialized,
         };
 
-        let sample = match self.sample_rx.try_recv() {
-            Ok(sample) => sample,
-            Err(_) => return VideoCodecStatus::NoOutput,
+        let sample = match self.sample_rx.lock() {
+            Ok(rx) => match rx.try_recv() {
+                Ok(sample) => sample,
+                Err(_) => return VideoCodecStatus::NoOutput,
+            },
+            Err(_) => return VideoCodecStatus::Error,
         };
 
         let mut encoded_image = EncodedImage::new();
@@ -1372,14 +1378,14 @@ impl VideoEncoderHandler for Mp4PassthroughEncoder {
 /// MP4 パススルー用の VideoCodecCapability
 struct Mp4PassthroughVideoCodecCapability {
     codec_type: WebrtcVideoCodecType,
-    sample_rx: std::sync::Mutex<Option<std_mpsc::Receiver<EncodedSample>>>,
+    sample_rx: Arc<std::sync::Mutex<std_mpsc::Receiver<EncodedSample>>>,
 }
 
 impl Mp4PassthroughVideoCodecCapability {
     fn new(codec_type: WebrtcVideoCodecType, sample_rx: std_mpsc::Receiver<EncodedSample>) -> Self {
         Self {
             codec_type,
-            sample_rx: std::sync::Mutex::new(Some(sample_rx)),
+            sample_rx: Arc::new(std::sync::Mutex::new(sample_rx)),
         }
     }
 }
@@ -1419,10 +1425,9 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
         &self,
         _format: &SdpVideoFormat,
     ) -> Option<Box<dyn VideoEncoderHandler>> {
-        let rx = self.sample_rx.lock().ok()?.take()?;
         Some(Box::new(Mp4PassthroughEncoder {
             callback: None,
-            sample_rx: rx,
+            sample_rx: self.sample_rx.clone(),
         }))
     }
 
