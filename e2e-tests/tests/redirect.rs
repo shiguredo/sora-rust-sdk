@@ -37,8 +37,9 @@ async fn test_redirect() {
     let first_connected = Arc::new(AtomicBool::new(false));
     let first_connected_clone = first_connected.clone();
 
-    let first_access_token =
-        generate_access_token(&channel_id, &secret, |f| f.member("cluster_affinity", true));
+    let first_access_token = generate_access_token(&channel_id, &secret, |f| {
+        f.member("cluster_affinity", false)
+    });
 
     let first_builder = SoraClient::builder(
         first_context,
