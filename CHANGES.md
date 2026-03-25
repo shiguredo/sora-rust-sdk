@@ -11,6 +11,8 @@
 
 ## develop
 
+- [UPDATE] `shiguredo_webrtc` を 0.146.2-canary.1 に上げる
+  - @sile
 - [ADD] Windows に対応する
   - @melpon
 - [ADD] `SoraClientBuilder::ice_server_url_configurer` を追加する
