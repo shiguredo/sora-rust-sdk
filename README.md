@@ -39,7 +39,7 @@ Please read <https://github.com/shiguredo/oss/blob/master/README.en.md> before u
 - クライアント証明書認証対応
 - TURN-TLS 対応
 - HTTP プロキシ対応
-- VP8 / VP9 / H.264 / H.265 / AV1 対応
+- VP8 / VP9 / AV1 / H.264 / H.265 対応
 - 複数クライアント同時実行対応
 
 ## 使い方
@@ -328,8 +328,7 @@ for i in 0..5 {
 sora-rust-sdk/
 ├── src/                      # sora_sdk クレート
 ├── examples/
-│   ├── sumomo/               # Sora クライアントサンプル
-│   └── zakuro/               # Sora 負荷試験ツール
+│   └── sumomo/               # Sora クライアントサンプル
 └── e2e-tests/                # エンドツーエンドテスト
 ```
 
