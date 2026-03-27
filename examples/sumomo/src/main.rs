@@ -1158,8 +1158,7 @@ impl Mp4SampleReader {
     fn new(path: &str) -> std::result::Result<Self, String> {
         use shiguredo_mp4::demux::{Input, Mp4FileDemuxer};
 
-        let file_data = std::fs::read(path)
-            .map_err(|e| format!("MP4 ファイルの読み込みに失敗しました: {e}"))?;
+        let file_data = std::fs::read(path).map_err(|e| format!("failed to read MP4 file: {e}"))?;
 
         let mut demuxer = Mp4FileDemuxer::new();
 
@@ -1181,13 +1180,13 @@ impl Mp4SampleReader {
 
         let tracks = demuxer
             .tracks()
-            .map_err(|e| format!("MP4 トラック情報の取得に失敗しました: {e}"))?;
+            .map_err(|e| format!("failed to get MP4 track info: {e}"))?;
 
         // 最初に見つかったビデオトラックを使用する (音声トラックは無視)
         let video_track = tracks
             .iter()
             .find(|t| t.kind == shiguredo_mp4::TrackKind::Video)
-            .ok_or("MP4 にビデオトラックが見つかりません")?;
+            .ok_or("no video track found in MP4")?;
 
         let video_track_id = video_track.track_id;
         let timescale = video_track.timescale.get();
@@ -1221,14 +1220,14 @@ impl Mp4SampleReader {
                     ));
                 }
                 Ok(None) => break,
-                Err(e) => return Err(format!("MP4 サンプルの読み出しに失敗しました: {e}")),
+                Err(e) => return Err(format!("failed to read MP4 sample: {e}")),
             }
         }
 
-        let track_info = track_info.ok_or("MP4 にビデオサンプルが見つかりません")?;
+        let track_info = track_info.ok_or("no video samples found in MP4")?;
 
         if samples.is_empty() {
-            return Err("MP4 にビデオサンプルが見つかりません".to_string());
+            return Err("no video samples found in MP4".to_string());
         }
 
         // 累積再生時刻テーブルを事前計算する。
@@ -1334,8 +1333,7 @@ impl Mp4SampleReader {
                 parameter_sets: None,
             }),
             _ => Err(
-                "MP4 のビデオコーデックが H.264, H.265, VP8, VP9, AV1 のいずれでもありません"
-                    .to_string(),
+                "unsupported MP4 video codec: expected H.264, H.265, VP8, VP9, or AV1".to_string(),
             ),
         }
     }
@@ -1721,7 +1719,7 @@ impl Mp4VideoCapturer {
                     }
                 }
 
-                rtc_log_info!("MP4 の末尾に到達しました。先頭に戻りループ再生します");
+                rtc_log_info!("MP4 reached end of file, looping back to the beginning");
             }
         });
 
