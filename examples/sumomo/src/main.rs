@@ -1093,8 +1093,8 @@ struct Mp4VideoTrackInfo {
     width: u16,
     height: u16,
     timescale: u32,
-    /// H.264 の場合の SPS/PPS (Annex B 形式)
-    h264_parameter_sets: Option<Vec<u8>>,
+    /// H.264 の SPS/PPS または H.265 の VPS/SPS/PPS (Annex B 形式)
+    parameter_sets: Option<Vec<u8>>,
 }
 
 /// MP4 ファイルからビデオサンプルを読み出す
@@ -1222,7 +1222,29 @@ impl Mp4SampleReader {
                     width,
                     height,
                     timescale,
-                    h264_parameter_sets: Some(parameter_sets),
+                    parameter_sets: Some(parameter_sets),
+                })
+            }
+            SampleEntry::Hev1(hev1) => {
+                let (width, height) = (hev1.visual.width, hev1.visual.height);
+                let parameter_sets = Self::extract_hevc_parameter_sets(&hev1.hvcc_box);
+                Ok(Mp4VideoTrackInfo {
+                    codec_type: WebrtcVideoCodecType::H265,
+                    width,
+                    height,
+                    timescale,
+                    parameter_sets: Some(parameter_sets),
+                })
+            }
+            SampleEntry::Hvc1(hvc1) => {
+                let (width, height) = (hvc1.visual.width, hvc1.visual.height);
+                let parameter_sets = Self::extract_hevc_parameter_sets(&hvc1.hvcc_box);
+                Ok(Mp4VideoTrackInfo {
+                    codec_type: WebrtcVideoCodecType::H265,
+                    width,
+                    height,
+                    timescale,
+                    parameter_sets: Some(parameter_sets),
                 })
             }
             SampleEntry::Vp08(vp08) => Ok(Mp4VideoTrackInfo {
@@ -1230,17 +1252,39 @@ impl Mp4SampleReader {
                 width: vp08.visual.width,
                 height: vp08.visual.height,
                 timescale,
-                h264_parameter_sets: None,
+                parameter_sets: None,
             }),
             SampleEntry::Vp09(vp09) => Ok(Mp4VideoTrackInfo {
                 codec_type: WebrtcVideoCodecType::Vp9,
                 width: vp09.visual.width,
                 height: vp09.visual.height,
                 timescale,
-                h264_parameter_sets: None,
+                parameter_sets: None,
             }),
-            _ => Err("MP4 のビデオコーデックが H.264, VP8, VP9 のいずれでもありません".to_string()),
+            SampleEntry::Av01(av01) => Ok(Mp4VideoTrackInfo {
+                codec_type: WebrtcVideoCodecType::Av1,
+                width: av01.visual.width,
+                height: av01.visual.height,
+                timescale,
+                parameter_sets: None,
+            }),
+            _ => Err(
+                "MP4 のビデオコーデックが H.264, H.265, VP8, VP9, AV1 のいずれでもありません"
+                    .to_string(),
+            ),
         }
+    }
+
+    /// HEVC の VPS/SPS/PPS を Annex B 形式で抽出する
+    fn extract_hevc_parameter_sets(hvcc: &shiguredo_mp4::boxes::HvccBox) -> Vec<u8> {
+        let mut parameter_sets = Vec::new();
+        for array in &hvcc.nalu_arrays {
+            for nalu in &array.nalus {
+                parameter_sets.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+                parameter_sets.extend_from_slice(nalu);
+            }
+        }
+        parameter_sets
     }
 
     /// 指定インデックスのサンプルデータを取得する
@@ -1248,17 +1292,18 @@ impl Mp4SampleReader {
         let (data_offset, data_size, keyframe, _, _) = self.samples[index];
         let raw_data = &self.file_data[data_offset as usize..data_offset as usize + data_size];
 
-        let data = if self.track_info.codec_type == WebrtcVideoCodecType::H264 {
-            let mut annex_b = Vec::new();
-            // キーフレームの場合は SPS/PPS を先頭に付与する
-            if keyframe && let Some(ref ps) = self.track_info.h264_parameter_sets {
-                annex_b.extend_from_slice(ps);
+        let data = match self.track_info.codec_type {
+            // H.264/H.265 は length-prefixed NAL → Annex B 変換が必要
+            WebrtcVideoCodecType::H264 | WebrtcVideoCodecType::H265 => {
+                let mut annex_b = Vec::new();
+                // キーフレームの場合は parameter sets を先頭に付与する
+                if keyframe && let Some(ref ps) = self.track_info.parameter_sets {
+                    annex_b.extend_from_slice(ps);
+                }
+                annex_b.extend_from_slice(&avcc_to_annex_b(raw_data));
+                annex_b
             }
-            // AVCC → Annex B 変換
-            annex_b.extend_from_slice(&avcc_to_annex_b(raw_data));
-            annex_b
-        } else {
-            raw_data.to_vec()
+            _ => raw_data.to_vec(),
         };
 
         EncodedSample {
@@ -1461,8 +1506,10 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
                 format.parameters_mut().set("packetization-mode", "1");
                 Some(format)
             }
+            WebrtcVideoCodecType::H265 => Some(SdpVideoFormat::new("H265")),
             WebrtcVideoCodecType::Vp8 => Some(SdpVideoFormat::new("VP8")),
             WebrtcVideoCodecType::Vp9 => Some(SdpVideoFormat::new("VP9")),
+            WebrtcVideoCodecType::Av1 => Some(SdpVideoFormat::new("AV1")),
             _ => None,
         }
     }
