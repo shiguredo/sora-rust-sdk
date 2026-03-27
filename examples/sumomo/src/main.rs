@@ -1076,10 +1076,38 @@ fn list_devices() -> Result<()> {
     Ok(())
 }
 
-// --- MP4 パススルー送信 ---
+// =============================================================================
+// MP4 パススルー送信
+// =============================================================================
+//
+// MP4 ファイルからエンコード済みビデオフレームを抽出し、再エンコードなしに
+// WebRTC で送信する機能。以下の 4 つのコンポーネントで構成される:
+//
+// 1. Mp4SampleReader     - MP4 ファイルを読み込み、ビデオサンプルを抽出する
+// 2. Mp4PassthroughEncoder - WebRTC のエンコーダーインターフェースを実装し、
+//                            エンコード済みデータをそのまま出力する
+// 3. Mp4PassthroughVideoCodecCapability - パススルーエンコーダーを WebRTC の
+//                                          コーデックパイプラインに登録する
+// 4. Mp4VideoCapturer    - フレームペーシングを行い、MP4 のタイミングに従って
+//                          フレームを WebRTC に供給する
+//
+// データフロー:
+//   Mp4SampleReader --[SharedSampleSlot]--> Mp4PassthroughEncoder --> WebRTC RTP
+//                                              ^
+//   Mp4VideoCapturer --[ダミー I420 フレーム]---+
+//                      (encode() をトリガーするため)
+//
+// 対応コーデック: H.264, H.265, VP8, VP9, AV1
+// =============================================================================
 
-/// MP4 から抽出したエンコード済みビデオサンプル
+/// MP4 から抽出したエンコード済みビデオサンプル。
+///
+/// Mp4SampleReader が生成し、SharedSampleSlot を経由して
+/// Mp4PassthroughEncoder に渡される。
 struct EncodedSample {
+    /// エンコード済みフレームデータ。
+    /// H.264/H.265 の場合は Annex B 形式に変換済み。
+    /// VP8/VP9/AV1 の場合は MP4 から抽出したそのまま。
     data: Vec<u8>,
     is_keyframe: bool,
     width: u32,
@@ -1087,27 +1115,46 @@ struct EncodedSample {
     codec_type: WebrtcVideoCodecType,
 }
 
-/// MP4 のビデオトラック情報
+/// MP4 のビデオトラックから抽出したコーデック情報。
+///
+/// SampleEntry (stsd ボックス) から取得する。
 struct Mp4VideoTrackInfo {
     codec_type: WebrtcVideoCodecType,
     width: u16,
     height: u16,
+    /// MP4 のタイムスケール (1 秒あたりのタイムスタンプ単位数)。
+    /// duration をマイクロ秒に変換する際に使用する。
     timescale: u32,
-    /// H.264 の SPS/PPS または H.265 の VPS/SPS/PPS (Annex B 形式)
+    /// H.264 の SPS/PPS または H.265 の VPS/SPS/PPS (Annex B 形式)。
+    /// キーフレーム送信時にフレームデータの先頭に付与する。
+    /// VP8/VP9/AV1 では None。
     parameter_sets: Option<Vec<u8>>,
 }
 
-/// MP4 ファイルからビデオサンプルを読み出す
+/// MP4 ファイルからビデオサンプルを読み出すリーダー。
+///
+/// コンストラクタでファイル全体をメモリに読み込み、全サンプルのメタデータを事前解析する。
+/// get_sample() でインデックス指定でサンプルを取得できる。
+/// ファイルデータを保持し続けるため、サンプル取得時にディスク I/O は発生しない。
 struct Mp4SampleReader {
+    /// MP4 ファイル全体のバイトデータ
     file_data: Vec<u8>,
     track_info: Mp4VideoTrackInfo,
-    /// (data_offset, data_size, keyframe, timestamp, duration) のリスト
+    /// 各サンプルのメタデータ: (data_offset, data_size, keyframe, timestamp, duration)。
+    /// data_offset と data_size は file_data 内の位置を指す。
+    /// timestamp と duration は MP4 のタイムスケール単位。
     samples: Vec<(u64, usize, bool, u64, u32)>,
-    /// 各フレームの累積再生時刻 (マイクロ秒)。長さは samples.len() + 1 で、末尾が全体の長さ。
+    /// 各フレームの累積再生時刻 (マイクロ秒)。
+    /// cumulative_us[0] = 0, cumulative_us[i] = フレーム 0..i の合計再生時間。
+    /// 長さは samples.len() + 1 で、末尾が動画全体の長さ。
+    /// フレームペーシングで絶対時刻ベースの待機に使用する。
     cumulative_us: Vec<u64>,
 }
 
 impl Mp4SampleReader {
+    /// MP4 ファイルを読み込み、ビデオトラックの全サンプルを事前解析する。
+    ///
+    /// ファイル全体をメモリに保持するため、大きなファイルではメモリ使用量に注意。
     fn new(path: &str) -> std::result::Result<Self, String> {
         use shiguredo_mp4::demux::{Input, Mp4FileDemuxer};
 
@@ -1116,7 +1163,9 @@ impl Mp4SampleReader {
 
         let mut demuxer = Mp4FileDemuxer::new();
 
-        // ファイル全体を入力として渡す
+        // shiguredo_mp4 のデマルチプレクサにファイルデータを供給する。
+        // required_input() が要求する範囲のデータを順次渡すことで、
+        // ボックス構造の解析が進む。
         while let Some(required) = demuxer.required_input() {
             let start = required.position as usize;
             let end = match required.size {
@@ -1134,7 +1183,7 @@ impl Mp4SampleReader {
             .tracks()
             .map_err(|e| format!("MP4 トラック情報の取得に失敗しました: {e}"))?;
 
-        // ビデオトラックを探す
+        // 最初に見つかったビデオトラックを使用する (音声トラックは無視)
         let video_track = tracks
             .iter()
             .find(|t| t.kind == shiguredo_mp4::TrackKind::Video)
@@ -1143,18 +1192,20 @@ impl Mp4SampleReader {
         let video_track_id = video_track.track_id;
         let timescale = video_track.timescale.get();
 
-        // サンプルを全て読み出してトラック情報を取得する
+        // 全サンプルを順次読み出す。
+        // 最初のサンプルの sample_entry からコーデック情報 (解像度、parameter sets 等) を取得する。
         let mut track_info: Option<Mp4VideoTrackInfo> = None;
         let mut samples = Vec::new();
 
         loop {
             match demuxer.next_sample() {
                 Ok(Some(sample)) => {
+                    // 音声など他トラックのサンプルはスキップする
                     if sample.track.track_id != video_track_id {
                         continue;
                     }
 
-                    // 最初のサンプルからコーデック情報を取得する
+                    // 最初のサンプルの sample_entry からコーデック情報を取得する
                     if track_info.is_none()
                         && let Some(entry) = sample.sample_entry
                     {
@@ -1180,7 +1231,10 @@ impl Mp4SampleReader {
             return Err("MP4 にビデオサンプルが見つかりません".to_string());
         }
 
-        // 累積再生時刻テーブルを事前計算する
+        // 累積再生時刻テーブルを事前計算する。
+        // フレームペーシングで「次のフレームをいつ送るべきか」を O(1) で求めるため。
+        // thread::sleep の相対待ちでは処理時間の累積ドリフトが発生するが、
+        // このテーブルを使って Instant ベースの絶対時刻待ちを行うことで防止する。
         let timescale = track_info.timescale as u64;
         let mut cumulative_us = Vec::with_capacity(samples.len() + 1);
         let mut acc: u64 = 0;
@@ -1198,6 +1252,11 @@ impl Mp4SampleReader {
         })
     }
 
+    /// SampleEntry からコーデック種別、解像度、parameter sets を抽出する。
+    ///
+    /// H.264: AvccBox から SPS/PPS を Annex B 形式で取得
+    /// H.265: HvccBox から VPS/SPS/PPS を Annex B 形式で取得
+    /// VP8/VP9/AV1: parameter sets は不要 (フレームデータに内包されている)
     fn extract_track_info(
         entry: &shiguredo_mp4::boxes::SampleEntry,
         timescale: u32,
@@ -1207,7 +1266,9 @@ impl Mp4SampleReader {
         match entry {
             SampleEntry::Avc1(avc1) => {
                 let (width, height) = (avc1.visual.width, avc1.visual.height);
-                // SPS/PPS を Annex B 形式で結合する
+                // H.264 の SPS (Sequence Parameter Set) と PPS (Picture Parameter Set) を
+                // Annex B 形式 (0x00000001 プレフィックス付き) で結合する。
+                // デコーダーはキーフレームの前にこれらを受け取る必要がある。
                 let mut parameter_sets = Vec::new();
                 for sps in &avc1.avcc_box.sps_list {
                     parameter_sets.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
@@ -1225,6 +1286,10 @@ impl Mp4SampleReader {
                     parameter_sets: Some(parameter_sets),
                 })
             }
+            // H.265 には hev1 と hvc1 の 2 種類の SampleEntry がある。
+            // hev1: parameter sets がサンプルデータ内にも含まれる (帯域内シグナリング)
+            // hvc1: parameter sets は SampleEntry のみに含まれる (帯域外シグナリング)
+            // どちらの場合も HvccBox から parameter sets を抽出して使用する。
             SampleEntry::Hev1(hev1) => {
                 let (width, height) = (hev1.visual.width, hev1.visual.height);
                 let parameter_sets = Self::extract_hevc_parameter_sets(&hev1.hvcc_box);
@@ -1275,7 +1340,11 @@ impl Mp4SampleReader {
         }
     }
 
-    /// HEVC の VPS/SPS/PPS を Annex B 形式で抽出する
+    /// HEVC の HvccBox から VPS/SPS/PPS を Annex B 形式で抽出する。
+    ///
+    /// HvccBox の nalu_arrays には NAL ユニット種別ごとに配列が格納されている。
+    /// VPS (Video Parameter Set), SPS, PPS がそれぞれ別の配列に入っている。
+    /// 全てを Annex B スタートコード (0x00000001) 付きで結合して返す。
     fn extract_hevc_parameter_sets(hvcc: &shiguredo_mp4::boxes::HvccBox) -> Vec<u8> {
         let mut parameter_sets = Vec::new();
         for array in &hvcc.nalu_arrays {
@@ -1287,20 +1356,26 @@ impl Mp4SampleReader {
         parameter_sets
     }
 
-    /// 指定インデックスのサンプルデータを取得する
+    /// 指定インデックスのサンプルデータを取得する。
+    ///
+    /// H.264/H.265 の場合:
+    /// - MP4 内の AVCC/HVCC 形式 (4 バイト長さプレフィックス) を
+    ///   Annex B 形式 (0x00000001 スタートコード) に変換する
+    /// - キーフレームの場合は先頭に parameter sets (SPS/PPS 等) を付与する
+    ///
+    /// VP8/VP9/AV1 の場合:
+    /// - MP4 から抽出したデータをそのまま使用する
     fn get_sample(&self, index: usize) -> EncodedSample {
         let (data_offset, data_size, keyframe, _, _) = self.samples[index];
         let raw_data = &self.file_data[data_offset as usize..data_offset as usize + data_size];
 
         let data = match self.track_info.codec_type {
-            // H.264/H.265 は length-prefixed NAL → Annex B 変換が必要
             WebrtcVideoCodecType::H264 | WebrtcVideoCodecType::H265 => {
                 let mut annex_b = Vec::new();
-                // キーフレームの場合は parameter sets を先頭に付与する
                 if keyframe && let Some(ref ps) = self.track_info.parameter_sets {
                     annex_b.extend_from_slice(ps);
                 }
-                annex_b.extend_from_slice(&avcc_to_annex_b(raw_data));
+                annex_b.extend_from_slice(&length_prefixed_nalu_to_annex_b(raw_data));
                 annex_b
             }
             _ => raw_data.to_vec(),
@@ -1320,14 +1395,23 @@ impl Mp4SampleReader {
         self.samples.len()
     }
 
-    /// 先頭から指定インデックスまでの累積時間をマイクロ秒で返す
+    /// 先頭からフレーム index までの累積再生時間をマイクロ秒で返す。
+    /// index=0 なら 0、index=len() なら動画全体の長さ。
     fn cumulative_duration_us(&self, index: usize) -> u64 {
         self.cumulative_us[index]
     }
 }
 
-/// AVCC フォーマット (length-prefixed NAL units) を Annex B フォーマット (start code prefixed) に変換する
-fn avcc_to_annex_b(data: &[u8]) -> Vec<u8> {
+/// 長さプレフィックス付き NAL ユニットを Annex B 形式に変換する。
+///
+/// MP4 内の H.264/H.265 フレームデータは AVCC/HVCC 形式で格納されている:
+///   [4 バイト NAL 長][NAL データ][4 バイト NAL 長][NAL データ]...
+///
+/// WebRTC (RTP) では Annex B 形式が期待される:
+///   [0x00 0x00 0x00 0x01][NAL データ][0x00 0x00 0x00 0x01][NAL データ]...
+///
+/// この関数は 4 バイトの長さプレフィックスを 4 バイトのスタートコードに置き換える。
+fn length_prefixed_nalu_to_annex_b(data: &[u8]) -> Vec<u8> {
     let mut result = Vec::with_capacity(data.len());
     let mut offset = 0;
     while offset + 4 <= data.len() {
@@ -1350,16 +1434,24 @@ fn avcc_to_annex_b(data: &[u8]) -> Vec<u8> {
 
 /// フィーダースレッドとエンコーダー間で最新サンプルを共有するスロット。
 ///
-/// フィーダースレッドは常に最新のサンプルで上書きし、
-/// encode() は呼ばれた時点の最新サンプルを take する。
-/// フレームドロッパーによるスキップ時はサンプルが上書きされるだけで、
+/// フィーダースレッド (Mp4VideoCapturer) は常に最新のサンプルで上書きし、
+/// エンコーダー (Mp4PassthroughEncoder) は encode() 呼び出し時に take する。
+///
+/// WebRTC のフレームドロッパーがフレームをスキップした場合、
+/// スロット内のサンプルは次のサンプルで上書きされるだけで、
 /// 古いサンプルが滞留してデコード不整合を起こすことはない。
 type SharedSampleSlot = Arc<std::sync::Mutex<Option<EncodedSample>>>;
 
-/// MP4 パススルーエンコーダー
+/// MP4 パススルーエンコーダー。
 ///
-/// encode() が呼ばれるたびに共有スロットから最新のエンコード済みサンプルを取り出し、
-/// EncodedImage として WebRTC に渡す。
+/// WebRTC の VideoEncoderHandler インターフェースを実装する。
+/// 実際のエンコード処理は行わず、SharedSampleSlot から事前エンコード済みの
+/// サンプルを取り出して EncodedImage として WebRTC に渡す。
+///
+/// has_trusted_rate_controller=true を設定することで、
+/// WebRTC のビットレート制御がこのエンコーダーに対して介入しないようにする。
+/// パススルーなのでビットレートの調整は不可能であり、
+/// 代わりに --video-bit-rate で十分な帯域を確保する必要がある。
 struct Mp4PassthroughEncoder {
     callback: Option<VideoEncoderEncodedImageCallbackPtr>,
     sample_slot: SharedSampleSlot,
@@ -1391,6 +1483,8 @@ impl VideoEncoderHandler for Mp4PassthroughEncoder {
             None => return VideoCodecStatus::Uninitialized,
         };
 
+        // SharedSampleSlot からサンプルを取得する。
+        // フィーダースレッドがまだサンプルを供給していない場合は NoOutput を返す。
         let sample = match self.sample_slot.lock() {
             Ok(mut slot) => match slot.take() {
                 Some(sample) => sample,
@@ -1405,6 +1499,7 @@ impl VideoEncoderHandler for Mp4PassthroughEncoder {
             sample.data.len()
         );
 
+        // EncodedImage を構築して WebRTC に渡す
         let mut encoded_image = EncodedImage::new();
         let encoded_buffer = EncodedImageBuffer::from_bytes(&sample.data);
         encoded_image.set_encoded_data(&encoded_buffer);
@@ -1417,6 +1512,8 @@ impl VideoEncoderHandler for Mp4PassthroughEncoder {
             VideoFrameType::Delta
         });
 
+        // H.264 の場合はパケタイゼーションモードと IDR フレームフラグを設定する。
+        // H.265/VP8/VP9/AV1 はコーデック種別の設定のみで十分。
         let mut codec_specific_info = CodecSpecificInfo::new();
         codec_specific_info.set_codec_type(sample.codec_type);
         if sample.codec_type == WebrtcVideoCodecType::H264 {
@@ -1449,6 +1546,8 @@ impl VideoEncoderHandler for Mp4PassthroughEncoder {
         VideoCodecStatus::Ok
     }
 
+    /// WebRTC からのビットレート変更通知。
+    /// パススルーエンコーダーではビットレートの調整はできないのでログ出力のみ行う。
     fn set_rates(&mut self, parameters: VideoEncoderRateControlParametersRef<'_>) {
         rtc_log_info!(
             "MP4Passthrough: set_rates() bitrate={}bps fps={}",
@@ -1461,13 +1560,20 @@ impl VideoEncoderHandler for Mp4PassthroughEncoder {
         let mut info = VideoEncoderEncoderInfo::new();
         info.set_implementation_name("MP4Passthrough");
         info.set_is_hardware_accelerated(false);
+        // has_trusted_rate_controller=true にすることで、WebRTC の帯域推定 (BWE) が
+        // このエンコーダーにビットレート変更を要求しなくなる。
+        // パススルーでは事前エンコード済みデータを送るため、レート制御は不可能。
         info.set_has_trusted_rate_controller(true);
         info
     }
 }
 
-/// MP4 パススルー用の VideoCodecCapability
+/// MP4 パススルー用の VideoCodecCapability。
+///
+/// WebRTC のコーデックパイプラインにパススルーエンコーダーを登録するためのアダプター。
+/// MP4 から検出されたコーデック種別のみをサポートし、デコーダーは提供しない (送信専用)。
 struct Mp4PassthroughVideoCodecCapability {
+    /// MP4 から検出されたコーデック種別
     codec_type: WebrtcVideoCodecType,
     sample_slot: SharedSampleSlot,
 }
@@ -1486,6 +1592,7 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
         VideoCodecImplementation::new("mp4-passthrough", "MP4 Passthrough")
     }
 
+    /// MP4 から検出されたコーデック種別のエンコーダーのみをサポートする
     fn is_supported(&self, direction: CodecDirection, codec_type: WebrtcVideoCodecType) -> bool {
         direction == CodecDirection::Encoder && codec_type == self.codec_type
     }
@@ -1524,6 +1631,7 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
         }))
     }
 
+    /// デコーダーは提供しない (パススルーは送信専用)
     fn create_video_decoder(
         &self,
         _format: &SdpVideoFormat,
@@ -1532,9 +1640,19 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
     }
 }
 
-/// MP4 ファイルからビデオフレームを送信するキャプチャラー
+/// MP4 ファイルからビデオフレームを送信するキャプチャラー。
+///
+/// 専用スレッドで MP4 のフレームタイミングに従ってサンプルを供給する。
+/// WebRTC のエンコーダーパイプラインは VideoTrackSource::on_frame() を起点に
+/// encode() を呼び出すため、パススルーでもダミーの I420 フレームを送る必要がある。
+/// 実際のエンコード済みデータは SharedSampleSlot 経由で渡す。
+///
+/// フレームペーシングは Instant ベースの絶対時刻待ちで行い、
+/// 処理時間の累積ドリフトを防止する。
+/// MP4 の末尾に到達すると先頭に戻りループ再生する。
 struct Mp4VideoCapturer {
     video_source: VideoTrackSource,
+    /// フィーダースレッドへの停止シグナル
     stop: Arc<AtomicBool>,
     thread_handle: Option<thread::JoinHandle<()>>,
 }
@@ -1555,23 +1673,33 @@ impl Mp4VideoCapturer {
         let thread_handle = thread::spawn(move || {
             let mut source = source;
             let mut aligner = TimestampAligner::new();
-            // encode() トリガー用のダミーバッファを事前に確保して使い回す
+
+            // encode() をトリガーするためのダミー I420 バッファ。
+            // 実際のピクセルデータは使われない (パススルーエンコーダーが無視する) が、
+            // WebRTC の VideoTrackSource::on_frame() には VideoFrame が必要。
+            // 毎フレームのアロケーションを避けるため、事前に確保して使い回す。
             let dummy_buffer = I420Buffer::new(width, height);
+
             loop {
+                // ループ再生の先頭で基準時刻を記録する。
+                // 各フレームの送信タイミングはこの基準時刻からの累積オフセットで決まる。
                 let loop_start = std::time::Instant::now();
+
                 for i in 0..reader.len() {
                     if stop_clone.load(Ordering::Acquire) {
                         return;
                     }
 
+                    // サンプルを取得して SharedSampleSlot に書き込む。
+                    // encode() が呼ばれた時にこのサンプルが取り出される。
                     let sample = reader.get_sample(i);
-                    // 最新サンプルでスロットを上書きする
-                    // フレームドロッパーがスキップした場合は次のサンプルで上書きされるだけ
                     if let Ok(mut slot) = sample_slot.lock() {
                         *slot = Some(sample);
                     }
 
-                    // ダミー I420 フレームを送信して encode() をトリガーする
+                    // ダミーフレームを送信して encode() をトリガーする。
+                    // adapt_frame() は WebRTC のフレームアダプター (解像度/フレームレート調整) を通す。
+                    // applied=false の場合はフレームドロッパーがスキップを指示している。
                     let timestamp_us = shiguredo_webrtc::time_millis() * 1000;
                     let AdaptFrameResult { applied, .. } =
                         source.adapt_frame(width, height, timestamp_us);
@@ -1582,7 +1710,9 @@ impl Mp4VideoCapturer {
                         source.on_frame(&video_frame);
                     }
 
-                    // 次のフレームの絶対時刻まで待機する (累積ドリフトを防ぐ)
+                    // 次のフレームの絶対送信時刻まで待機する。
+                    // cumulative_duration_us(i+1) は「フレーム 0 から i までの合計再生時間」を返す。
+                    // loop_start からのオフセットとして使うことで、累積ドリフトを防止する。
                     let next_frame_time_us = reader.cumulative_duration_us(i + 1);
                     let target = loop_start + std::time::Duration::from_micros(next_frame_time_us);
                     let now = std::time::Instant::now();
@@ -1590,7 +1720,7 @@ impl Mp4VideoCapturer {
                         thread::sleep(target - now);
                     }
                 }
-                // ループ再生: 先頭に戻る
+
                 rtc_log_info!("MP4 の末尾に到達しました。先頭に戻りループ再生します");
             }
         });
@@ -1615,8 +1745,6 @@ impl Drop for Mp4VideoCapturer {
         }
     }
 }
-
-// --- MP4 パススルー送信ここまで ---
 
 #[cfg(feature = "media-device")]
 struct VideoDeviceCapturer {
