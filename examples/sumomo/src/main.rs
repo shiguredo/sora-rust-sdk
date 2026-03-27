@@ -38,6 +38,7 @@ struct Args {
     audio: Option<bool>,
     video: Option<bool>,
     video_codec_type: Option<String>,
+    video_bit_rate: Option<u32>,
     input_mp4: Option<String>,
     data_channel_signaling: Option<bool>,
     ignore_disconnect_websocket: Option<bool>,
@@ -266,6 +267,15 @@ fn parse_args() -> Result<Args> {
             _ => Err("video-codec-type は vp8/vp9/av1/h264/h265 で指定してください"),
         })?;
 
+    let video_bit_rate: Option<u32> = noargs::opt("video-bit-rate")
+        .doc("映像ビットレート (kbps)")
+        .take(&mut args)
+        .present_and_then(|o| {
+            o.value()
+                .parse::<u32>()
+                .map_err(|_| "video-bit-rate は数値で指定してください")
+        })?;
+
     let input_mp4: Option<String> = noargs::opt("input-mp4")
         .doc("MP4 ファイルからエンコード済み映像をそのまま送信する")
         .take(&mut args)
@@ -374,6 +384,7 @@ fn parse_args() -> Result<Args> {
         audio,
         video,
         video_codec_type,
+        video_bit_rate,
         input_mp4,
         data_channel_signaling,
         ignore_disconnect_websocket,
@@ -1092,6 +1103,8 @@ struct Mp4SampleReader {
     track_info: Mp4VideoTrackInfo,
     /// (data_offset, data_size, keyframe, timestamp, duration) のリスト
     samples: Vec<(u64, usize, bool, u64, u32)>,
+    /// 各フレームの累積再生時刻 (マイクロ秒)。長さは samples.len() + 1 で、末尾が全体の長さ。
+    cumulative_us: Vec<u64>,
 }
 
 impl Mp4SampleReader {
@@ -1167,10 +1180,21 @@ impl Mp4SampleReader {
             return Err("MP4 にビデオサンプルが見つかりません".to_string());
         }
 
+        // 累積再生時刻テーブルを事前計算する
+        let timescale = track_info.timescale as u64;
+        let mut cumulative_us = Vec::with_capacity(samples.len() + 1);
+        let mut acc: u64 = 0;
+        cumulative_us.push(0);
+        for &(_, _, _, _, duration) in &samples {
+            acc += duration as u64;
+            cumulative_us.push((acc * 1_000_000) / timescale);
+        }
+
         Ok(Self {
             file_data,
             track_info,
             samples,
+            cumulative_us,
         })
     }
 
@@ -1251,10 +1275,9 @@ impl Mp4SampleReader {
         self.samples.len()
     }
 
-    /// フレーム間隔をマイクロ秒で返す
-    fn frame_duration_us(&self, index: usize) -> u64 {
-        let (_, _, _, _, duration) = self.samples[index];
-        (duration as u64 * 1_000_000) / self.track_info.timescale as u64
+    /// 先頭から指定インデックスまでの累積時間をマイクロ秒で返す
+    fn cumulative_duration_us(&self, index: usize) -> u64 {
+        self.cumulative_us[index]
     }
 }
 
@@ -1393,6 +1416,7 @@ impl VideoEncoderHandler for Mp4PassthroughEncoder {
         let mut info = VideoEncoderEncoderInfo::new();
         info.set_implementation_name("MP4Passthrough");
         info.set_is_hardware_accelerated(false);
+        info.set_has_trusted_rate_controller(true);
         info
     }
 }
@@ -1484,7 +1508,10 @@ impl Mp4VideoCapturer {
         let thread_handle = thread::spawn(move || {
             let mut source = source;
             let mut aligner = TimestampAligner::new();
+            // encode() トリガー用のダミーバッファを事前に確保して使い回す
+            let dummy_buffer = I420Buffer::new(width, height);
             loop {
+                let loop_start = std::time::Instant::now();
                 for i in 0..reader.len() {
                     if stop_clone.load(Ordering::Acquire) {
                         return;
@@ -1502,17 +1529,18 @@ impl Mp4VideoCapturer {
                     let AdaptFrameResult { applied, .. } =
                         source.adapt_frame(width, height, timestamp_us);
                     if applied {
-                        let buffer = I420Buffer::new(width, height);
                         let ts =
                             aligner.translate(timestamp_us, shiguredo_webrtc::time_millis() * 1000);
-                        let video_frame = VideoFrame::from_i420(&buffer, ts, 0);
+                        let video_frame = VideoFrame::from_i420(&dummy_buffer, ts, 0);
                         source.on_frame(&video_frame);
                     }
 
-                    // フレーム間隔だけ待機する
-                    let duration_us = reader.frame_duration_us(i);
-                    if duration_us > 0 {
-                        thread::sleep(std::time::Duration::from_micros(duration_us));
+                    // 次のフレームの絶対時刻まで待機する (累積ドリフトを防ぐ)
+                    let next_frame_time_us = reader.cumulative_duration_us(i + 1);
+                    let target = loop_start + std::time::Duration::from_micros(next_frame_time_us);
+                    let now = std::time::Instant::now();
+                    if target > now {
+                        thread::sleep(target - now);
                     }
                 }
                 // ループ再生: 先頭に戻る
@@ -2009,14 +2037,15 @@ async fn main() -> Result<()> {
         builder = builder.audio(sora_sdk::Audio::new_bool(audio));
     }
 
+    let video_bit_rate = args.video_bit_rate;
     if let Some(video) = args.video {
         if video {
             let video_setting = match args.video_codec_type.as_deref() {
-                Some("vp8") => sora_sdk::Video::new_vp8(None),
-                Some("vp9") => sora_sdk::Video::new_vp9(None, None),
-                Some("av1") => sora_sdk::Video::new_av1(None, None),
-                Some("h264") => sora_sdk::Video::new_h264(None, None),
-                Some("h265") => sora_sdk::Video::new_h265(None, None),
+                Some("vp8") => sora_sdk::Video::new_vp8(video_bit_rate),
+                Some("vp9") => sora_sdk::Video::new_vp9(video_bit_rate, None),
+                Some("av1") => sora_sdk::Video::new_av1(video_bit_rate, None),
+                Some("h264") => sora_sdk::Video::new_h264(video_bit_rate, None),
+                Some("h265") => sora_sdk::Video::new_h265(video_bit_rate, None),
                 None => sora_sdk::Video::new_bool(true),
                 _ => sora_sdk::Video::new_bool(true),
             };
@@ -2026,11 +2055,11 @@ async fn main() -> Result<()> {
         }
     } else if let Some(ref codec) = args.video_codec_type {
         let video_setting = match codec.as_str() {
-            "vp8" => sora_sdk::Video::new_vp8(None),
-            "vp9" => sora_sdk::Video::new_vp9(None, None),
-            "av1" => sora_sdk::Video::new_av1(None, None),
-            "h264" => sora_sdk::Video::new_h264(None, None),
-            "h265" => sora_sdk::Video::new_h265(None, None),
+            "vp8" => sora_sdk::Video::new_vp8(video_bit_rate),
+            "vp9" => sora_sdk::Video::new_vp9(video_bit_rate, None),
+            "av1" => sora_sdk::Video::new_av1(video_bit_rate, None),
+            "h264" => sora_sdk::Video::new_h264(video_bit_rate, None),
+            "h265" => sora_sdk::Video::new_h265(video_bit_rate, None),
             _ => sora_sdk::Video::new_bool(true),
         };
         builder = builder.video(video_setting);
