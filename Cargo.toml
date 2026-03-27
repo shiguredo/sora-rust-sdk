@@ -51,3 +51,6 @@ rustls-webpki = { version = "0.103", default-features = false, features = [
     "std",
     "aws-lc-rs",
 ] }
+
+[dev-dependencies]
+proptest = "1"
