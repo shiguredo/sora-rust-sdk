@@ -6,7 +6,7 @@ shiguredo_webrtc = { version = "=0.146.2-canary.5" }
 
 [package]
 name = "sora_sdk"
-version = "2026.1.0-canary.3"
+version = "2026.1.0-canary.4"
 edition = "2024"
 rust-version = "1.88"
 authors = ["Shiguredo Inc."]
