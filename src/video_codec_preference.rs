@@ -382,6 +382,12 @@ mod tests {
     use crate::error::Error;
     use shiguredo_webrtc::{SdpVideoFormat, VideoDecoderHandler, VideoEncoderHandler};
 
+    struct StubVideoEncoder;
+    impl VideoEncoderHandler for StubVideoEncoder {}
+
+    struct StubVideoDecoder;
+    impl VideoDecoderHandler for StubVideoDecoder {}
+
     struct MockVideoCodecCapability {
         implementation: VideoCodecImplementation,
         encoder_supported: Vec<VideoCodecType>,
@@ -462,7 +468,7 @@ mod tests {
                 .ok()
                 .and_then(|name| VideoCodecType::try_from(name.as_str()).ok())?;
             if self.is_supported(CodecDirection::Encoder, codec_type) {
-                Some(Box::new(()))
+                Some(Box::new(StubVideoEncoder))
             } else {
                 None
             }
@@ -477,7 +483,7 @@ mod tests {
                 .ok()
                 .and_then(|name| VideoCodecType::try_from(name.as_str()).ok())?;
             if self.is_supported(CodecDirection::Decoder, codec_type) {
-                Some(Box::new(()))
+                Some(Box::new(StubVideoDecoder))
             } else {
                 None
             }
