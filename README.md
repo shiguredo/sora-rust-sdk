@@ -240,6 +240,24 @@ tokio::spawn(async move {
 let stats = handle.get_stats().await?;
 ```
 
+### メッセージ受信
+
+`SoraClient::builder()` の `on_message` コールバックで `#` プレフィックス付きラベルのユーザー定義 DataChannel からメッセージを受信できます。
+
+```rust
+.on_message(|label, data| {
+    println!("received on {label}: {} bytes", data.len());
+})
+```
+
+### メッセージ送信
+
+`SoraClientHandle` を使って `#` プレフィックス付きラベルのユーザー定義 DataChannel にバイナリデータを送信できます。
+
+```rust
+handle.send_message("#my-channel", b"hello").await?;
+```
+
 ### RPC
 
 `SoraClientHandle` を使って JSON-RPC 2.0 over DataChannel でリクエストを送信できます。
@@ -288,14 +306,6 @@ let response = handle.send_rpc_request(
         ..Default::default()
     },
 ).await?;
-```
-
-### メッセージ送信
-
-`SoraClientHandle` を使って `#` プレフィックス付きラベルのユーザー定義 DataChannel にバイナリデータを送信できます。
-
-```rust
-handle.send_message("#my-channel", b"hello").await?;
 ```
 
 ### 複数クライアントの同時実行
@@ -382,10 +392,10 @@ cargo build
 - Ubuntu 24.04 LTS arm64
 - Ubuntu 22.04 LTS x86_64
 - Ubuntu 22.04 LTS arm64
-- Windows 11 x86_64
-- Windows Server 2025 x86_64
 - macOS Tahoe 26 arm64
 - macOS Sequoia 15 arm64
+- Windows 11 x86_64
+- Windows Server 2025 x86_64
 
 ### Ubuntu の対応バージョン
 
