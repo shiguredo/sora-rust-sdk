@@ -7,8 +7,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
-#[cfg(feature = "media-device")]
-use shiguredo_webrtc::VideoFrame as WebrtcVideoFrame;
 use shiguredo_webrtc::{
     AdaptFrameResult, AdaptedVideoTrackSource, I420Buffer, LibyuvFourcc, VideoFrameRef, VideoSink,
     VideoSinkHandler, VideoSinkWants, VideoTrackSource, convert_from_i420, log, rtc_log_info,
@@ -516,8 +514,11 @@ impl VideoSinkHandler for RawPlayerTrackSinkHandler {
                 self.track_id_for_log
             );
         }
-        let buffer = frame.buffer();
-        let i420_frame = I420Frame::from_buffer(&buffer);
+        let mut buffer = frame.buffer();
+        let Some(i420_buffer) = buffer.to_i420() else {
+            return;
+        };
+        let i420_frame = I420Frame::from_buffer(&i420_buffer);
         let _ = self.frame_tx.try_send(i420_frame);
     }
 }
@@ -548,16 +549,37 @@ fn rgb_to_ansi256(r: u8, g: u8, b: u8) -> i32 {
 }
 
 fn render_frame(frame: VideoFrameRef, width: i32, height: i32) {
-    let src = frame.buffer();
-    let mut scaled = I420Buffer::new(width, height);
-    scaled.scale_from(&src);
-
-    let image = match convert_from_i420(&scaled, LibyuvFourcc::Argb) {
-        Some(image) => image,
-        None => return,
+    let mut src = frame.buffer();
+    let Some(src_i420) = src.to_i420() else {
+        return;
     };
+    let mut scaled = I420Buffer::new(width, height);
+    scaled.scale_from(&src_i420);
+
     let width_u = width.max(0) as usize;
     let height_u = height.max(0) as usize;
+    let Some(dst_stride) = width_u.checked_mul(4) else {
+        return;
+    };
+    let Some(dst_bytes) = dst_stride.checked_mul(height_u) else {
+        return;
+    };
+    let mut image = vec![0u8; dst_bytes];
+    if !convert_from_i420(
+        scaled.y_data(),
+        scaled.stride_y(),
+        scaled.u_data(),
+        scaled.stride_u(),
+        scaled.v_data(),
+        scaled.stride_v(),
+        &mut image,
+        dst_stride as i32,
+        width,
+        height,
+        LibyuvFourcc::Argb,
+    ) {
+        return;
+    }
     let capacity = width_u.saturating_mul(height_u).saturating_mul(20);
     let mut output = String::with_capacity(capacity);
     output.push_str("\x1b[H");
@@ -750,32 +772,46 @@ fn tick_once(
         }
     }
 
-    if let Some(buffer) =
-        shiguredo_webrtc::abgr_to_i420(u32_slice_as_u8_slice(image), width, height)
-    {
-        let timestamp_us = elapsed_ms * 1000;
-        let frame = shiguredo_webrtc::VideoFrame::from_i420(&buffer, timestamp_us, 0);
-        let AdaptFrameResult { applied, size } = source.adapt_frame(width, height, timestamp_us);
-        let frame = if applied
-            && (size.adapted_width != frame.width() || size.adapted_height != frame.height())
-        {
-            let mut scaled =
-                shiguredo_webrtc::I420Buffer::new(size.adapted_width, size.adapted_height);
-            scaled.scale_from(&buffer);
-            shiguredo_webrtc::VideoFrame::from_i420(
-                &scaled,
-                timestamp_aligner.translate(timestamp_us, shiguredo_webrtc::time_millis() * 1000),
-                0,
-            )
-        } else {
-            shiguredo_webrtc::VideoFrame::from_i420(
-                &buffer,
-                timestamp_aligner.translate(timestamp_us, shiguredo_webrtc::time_millis() * 1000),
-                0,
-            )
-        };
-        source.on_frame(&frame);
+    let Some(src_stride) = width.checked_mul(4) else {
+        return;
+    };
+    let mut buffer = I420Buffer::new(width, height);
+    let dst_stride_y = buffer.stride_y();
+    let dst_stride_u = buffer.stride_u();
+    let dst_stride_v = buffer.stride_v();
+    let (dst_y, dst_u, dst_v) = buffer.planes_mut();
+    if !shiguredo_webrtc::abgr_to_i420(
+        u32_slice_as_u8_slice(image),
+        src_stride,
+        dst_y,
+        dst_stride_y,
+        dst_u,
+        dst_stride_u,
+        dst_v,
+        dst_stride_v,
+        width,
+        height,
+    ) {
+        return;
     }
+    let timestamp_us = elapsed_ms * 1000;
+    let translated_timestamp_us =
+        timestamp_aligner.translate(timestamp_us, shiguredo_webrtc::time_millis() * 1000);
+    let AdaptFrameResult { applied, size } = source.adapt_frame(width, height, timestamp_us);
+    let frame = if applied && (size.adapted_width != width || size.adapted_height != height) {
+        let mut scaled = shiguredo_webrtc::I420Buffer::new(size.adapted_width, size.adapted_height);
+        scaled.scale_from(&buffer);
+        shiguredo_webrtc::VideoFrame::builder(&scaled.cast_to_video_frame_buffer())
+            .set_timestamp_us(translated_timestamp_us)
+            .set_rtp_timestamp(0)
+            .build()
+    } else {
+        shiguredo_webrtc::VideoFrame::builder(&buffer.cast_to_video_frame_buffer())
+            .set_timestamp_us(translated_timestamp_us)
+            .set_rtp_timestamp(0)
+            .build()
+    };
+    source.on_frame(&frame);
 }
 
 #[cfg(feature = "raw-player")]
@@ -1071,28 +1107,56 @@ impl VideoDeviceCapturer {
 
         let shared_clone = shared.clone();
         let capture = shiguredo_video_device::VideoCapture::new(config, move |frame| {
-            let i420 = match frame.pixel_format {
+            let buffer = match frame.pixel_format {
                 shiguredo_video_device::PixelFormat::Nv12 => {
                     let uv = frame.uv_data.unwrap_or(&[]);
-                    shiguredo_webrtc::nv12_to_i420(
+                    let mut buffer = I420Buffer::new(frame.width, frame.height);
+                    let dst_stride_y = buffer.stride_y();
+                    let dst_stride_u = buffer.stride_u();
+                    let dst_stride_v = buffer.stride_v();
+                    let (dst_y, dst_u, dst_v) = buffer.planes_mut();
+                    if !shiguredo_webrtc::nv12_to_i420(
                         frame.data,
                         frame.stride,
                         uv,
                         frame.stride_uv,
+                        dst_y,
+                        dst_stride_y,
+                        dst_u,
+                        dst_stride_u,
+                        dst_v,
+                        dst_stride_v,
                         frame.width,
                         frame.height,
-                    )
+                    ) {
+                        return;
+                    }
+                    buffer
                 }
-                shiguredo_video_device::PixelFormat::Yuy2 => shiguredo_webrtc::yuy2_to_i420(
-                    frame.data,
-                    frame.stride,
-                    frame.width,
-                    frame.height,
-                ),
-                _ => None,
+                shiguredo_video_device::PixelFormat::Yuy2 => {
+                    let mut buffer = I420Buffer::new(frame.width, frame.height);
+                    let dst_stride_y = buffer.stride_y();
+                    let dst_stride_u = buffer.stride_u();
+                    let dst_stride_v = buffer.stride_v();
+                    let (dst_y, dst_u, dst_v) = buffer.planes_mut();
+                    if !shiguredo_webrtc::yuy2_to_i420(
+                        frame.data,
+                        frame.stride,
+                        dst_y,
+                        dst_stride_y,
+                        dst_u,
+                        dst_stride_u,
+                        dst_v,
+                        dst_stride_v,
+                        frame.width,
+                        frame.height,
+                    ) {
+                        return;
+                    }
+                    buffer
+                }
+                _ => return,
             };
-
-            let Some(buffer) = i420 else { return };
             let Ok(mut guard) = shared_clone.lock() else {
                 return;
             };
@@ -1110,9 +1174,15 @@ impl VideoDeviceCapturer {
                 if size.adapted_width != frame.width || size.adapted_height != frame.height {
                     let mut scaled = I420Buffer::new(size.adapted_width, size.adapted_height);
                     scaled.scale_from(&buffer);
-                    WebrtcVideoFrame::from_i420(&scaled, ts, 0)
+                    shiguredo_webrtc::VideoFrame::builder(&scaled.cast_to_video_frame_buffer())
+                        .set_timestamp_us(ts)
+                        .set_rtp_timestamp(0)
+                        .build()
                 } else {
-                    WebrtcVideoFrame::from_i420(&buffer, ts, 0)
+                    shiguredo_webrtc::VideoFrame::builder(&buffer.cast_to_video_frame_buffer())
+                        .set_timestamp_us(ts)
+                        .set_rtp_timestamp(0)
+                        .build()
                 };
 
             source.on_frame(&video_frame);
