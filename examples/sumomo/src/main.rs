@@ -1740,7 +1740,11 @@ impl Mp4VideoCapturer {
                     if applied {
                         let ts =
                             aligner.translate(timestamp_us, shiguredo_webrtc::time_millis() * 1000);
-                        let video_frame = VideoFrame::from_i420(&dummy_buffer, ts, 0);
+                        let video_frame =
+                            VideoFrame::builder(&dummy_buffer.cast_to_video_frame_buffer())
+                                .set_timestamp_us(ts)
+                                .set_rtp_timestamp(0)
+                                .build();
                         source.on_frame(&video_frame);
                     }
 
