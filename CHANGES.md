@@ -17,8 +17,10 @@
   - @melpon
 - [ADD] `SoraClientBuilder::ice_server_url_configurer` を追加する
   - @melpon
+- [ADD] MP4 ファイルからエンコード済み映像をパススルー送信する機能を追加
+  - @voluntas, @melpon
 
 ### misc
 
-- [ADD] sumomo に --input-mp4 オプションを追加して MP4 ファイルからエンコード済み映像をパススルー送信する
+- [ADD] sumomo に --input-mp4 オプションを追加
   - @voluntas, @melpon

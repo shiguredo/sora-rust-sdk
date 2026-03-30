@@ -10,9 +10,9 @@ use shiguredo_webrtc::{
 
 use crate::error::Result;
 use crate::video_codec::{SoraVideoDecoderFactory, SoraVideoEncoderFactory};
-use crate::video_codec_capabilities::internal::InternalVideoCodecCapability;
 use crate::video_codec_capability::VideoCodecCapability;
 use crate::video_codec_preference::{VideoCodecPreference, validate_video_codec_preference};
+use crate::video_codecs::internal::InternalVideoCodecCapability;
 
 #[derive(Clone, Default)]
 pub enum AdmConfig {

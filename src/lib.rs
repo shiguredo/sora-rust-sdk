@@ -7,9 +7,9 @@ mod signaling_types;
 mod types;
 mod version;
 mod video_codec;
-mod video_codec_capabilities;
 mod video_codec_capability;
 mod video_codec_preference;
+mod video_codecs;
 mod zlib;
 
 pub use crate::client::{
@@ -24,12 +24,16 @@ pub use crate::types::{
     VideoCodecType, VideoH264Params, VideoH265Params, VideoVP9Params,
 };
 pub use crate::video_codec::{SoraVideoDecoderFactory, SoraVideoEncoderFactory};
-pub use crate::video_codec_capabilities::internal::InternalVideoCodecCapability;
-#[cfg(feature = "nvcodec")]
-pub use crate::video_codec_capabilities::nvcodec::NvCodecVideoCodecCapability;
 pub use crate::video_codec_capability::{
     CodecDirection, VideoCodecCapability, VideoCodecImplementation,
 };
 pub use crate::video_codec_preference::{
     PreferenceCodec, VideoCodecPreference, validate_video_codec_preference,
 };
+pub use crate::video_codecs::internal::InternalVideoCodecCapability;
+pub use crate::video_codecs::mp4::{
+    Mp4EncodedSample, Mp4Error, Mp4PassthroughVideoCodecCapability, Mp4SampleReader,
+    Mp4VideoCapturer,
+};
+#[cfg(feature = "nvcodec")]
+pub use crate::video_codecs::nvcodec::NvCodecVideoCodecCapability;
