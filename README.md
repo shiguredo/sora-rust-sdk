@@ -39,7 +39,7 @@ Please read <https://github.com/shiguredo/oss/blob/master/README.en.md> before u
 - クライアント証明書認証対応
 - TURN-TLS 対応
 - HTTP プロキシ対応
-- VP8 / VP9 / H.264 / H.265 / AV1 対応
+- VP8 / VP9 / AV1 / H.264 / H.265 対応
 - 複数クライアント同時実行対応
 
 ## 使い方
@@ -240,6 +240,24 @@ tokio::spawn(async move {
 let stats = handle.get_stats().await?;
 ```
 
+### メッセージ受信
+
+`SoraClient::builder()` の `on_message` コールバックで `#` プレフィックス付きラベルのユーザー定義 DataChannel からメッセージを受信できます。
+
+```rust
+.on_message(|label, data| {
+    println!("received on {label}: {} bytes", data.len());
+})
+```
+
+### メッセージ送信
+
+`SoraClientHandle` を使って `#` プレフィックス付きラベルのユーザー定義 DataChannel にバイナリデータを送信できます。
+
+```rust
+handle.send_message("#my-channel", b"hello").await?;
+```
+
 ### RPC
 
 `SoraClientHandle` を使って JSON-RPC 2.0 over DataChannel でリクエストを送信できます。
@@ -290,14 +308,6 @@ let response = handle.send_rpc_request(
 ).await?;
 ```
 
-### メッセージ送信
-
-`SoraClientHandle` を使って `#` プレフィックス付きラベルのユーザー定義 DataChannel にバイナリデータを送信できます。
-
-```rust
-handle.send_message("#my-channel", b"hello").await?;
-```
-
 ### 複数クライアントの同時実行
 
 `SoraClientContext` は `Send + Sync` を実装しているため、複数の `SoraClient` で共有できます。
@@ -328,8 +338,7 @@ for i in 0..5 {
 sora-rust-sdk/
 ├── src/                      # sora_sdk クレート
 ├── examples/
-│   ├── sumomo/               # Sora クライアントサンプル
-│   └── zakuro/               # Sora 負荷試験ツール
+│   └── sumomo/               # Sora クライアントサンプル
 └── e2e-tests/                # エンドツーエンドテスト
 ```
 
@@ -383,10 +392,10 @@ cargo build
 - Ubuntu 24.04 LTS arm64
 - Ubuntu 22.04 LTS x86_64
 - Ubuntu 22.04 LTS arm64
-- Windows 11 x86_64
-- Windows Server 2025 x86_64
 - macOS Tahoe 26 arm64
 - macOS Sequoia 15 arm64
+- Windows 11 x86_64
+- Windows Server 2025 x86_64
 
 ### Ubuntu の対応バージョン
 

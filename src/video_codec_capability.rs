@@ -112,6 +112,12 @@ mod tests {
     use super::*;
     use nojson::Json;
 
+    struct StubVideoEncoder;
+    impl VideoEncoderHandler for StubVideoEncoder {}
+
+    struct StubVideoDecoder;
+    impl VideoDecoderHandler for StubVideoDecoder {}
+
     struct MockCapability;
 
     impl VideoCodecCapability for MockCapability {
@@ -142,7 +148,7 @@ mod tests {
             format: &SdpVideoFormat,
         ) -> Option<Box<dyn VideoEncoderHandler>> {
             if format.name().ok().as_deref() == Some("H264") {
-                Some(Box::new(()))
+                Some(Box::new(StubVideoEncoder))
             } else {
                 None
             }
@@ -153,7 +159,7 @@ mod tests {
             format: &SdpVideoFormat,
         ) -> Option<Box<dyn VideoDecoderHandler>> {
             if format.name().ok().as_deref() == Some("H264") {
-                Some(Box::new(()))
+                Some(Box::new(StubVideoDecoder))
             } else {
                 None
             }

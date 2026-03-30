@@ -5,7 +5,7 @@ use shiguredo_nvcodec::{
 };
 use shiguredo_webrtc::{
     CodecSpecificInfo, EncodedImage, EncodedImageBuffer, EncodedImageRef, H264PacketizationMode,
-    SdpVideoFormat, VideoCodecRef, VideoCodecStatus, VideoCodecType,
+    I420Buffer, NV12Buffer, SdpVideoFormat, VideoCodecRef, VideoCodecStatus, VideoCodecType,
     VideoDecoderDecodedImageCallbackPtr, VideoDecoderDecoderInfo, VideoDecoderHandler,
     VideoDecoderSettingsRef, VideoEncoderEncodedImageCallbackPtr,
     VideoEncoderEncodedImageCallbackRef, VideoEncoderEncodedImageCallbackResultError,
@@ -107,11 +107,35 @@ impl VideoEncoderHandler for NvCodecVideoEncoder {
             }
         }
 
-        let i420 = frame.buffer();
-        let nv12 = match i420_to_nv12(&i420) {
-            Some(v) => v,
-            None => return VideoCodecStatus::Error,
+        let mut frame_buffer = frame.buffer();
+        let Some(i420) = frame_buffer.to_i420() else {
+            return VideoCodecStatus::Error;
         };
+        let mut nv12 = NV12Buffer::new(frame_width as i32, frame_height as i32);
+        let src_stride_y = i420.stride_y();
+        let src_stride_u = i420.stride_u();
+        let src_stride_v = i420.stride_v();
+        let dst_stride_y = nv12.stride_y();
+        let dst_stride_uv = nv12.stride_uv();
+        {
+            let (dst_y, dst_uv) = nv12.planes_mut();
+            if !i420_to_nv12(
+                i420.y_data(),
+                src_stride_y,
+                i420.u_data(),
+                src_stride_u,
+                i420.v_data(),
+                src_stride_v,
+                dst_y,
+                dst_stride_y,
+                dst_uv,
+                dst_stride_uv,
+                frame_width as i32,
+                frame_height as i32,
+            ) {
+                return VideoCodecStatus::Error;
+            }
+        }
 
         let rtp_timestamp = frame.rtp_timestamp();
         let encoder = self.encoder.as_mut().expect("encoder should exist");
@@ -245,22 +269,34 @@ impl VideoDecoderHandler for NvCodecVideoDecoder {
                 break;
             };
 
-            let Some(i420) = nv12_to_i420(
+            let mut i420 = I420Buffer::new(frame.width() as i32, frame.height() as i32);
+            let dst_stride_y = i420.stride_y();
+            let dst_stride_u = i420.stride_u();
+            let dst_stride_v = i420.stride_v();
+            let (dst_y, dst_u, dst_v) = i420.planes_mut();
+            if !nv12_to_i420(
                 frame.y_plane(),
                 frame.y_stride() as i32,
                 frame.uv_plane(),
                 frame.uv_stride() as i32,
+                dst_y,
+                dst_stride_y,
+                dst_u,
+                dst_stride_u,
+                dst_v,
+                dst_stride_v,
                 frame.width() as i32,
                 frame.height() as i32,
-            ) else {
+            ) {
                 return VideoCodecStatus::Error;
-            };
+            }
 
-            decoded_images.push(VideoFrame::from_i420(
-                &i420,
-                render_time_ms.saturating_mul(1000),
-                rtp_timestamp,
-            ));
+            decoded_images.push(
+                VideoFrame::builder(&i420.cast_to_video_frame_buffer())
+                    .set_timestamp_us(render_time_ms.saturating_mul(1000))
+                    .set_rtp_timestamp(rtp_timestamp)
+                    .build(),
+            );
         }
         let Some(callback) = self.callback.as_ref() else {
             return VideoCodecStatus::Uninitialized;
