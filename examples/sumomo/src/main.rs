@@ -1,16 +1,18 @@
-use rustls_pki_types::pem::PemObject;
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::io;
 use std::io::Write as IoWrite;
 use std::sync::Arc;
+#[cfg(feature = "media-device")]
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
+use rustls_pki_types::pem::PemObject;
 use shiguredo_webrtc::{
     AdaptFrameResult, AdaptedVideoTrackSource, CodecSpecificInfo, EncodedImage, EncodedImageBuffer,
     H264PacketizationMode, I420Buffer, LibyuvFourcc, SdpVideoFormat, TimestampAligner,
-    VideoCodecRef, VideoCodecStatus, VideoCodecType as WebrtcVideoCodecType,
+    VideoCodecRef, VideoCodecStatus, VideoCodecType, VideoDecoderHandler,
     VideoEncoderEncodedImageCallbackPtr, VideoEncoderEncodedImageCallbackRef,
     VideoEncoderEncodedImageCallbackResultError, VideoEncoderEncoderInfo, VideoEncoderHandler,
     VideoEncoderRateControlParametersRef, VideoEncoderSettingsRef, VideoFrame, VideoFrameBuffer,
@@ -18,6 +20,8 @@ use shiguredo_webrtc::{
     VideoSinkHandler, VideoSinkWants, VideoTrackSource, convert_from_i420, log, rtc_log_info,
     rtc_log_warning,
 };
+#[cfg(feature = "media-device")]
+use shiguredo_webrtc::{AudioDeviceModule, AudioDeviceModuleHandler, AudioTransportRef};
 use sora_sdk::{
     CodecDirection, Role, SoraClient, SoraClientContext, SoraClientContextConfig,
     VideoCodecImplementation,
@@ -26,8 +30,6 @@ use sora_sdk::{
 use sora_sdk::{NvCodecVideoCodecCapability, VideoCodecCapability, VideoCodecPreference};
 #[cfg(not(feature = "nvcodec"))]
 use sora_sdk::{VideoCodecCapability, VideoCodecPreference};
-#[cfg(feature = "media-device")]
-use std::sync::Mutex;
 use tokio::sync::mpsc;
 
 struct Args {
@@ -224,6 +226,7 @@ fn parse_args() -> Result<Args> {
             audio: None,
             video: None,
             video_codec_type: None,
+            video_bit_rate: None,
             data_channel_signaling: None,
             ignore_disconnect_websocket: None,
             simulcast: None,
@@ -697,7 +700,7 @@ impl Default for FakeVideoCapturerConfig {
 
 struct FakeVideoCapturer {
     source: AdaptedVideoTrackSource,
-    timestamp_aligner: Option<shiguredo_webrtc::TimestampAligner>,
+    timestamp_aligner: Option<TimestampAligner>,
     image: Vec<u32>,
     width: i32,
     height: i32,
@@ -718,7 +721,7 @@ impl FakeVideoCapturer {
         };
         let fps = if config.fps > 0 { config.fps } else { 30 };
         let source = AdaptedVideoTrackSource::new();
-        let timestamp_aligner = shiguredo_webrtc::TimestampAligner::new();
+        let timestamp_aligner = TimestampAligner::new();
         let video_source = source.cast_to_video_track_source();
         Ok(Self {
             image: vec![0u32; (width * height) as usize],
@@ -790,7 +793,7 @@ impl Drop for FakeVideoCapturer {
 
 fn tick_once(
     source: &mut AdaptedVideoTrackSource,
-    timestamp_aligner: &mut shiguredo_webrtc::TimestampAligner,
+    timestamp_aligner: &mut TimestampAligner,
     image: &mut [u32],
     width: i32,
     height: i32,
@@ -850,14 +853,14 @@ fn tick_once(
         timestamp_aligner.translate(timestamp_us, shiguredo_webrtc::time_millis() * 1000);
     let AdaptFrameResult { applied, size } = source.adapt_frame(width, height, timestamp_us);
     let frame = if applied && (size.adapted_width != width || size.adapted_height != height) {
-        let mut scaled = shiguredo_webrtc::I420Buffer::new(size.adapted_width, size.adapted_height);
+        let mut scaled = I420Buffer::new(size.adapted_width, size.adapted_height);
         scaled.scale_from(&buffer);
-        shiguredo_webrtc::VideoFrame::builder(&scaled.cast_to_video_frame_buffer())
+        VideoFrame::builder(&scaled.cast_to_video_frame_buffer())
             .set_timestamp_us(translated_timestamp_us)
             .set_rtp_timestamp(0)
             .build()
     } else {
-        shiguredo_webrtc::VideoFrame::builder(&buffer.cast_to_video_frame_buffer())
+        VideoFrame::builder(&buffer.cast_to_video_frame_buffer())
             .set_timestamp_us(translated_timestamp_us)
             .set_rtp_timestamp(0)
             .build()
@@ -1061,7 +1064,7 @@ fn run_with_raw_player(args: Args) -> Result<()> {
             raw_player_renderer.render(&frame);
         }
 
-        std::thread::sleep(std::time::Duration::from_millis(1));
+        thread::sleep(std::time::Duration::from_millis(1));
     }
 
     stop.store(true, Ordering::Relaxed);
@@ -1168,7 +1171,7 @@ struct EncodedSample {
     is_keyframe: bool,
     width: u32,
     height: u32,
-    codec_type: WebrtcVideoCodecType,
+    codec_type: VideoCodecType,
 }
 
 impl VideoFrameBufferHandler for EncodedSample {
@@ -1189,7 +1192,7 @@ impl VideoFrameBufferHandler for EncodedSample {
 ///
 /// SampleEntry (stsd ボックス) から取得する。
 struct Mp4VideoTrackInfo {
-    codec_type: WebrtcVideoCodecType,
+    codec_type: VideoCodecType,
     width: u16,
     height: u16,
     /// MP4 のタイムスケール (1 秒あたりのタイムスタンプ単位数)。
@@ -1344,7 +1347,7 @@ impl Mp4SampleReader {
                     parameter_sets.extend_from_slice(pps);
                 }
                 Ok(Mp4VideoTrackInfo {
-                    codec_type: WebrtcVideoCodecType::H264,
+                    codec_type: VideoCodecType::H264,
                     width,
                     height,
                     timescale,
@@ -1359,7 +1362,7 @@ impl Mp4SampleReader {
                 let (width, height) = (hev1.visual.width, hev1.visual.height);
                 let parameter_sets = Self::extract_hevc_parameter_sets(&hev1.hvcc_box);
                 Ok(Mp4VideoTrackInfo {
-                    codec_type: WebrtcVideoCodecType::H265,
+                    codec_type: VideoCodecType::H265,
                     width,
                     height,
                     timescale,
@@ -1370,7 +1373,7 @@ impl Mp4SampleReader {
                 let (width, height) = (hvc1.visual.width, hvc1.visual.height);
                 let parameter_sets = Self::extract_hevc_parameter_sets(&hvc1.hvcc_box);
                 Ok(Mp4VideoTrackInfo {
-                    codec_type: WebrtcVideoCodecType::H265,
+                    codec_type: VideoCodecType::H265,
                     width,
                     height,
                     timescale,
@@ -1378,21 +1381,21 @@ impl Mp4SampleReader {
                 })
             }
             SampleEntry::Vp08(vp08) => Ok(Mp4VideoTrackInfo {
-                codec_type: WebrtcVideoCodecType::Vp8,
+                codec_type: VideoCodecType::Vp8,
                 width: vp08.visual.width,
                 height: vp08.visual.height,
                 timescale,
                 parameter_sets: None,
             }),
             SampleEntry::Vp09(vp09) => Ok(Mp4VideoTrackInfo {
-                codec_type: WebrtcVideoCodecType::Vp9,
+                codec_type: VideoCodecType::Vp9,
                 width: vp09.visual.width,
                 height: vp09.visual.height,
                 timescale,
                 parameter_sets: None,
             }),
             SampleEntry::Av01(av01) => Ok(Mp4VideoTrackInfo {
-                codec_type: WebrtcVideoCodecType::Av1,
+                codec_type: VideoCodecType::Av1,
                 width: av01.visual.width,
                 height: av01.visual.height,
                 timescale,
@@ -1432,7 +1435,7 @@ impl Mp4SampleReader {
         let raw_data = &self.file_data[data_offset as usize..data_offset as usize + data_size];
 
         let data = match self.track_info.codec_type {
-            WebrtcVideoCodecType::H264 | WebrtcVideoCodecType::H265 => {
+            VideoCodecType::H264 | VideoCodecType::H265 => {
                 let mut annex_b = Vec::new();
                 if keyframe && let Some(ref ps) = self.track_info.parameter_sets {
                     annex_b.extend_from_slice(ps);
@@ -1567,7 +1570,7 @@ impl VideoEncoderHandler for Mp4PassthroughEncoder {
         // H.265/VP8/VP9/AV1 はコーデック種別の設定のみで十分。
         let mut codec_specific_info = CodecSpecificInfo::new();
         codec_specific_info.set_codec_type(sample.codec_type);
-        if sample.codec_type == WebrtcVideoCodecType::H264 {
+        if sample.codec_type == VideoCodecType::H264 {
             codec_specific_info.set_h264_packetization_mode(H264PacketizationMode::NonInterleaved);
             codec_specific_info.set_h264_idr_frame(sample.is_keyframe);
         }
@@ -1625,11 +1628,11 @@ impl VideoEncoderHandler for Mp4PassthroughEncoder {
 /// MP4 から検出されたコーデック種別のみをサポートし、デコーダーは提供しない (送信専用)。
 struct Mp4PassthroughVideoCodecCapability {
     /// MP4 から検出されたコーデック種別
-    codec_type: WebrtcVideoCodecType,
+    codec_type: VideoCodecType,
 }
 
 impl Mp4PassthroughVideoCodecCapability {
-    fn new(codec_type: WebrtcVideoCodecType) -> Self {
+    fn new(codec_type: VideoCodecType) -> Self {
         Self { codec_type }
     }
 }
@@ -1640,14 +1643,14 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
     }
 
     /// MP4 から検出されたコーデック種別のエンコーダーのみをサポートする
-    fn is_supported(&self, direction: CodecDirection, codec_type: WebrtcVideoCodecType) -> bool {
+    fn is_supported(&self, direction: CodecDirection, codec_type: VideoCodecType) -> bool {
         direction == CodecDirection::Encoder && codec_type == self.codec_type
     }
 
     fn resolve_sdp_format(
         &self,
         direction: CodecDirection,
-        codec_type: WebrtcVideoCodecType,
+        codec_type: VideoCodecType,
         _parameters: &HashMap<String, String>,
         _scalability_mode: Option<&str>,
     ) -> Option<SdpVideoFormat> {
@@ -1655,15 +1658,15 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
             return None;
         }
         match codec_type {
-            WebrtcVideoCodecType::H264 => {
+            VideoCodecType::H264 => {
                 let mut format = SdpVideoFormat::new("H264");
                 format.parameters_mut().set("packetization-mode", "1");
                 Some(format)
             }
-            WebrtcVideoCodecType::H265 => Some(SdpVideoFormat::new("H265")),
-            WebrtcVideoCodecType::Vp8 => Some(SdpVideoFormat::new("VP8")),
-            WebrtcVideoCodecType::Vp9 => Some(SdpVideoFormat::new("VP9")),
-            WebrtcVideoCodecType::Av1 => Some(SdpVideoFormat::new("AV1")),
+            VideoCodecType::H265 => Some(SdpVideoFormat::new("H265")),
+            VideoCodecType::Vp8 => Some(SdpVideoFormat::new("VP8")),
+            VideoCodecType::Vp9 => Some(SdpVideoFormat::new("VP9")),
+            VideoCodecType::Av1 => Some(SdpVideoFormat::new("AV1")),
             _ => None,
         }
     }
@@ -1679,7 +1682,7 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
     fn create_video_decoder(
         &self,
         _format: &SdpVideoFormat,
-    ) -> Option<Box<dyn shiguredo_webrtc::VideoDecoderHandler>> {
+    ) -> Option<Box<dyn VideoDecoderHandler>> {
         None
     }
 }
@@ -1789,15 +1792,16 @@ impl VideoDeviceCapturer {
     fn new(device_id: Option<String>) -> Result<Self> {
         let source = AdaptedVideoTrackSource::new();
         let video_source = source.cast_to_video_track_source();
-        let timestamp_aligner = shiguredo_webrtc::TimestampAligner::new();
+        let timestamp_aligner = TimestampAligner::new();
 
-        let shared = Arc::new(std::sync::Mutex::new((source, timestamp_aligner)));
+        let shared = Arc::new(Mutex::new((source, timestamp_aligner)));
 
         let config = shiguredo_video_device::VideoCaptureConfig {
             device_id,
             width: 640,
             height: 480,
             fps: 30,
+            pixel_format: None,
         };
 
         let shared_clone = shared.clone();
@@ -1869,12 +1873,12 @@ impl VideoDeviceCapturer {
                 if size.adapted_width != frame.width || size.adapted_height != frame.height {
                     let mut scaled = I420Buffer::new(size.adapted_width, size.adapted_height);
                     scaled.scale_from(&buffer);
-                    shiguredo_webrtc::VideoFrame::builder(&scaled.cast_to_video_frame_buffer())
+                    VideoFrame::builder(&scaled.cast_to_video_frame_buffer())
                         .set_timestamp_us(ts)
                         .set_rtp_timestamp(0)
                         .build()
                 } else {
-                    shiguredo_webrtc::VideoFrame::builder(&buffer.cast_to_video_frame_buffer())
+                    VideoFrame::builder(&buffer.cast_to_video_frame_buffer())
                         .set_timestamp_us(ts)
                         .set_rtp_timestamp(0)
                         .build()
@@ -1938,7 +1942,7 @@ struct AudioDeviceCapturer {
 #[derive(Clone)]
 struct SumomoAdmState {
     recording: Arc<AtomicBool>,
-    audio_transport: Arc<Mutex<Option<shiguredo_webrtc::AudioTransportRef>>>,
+    audio_transport: Arc<Mutex<Option<AudioTransportRef>>>,
 }
 
 #[cfg(feature = "media-device")]
@@ -1984,22 +1988,19 @@ impl SumomoAdmState {
 #[cfg(feature = "media-device")]
 #[derive(Clone)]
 struct SumomoAdm {
-    adm: shiguredo_webrtc::AudioDeviceModule,
+    adm: AudioDeviceModule,
     state: SumomoAdmState,
 }
 
 #[cfg(feature = "media-device")]
 struct SumomoAdmHandler {
     recording: Arc<AtomicBool>,
-    audio_transport: Arc<Mutex<Option<shiguredo_webrtc::AudioTransportRef>>>,
+    audio_transport: Arc<Mutex<Option<AudioTransportRef>>>,
 }
 
 #[cfg(feature = "media-device")]
-impl shiguredo_webrtc::AudioDeviceModuleHandler for SumomoAdmHandler {
-    fn register_audio_callback(
-        &self,
-        transport: Option<shiguredo_webrtc::AudioTransportRef>,
-    ) -> i32 {
+impl AudioDeviceModuleHandler for SumomoAdmHandler {
+    fn register_audio_callback(&self, transport: Option<AudioTransportRef>) -> i32 {
         let mut stored = self.audio_transport.lock().unwrap();
         *stored = transport;
         0
@@ -2067,15 +2068,14 @@ impl SumomoAdm {
             recording: Arc::new(AtomicBool::new(false)),
             audio_transport: Arc::new(Mutex::new(None)),
         };
-        let adm =
-            shiguredo_webrtc::AudioDeviceModule::new_with_handler(Box::new(SumomoAdmHandler {
-                recording: Arc::clone(&state.recording),
-                audio_transport: Arc::clone(&state.audio_transport),
-            }));
+        let adm = AudioDeviceModule::new_with_handler(Box::new(SumomoAdmHandler {
+            recording: Arc::clone(&state.recording),
+            audio_transport: Arc::clone(&state.audio_transport),
+        }));
         Self { adm, state }
     }
 
-    fn audio_device_module(&self) -> shiguredo_webrtc::AudioDeviceModule {
+    fn audio_device_module(&self) -> AudioDeviceModule {
         self.adm.clone()
     }
 
