@@ -13,9 +13,10 @@ use shiguredo_webrtc::{
     VideoCodecRef, VideoCodecStatus, VideoCodecType as WebrtcVideoCodecType,
     VideoEncoderEncodedImageCallbackPtr, VideoEncoderEncodedImageCallbackRef,
     VideoEncoderEncodedImageCallbackResultError, VideoEncoderEncoderInfo, VideoEncoderHandler,
-    VideoEncoderRateControlParametersRef, VideoEncoderSettingsRef, VideoFrame, VideoFrameRef,
-    VideoFrameType, VideoFrameTypeVectorRef, VideoSink, VideoSinkHandler, VideoSinkWants,
-    VideoTrackSource, convert_from_i420, log, rtc_log_info, rtc_log_warning,
+    VideoEncoderRateControlParametersRef, VideoEncoderSettingsRef, VideoFrame, VideoFrameBuffer,
+    VideoFrameBufferHandler, VideoFrameRef, VideoFrameType, VideoFrameTypeVectorRef, VideoSink,
+    VideoSinkHandler, VideoSinkWants, VideoTrackSource, convert_from_i420, log, rtc_log_info,
+    rtc_log_warning,
 };
 use sora_sdk::{
     CodecDirection, Role, SoraClient, SoraClientContext, SoraClientContextConfig,
@@ -1128,17 +1129,15 @@ fn list_devices() -> Result<()> {
 //                          フレームを WebRTC に供給する
 //
 // データフロー:
-//   Mp4SampleReader --[SharedSampleSlot]--> Mp4PassthroughEncoder --> WebRTC RTP
-//                                              ^
-//   Mp4VideoCapturer --[ダミー I420 フレーム]---+
-//                      (encode() をトリガーするため)
+//   Mp4SampleReader --[EncodedSample を内包した VideoFrame]--> Mp4PassthroughEncoder --> WebRTC RTP
+//                                      (native VideoFrameBuffer)
 //
 // 対応コーデック: H.264, H.265, VP8, VP9, AV1
 // =============================================================================
 
 /// MP4 から抽出したエンコード済みビデオサンプル。
 ///
-/// Mp4SampleReader が生成し、SharedSampleSlot を経由して
+/// Mp4SampleReader が生成し、native VideoFrameBuffer に保持されて
 /// Mp4PassthroughEncoder に渡される。
 struct EncodedSample {
     /// エンコード済みフレームデータ。
@@ -1149,6 +1148,20 @@ struct EncodedSample {
     width: u32,
     height: u32,
     codec_type: WebrtcVideoCodecType,
+}
+
+impl VideoFrameBufferHandler for EncodedSample {
+    fn width(&self) -> i32 {
+        self.width as i32
+    }
+
+    fn height(&self) -> i32 {
+        self.height as i32
+    }
+
+    fn to_i420(&mut self) -> Option<I420Buffer> {
+        None
+    }
 }
 
 /// MP4 のビデオトラックから抽出したコーデック情報。
@@ -1466,21 +1479,11 @@ fn length_prefixed_nalu_to_annex_b(data: &[u8]) -> Vec<u8> {
     result
 }
 
-/// フィーダースレッドとエンコーダー間で最新サンプルを共有するスロット。
-///
-/// フィーダースレッド (Mp4VideoCapturer) は常に最新のサンプルで上書きし、
-/// エンコーダー (Mp4PassthroughEncoder) は encode() 呼び出し時に take する。
-///
-/// WebRTC のフレームドロッパーがフレームをスキップした場合、
-/// スロット内のサンプルは次のサンプルで上書きされるだけで、
-/// 古いサンプルが滞留してデコード不整合を起こすことはない。
-type SharedSampleSlot = Arc<std::sync::Mutex<Option<EncodedSample>>>;
-
 /// MP4 パススルーエンコーダー。
 ///
 /// WebRTC の VideoEncoderHandler インターフェースを実装する。
-/// 実際のエンコード処理は行わず、SharedSampleSlot から事前エンコード済みの
-/// サンプルを取り出して EncodedImage として WebRTC に渡す。
+/// 実際のエンコード処理は行わず、VideoFrame の native VideoFrameBuffer から
+/// 事前エンコード済みのサンプルを取り出して EncodedImage として WebRTC に渡す。
 ///
 /// has_trusted_rate_controller=true を設定することで、
 /// WebRTC のビットレート制御がこのエンコーダーに対して介入しないようにする。
@@ -1488,7 +1491,6 @@ type SharedSampleSlot = Arc<std::sync::Mutex<Option<EncodedSample>>>;
 /// 代わりに --video-bit-rate で十分な帯域を確保する必要がある。
 struct Mp4PassthroughEncoder {
     callback: Option<VideoEncoderEncodedImageCallbackPtr>,
-    sample_slot: SharedSampleSlot,
 }
 
 impl VideoEncoderHandler for Mp4PassthroughEncoder {
@@ -1517,14 +1519,14 @@ impl VideoEncoderHandler for Mp4PassthroughEncoder {
             None => return VideoCodecStatus::Uninitialized,
         };
 
-        // SharedSampleSlot からサンプルを取得する。
-        // フィーダースレッドがまだサンプルを供給していない場合は NoOutput を返す。
-        let sample = match self.sample_slot.lock() {
-            Ok(mut slot) => match slot.take() {
-                Some(sample) => sample,
-                None => return VideoCodecStatus::NoOutput,
-            },
-            Err(_) => return VideoCodecStatus::Error,
+        let frame_buffer = frame.buffer();
+        // Safety: encode() 呼び出し中の参照のみを取得し、同一実体への同時アクセスは行わない。
+        let sample = match unsafe { frame_buffer.as_native_ref::<EncodedSample>() } {
+            Some(sample) => sample,
+            None => {
+                rtc_log_warning!("MP4Passthrough: failed to get EncodedSample from frame buffer");
+                return VideoCodecStatus::Error;
+            }
         };
 
         rtc_log_info!(
@@ -1609,15 +1611,11 @@ impl VideoEncoderHandler for Mp4PassthroughEncoder {
 struct Mp4PassthroughVideoCodecCapability {
     /// MP4 から検出されたコーデック種別
     codec_type: WebrtcVideoCodecType,
-    sample_slot: SharedSampleSlot,
 }
 
 impl Mp4PassthroughVideoCodecCapability {
-    fn new(codec_type: WebrtcVideoCodecType, sample_slot: SharedSampleSlot) -> Self {
-        Self {
-            codec_type,
-            sample_slot,
-        }
+    fn new(codec_type: WebrtcVideoCodecType) -> Self {
+        Self { codec_type }
     }
 }
 
@@ -1659,10 +1657,7 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
         &self,
         _format: &SdpVideoFormat,
     ) -> Option<Box<dyn VideoEncoderHandler>> {
-        Some(Box::new(Mp4PassthroughEncoder {
-            callback: None,
-            sample_slot: self.sample_slot.clone(),
-        }))
+        Some(Box::new(Mp4PassthroughEncoder { callback: None }))
     }
 
     /// デコーダーは提供しない (パススルーは送信専用)
@@ -1678,8 +1673,7 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
 ///
 /// 専用スレッドで MP4 のフレームタイミングに従ってサンプルを供給する。
 /// WebRTC のエンコーダーパイプラインは VideoTrackSource::on_frame() を起点に
-/// encode() を呼び出すため、パススルーでもダミーの I420 フレームを送る必要がある。
-/// 実際のエンコード済みデータは SharedSampleSlot 経由で渡す。
+/// encode() を呼び出すため、サンプルを内包した native VideoFrameBuffer を送る。
 ///
 /// フレームペーシングは Instant ベースの絶対時刻待ちで行い、
 /// 処理時間の累積ドリフトを防止する。
@@ -1692,10 +1686,7 @@ struct Mp4VideoCapturer {
 }
 
 impl Mp4VideoCapturer {
-    fn new(
-        reader: Mp4SampleReader,
-        sample_slot: SharedSampleSlot,
-    ) -> std::result::Result<Self, String> {
+    fn new(reader: Mp4SampleReader) -> std::result::Result<Self, String> {
         let width = reader.track_info.width as i32;
         let height = reader.track_info.height as i32;
 
@@ -1708,12 +1699,6 @@ impl Mp4VideoCapturer {
             let mut source = source;
             let mut aligner = TimestampAligner::new();
 
-            // encode() をトリガーするためのダミー I420 バッファ。
-            // 実際のピクセルデータは使われない (パススルーエンコーダーが無視する) が、
-            // WebRTC の VideoTrackSource::on_frame() には VideoFrame が必要。
-            // 毎フレームのアロケーションを避けるため、事前に確保して使い回す。
-            let dummy_buffer = I420Buffer::new(width, height);
-
             loop {
                 // ループ再生の先頭で基準時刻を記録する。
                 // 各フレームの送信タイミングはこの基準時刻からの累積オフセットで決まる。
@@ -1724,27 +1709,21 @@ impl Mp4VideoCapturer {
                         return;
                     }
 
-                    // サンプルを取得して SharedSampleSlot に書き込む。
-                    // encode() が呼ばれた時にこのサンプルが取り出される。
-                    let sample = reader.get_sample(i);
-                    if let Ok(mut slot) = sample_slot.lock() {
-                        *slot = Some(sample);
-                    }
-
-                    // ダミーフレームを送信して encode() をトリガーする。
+                    // サンプルを内包した native VideoFrameBuffer を送信して encode() をトリガーする。
                     // adapt_frame() は WebRTC のフレームアダプター (解像度/フレームレート調整) を通す。
                     // applied=false の場合はフレームドロッパーがスキップを指示している。
                     let timestamp_us = shiguredo_webrtc::time_millis() * 1000;
                     let AdaptFrameResult { applied, .. } =
                         source.adapt_frame(width, height, timestamp_us);
                     if applied {
+                        let sample = reader.get_sample(i);
+                        let frame_buffer = VideoFrameBuffer::new_with_handler(Box::new(sample));
                         let ts =
                             aligner.translate(timestamp_us, shiguredo_webrtc::time_millis() * 1000);
-                        let video_frame =
-                            VideoFrame::builder(&dummy_buffer.cast_to_video_frame_buffer())
-                                .set_timestamp_us(ts)
-                                .set_rtp_timestamp(0)
-                                .build();
+                        let video_frame = VideoFrame::builder(&frame_buffer)
+                            .set_timestamp_us(ts)
+                            .set_rtp_timestamp(0)
+                            .build();
                         source.on_frame(&video_frame);
                     }
 
@@ -2182,8 +2161,7 @@ async fn main() -> Result<()> {
     let mp4_state = if let Some(ref mp4_path) = args.input_mp4 {
         let reader = Mp4SampleReader::new(mp4_path).map_err(ErrorMessage::new)?;
         let codec_type = reader.track_info.codec_type;
-        let sample_slot: SharedSampleSlot = Arc::new(std::sync::Mutex::new(None));
-        Some((reader, sample_slot, codec_type))
+        Some((reader, codec_type))
     } else {
         None
     };
@@ -2201,10 +2179,9 @@ async fn main() -> Result<()> {
     };
 
     // --input-mp4 が指定されている場合はパススルー capability を追加する
-    let mp4_state = if let Some((reader, sample_slot, codec_type)) = mp4_state {
-        let passthrough_capability: Box<dyn VideoCodecCapability> = Box::new(
-            Mp4PassthroughVideoCodecCapability::new(codec_type, sample_slot.clone()),
-        );
+    let mp4_state = if let Some((reader, codec_type)) = mp4_state {
+        let passthrough_capability: Box<dyn VideoCodecCapability> =
+            Box::new(Mp4PassthroughVideoCodecCapability::new(codec_type));
         let passthrough_preference =
             VideoCodecPreference::new_from_capability(passthrough_capability.as_ref());
         context_config
@@ -2213,7 +2190,7 @@ async fn main() -> Result<()> {
         context_config
             .video_codec_capabilities
             .push(passthrough_capability);
-        Some((reader, sample_slot, codec_type))
+        Some((reader, codec_type))
     } else {
         None
     };
@@ -2314,10 +2291,9 @@ async fn main() -> Result<()> {
 
     let mut _video_capturer: Option<VideoCapturerHolder> = None;
     if args.role.wants_send() && video_enabled {
-        let mut capturer = if let Some((reader, sample_slot, _codec_type)) = mp4_state {
+        let mut capturer = if let Some((reader, _codec_type)) = mp4_state {
             // --input-mp4 が最優先
-            let mp4_capturer =
-                Mp4VideoCapturer::new(reader, sample_slot).map_err(ErrorMessage::new)?;
+            let mp4_capturer = Mp4VideoCapturer::new(reader).map_err(ErrorMessage::new)?;
             VideoCapturerHolder::Mp4(mp4_capturer)
         } else {
             #[cfg(feature = "media-device")]
