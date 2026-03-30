@@ -66,19 +66,26 @@ enum AppEvent {
     OnRemoveTrack(shiguredo_webrtc::RtpReceiver),
 }
 
-#[derive(Debug, Clone)]
-struct ErrorMessage {
-    message: String,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mp4SampleError {
+    NoVideoTrack,
+    NoVideoSamples,
+    UnsupportedVideoCodec,
 }
 
-impl ErrorMessage {
-    #[allow(dead_code)]
-    fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
+impl std::fmt::Display for Mp4SampleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Mp4SampleError::NoVideoTrack => f.write_str("no video track found in MP4"),
+            Mp4SampleError::NoVideoSamples => f.write_str("no video samples found in MP4"),
+            Mp4SampleError::UnsupportedVideoCodec => {
+                f.write_str("unsupported MP4 video codec: expected H.264, H.265, VP8, VP9, or AV1")
+            }
         }
     }
 }
+
+impl std::error::Error for Mp4SampleError {}
 
 #[derive(Debug)]
 enum AppError {
@@ -90,8 +97,10 @@ enum AppError {
     Audio(shiguredo_audio_device::Error),
     #[cfg(feature = "raw-player")]
     RawPlayer(raw_player::Error),
-    Message(ErrorMessage),
     Io(std::io::Error),
+    Mp4Demux(shiguredo_mp4::demux::DemuxError),
+    Pem(rustls_pki_types::pem::Error),
+    Mp4Sample(Mp4SampleError),
 }
 
 impl std::fmt::Display for AppError {
@@ -99,7 +108,6 @@ impl std::fmt::Display for AppError {
         match self {
             AppError::Args(err) => write!(f, "{err:?}"),
             AppError::Sora(err) => write!(f, "AppError::Sora: {err}"),
-            AppError::Message(err) => write!(f, "AppError::Message: {err}"),
             #[cfg(feature = "media-device")]
             AppError::Video(err) => write!(f, "AppError::Video: {err}"),
             #[cfg(feature = "media-device")]
@@ -107,13 +115,10 @@ impl std::fmt::Display for AppError {
             #[cfg(feature = "raw-player")]
             AppError::RawPlayer(err) => write!(f, "AppError::RawPlayer: {err}"),
             AppError::Io(err) => write!(f, "AppError::Io: {err}"),
+            AppError::Mp4Demux(err) => write!(f, "AppError::Mp4Demux: {err}"),
+            AppError::Pem(err) => write!(f, "AppError::Pem: {err}"),
+            AppError::Mp4Sample(err) => write!(f, "AppError::Mp4Sample: {err}"),
         }
-    }
-}
-
-impl std::fmt::Display for ErrorMessage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
     }
 }
 
@@ -121,6 +126,10 @@ impl std::error::Error for AppError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             AppError::Sora(err) => Some(err),
+            AppError::Io(err) => Some(err),
+            AppError::Mp4Demux(err) => Some(err),
+            AppError::Pem(err) => Some(err),
+            AppError::Mp4Sample(err) => Some(err),
             _ => None,
         }
     }
@@ -138,15 +147,27 @@ impl From<sora_sdk::Error> for AppError {
     }
 }
 
-impl From<ErrorMessage> for AppError {
-    fn from(err: ErrorMessage) -> Self {
-        AppError::Message(err)
-    }
-}
-
 impl From<std::io::Error> for AppError {
     fn from(err: std::io::Error) -> Self {
         AppError::Io(err)
+    }
+}
+
+impl From<shiguredo_mp4::demux::DemuxError> for AppError {
+    fn from(err: shiguredo_mp4::demux::DemuxError) -> Self {
+        AppError::Mp4Demux(err)
+    }
+}
+
+impl From<rustls_pki_types::pem::Error> for AppError {
+    fn from(err: rustls_pki_types::pem::Error) -> Self {
+        AppError::Pem(err)
+    }
+}
+
+impl From<Mp4SampleError> for AppError {
+    fn from(err: Mp4SampleError) -> Self {
+        AppError::Mp4Sample(err)
     }
 }
 
@@ -1204,10 +1225,10 @@ impl Mp4SampleReader {
     /// MP4 ファイルを読み込み、ビデオトラックの全サンプルを事前解析する。
     ///
     /// ファイル全体をメモリに保持するため、大きなファイルではメモリ使用量に注意。
-    fn new(path: &str) -> std::result::Result<Self, String> {
+    fn new(path: &str) -> Result<Self> {
         use shiguredo_mp4::demux::{Input, Mp4FileDemuxer};
 
-        let file_data = std::fs::read(path).map_err(|e| format!("failed to read MP4 file: {e}"))?;
+        let file_data = std::fs::read(path)?;
 
         let mut demuxer = Mp4FileDemuxer::new();
 
@@ -1227,15 +1248,13 @@ impl Mp4SampleReader {
             });
         }
 
-        let tracks = demuxer
-            .tracks()
-            .map_err(|e| format!("failed to get MP4 track info: {e}"))?;
+        let tracks = demuxer.tracks()?;
 
         // 最初に見つかったビデオトラックを使用する (音声トラックは無視)
         let video_track = tracks
             .iter()
             .find(|t| t.kind == shiguredo_mp4::TrackKind::Video)
-            .ok_or("no video track found in MP4")?;
+            .ok_or(Mp4SampleError::NoVideoTrack)?;
 
         let video_track_id = video_track.track_id;
         let timescale = video_track.timescale.get();
@@ -1246,37 +1265,35 @@ impl Mp4SampleReader {
         let mut samples = Vec::new();
 
         loop {
-            match demuxer.next_sample() {
-                Ok(Some(sample)) => {
-                    // 音声など他トラックのサンプルはスキップする
-                    if sample.track.track_id != video_track_id {
-                        continue;
-                    }
+            let Some(sample) = demuxer.next_sample()? else {
+                break;
+            };
 
-                    // 最初のサンプルの sample_entry からコーデック情報を取得する
-                    if track_info.is_none()
-                        && let Some(entry) = sample.sample_entry
-                    {
-                        track_info = Some(Self::extract_track_info(entry, timescale)?);
-                    }
-
-                    samples.push((
-                        sample.data_offset,
-                        sample.data_size,
-                        sample.keyframe,
-                        sample.timestamp,
-                        sample.duration,
-                    ));
-                }
-                Ok(None) => break,
-                Err(e) => return Err(format!("failed to read MP4 sample: {e}")),
+            // 音声など他トラックのサンプルはスキップする
+            if sample.track.track_id != video_track_id {
+                continue;
             }
+
+            // 最初のサンプルの sample_entry からコーデック情報を取得する
+            if track_info.is_none()
+                && let Some(entry) = sample.sample_entry
+            {
+                track_info = Some(Self::extract_track_info(entry, timescale)?);
+            }
+
+            samples.push((
+                sample.data_offset,
+                sample.data_size,
+                sample.keyframe,
+                sample.timestamp,
+                sample.duration,
+            ));
         }
 
-        let track_info = track_info.ok_or("no video samples found in MP4")?;
+        let track_info = track_info.ok_or(Mp4SampleError::NoVideoSamples)?;
 
         if samples.is_empty() {
-            return Err("no video samples found in MP4".to_string());
+            return Err(Mp4SampleError::NoVideoSamples.into());
         }
 
         // 累積再生時刻テーブルを事前計算する。
@@ -1308,7 +1325,7 @@ impl Mp4SampleReader {
     fn extract_track_info(
         entry: &shiguredo_mp4::boxes::SampleEntry,
         timescale: u32,
-    ) -> std::result::Result<Mp4VideoTrackInfo, String> {
+    ) -> Result<Mp4VideoTrackInfo> {
         use shiguredo_mp4::boxes::SampleEntry;
 
         match entry {
@@ -1381,9 +1398,7 @@ impl Mp4SampleReader {
                 timescale,
                 parameter_sets: None,
             }),
-            _ => Err(
-                "unsupported MP4 video codec: expected H.264, H.265, VP8, VP9, or AV1".to_string(),
-            ),
+            _ => Err(Mp4SampleError::UnsupportedVideoCodec.into()),
         }
     }
 
@@ -1686,7 +1701,7 @@ struct Mp4VideoCapturer {
 }
 
 impl Mp4VideoCapturer {
-    fn new(reader: Mp4SampleReader) -> std::result::Result<Self, String> {
+    fn new(reader: Mp4SampleReader) -> Result<Self> {
         let width = reader.track_info.width as i32;
         let height = reader.track_info.height as i32;
 
@@ -2159,7 +2174,7 @@ async fn main() -> Result<()> {
 
     // --input-mp4 が指定されている場合は MP4 を読み込んでパススルーの準備をする
     let mp4_state = if let Some(ref mp4_path) = args.input_mp4 {
-        let reader = Mp4SampleReader::new(mp4_path).map_err(ErrorMessage::new)?;
+        let reader = Mp4SampleReader::new(mp4_path)?;
         let codec_type = reader.track_info.codec_type;
         Some((reader, codec_type))
     } else {
@@ -2293,7 +2308,7 @@ async fn main() -> Result<()> {
     if args.role.wants_send() && video_enabled {
         let mut capturer = if let Some((reader, _codec_type)) = mp4_state {
             // --input-mp4 が最優先
-            let mp4_capturer = Mp4VideoCapturer::new(reader).map_err(ErrorMessage::new)?;
+            let mp4_capturer = Mp4VideoCapturer::new(reader)?;
             VideoCapturerHolder::Mp4(mp4_capturer)
         } else {
             #[cfg(feature = "media-device")]
@@ -2345,8 +2360,7 @@ async fn main() -> Result<()> {
     }
     if let Some(ca_cert_path) = args.turn_tls_ca_cert {
         let pem_data = std::fs::read(&ca_cert_path)?;
-        let cert = rustls_pki_types::CertificateDer::from_pem_slice(&pem_data)
-            .map_err(|e| ErrorMessage::new(format!("CA 証明書の読み込みに失敗しました: {e}")))?;
+        let cert = rustls_pki_types::CertificateDer::from_pem_slice(&pem_data)?;
         builder = builder.turn_tls_ca_cert(cert.to_vec());
     }
 
