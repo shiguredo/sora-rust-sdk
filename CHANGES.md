@@ -19,3 +19,6 @@
   - @melpon
 
 ### misc
+
+- [ADD] sumomo に --input-mp4 オプションを追加して MP4 ファイルからエンコード済み映像をパススルー送信する
+  - @voluntas, @melpon
