@@ -74,7 +74,13 @@ impl<'text, 'raw> TryFrom<RawJsonValue<'text, 'raw>> for CodecDirection {
 
 pub trait VideoCodecCapability: Send {
     fn get_implementation(&self) -> VideoCodecImplementation;
-    fn is_supported(&self, direction: CodecDirection, codec_type: VideoCodecType) -> bool;
+    fn get_supported_formats(&self, _direction: CodecDirection) -> Option<Vec<SdpVideoFormat>> {
+        None
+    }
+    fn is_supported(&self, direction: CodecDirection, codec_type: VideoCodecType) -> bool {
+        self.resolve_sdp_format(direction, codec_type, &HashMap::new(), None)
+            .is_some()
+    }
     fn resolve_sdp_format(
         &self,
         direction: CodecDirection,
@@ -123,10 +129,6 @@ mod tests {
     impl VideoCodecCapability for MockCapability {
         fn get_implementation(&self) -> VideoCodecImplementation {
             VideoCodecImplementation::new("mock", "Mock Codec")
-        }
-
-        fn is_supported(&self, _direction: CodecDirection, codec_type: VideoCodecType) -> bool {
-            codec_type == VideoCodecType::H264
         }
 
         fn resolve_sdp_format(

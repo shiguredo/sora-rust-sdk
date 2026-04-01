@@ -575,11 +575,6 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
         VideoCodecImplementation::new("mp4-passthrough", "MP4 Passthrough")
     }
 
-    /// MP4 から検出されたコーデック種別のエンコーダーのみをサポートする。
-    fn is_supported(&self, direction: CodecDirection, codec_type: VideoCodecType) -> bool {
-        direction == CodecDirection::Encoder && codec_type == self.codec_type
-    }
-
     fn resolve_sdp_format(
         &self,
         direction: CodecDirection,
@@ -587,7 +582,7 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
         _parameters: &HashMap<String, String>,
         _scalability_mode: Option<&str>,
     ) -> Option<SdpVideoFormat> {
-        if !self.is_supported(direction, codec_type) {
+        if direction != CodecDirection::Encoder || codec_type != self.codec_type {
             return None;
         }
         match codec_type {

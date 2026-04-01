@@ -31,6 +31,8 @@ pub use crate::video_codec_preference::{
     PreferenceCodec, VideoCodecPreference, validate_video_codec_preference,
 };
 pub use crate::video_codecs::internal::InternalVideoCodecCapability;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub use crate::video_codecs::internal_hwa::InternalHwaVideoCodecCapability;
 pub use crate::video_codecs::mp4::{
     Mp4EncodedSample, Mp4Error, Mp4PassthroughVideoCodecCapability, Mp4SampleReader,
     Mp4VideoCapturer,

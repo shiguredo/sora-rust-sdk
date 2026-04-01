@@ -1,4 +1,8 @@
+mod internal_factory;
+
 pub mod internal;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub mod internal_hwa;
 pub mod mp4;
 #[cfg(feature = "nvcodec")]
 pub mod nvcodec;

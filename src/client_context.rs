@@ -13,6 +13,8 @@ use crate::video_codec::{SoraVideoDecoderFactory, SoraVideoEncoderFactory};
 use crate::video_codec_capability::VideoCodecCapability;
 use crate::video_codec_preference::{VideoCodecPreference, validate_video_codec_preference};
 use crate::video_codecs::internal::InternalVideoCodecCapability;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+use crate::video_codecs::internal_hwa::InternalHwaVideoCodecCapability;
 
 #[derive(Clone, Default)]
 pub enum AdmConfig {
@@ -34,13 +36,26 @@ pub struct SoraClientContextConfig {
 
 impl Default for SoraClientContextConfig {
     fn default() -> Self {
-        let capability: Box<dyn VideoCodecCapability> =
+        let internal_capability: Box<dyn VideoCodecCapability> =
             Box::new(InternalVideoCodecCapability::new());
-        let video_codec_preference = VideoCodecPreference::new_from_capability(capability.as_ref());
+        let mut video_codec_preference =
+            VideoCodecPreference::new_from_capability(internal_capability.as_ref());
+        let mut video_codec_capabilities = vec![internal_capability];
+
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        if let Some(internal_hwa_capability) = InternalHwaVideoCodecCapability::new() {
+            let internal_hwa_capability: Box<dyn VideoCodecCapability> =
+                Box::new(internal_hwa_capability);
+            video_codec_preference.merge(&VideoCodecPreference::new_from_capability(
+                internal_hwa_capability.as_ref(),
+            ));
+            video_codec_capabilities.push(internal_hwa_capability);
+        }
+
         Self {
             adm_config: AdmConfig::default(),
             video_codec_preference,
-            video_codec_capabilities: vec![capability],
+            video_codec_capabilities,
         }
     }
 }
@@ -159,3 +174,47 @@ unsafe impl Send for SoraClientContext {}
 // アクセスするためスレッドセーフに使用できる。
 // ref: https://source.chromium.org/chromium/chromium/src/+/main:third_party/webrtc/pc/peer_connection_factory_proxy.h;l=32-59;drc=ef55be496e45889ace33ace4b05094ca19cb499b
 unsafe impl Sync for SoraClientContext {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::video_codec_capability::CodecDirection;
+    use shiguredo_webrtc::VideoCodecType;
+
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[test]
+    fn default_config_prefers_internal_hwa_for_supported_codecs() {
+        let config = SoraClientContextConfig::default();
+        let Some(internal_hwa_capability) = config
+            .video_codec_capabilities
+            .iter()
+            .find(|cap| cap.get_implementation().name() == "internal-hwa")
+        else {
+            return;
+        };
+        let internal_hwa_implementation = internal_hwa_capability.get_implementation();
+
+        for codec_type in [
+            VideoCodecType::Vp8,
+            VideoCodecType::Vp9,
+            VideoCodecType::H264,
+            VideoCodecType::H265,
+            VideoCodecType::Av1,
+        ] {
+            for direction in [CodecDirection::Encoder, CodecDirection::Decoder] {
+                if !internal_hwa_capability.is_supported(direction, codec_type) {
+                    continue;
+                }
+                let preference = config
+                    .video_codec_preference
+                    .find(direction, codec_type)
+                    .expect("preference entry must exist");
+                assert_eq!(
+                    preference.implementation(),
+                    &internal_hwa_implementation,
+                    "internal-hwa must be preferred for {direction:?} {codec_type:?}",
+                );
+            }
+        }
+    }
+}

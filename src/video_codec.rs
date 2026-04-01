@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use shiguredo_webrtc::{
@@ -51,6 +50,13 @@ impl SoraVideoDecoderFactory {
 impl VideoEncoderFactoryHandler for SoraVideoEncoderFactory {
     fn get_supported_formats(&mut self) -> Vec<SdpVideoFormat> {
         let capabilities = self.capabilities.lock().unwrap();
+        if let Some(formats) = collect_capability_supported_formats(
+            &self.preference,
+            &capabilities,
+            CodecDirection::Encoder,
+        ) {
+            return formats;
+        }
         collect_supported_formats(&self.preference, &capabilities, CodecDirection::Encoder)
     }
 
@@ -65,21 +71,11 @@ impl VideoEncoderFactoryHandler for SoraVideoEncoderFactory {
         let preference = self.preference.find(CodecDirection::Encoder, codec_type)?;
         let capabilities = self.capabilities.lock().unwrap();
         let capability = find_capability(&capabilities, preference.implementation())?;
-        let mut format_owned = format.to_owned();
-        let input_parameters = format_owned
-            .parameters_mut()
-            .iter()
-            .collect::<HashMap<String, String>>();
-        let input_scalability_mode = format_owned
-            .scalability_modes()
-            .into_iter()
-            .next()
-            .and_then(|mode| mode.as_str().ok());
         let resolved = capability.resolve_sdp_format(
             CodecDirection::Encoder,
             codec_type,
-            &input_parameters,
-            input_scalability_mode.as_deref(),
+            preference.parameters(),
+            preference.scalability_mode(),
         )?;
         capability.create_video_encoder(&resolved)
     }
@@ -88,6 +84,13 @@ impl VideoEncoderFactoryHandler for SoraVideoEncoderFactory {
 impl VideoDecoderFactoryHandler for SoraVideoDecoderFactory {
     fn get_supported_formats(&mut self) -> Vec<SdpVideoFormat> {
         let capabilities = self.capabilities.lock().unwrap();
+        if let Some(formats) = collect_capability_supported_formats(
+            &self.preference,
+            &capabilities,
+            CodecDirection::Decoder,
+        ) {
+            return formats;
+        }
         collect_supported_formats(&self.preference, &capabilities, CodecDirection::Decoder)
     }
 
@@ -102,21 +105,11 @@ impl VideoDecoderFactoryHandler for SoraVideoDecoderFactory {
         let preference = self.preference.find(CodecDirection::Decoder, codec_type)?;
         let capabilities = self.capabilities.lock().unwrap();
         let capability = find_capability(&capabilities, preference.implementation())?;
-        let mut format_owned = format.to_owned();
-        let input_parameters = format_owned
-            .parameters_mut()
-            .iter()
-            .collect::<HashMap<String, String>>();
-        let input_scalability_mode = format_owned
-            .scalability_modes()
-            .into_iter()
-            .next()
-            .and_then(|mode| mode.as_str().ok());
         let resolved = capability.resolve_sdp_format(
             CodecDirection::Decoder,
             codec_type,
-            &input_parameters,
-            input_scalability_mode.as_deref(),
+            preference.parameters(),
+            preference.scalability_mode(),
         )?;
         capability.create_video_decoder(&resolved)
     }
@@ -154,6 +147,20 @@ fn collect_supported_formats(
     formats
 }
 
+fn collect_capability_supported_formats(
+    preference: &VideoCodecPreference,
+    capabilities: &[Box<dyn VideoCodecCapability>],
+    direction: CodecDirection,
+) -> Option<Vec<SdpVideoFormat>> {
+    let implementation = preference
+        .codecs()
+        .iter()
+        .find(|codec| codec.direction() == direction)
+        .map(|codec| codec.implementation().clone())?;
+    let capability = find_capability(capabilities, &implementation)?;
+    capability.get_supported_formats(direction)
+}
+
 fn find_capability<'a>(
     capabilities: &'a [Box<dyn VideoCodecCapability>],
     implementation: &VideoCodecImplementation,
@@ -166,6 +173,8 @@ fn find_capability<'a>(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
     use crate::video_codec_preference::PreferenceCodec;
     use shiguredo_webrtc::ScalabilityMode;
@@ -180,6 +189,8 @@ mod tests {
         implementation: VideoCodecImplementation,
         encoder_supported: Vec<VideoCodecType>,
         decoder_supported: Vec<VideoCodecType>,
+        encoder_formats: Option<Vec<VideoCodecType>>,
+        decoder_formats: Option<Vec<VideoCodecType>>,
     }
 
     impl MockCapability {
@@ -192,13 +203,42 @@ mod tests {
                 implementation,
                 encoder_supported,
                 decoder_supported,
+                encoder_formats: None,
+                decoder_formats: None,
             }
+        }
+
+        fn with_supported_formats(
+            mut self,
+            direction: CodecDirection,
+            formats: Vec<VideoCodecType>,
+        ) -> Self {
+            match direction {
+                CodecDirection::Encoder => self.encoder_formats = Some(formats),
+                CodecDirection::Decoder => self.decoder_formats = Some(formats),
+            }
+            self
         }
     }
 
     impl VideoCodecCapability for MockCapability {
         fn get_implementation(&self) -> VideoCodecImplementation {
             self.implementation.clone()
+        }
+
+        fn get_supported_formats(&self, direction: CodecDirection) -> Option<Vec<SdpVideoFormat>> {
+            let codec_types = match direction {
+                CodecDirection::Encoder => self.encoder_formats.as_ref()?,
+                CodecDirection::Decoder => self.decoder_formats.as_ref()?,
+            };
+            let mut formats = Vec::new();
+            for codec_type in codec_types {
+                let codec_name = codec_type
+                    .as_str()
+                    .expect("known codec type must be converted to codec name");
+                formats.push(SdpVideoFormat::new(codec_name));
+            }
+            Some(formats)
         }
 
         fn is_supported(&self, direction: CodecDirection, codec_type: VideoCodecType) -> bool {
@@ -338,6 +378,35 @@ mod tests {
         let formats = VideoEncoderFactoryHandler::get_supported_formats(&mut factory);
         assert_eq!(formats.len(), 2);
         assert_eq!(formats[0].name().expect("name 取得失敗"), "VP8");
+        assert_eq!(formats[1].name().expect("name 取得失敗"), "H264");
+    }
+
+    #[test]
+    fn encoder_factory_uses_capability_formats_when_available() {
+        let preference = VideoCodecPreference::new(vec![PreferenceCodec::new(
+            CodecDirection::Encoder,
+            VideoCodecType::H264,
+            VideoCodecImplementation::new("impl-a", "Implementation A"),
+            None,
+            HashMap::new(),
+        )]);
+        let capabilities: Vec<Box<dyn VideoCodecCapability>> = vec![Box::new(
+            MockCapability::new(
+                VideoCodecImplementation::new("impl-a", "Implementation A"),
+                vec![VideoCodecType::H264],
+                Vec::new(),
+            )
+            .with_supported_formats(
+                CodecDirection::Encoder,
+                vec![VideoCodecType::Vp9, VideoCodecType::H264],
+            ),
+        )];
+
+        let shared = Arc::new(Mutex::new(capabilities));
+        let mut factory = SoraVideoEncoderFactory::new(preference, shared);
+        let formats = VideoEncoderFactoryHandler::get_supported_formats(&mut factory);
+        assert_eq!(formats.len(), 2);
+        assert_eq!(formats[0].name().expect("name 取得失敗"), "VP9");
         assert_eq!(formats[1].name().expect("name 取得失敗"), "H264");
     }
 

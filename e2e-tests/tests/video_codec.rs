@@ -5,7 +5,7 @@ use std::time::Duration;
 use e2e_tests::{
     FakeVideoCapturer, FakeVideoCapturerConfig, build_metadata_with_access_token,
     build_sender_tracks, generate_channel_id, load_env, secret_key, signaling_urls,
-    verify_stats_field_positive,
+    verify_stats_field_positive, verify_video_codec_mime_type,
 };
 use sora_sdk::{Role, SoraClient, SoraClientContext, Video};
 
@@ -16,7 +16,11 @@ fn test_channel_id(suffix: &str) -> String {
 }
 
 /// 指定したコーデックで SendOnly → RecvOnly の接続テストを実行する
-async fn run_sendonly_recvonly_with_codec(video: Video, codec_name: &str) {
+async fn run_sendonly_recvonly_with_codec(
+    video: Video,
+    codec_name: &str,
+    expected_mime_type: &str,
+) {
     load_env();
 
     let urls = signaling_urls().expect("TEST_SIGNALING_URLS が必要");
@@ -181,6 +185,18 @@ async fn run_sendonly_recvonly_with_codec(video: Video, codec_name: &str) {
         "{}: RecvOnly の inbound-rtp の packetsReceived が 0 より大きくありません",
         codec_name
     );
+    assert!(
+        verify_video_codec_mime_type(&sendonly_stats, "outbound-rtp", expected_mime_type),
+        "{}: SendOnly の outbound-rtp が期待 codec ではありません: expected={}",
+        codec_name,
+        expected_mime_type
+    );
+    assert!(
+        verify_video_codec_mime_type(&recvonly_stats, "inbound-rtp", expected_mime_type),
+        "{}: RecvOnly の inbound-rtp が期待 codec ではありません: expected={}",
+        codec_name,
+        expected_mime_type
+    );
 
     // 切断
     sendonly_handle
@@ -202,7 +218,7 @@ async fn run_sendonly_recvonly_with_codec(video: Video, codec_name: &str) {
 }
 
 /// 指定したコーデックで SendRecv の双方向接続テストを実行する
-async fn run_sendrecv_with_codec(video: Video, codec_name: &str) {
+async fn run_sendrecv_with_codec(video: Video, codec_name: &str, expected_mime_type: &str) {
     load_env();
 
     let urls = signaling_urls().expect("TEST_SIGNALING_URLS が必要");
@@ -385,6 +401,30 @@ async fn run_sendrecv_with_codec(video: Video, codec_name: &str) {
         "{}: クライアント 2 の inbound-rtp の packetsReceived が 0 より大きくありません",
         codec_name
     );
+    assert!(
+        verify_video_codec_mime_type(&stats1, "outbound-rtp", expected_mime_type),
+        "{}: クライアント 1 の outbound-rtp が期待 codec ではありません: expected={}",
+        codec_name,
+        expected_mime_type
+    );
+    assert!(
+        verify_video_codec_mime_type(&stats2, "outbound-rtp", expected_mime_type),
+        "{}: クライアント 2 の outbound-rtp が期待 codec ではありません: expected={}",
+        codec_name,
+        expected_mime_type
+    );
+    assert!(
+        verify_video_codec_mime_type(&stats1, "inbound-rtp", expected_mime_type),
+        "{}: クライアント 1 の inbound-rtp が期待 codec ではありません: expected={}",
+        codec_name,
+        expected_mime_type
+    );
+    assert!(
+        verify_video_codec_mime_type(&stats2, "inbound-rtp", expected_mime_type),
+        "{}: クライアント 2 の inbound-rtp が期待 codec ではありません: expected={}",
+        codec_name,
+        expected_mime_type
+    );
 
     // 切断
     handle1
@@ -403,33 +443,29 @@ async fn run_sendrecv_with_codec(video: Video, codec_name: &str) {
 }
 
 /// H.264 で SendOnly → RecvOnly の接続テスト
-/// webrtc-rs が macOS H.264/H.265 に未対応のため一時的に ignore
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 #[tokio::test]
-#[ignore]
 async fn test_h264_sendonly_recvonly() {
-    run_sendonly_recvonly_with_codec(Video::new_h264(None, None), "H264").await;
+    run_sendonly_recvonly_with_codec(Video::new_h264(None, None), "H264", "video/H264").await;
 }
 
 /// H.265 で SendOnly → RecvOnly の接続テスト
-/// webrtc-rs が macOS H.264/H.265 に未対応のため一時的に ignore
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 #[tokio::test]
-#[ignore]
 async fn test_h265_sendonly_recvonly() {
-    run_sendonly_recvonly_with_codec(Video::new_h265(None, None), "H265").await;
+    run_sendonly_recvonly_with_codec(Video::new_h265(None, None), "H265", "video/H265").await;
 }
 
 /// H.264 で SendRecv の双方向接続テスト
-/// webrtc-rs が macOS H.264/H.265 に未対応のため一時的に ignore
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 #[tokio::test]
-#[ignore]
 async fn test_h264_sendrecv() {
-    run_sendrecv_with_codec(Video::new_h264(None, None), "H264").await;
+    run_sendrecv_with_codec(Video::new_h264(None, None), "H264", "video/H264").await;
 }
 
 /// H.265 で SendRecv の双方向接続テスト
-/// webrtc-rs が macOS H.264/H.265 に未対応のため一時的に ignore
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 #[tokio::test]
-#[ignore]
 async fn test_h265_sendrecv() {
-    run_sendrecv_with_codec(Video::new_h265(None, None), "H265").await;
+    run_sendrecv_with_codec(Video::new_h265(None, None), "H265", "video/H265").await;
 }

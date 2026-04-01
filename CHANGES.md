@@ -11,7 +11,7 @@
 
 ## develop
 
-- [UPDATE] `shiguredo_webrtc` を 0.146.2-canary.1 に上げる
+- [UPDATE] `shiguredo_webrtc` を 0.146.3-canary.2 に上げる
   - @sile
 - [ADD] Windows に対応する
   - @melpon
@@ -19,6 +19,12 @@
   - @melpon
 - [ADD] MP4 ファイルからエンコード済み映像をパススルー送信する機能を追加
   - @voluntas, @melpon
+- [ADD] Apple 環境で ObjC default VideoCodecFactory を利用する `InternalHwaVideoCodecCapability` を追加する
+  - @melpon
+- [UPDATE] `VideoCodecCapability::is_supported` のデフォルト実装を設定する
+  - @melpon
+- [ADD] `VideoCodecCapability::get_supported_formats` を追加し、デフォルト実装も追加する
+  - @melpon
 
 ### misc
 
