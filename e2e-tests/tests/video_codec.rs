@@ -12,6 +12,8 @@ use e2e_tests::{
     verify_stats_field_positive, verify_video_codec_mime_type,
 };
 #[cfg(any(target_os = "macos", target_os = "ios"))]
+use shiguredo_webrtc::VideoCodecType;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 use sora_sdk::{Role, SoraClient, SoraClientContext, Video};
 
 /// テスト用のチャンネル ID を生成する (suffix 付き)
@@ -19,6 +21,31 @@ use sora_sdk::{Role, SoraClient, SoraClientContext, Video};
 fn test_channel_id(suffix: &str) -> String {
     let base = generate_channel_id();
     format!("{}-{}", base, suffix)
+}
+
+/// 指定 codec の Encoder / Decoder が両方対応しているか確認する。
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn is_codec_fully_supported(codec_type: VideoCodecType) -> bool {
+    let config = sora_sdk::SoraClientContextConfig::default();
+    let has_encoder = config
+        .video_codec_capabilities
+        .iter()
+        .any(|capability| capability.is_supported(sora_sdk::CodecDirection::Encoder, codec_type));
+    let has_decoder = config
+        .video_codec_capabilities
+        .iter()
+        .any(|capability| capability.is_supported(sora_sdk::CodecDirection::Decoder, codec_type));
+    has_encoder && has_decoder
+}
+
+/// 指定 codec が未対応ならスキップし、スキップしたかを返す。
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn skip_if_codec_not_fully_supported(codec_type: VideoCodecType, codec_name: &str) -> bool {
+    if is_codec_fully_supported(codec_type) {
+        return false;
+    }
+    println!("SKIP: {codec_name} encoder/decoder is not fully supported");
+    true
 }
 
 /// 指定したコーデックで SendOnly → RecvOnly の接続テストを実行する
@@ -454,6 +481,9 @@ async fn run_sendrecv_with_codec(video: Video, codec_name: &str, expected_mime_t
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 #[tokio::test]
 async fn test_h264_sendonly_recvonly() {
+    if skip_if_codec_not_fully_supported(VideoCodecType::H264, "H264") {
+        return;
+    }
     run_sendonly_recvonly_with_codec(Video::new_h264(None, None), "H264", "video/H264").await;
 }
 
@@ -461,6 +491,9 @@ async fn test_h264_sendonly_recvonly() {
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 #[tokio::test]
 async fn test_h265_sendonly_recvonly() {
+    if skip_if_codec_not_fully_supported(VideoCodecType::H265, "H265") {
+        return;
+    }
     run_sendonly_recvonly_with_codec(Video::new_h265(None, None), "H265", "video/H265").await;
 }
 
@@ -468,6 +501,9 @@ async fn test_h265_sendonly_recvonly() {
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 #[tokio::test]
 async fn test_h264_sendrecv() {
+    if skip_if_codec_not_fully_supported(VideoCodecType::H264, "H264") {
+        return;
+    }
     run_sendrecv_with_codec(Video::new_h264(None, None), "H264", "video/H264").await;
 }
 
@@ -475,5 +511,8 @@ async fn test_h264_sendrecv() {
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 #[tokio::test]
 async fn test_h265_sendrecv() {
+    if skip_if_codec_not_fully_supported(VideoCodecType::H265, "H265") {
+        return;
+    }
     run_sendrecv_with_codec(Video::new_h265(None, None), "H265", "video/H265").await;
 }
