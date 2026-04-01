@@ -1,21 +1,28 @@
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 use std::sync::Arc;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 use std::time::Duration;
 
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 use e2e_tests::{
     FakeVideoCapturer, FakeVideoCapturerConfig, build_metadata_with_access_token,
     build_sender_tracks, generate_channel_id, load_env, secret_key, signaling_urls,
     verify_stats_field_positive, verify_video_codec_mime_type,
 };
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 use sora_sdk::{Role, SoraClient, SoraClientContext, Video};
 
 /// テスト用のチャンネル ID を生成する (suffix 付き)
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn test_channel_id(suffix: &str) -> String {
     let base = generate_channel_id();
     format!("{}-{}", base, suffix)
 }
 
 /// 指定したコーデックで SendOnly → RecvOnly の接続テストを実行する
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 async fn run_sendonly_recvonly_with_codec(
     video: Video,
     codec_name: &str,
@@ -218,6 +225,7 @@ async fn run_sendonly_recvonly_with_codec(
 }
 
 /// 指定したコーデックで SendRecv の双方向接続テストを実行する
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 async fn run_sendrecv_with_codec(video: Video, codec_name: &str, expected_mime_type: &str) {
     load_env();
 

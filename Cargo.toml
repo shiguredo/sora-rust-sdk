@@ -2,7 +2,7 @@
 members = ["examples/sumomo", "e2e-tests"]
 
 [workspace.dependencies]
-shiguredo_webrtc = { version = "=0.146.3-canary.2" }
+shiguredo_webrtc = { version = "=0.146.3-canary.3" }
 
 [package]
 name = "sora_sdk"

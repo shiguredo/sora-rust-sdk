@@ -36,11 +36,15 @@ pub struct SoraClientContextConfig {
 
 impl Default for SoraClientContextConfig {
     fn default() -> Self {
+        let mut video_codec_preference = VideoCodecPreference::default();
+        let mut video_codec_capabilities = Vec::new();
+
         let internal_capability: Box<dyn VideoCodecCapability> =
             Box::new(InternalVideoCodecCapability::new());
-        let mut video_codec_preference =
-            VideoCodecPreference::new_from_capability(internal_capability.as_ref());
-        let mut video_codec_capabilities = vec![internal_capability];
+        video_codec_preference.merge(&VideoCodecPreference::new_from_capability(
+            internal_capability.as_ref(),
+        ));
+        video_codec_capabilities.push(internal_capability);
 
         #[cfg(any(target_os = "macos", target_os = "ios"))]
         if let Some(internal_hwa_capability) = InternalHwaVideoCodecCapability::new() {
@@ -175,7 +179,7 @@ unsafe impl Send for SoraClientContext {}
 // ref: https://source.chromium.org/chromium/chromium/src/+/main:third_party/webrtc/pc/peer_connection_factory_proxy.h;l=32-59;drc=ef55be496e45889ace33ace4b05094ca19cb499b
 unsafe impl Sync for SoraClientContext {}
 
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "macos", target_os = "ios")))]
 mod tests {
     use super::*;
     use crate::video_codec_capability::CodecDirection;

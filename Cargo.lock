@@ -1426,7 +1426,7 @@ dependencies = [
 
 [[package]]
 name = "shiguredo_webrtc"
-version = "0.146.3-canary.2"
+version = "0.146.3-canary.3"
 dependencies = [
  "bindgen",
  "nojson",
