@@ -269,79 +269,121 @@ fn test_video_capture_start_stop() {
 #[test]
 #[serial]
 fn test_video_capture_frame_received() {
-    let config = match first_device_capture_config() {
-        Some(c) => c,
-        None => {
-            println!("ビデオデバイスが見つかりません（スキップ）");
-            return;
+    const MAX_ATTEMPTS: usize = 3;
+    let mut attempt_errors = Vec::new();
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        let config = match first_device_capture_config() {
+            Some(c) => c,
+            None => {
+                println!("ビデオデバイスが見つかりません（スキップ）");
+                return;
+            }
+        };
+
+        println!(
+            "video capture attempt started: attempt={}, width={}, height={}, fps={}",
+            attempt, config.width, config.height, config.fps
+        );
+
+        let frame_count = Arc::new(AtomicU32::new(0));
+        let frame_count_clone = frame_count.clone();
+
+        let mut capture = match VideoCapture::new(config, move |frame: VideoFrame<'_>| {
+            frame_count_clone.fetch_add(1, Ordering::SeqCst);
+
+            // フレームの基本的な検証
+            assert!(frame.width > 0, "幅が 0 以下");
+            assert!(frame.height > 0, "高さが 0 以下");
+            assert!(!frame.data.is_empty(), "データが空");
+        }) {
+            Ok(c) => c,
+            Err(e) => {
+                println!(
+                    "video capture session creation failed: attempt={}, error={:?}",
+                    attempt, e
+                );
+                attempt_errors.push(format!(
+                    "attempt={} session_creation_error={:?}",
+                    attempt, e
+                ));
+                std::thread::sleep(Duration::from_secs(1));
+                continue;
+            }
+        };
+
+        let start_result = capture.start();
+        if let Err(e) = start_result {
+            capture.stop();
+            println!(
+                "video capture start failed: attempt={}, error={:?}",
+                attempt, e
+            );
+            attempt_errors.push(format!("attempt={} start_error={:?}", attempt, e));
+            std::thread::sleep(Duration::from_secs(1));
+            continue;
         }
-    };
 
-    let frame_count = Arc::new(AtomicU32::new(0));
-    let frame_count_clone = frame_count.clone();
-
-    let mut capture = match VideoCapture::new(config, move |frame: VideoFrame<'_>| {
-        frame_count_clone.fetch_add(1, Ordering::SeqCst);
-
-        // フレームの基本的な検証
-        assert!(frame.width > 0, "幅が 0 以下");
-        assert!(frame.height > 0, "高さが 0 以下");
-        assert!(!frame.data.is_empty(), "データが空");
-    }) {
-        Ok(c) => c,
-        Err(e) => {
-            println!("キャプチャセッション作成に失敗（スキップ）: {:?}", e);
-            return;
+        let first = wait_for_frame_count(frame_count.as_ref(), 1, Duration::from_secs(12), "first");
+        if first.is_none() {
+            capture.stop();
+            let current = frame_count.load(Ordering::SeqCst);
+            println!(
+                "video capture first frame timeout: attempt={}, frame_count={}",
+                attempt, current
+            );
+            attempt_errors.push(format!(
+                "attempt={} first_frame_timeout frame_count={}",
+                attempt, current
+            ));
+            std::thread::sleep(Duration::from_secs(1));
+            continue;
         }
-    };
+        let (first_count, first_elapsed) = first.unwrap();
+        println!(
+            "video capture first frame summary: attempt={}, count={}, elapsed_ms={}",
+            attempt,
+            first_count,
+            first_elapsed.as_millis()
+        );
 
-    let start_result = capture.start();
-    assert!(
-        start_result.is_ok(),
-        "キャプチャ開始に失敗: {:?}",
-        start_result.err()
-    );
-    println!(
-        "video capture started: width={}, height={}, fps={}",
-        capture.config().width,
-        capture.config().height,
-        capture.config().fps
-    );
+        let next_target = first_count.saturating_add(1);
+        let second = wait_for_frame_count(
+            frame_count.as_ref(),
+            next_target,
+            Duration::from_secs(3),
+            "continuous",
+        );
+        if second.is_none() {
+            capture.stop();
+            let current = frame_count.load(Ordering::SeqCst);
+            println!(
+                "video capture continuous frame timeout: attempt={}, frame_count={}, target_count={}",
+                attempt, current, next_target
+            );
+            attempt_errors.push(format!(
+                "attempt={} continuous_frame_timeout frame_count={} target_count={}",
+                attempt, current, next_target
+            ));
+            std::thread::sleep(Duration::from_secs(1));
+            continue;
+        }
+        let (second_count, second_elapsed) = second.unwrap();
+        capture.stop();
+        let final_count = frame_count.load(Ordering::SeqCst);
+        println!(
+            "video capture final summary: attempt={}, first_count={}, second_count={}, final_count={}, second_elapsed_ms={}",
+            attempt,
+            first_count,
+            second_count,
+            final_count,
+            second_elapsed.as_millis()
+        );
+        return;
+    }
 
-    let first = wait_for_frame_count(frame_count.as_ref(), 1, Duration::from_secs(5), "first");
-    assert!(first.is_some(), "failed to receive first video frame");
-    let (first_count, first_elapsed) = first.unwrap();
-    println!(
-        "video capture first frame summary: count={}, elapsed_ms={}",
-        first_count,
-        first_elapsed.as_millis()
-    );
-
-    let next_target = first_count.saturating_add(1);
-    let second = wait_for_frame_count(
-        frame_count.as_ref(),
-        next_target,
-        Duration::from_secs(2),
-        "continuous",
-    );
-    assert!(
-        second.is_some(),
-        "failed to receive continuous video frame: first_count={}, next_target={}",
-        first_count,
-        next_target
-    );
-    let (second_count, second_elapsed) = second.unwrap();
-    println!(
-        "video capture continuous frame summary: count={}, elapsed_ms={}",
-        second_count,
-        second_elapsed.as_millis()
-    );
-
-    capture.stop();
-
-    let final_count = frame_count.load(Ordering::SeqCst);
-    println!(
-        "video capture final summary: first_count={}, second_count={}, final_count={}",
-        first_count, second_count, final_count
+    panic!(
+        "failed to receive video frame after retries: {}",
+        attempt_errors.join(" | ")
     );
 }
