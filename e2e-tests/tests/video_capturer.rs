@@ -30,13 +30,17 @@ fn first_device_capture_config() -> Option<VideoCaptureConfig> {
         .unwrap_or(&formats[0]);
 
     // VideoFormat の min_fps/max_fps がデバイスの実際の対応フレームレート（離散値）と
-    // 一致しない場合があるため、広く対応されている 30fps を使用する
+    // 一致しない場合があるため、範囲内の 30fps 相当値を使用する
+    let min_fps = format.min_fps.ceil().max(1.0) as i32;
+    let max_fps = format.max_fps.floor().max(min_fps as f32) as i32;
+    let selected_fps = 30_i32.clamp(min_fps, max_fps);
+
     Some(VideoCaptureConfig {
         device_id,
         width: format.width,
         height: format.height,
-        fps: 30,
-        pixel_format: None,
+        fps: selected_fps,
+        pixel_format: Some(format.pixel_format),
     })
 }
 
@@ -90,6 +94,54 @@ fn wait_for_frame_count(
 
         std::thread::sleep(poll_interval);
     }
+}
+
+/// テスト用: 最初のデバイスから、相性違いに備えた複数のキャプチャ設定候補を作る。
+fn first_device_capture_config_candidates(max_configs: usize) -> Option<Vec<VideoCaptureConfig>> {
+    if max_configs == 0 {
+        return Some(Vec::new());
+    }
+
+    let device_list = VideoDeviceList::enumerate().ok()?;
+    if device_list.is_empty() {
+        return None;
+    }
+
+    let device = &device_list.devices()[0];
+    let device_id = device.unique_id().ok();
+    let formats = device.formats();
+    if formats.is_empty() {
+        return None;
+    }
+
+    let preferred_index = formats
+        .iter()
+        .position(|f| f.width == 640 && f.height == 480)
+        .unwrap_or(0);
+
+    let mut ordered_formats = Vec::new();
+    ordered_formats.push(&formats[preferred_index]);
+    for (index, format) in formats.iter().enumerate() {
+        if index != preferred_index {
+            ordered_formats.push(format);
+        }
+    }
+
+    let mut configs = Vec::new();
+    for format in ordered_formats.into_iter().take(max_configs) {
+        let min_fps = format.min_fps.ceil().max(1.0) as i32;
+        let max_fps = format.max_fps.floor().max(min_fps as f32) as i32;
+        let selected_fps = 30_i32.clamp(min_fps, max_fps);
+        configs.push(VideoCaptureConfig {
+            device_id: device_id.clone(),
+            width: format.width,
+            height: format.height,
+            fps: selected_fps,
+            pixel_format: Some(format.pixel_format),
+        });
+    }
+
+    Some(configs)
 }
 
 #[test]
@@ -269,21 +321,31 @@ fn test_video_capture_start_stop() {
 #[test]
 #[serial]
 fn test_video_capture_frame_received() {
-    const MAX_ATTEMPTS: usize = 3;
+    const MAX_ATTEMPTS: usize = 6;
     let mut attempt_errors = Vec::new();
 
-    for attempt in 1..=MAX_ATTEMPTS {
-        let config = match first_device_capture_config() {
-            Some(c) => c,
-            None => {
-                println!("ビデオデバイスが見つかりません（スキップ）");
-                return;
-            }
+    let configs = match first_device_capture_config_candidates(MAX_ATTEMPTS) {
+        Some(c) if !c.is_empty() => c,
+        Some(_) | None => {
+            println!("ビデオデバイスが見つかりません（スキップ）");
+            return;
+        }
+    };
+    println!("video capture config candidates: {}", configs.len());
+
+    for (attempt_index, config) in configs.into_iter().enumerate() {
+        let attempt = attempt_index + 1;
+        let width = config.width;
+        let height = config.height;
+        let fps = config.fps;
+        let pixel_format_name = match config.pixel_format {
+            Some(format) => format.name(),
+            None => "auto",
         };
 
         println!(
-            "video capture attempt started: attempt={}, width={}, height={}, fps={}",
-            attempt, config.width, config.height, config.fps
+            "video capture attempt started: attempt={}, width={}, height={}, fps={}, pixel_format={}",
+            attempt, width, height, fps, pixel_format_name
         );
 
         let frame_count = Arc::new(AtomicU32::new(0));
@@ -304,8 +366,8 @@ fn test_video_capture_frame_received() {
                     attempt, e
                 );
                 attempt_errors.push(format!(
-                    "attempt={} session_creation_error={:?}",
-                    attempt, e
+                    "attempt={} config={}x{}@{} {} session_creation_error={:?}",
+                    attempt, width, height, fps, pixel_format_name, e
                 ));
                 std::thread::sleep(Duration::from_secs(1));
                 continue;
@@ -319,7 +381,10 @@ fn test_video_capture_frame_received() {
                 "video capture start failed: attempt={}, error={:?}",
                 attempt, e
             );
-            attempt_errors.push(format!("attempt={} start_error={:?}", attempt, e));
+            attempt_errors.push(format!(
+                "attempt={} config={}x{}@{} {} start_error={:?}",
+                attempt, width, height, fps, pixel_format_name, e
+            ));
             std::thread::sleep(Duration::from_secs(1));
             continue;
         }
@@ -333,8 +398,8 @@ fn test_video_capture_frame_received() {
                 attempt, current
             );
             attempt_errors.push(format!(
-                "attempt={} first_frame_timeout frame_count={}",
-                attempt, current
+                "attempt={} config={}x{}@{} {} first_frame_timeout frame_count={}",
+                attempt, width, height, fps, pixel_format_name, current
             ));
             std::thread::sleep(Duration::from_secs(1));
             continue;
@@ -362,8 +427,8 @@ fn test_video_capture_frame_received() {
                 attempt, current, next_target
             );
             attempt_errors.push(format!(
-                "attempt={} continuous_frame_timeout frame_count={} target_count={}",
-                attempt, current, next_target
+                "attempt={} config={}x{}@{} {} continuous_frame_timeout frame_count={} target_count={}",
+                attempt, width, height, fps, pixel_format_name, current, next_target
             ));
             std::thread::sleep(Duration::from_secs(1));
             continue;
