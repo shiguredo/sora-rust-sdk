@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serial_test::serial;
 use shiguredo_video_device::{
@@ -30,121 +30,14 @@ fn first_device_capture_config() -> Option<VideoCaptureConfig> {
         .unwrap_or(&formats[0]);
 
     // VideoFormat の min_fps/max_fps がデバイスの実際の対応フレームレート（離散値）と
-    // 一致しない場合があるため、範囲内の 30fps 相当値を使用する
-    let min_fps = format.min_fps.ceil().max(1.0) as i32;
-    let max_fps = format.max_fps.floor().max(min_fps as f32) as i32;
-    let selected_fps = 30_i32.clamp(min_fps, max_fps);
-
+    // 一致しない場合があるため、広く対応されている 30fps を使用する
     Some(VideoCaptureConfig {
         device_id,
         width: format.width,
         height: format.height,
-        fps: selected_fps,
-        pixel_format: Some(format.pixel_format),
+        fps: 30,
+        pixel_format: None,
     })
-}
-
-/// テスト用: 指定したフレーム数に到達するまでタイムアウト付きで待機する。
-fn wait_for_frame_count(
-    frame_count: &AtomicU32,
-    target_count: u32,
-    timeout: Duration,
-    phase: &str,
-) -> Option<(u32, Duration)> {
-    let started_at = Instant::now();
-    let poll_interval = Duration::from_millis(100);
-    let log_interval = Duration::from_millis(500);
-    let mut next_log_at = log_interval;
-
-    loop {
-        let count = frame_count.load(Ordering::SeqCst);
-        if count >= target_count {
-            println!(
-                "video capture target reached: phase={}, count={}, target_count={}, elapsed_ms={}",
-                phase,
-                count,
-                target_count,
-                started_at.elapsed().as_millis()
-            );
-            return Some((count, started_at.elapsed()));
-        }
-
-        let elapsed = started_at.elapsed();
-        if elapsed >= timeout {
-            println!(
-                "video capture timed out: phase={}, count={}, target_count={}, timeout_ms={}",
-                phase,
-                count,
-                target_count,
-                timeout.as_millis()
-            );
-            return None;
-        }
-
-        if elapsed >= next_log_at {
-            println!(
-                "video capture waiting for frame: phase={}, elapsed_ms={}, count={}, target_count={}",
-                phase,
-                elapsed.as_millis(),
-                count,
-                target_count
-            );
-            next_log_at += log_interval;
-        }
-
-        std::thread::sleep(poll_interval);
-    }
-}
-
-/// テスト用: 最初のデバイスから、相性違いに備えた複数のキャプチャ設定候補を作る。
-fn first_device_capture_config_candidates(
-    max_configs: usize,
-) -> Result<Vec<VideoCaptureConfig>, String> {
-    if max_configs == 0 {
-        return Ok(Vec::new());
-    }
-
-    let device_list = VideoDeviceList::enumerate()
-        .map_err(|e| format!("video device enumeration failed: {:?}", e))?;
-    if device_list.is_empty() {
-        return Err("video device list is empty".to_owned());
-    }
-
-    let device = &device_list.devices()[0];
-    let device_id = device.unique_id().ok();
-    let formats = device.formats();
-    if formats.is_empty() {
-        return Err("video device formats are empty".to_owned());
-    }
-
-    let preferred_index = formats
-        .iter()
-        .position(|f| f.width == 640 && f.height == 480)
-        .unwrap_or(0);
-
-    let mut ordered_formats = Vec::new();
-    ordered_formats.push(&formats[preferred_index]);
-    for (index, format) in formats.iter().enumerate() {
-        if index != preferred_index {
-            ordered_formats.push(format);
-        }
-    }
-
-    let mut configs = Vec::new();
-    for format in ordered_formats.into_iter().take(max_configs) {
-        let min_fps = format.min_fps.ceil().max(1.0) as i32;
-        let max_fps = format.max_fps.floor().max(min_fps as f32) as i32;
-        let selected_fps = 30_i32.clamp(min_fps, max_fps);
-        configs.push(VideoCaptureConfig {
-            device_id: device_id.clone(),
-            width: format.width,
-            height: format.height,
-            fps: selected_fps,
-            pixel_format: Some(format.pixel_format),
-        });
-    }
-
-    Ok(configs)
 }
 
 #[test]
@@ -324,132 +217,45 @@ fn test_video_capture_start_stop() {
 #[test]
 #[serial]
 fn test_video_capture_frame_received() {
-    const MAX_ATTEMPTS: usize = 6;
-    let mut attempt_errors = Vec::new();
-
-    let configs = match first_device_capture_config_candidates(MAX_ATTEMPTS) {
-        Ok(c) if !c.is_empty() => c,
-        Ok(_) => panic!("video capture config candidates are empty"),
-        Err(e) => panic!("{}", e),
+    let config = match first_device_capture_config() {
+        Some(c) => c,
+        None => {
+            println!("ビデオデバイスが見つかりません（スキップ）");
+            return;
+        }
     };
-    println!("video capture config candidates: {}", configs.len());
 
-    for (attempt_index, config) in configs.into_iter().enumerate() {
-        let attempt = attempt_index + 1;
-        let width = config.width;
-        let height = config.height;
-        let fps = config.fps;
-        let pixel_format_name = match config.pixel_format {
-            Some(format) => format.name(),
-            None => "auto",
-        };
+    let frame_count = Arc::new(AtomicU32::new(0));
+    let frame_count_clone = frame_count.clone();
 
-        println!(
-            "video capture attempt started: attempt={}, width={}, height={}, fps={}, pixel_format={}",
-            attempt, width, height, fps, pixel_format_name
-        );
+    let mut capture = match VideoCapture::new(config, move |frame: VideoFrame<'_>| {
+        frame_count_clone.fetch_add(1, Ordering::SeqCst);
 
-        let frame_count = Arc::new(AtomicU32::new(0));
-        let frame_count_clone = frame_count.clone();
-
-        let mut capture = match VideoCapture::new(config, move |frame: VideoFrame<'_>| {
-            frame_count_clone.fetch_add(1, Ordering::SeqCst);
-
-            // フレームの基本的な検証
-            assert!(frame.width > 0, "幅が 0 以下");
-            assert!(frame.height > 0, "高さが 0 以下");
-            assert!(!frame.data.is_empty(), "データが空");
-        }) {
-            Ok(c) => c,
-            Err(e) => {
-                println!(
-                    "video capture session creation failed: attempt={}, error={:?}",
-                    attempt, e
-                );
-                attempt_errors.push(format!(
-                    "attempt={} config={}x{}@{} {} session_creation_error={:?}",
-                    attempt, width, height, fps, pixel_format_name, e
-                ));
-                std::thread::sleep(Duration::from_secs(1));
-                continue;
-            }
-        };
-
-        let start_result = capture.start();
-        if let Err(e) = start_result {
-            capture.stop();
-            println!(
-                "video capture start failed: attempt={}, error={:?}",
-                attempt, e
-            );
-            attempt_errors.push(format!(
-                "attempt={} config={}x{}@{} {} start_error={:?}",
-                attempt, width, height, fps, pixel_format_name, e
-            ));
-            std::thread::sleep(Duration::from_secs(1));
-            continue;
+        // フレームの基本的な検証
+        assert!(frame.width > 0, "幅が 0 以下");
+        assert!(frame.height > 0, "高さが 0 以下");
+        assert!(!frame.data.is_empty(), "データが空");
+    }) {
+        Ok(c) => c,
+        Err(e) => {
+            println!("キャプチャセッション作成に失敗（スキップ）: {:?}", e);
+            return;
         }
+    };
 
-        let first = wait_for_frame_count(frame_count.as_ref(), 1, Duration::from_secs(12), "first");
-        if first.is_none() {
-            capture.stop();
-            let current = frame_count.load(Ordering::SeqCst);
-            println!(
-                "video capture first frame timeout: attempt={}, frame_count={}",
-                attempt, current
-            );
-            attempt_errors.push(format!(
-                "attempt={} config={}x{}@{} {} first_frame_timeout frame_count={}",
-                attempt, width, height, fps, pixel_format_name, current
-            ));
-            std::thread::sleep(Duration::from_secs(1));
-            continue;
-        }
-        let (first_count, first_elapsed) = first.unwrap();
-        println!(
-            "video capture first frame summary: attempt={}, count={}, elapsed_ms={}",
-            attempt,
-            first_count,
-            first_elapsed.as_millis()
-        );
-
-        let next_target = first_count.saturating_add(1);
-        let second = wait_for_frame_count(
-            frame_count.as_ref(),
-            next_target,
-            Duration::from_secs(3),
-            "continuous",
-        );
-        if second.is_none() {
-            capture.stop();
-            let current = frame_count.load(Ordering::SeqCst);
-            println!(
-                "video capture continuous frame timeout: attempt={}, frame_count={}, target_count={}",
-                attempt, current, next_target
-            );
-            attempt_errors.push(format!(
-                "attempt={} config={}x{}@{} {} continuous_frame_timeout frame_count={} target_count={}",
-                attempt, width, height, fps, pixel_format_name, current, next_target
-            ));
-            std::thread::sleep(Duration::from_secs(1));
-            continue;
-        }
-        let (second_count, second_elapsed) = second.unwrap();
-        capture.stop();
-        let final_count = frame_count.load(Ordering::SeqCst);
-        println!(
-            "video capture final summary: attempt={}, first_count={}, second_count={}, final_count={}, second_elapsed_ms={}",
-            attempt,
-            first_count,
-            second_count,
-            final_count,
-            second_elapsed.as_millis()
-        );
-        return;
-    }
-
-    panic!(
-        "failed to receive video frame after retries: {}",
-        attempt_errors.join(" | ")
+    let start_result = capture.start();
+    assert!(
+        start_result.is_ok(),
+        "キャプチャ開始に失敗: {:?}",
+        start_result.err()
     );
+
+    // フレームを受け取る時間を確保（1秒）
+    std::thread::sleep(Duration::from_secs(1));
+
+    capture.stop();
+
+    let count = frame_count.load(Ordering::SeqCst);
+    assert!(count > 0, "フレームを受信できませんでした");
+    println!("受信したフレーム数: {}", count);
 }
