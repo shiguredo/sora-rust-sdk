@@ -2,9 +2,7 @@
 use std::io;
 
 use nojson::JsonParseError;
-use shiguredo_http11::{Error as Http11Error, auth::AuthError, uri::UriError};
-#[cfg(feature = "openh264")]
-use shiguredo_openh264::Error as Openh264Error;
+use shiguredo_http11::{auth::AuthError, uri::UriError};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::client::SoraClientCommand;
@@ -34,7 +32,7 @@ pub enum Error {
         path: String,
     },
     ProxyUrlQueryNotAllowed,
-    ProxyConnectDecode(Http11Error),
+    ProxyConnectDecode(shiguredo_http11::Error),
     ProxyConnectResponseMissing,
     ProxyConnectStatusNotSuccessful {
         status_code: u16,
@@ -115,7 +113,7 @@ pub enum Error {
         reason: String,
     },
     #[cfg(feature = "openh264")]
-    Openh264(Openh264Error),
+    Openh264(shiguredo_openh264::Error),
     RpcTimeout,
     SignalingUrlsEmpty,
     AllSignalingUrlsFailed {
@@ -327,8 +325,8 @@ impl From<UriError> for Error {
     }
 }
 
-impl From<Http11Error> for Error {
-    fn from(err: Http11Error) -> Self {
+impl From<shiguredo_http11::Error> for Error {
+    fn from(err: shiguredo_http11::Error) -> Self {
         Error::ProxyConnectDecode(err)
     }
 }
@@ -364,8 +362,8 @@ impl From<shiguredo_webrtc::Error> for Error {
 }
 
 #[cfg(feature = "openh264")]
-impl From<Openh264Error> for Error {
-    fn from(err: Openh264Error) -> Self {
+impl From<shiguredo_openh264::Error> for Error {
+    fn from(err: shiguredo_openh264::Error) -> Self {
         Error::Openh264(err)
     }
 }

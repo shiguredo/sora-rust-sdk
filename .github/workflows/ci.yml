@@ -64,7 +64,6 @@ jobs:
       - run: cp .cargo/config.toml.ci .cargo/config.toml
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace -- -D warnings
-
       - run: cargo test --workspace
 
   ci-macos-self:
