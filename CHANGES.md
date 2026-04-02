@@ -11,8 +11,8 @@
 
 ## develop
 
-- [UPDATE] `shiguredo_webrtc` を 0.146.3 に上げる
-  - @sile
+- [UPDATE] `shiguredo_webrtc` を 0.147.0 に上げる
+  - @sile, @melpon
 - [ADD] Windows に対応する
   - @melpon
 - [ADD] `SoraClientBuilder::ice_server_url_configurer` を追加する
@@ -26,6 +26,8 @@
 - [UPDATE] `VideoCodecCapability::is_supported` のデフォルト実装を設定する
   - @melpon
 - [ADD] `VideoCodecCapability::get_supported_formats` を追加し、デフォルト実装も追加する
+  - @melpon
+- [UPDATE] `nvcodec` / `openh264` で連続メモリ API を利用し、エンコード前の入力バッファを正規化するように修正する
   - @melpon
 
 ### misc

@@ -13,6 +13,7 @@ use shiguredo_webrtc::{
     VideoEncoderEncodedImageCallbackRef, VideoEncoderEncodedImageCallbackResultError,
     VideoEncoderEncoderInfo, VideoEncoderHandler, VideoEncoderRateControlParametersRef,
     VideoEncoderSettingsRef, VideoFrame, VideoFrameRef, VideoFrameType, VideoFrameTypeVectorRef,
+    i420_copy,
 };
 
 use crate::error::Result;
@@ -49,89 +50,37 @@ impl Openh264VideoEncoder {
         }
     }
 
-    fn flatten_i420_for_encoder(i420: &I420Buffer, width: u32, height: u32) -> Option<I420Frame> {
-        let width = usize::try_from(width).ok()?;
-        let height = usize::try_from(height).ok()?;
-        let stride_y = usize::try_from(i420.stride_y()).ok()?;
-        let stride_u = usize::try_from(i420.stride_u()).ok()?;
-        let stride_v = usize::try_from(i420.stride_v()).ok()?;
-
-        let chroma_width = width.div_ceil(2);
-        let chroma_height = height.div_ceil(2);
-
-        if width == 0
-            || height == 0
-            || stride_y < width
-            || stride_u < chroma_width
-            || stride_v < chroma_width
-        {
-            return None;
-        }
-
-        let y_size = width.checked_mul(height)?;
-        let uv_size = chroma_width.checked_mul(chroma_height)?;
-
-        let src_y = i420.y_data();
-        let src_u = i420.u_data();
-        let src_v = i420.v_data();
-
-        let mut y = vec![0u8; y_size];
-        let mut u = vec![0u8; uv_size];
-        let mut v = vec![0u8; uv_size];
-
-        for row in 0..height {
-            let src_offset = row.checked_mul(stride_y)?;
-            let dst_offset = row.checked_mul(width)?;
-            let src_row = src_y.get(src_offset..src_offset + width)?;
-            y[dst_offset..dst_offset + width].copy_from_slice(src_row);
-        }
-
-        for row in 0..chroma_height {
-            let src_offset_u = row.checked_mul(stride_u)?;
-            let src_offset_v = row.checked_mul(stride_v)?;
-            let dst_offset = row.checked_mul(chroma_width)?;
-            let src_row_u = src_u.get(src_offset_u..src_offset_u + chroma_width)?;
-            let src_row_v = src_v.get(src_offset_v..src_offset_v + chroma_width)?;
-            u[dst_offset..dst_offset + chroma_width].copy_from_slice(src_row_u);
-            v[dst_offset..dst_offset + chroma_width].copy_from_slice(src_row_v);
-        }
-
-        Some(I420Frame { y, u, v })
-    }
-
-    fn prepare_i420_for_encoder<'a>(
-        i420: &'a I420Buffer,
+    fn normalize_i420_for_encoder(
+        i420: &I420Buffer,
         width: u32,
         height: u32,
-    ) -> Option<I420Input<'a>> {
-        let width = usize::try_from(width).ok()?;
-        let height = usize::try_from(height).ok()?;
-        let stride_y = usize::try_from(i420.stride_y()).ok()?;
-        let stride_u = usize::try_from(i420.stride_u()).ok()?;
-        let stride_v = usize::try_from(i420.stride_v()).ok()?;
-
-        let chroma_width = width.div_ceil(2);
-        let chroma_height = height.div_ceil(2);
-        let y_size = width.checked_mul(height)?;
-        let uv_size = chroma_width.checked_mul(chroma_height)?;
-
-        if can_use_borrowed_i420(I420Layout {
-            width,
-            height,
-            stride_y,
-            stride_u,
-            stride_v,
-            y_len: i420.y_data().len(),
-            u_len: i420.u_data().len(),
-            v_len: i420.v_data().len(),
-        }) {
-            let y = i420.y_data().get(..y_size)?;
-            let u = i420.u_data().get(..uv_size)?;
-            let v = i420.v_data().get(..uv_size)?;
-            Some(I420Input::Borrowed { y, u, v })
-        } else {
-            Self::flatten_i420_for_encoder(i420, width as u32, height as u32).map(I420Input::Owned)
+    ) -> Option<I420Buffer> {
+        let width_i32 = i32::try_from(width).ok()?;
+        let height_i32 = i32::try_from(height).ok()?;
+        let mut normalized = I420Buffer::new(width_i32, height_i32);
+        let dst_stride_y = normalized.stride_y();
+        let dst_stride_u = normalized.stride_u();
+        let dst_stride_v = normalized.stride_v();
+        let (dst_y, dst_u, dst_v) = normalized.planes_mut();
+        if !i420_copy(
+            i420.y_data(),
+            i420.stride_y(),
+            i420.u_data(),
+            i420.stride_u(),
+            i420.v_data(),
+            i420.stride_v(),
+            dst_y,
+            dst_stride_y,
+            dst_u,
+            dst_stride_u,
+            dst_v,
+            dst_stride_v,
+            width_i32,
+            height_i32,
+        ) {
+            return None;
         }
+        Some(normalized)
     }
 
     fn build_encoder_config(&self) -> Option<EncoderConfig> {
@@ -227,7 +176,20 @@ impl VideoEncoderHandler for Openh264VideoEncoder {
             return VideoCodecStatus::Error;
         };
 
-        let Some(i420_frame) = Self::prepare_i420_for_encoder(&i420, frame_width, frame_height)
+        let Some(i420_frame) = Self::normalize_i420_for_encoder(&i420, frame_width, frame_height)
+        else {
+            return VideoCodecStatus::Error;
+        };
+        let frame_width_usize = match usize::try_from(frame_width) {
+            Ok(v) => v,
+            Err(_) => return VideoCodecStatus::Error,
+        };
+        let frame_height_usize = match usize::try_from(frame_height) {
+            Ok(v) => v,
+            Err(_) => return VideoCodecStatus::Error,
+        };
+        let Some((y, u, v)) =
+            split_i420_data(i420_frame.data(), frame_width_usize, frame_height_usize)
         else {
             return VideoCodecStatus::Error;
         };
@@ -238,10 +200,7 @@ impl VideoEncoderHandler for Openh264VideoEncoder {
                 || matches!(requested_frame_type, Some(VideoFrameType::Key)),
         };
         let encoder = self.encoder.as_mut().expect("encoder should exist");
-        let encoded = match i420_frame {
-            I420Input::Borrowed { y, u, v } => encoder.encode(y, u, v, &options),
-            I420Input::Owned(frame) => encoder.encode(&frame.y, &frame.u, &frame.v, &options),
-        };
+        let encoded = encoder.encode(y, u, v, &options);
         let encoded = match encoded {
             Ok(v) => v,
             Err(_) => {
@@ -433,53 +392,40 @@ impl VideoDecoderHandler for Openh264VideoDecoder {
             Err(_) => return VideoCodecStatus::Error,
         };
 
-        let mut i420 = I420Buffer::new(width, height);
-        let dst_stride_y = match usize::try_from(i420.stride_y()) {
+        let src_stride_y = match i32::try_from(decoded.y_stride()) {
             Ok(v) => v,
             Err(_) => return VideoCodecStatus::Error,
         };
-        let dst_stride_u = match usize::try_from(i420.stride_u()) {
+        let src_stride_u = match i32::try_from(decoded.u_stride()) {
             Ok(v) => v,
             Err(_) => return VideoCodecStatus::Error,
         };
-        let dst_stride_v = match usize::try_from(i420.stride_v()) {
+        let src_stride_v = match i32::try_from(decoded.v_stride()) {
             Ok(v) => v,
             Err(_) => return VideoCodecStatus::Error,
         };
+        let mut i420 =
+            I420Buffer::new_with_strides(width, height, src_stride_y, src_stride_u, src_stride_v);
+        let dst_stride_y = i420.stride_y();
+        let dst_stride_u = i420.stride_u();
+        let dst_stride_v = i420.stride_v();
         let (dst_y, dst_u, dst_v) = i420.planes_mut();
 
-        let width_usize = decoded.width();
-        let height_usize = decoded.height();
-        let chroma_width = width_usize.div_ceil(2);
-        let chroma_height = height_usize.div_ceil(2);
-
-        if !copy_plane(
+        if !i420_copy(
+            decoded.y_plane(),
+            src_stride_y,
+            decoded.u_plane(),
+            src_stride_u,
+            decoded.v_plane(),
+            src_stride_v,
             dst_y,
             dst_stride_y,
-            decoded.y_plane(),
-            decoded.y_stride(),
-            width_usize,
-            height_usize,
-        ) {
-            return VideoCodecStatus::Error;
-        }
-        if !copy_plane(
             dst_u,
             dst_stride_u,
-            decoded.u_plane(),
-            decoded.u_stride(),
-            chroma_width,
-            chroma_height,
-        ) {
-            return VideoCodecStatus::Error;
-        }
-        if !copy_plane(
             dst_v,
             dst_stride_v,
-            decoded.v_plane(),
-            decoded.v_stride(),
-            chroma_width,
-            chroma_height,
+            width,
+            height,
         ) {
             return VideoCodecStatus::Error;
         }
@@ -588,21 +534,6 @@ impl VideoCodecCapability for Openh264VideoCodecCapability {
     }
 }
 
-struct I420Frame {
-    y: Vec<u8>,
-    u: Vec<u8>,
-    v: Vec<u8>,
-}
-
-enum I420Input<'a> {
-    Borrowed {
-        y: &'a [u8],
-        u: &'a [u8],
-        v: &'a [u8],
-    },
-    Owned(I420Frame),
-}
-
 fn frame_type_from_openh264(frame_type: FrameType) -> VideoFrameType {
     match frame_type {
         FrameType::Idr => VideoFrameType::Key,
@@ -614,37 +545,6 @@ fn requested_frame_type(
     frame_types: Option<VideoFrameTypeVectorRef<'_>>,
 ) -> Option<VideoFrameType> {
     frame_types.and_then(|frame_types| frame_types.get(0))
-}
-
-struct I420Layout {
-    width: usize,
-    height: usize,
-    stride_y: usize,
-    stride_u: usize,
-    stride_v: usize,
-    y_len: usize,
-    u_len: usize,
-    v_len: usize,
-}
-
-fn can_use_borrowed_i420(layout: I420Layout) -> bool {
-    if layout.width == 0 || layout.height == 0 {
-        return false;
-    }
-    let chroma_width = layout.width.div_ceil(2);
-    let chroma_height = layout.height.div_ceil(2);
-    let Some(y_size) = layout.width.checked_mul(layout.height) else {
-        return false;
-    };
-    let Some(uv_size) = chroma_width.checked_mul(chroma_height) else {
-        return false;
-    };
-    layout.stride_y == layout.width
-        && layout.stride_u == chroma_width
-        && layout.stride_v == chroma_width
-        && layout.y_len >= y_size
-        && layout.u_len >= uv_size
-        && layout.v_len >= uv_size
 }
 
 fn update_pause_state(
@@ -682,37 +582,20 @@ fn has_annexb_start_code(data: &[u8]) -> bool {
         || (data.len() >= 3 && data[0] == 0 && data[1] == 0 && data[2] == 1)
 }
 
-fn copy_plane(
-    dst: &mut [u8],
-    dst_stride: usize,
-    src: &[u8],
-    src_stride: usize,
-    row_bytes: usize,
-    row_count: usize,
-) -> bool {
-    if row_bytes == 0 || row_count == 0 || src_stride < row_bytes || dst_stride < row_bytes {
-        return false;
+fn split_i420_data(data: &[u8], width: usize, height: usize) -> Option<(&[u8], &[u8], &[u8])> {
+    if width == 0 || height == 0 {
+        return None;
     }
-
-    for row in 0..row_count {
-        let src_offset = match row.checked_mul(src_stride) {
-            Some(v) => v,
-            None => return false,
-        };
-        let dst_offset = match row.checked_mul(dst_stride) {
-            Some(v) => v,
-            None => return false,
-        };
-        let Some(src_row) = src.get(src_offset..src_offset + row_bytes) else {
-            return false;
-        };
-        let Some(dst_row) = dst.get_mut(dst_offset..dst_offset + row_bytes) else {
-            return false;
-        };
-        dst_row.copy_from_slice(src_row);
-    }
-
-    true
+    let chroma_width = width.div_ceil(2);
+    let chroma_height = height.div_ceil(2);
+    let y_size = width.checked_mul(height)?;
+    let uv_size = chroma_width.checked_mul(chroma_height)?;
+    let u_end = y_size.checked_add(uv_size)?;
+    let v_end = u_end.checked_add(uv_size)?;
+    let y = data.get(..y_size)?;
+    let u = data.get(y_size..u_end)?;
+    let v = data.get(u_end..v_end)?;
+    Some((y, u, v))
 }
 
 #[cfg(test)]
@@ -828,27 +711,33 @@ mod tests {
     }
 
     #[test]
-    fn openh264_can_use_borrowed_i420_only_for_contiguous_planes() {
-        assert!(can_use_borrowed_i420(I420Layout {
-            width: 640,
-            height: 480,
-            stride_y: 640,
-            stride_u: 320,
-            stride_v: 320,
-            y_len: 640 * 480,
-            u_len: 320 * 240,
-            v_len: 320 * 240,
-        }));
-        assert!(!can_use_borrowed_i420(I420Layout {
-            width: 640,
-            height: 480,
-            stride_y: 672,
-            stride_u: 320,
-            stride_v: 320,
-            y_len: 640 * 480,
-            u_len: 320 * 240,
-            v_len: 320 * 240,
-        }));
+    fn openh264_split_i420_data_returns_planes_for_odd_size() {
+        let width = 5usize;
+        let height = 3usize;
+        let y_size = width * height;
+        let uv_size = width.div_ceil(2) * height.div_ceil(2);
+        let data = (0u8..(y_size + uv_size + uv_size) as u8).collect::<Vec<_>>();
+
+        let Some((y, u, v)) = split_i420_data(&data, width, height) else {
+            panic!("split_i420_data must return planes");
+        };
+        assert_eq!(y.len(), y_size);
+        assert_eq!(u.len(), uv_size);
+        assert_eq!(v.len(), uv_size);
+        assert_eq!(y[0], 0);
+        assert_eq!(u[0], y_size as u8);
+        assert_eq!(v[0], (y_size + uv_size) as u8);
+    }
+
+    #[test]
+    fn openh264_split_i420_data_returns_none_for_short_input() {
+        let width = 4usize;
+        let height = 4usize;
+        let y_size = width * height;
+        let uv_size = width.div_ceil(2) * height.div_ceil(2);
+        let data = vec![0u8; y_size + uv_size + uv_size - 1];
+
+        assert!(split_i420_data(&data, width, height).is_none());
     }
 
     #[test]

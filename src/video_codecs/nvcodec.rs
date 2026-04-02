@@ -41,39 +41,6 @@ impl NvCodecVideoEncoder {
         }
     }
 
-    fn flatten_nv12_for_encoder(nv12: &NV12Buffer, width: u32, height: u32) -> Option<Vec<u8>> {
-        let width = usize::try_from(width).ok()?;
-        let height = usize::try_from(height).ok()?;
-        let stride_y = usize::try_from(nv12.stride_y()).ok()?;
-        let stride_uv = usize::try_from(nv12.stride_uv()).ok()?;
-        if width == 0 || height == 0 || stride_y < width || stride_uv < width {
-            return None;
-        }
-
-        let y_size = width.checked_mul(height)?;
-        let chroma_height = height.div_ceil(2);
-        let uv_size = width.checked_mul(chroma_height)?;
-        let total_size = y_size.checked_add(uv_size)?;
-
-        let src_y = nv12.y_data();
-        let src_uv = nv12.uv_data();
-        let mut packed = vec![0u8; total_size];
-        for row in 0..height {
-            let src_offset = row.checked_mul(stride_y)?;
-            let dst_offset = row.checked_mul(width)?;
-            let src_row = src_y.get(src_offset..src_offset + width)?;
-            packed[dst_offset..dst_offset + width].copy_from_slice(src_row);
-        }
-        for row in 0..chroma_height {
-            let src_offset = row.checked_mul(stride_uv)?;
-            let dst_offset = y_size.checked_add(row.checked_mul(width)?)?;
-            let src_row = src_uv.get(src_offset..src_offset + width)?;
-            packed[dst_offset..dst_offset + width].copy_from_slice(src_row);
-        }
-
-        Some(packed)
-    }
-
     fn rebuild_encoder(&mut self) -> Result<(), ()> {
         if self.width == 0 || self.height == 0 {
             return Err(());
@@ -144,7 +111,15 @@ impl VideoEncoderHandler for NvCodecVideoEncoder {
         let Some(i420) = frame_buffer.to_i420() else {
             return VideoCodecStatus::Error;
         };
-        let mut nv12 = NV12Buffer::new(frame_width as i32, frame_height as i32);
+        let frame_width_i32 = match i32::try_from(frame_width) {
+            Ok(v) => v,
+            Err(_) => return VideoCodecStatus::Error,
+        };
+        let frame_height_i32 = match i32::try_from(frame_height) {
+            Ok(v) => v,
+            Err(_) => return VideoCodecStatus::Error,
+        };
+        let mut nv12 = NV12Buffer::new(frame_width_i32, frame_height_i32);
         let src_stride_y = i420.stride_y();
         let src_stride_u = i420.stride_u();
         let src_stride_v = i420.stride_v();
@@ -163,8 +138,8 @@ impl VideoEncoderHandler for NvCodecVideoEncoder {
                 dst_stride_y,
                 dst_uv,
                 dst_stride_uv,
-                frame_width as i32,
-                frame_height as i32,
+                frame_width_i32,
+                frame_height_i32,
             ) {
                 return VideoCodecStatus::Error;
             }
@@ -172,11 +147,7 @@ impl VideoEncoderHandler for NvCodecVideoEncoder {
 
         let rtp_timestamp = frame.rtp_timestamp();
         let encoder = self.encoder.as_mut().expect("encoder should exist");
-        let nv12_data = match Self::flatten_nv12_for_encoder(&nv12, frame_width, frame_height) {
-            Some(data) => data,
-            None => return VideoCodecStatus::Error,
-        };
-        if encoder.encode(&nv12_data).is_err() {
+        if encoder.encode(nv12.data()).is_err() {
             return VideoCodecStatus::Error;
         }
 

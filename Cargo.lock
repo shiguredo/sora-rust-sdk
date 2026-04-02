@@ -1436,9 +1436,7 @@ dependencies = [
 
 [[package]]
 name = "shiguredo_webrtc"
-version = "0.146.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbf2a9ac93fa60dfebac3951a2dbc57a900cb817550ca3e4d1c6c9bb3a73f09a"
+version = "0.147.0"
 dependencies = [
  "bindgen",
  "nojson",
@@ -2225,7 +2223,3 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
-
-[[patch.unused]]
-name = "shiguredo_webrtc"
-version = "0.146.3-canary.4"
