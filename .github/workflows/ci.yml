@@ -49,6 +49,8 @@ jobs:
       - run: cp .cargo/config.toml.ci .cargo/config.toml
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace -- -D warnings
+      - name: Probe video capture timing
+        run: cargo test -p e2e-tests --test video_capturer test_video_capture_frame_received -- --nocapture
       - run: cargo test --workspace
 
   ci-macos-self:
