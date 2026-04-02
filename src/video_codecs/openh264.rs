@@ -3,7 +3,7 @@ use std::path::Path;
 
 use shiguredo_openh264::{
     Decoder, EncodeOptions, Encoder, EncoderConfig, Error as Openh264Error, FrameType,
-    Openh264Library,
+    Openh264Library, RateControlMode, SliceMode,
 };
 use shiguredo_webrtc::{
     CodecSpecificInfo, EncodedImage, EncodedImageBuffer, EncodedImageRef, H264PacketizationMode,
@@ -29,8 +29,8 @@ struct Openh264VideoEncoder {
     framerate: u32,
     target_bitrate_bps: u32,
     reconfigure_needed: bool,
-    fallback_rtp_timestamp: u32,
-    fallback_rtp_step: u32,
+    paused: bool,
+    force_idr_on_resume: bool,
 }
 
 impl Openh264VideoEncoder {
@@ -44,8 +44,8 @@ impl Openh264VideoEncoder {
             framerate: 30,
             target_bitrate_bps: 500_000,
             reconfigure_needed: false,
-            fallback_rtp_timestamp: 0,
-            fallback_rtp_step: 3000,
+            paused: false,
+            force_idr_on_resume: false,
         }
     }
 
@@ -99,18 +99,56 @@ impl Openh264VideoEncoder {
         Some(I420Frame { y, u, v })
     }
 
+    fn prepare_i420_for_encoder<'a>(
+        i420: &'a I420Buffer,
+        width: u32,
+        height: u32,
+    ) -> Option<I420Input<'a>> {
+        let width = usize::try_from(width).ok()?;
+        let height = usize::try_from(height).ok()?;
+        let stride_y = usize::try_from(i420.stride_y()).ok()?;
+        let stride_u = usize::try_from(i420.stride_u()).ok()?;
+        let stride_v = usize::try_from(i420.stride_v()).ok()?;
+
+        let chroma_width = width.div_ceil(2);
+        let chroma_height = height.div_ceil(2);
+        let y_size = width.checked_mul(height)?;
+        let uv_size = chroma_width.checked_mul(chroma_height)?;
+
+        if can_use_borrowed_i420(I420Layout {
+            width,
+            height,
+            stride_y,
+            stride_u,
+            stride_v,
+            y_len: i420.y_data().len(),
+            u_len: i420.u_data().len(),
+            v_len: i420.v_data().len(),
+        }) {
+            let y = i420.y_data().get(..y_size)?;
+            let u = i420.u_data().get(..uv_size)?;
+            let v = i420.v_data().get(..uv_size)?;
+            Some(I420Input::Borrowed { y, u, v })
+        } else {
+            Self::flatten_i420_for_encoder(i420, width as u32, height as u32).map(I420Input::Owned)
+        }
+    }
+
     fn build_encoder_config(&self) -> Option<EncoderConfig> {
         if self.width == 0 || self.height == 0 {
             return None;
         }
 
-        Some(EncoderConfig::new(
+        let mut config = EncoderConfig::new(
             usize::try_from(self.width).ok()?,
             usize::try_from(self.height).ok()?,
             usize::try_from(self.target_bitrate_bps.max(1)).ok()?,
             usize::try_from(self.framerate.max(1)).ok()?,
             1,
-        ))
+        );
+        config.rate_control_mode = Some(RateControlMode::Bitrate);
+        config.slice_mode = Some(SliceMode::FixedCount(1));
+        Some(config)
     }
 
     fn rebuild_encoder(&mut self) -> std::result::Result<(), Openh264Error> {
@@ -141,8 +179,8 @@ impl VideoEncoderHandler for Openh264VideoEncoder {
         self.height = codec.height().max(0) as u32;
         self.framerate = codec.max_framerate().max(1);
         self.target_bitrate_bps = codec.start_bitrate_kbps().saturating_mul(1000).max(1);
-        self.fallback_rtp_step = (90_000 / self.framerate.max(1)).max(1);
-        self.fallback_rtp_timestamp = 0;
+        self.paused = false;
+        self.force_idr_on_resume = false;
 
         if self.rebuild_encoder().is_err() {
             return VideoCodecStatus::Error;
@@ -151,7 +189,6 @@ impl VideoEncoderHandler for Openh264VideoEncoder {
         VideoCodecStatus::Ok
     }
 
-    #[expect(unused_variables)]
     fn encode(
         &mut self,
         frame: VideoFrameRef<'_>,
@@ -161,11 +198,18 @@ impl VideoEncoderHandler for Openh264VideoEncoder {
             Some(callback) => callback,
             None => return VideoCodecStatus::Uninitialized,
         };
+        if self.paused {
+            return VideoCodecStatus::NoOutput;
+        }
 
         let frame_width = frame.width().max(0) as u32;
         let frame_height = frame.height().max(0) as u32;
         if frame_width == 0 || frame_height == 0 {
             return VideoCodecStatus::ErrParameter;
+        }
+        let requested_frame_type = requested_frame_type(frame_types);
+        if matches!(requested_frame_type, Some(VideoFrameType::Empty)) {
+            return VideoCodecStatus::NoOutput;
         }
 
         if self.width != frame_width || self.height != frame_height {
@@ -183,21 +227,35 @@ impl VideoEncoderHandler for Openh264VideoEncoder {
             return VideoCodecStatus::Error;
         };
 
-        let Some(i420_frame) = Self::flatten_i420_for_encoder(&i420, frame_width, frame_height)
+        let Some(i420_frame) = Self::prepare_i420_for_encoder(&i420, frame_width, frame_height)
         else {
             return VideoCodecStatus::Error;
         };
 
-        let options = EncodeOptions { force_idr: false };
+        let force_idr_from_resume = self.force_idr_on_resume;
+        let options = EncodeOptions {
+            force_idr: force_idr_from_resume
+                || matches!(requested_frame_type, Some(VideoFrameType::Key)),
+        };
         let encoder = self.encoder.as_mut().expect("encoder should exist");
-        let encoded = match encoder.encode(&i420_frame.y, &i420_frame.u, &i420_frame.v, &options) {
+        let encoded = match i420_frame {
+            I420Input::Borrowed { y, u, v } => encoder.encode(y, u, v, &options),
+            I420Input::Owned(frame) => encoder.encode(&frame.y, &frame.u, &frame.v, &options),
+        };
+        let encoded = match encoded {
             Ok(v) => v,
-            Err(_) => return VideoCodecStatus::Error,
+            Err(_) => {
+                self.reconfigure_needed = true;
+                return VideoCodecStatus::Error;
+            }
         };
 
         let Some(encoded) = encoded else {
             return VideoCodecStatus::NoOutput;
         };
+        if force_idr_from_resume {
+            self.force_idr_on_resume = false;
+        }
 
         let mut annexb = Vec::new();
         for sps in &encoded.sps_list {
@@ -217,26 +275,13 @@ impl VideoEncoderHandler for Openh264VideoEncoder {
             return VideoCodecStatus::NoOutput;
         }
 
-        let input_rtp_timestamp = frame.rtp_timestamp();
-        let output_rtp_timestamp = if input_rtp_timestamp == 0 {
-            self.fallback_rtp_timestamp = self
-                .fallback_rtp_timestamp
-                .wrapping_add(self.fallback_rtp_step);
-            self.fallback_rtp_timestamp
-        } else {
-            input_rtp_timestamp
-        };
-
         let mut encoded_image = EncodedImage::new();
         let encoded_buffer = EncodedImageBuffer::from_bytes(&annexb);
         encoded_image.set_encoded_data(&encoded_buffer);
-        encoded_image.set_rtp_timestamp(output_rtp_timestamp);
+        encoded_image.set_rtp_timestamp(frame.rtp_timestamp());
         encoded_image.set_encoded_width(frame_width);
         encoded_image.set_encoded_height(frame_height);
-        encoded_image.set_frame_type(match encoded.frame_type {
-            FrameType::Idr | FrameType::I => VideoFrameType::Key,
-            FrameType::P => VideoFrameType::Delta,
-        });
+        encoded_image.set_frame_type(frame_type_from_openh264(encoded.frame_type));
 
         let mut codec_specific_info = CodecSpecificInfo::new();
         codec_specific_info.set_codec_type(VideoCodecType::H264);
@@ -265,17 +310,53 @@ impl VideoEncoderHandler for Openh264VideoEncoder {
     fn release(&mut self) -> VideoCodecStatus {
         self.encoder = None;
         self.callback = None;
+        self.paused = false;
+        self.force_idr_on_resume = false;
         VideoCodecStatus::Ok
     }
 
     fn set_rates(&mut self, parameters: VideoEncoderRateControlParametersRef<'_>) {
         self.framerate = parameters.framerate_fps().max(1.0) as u32;
-        self.fallback_rtp_step = (90_000 / self.framerate.max(1)).max(1);
-        let bitrate = parameters
-            .bitrate_sum_bps()
-            .max(parameters.target_bitrate_sum_bps());
-        self.target_bitrate_bps = bitrate.max(1);
-        self.reconfigure_needed = true;
+        let bitrate = update_pause_state(
+            &mut self.paused,
+            &mut self.force_idr_on_resume,
+            parameters.bitrate_sum_bps(),
+            parameters.target_bitrate_sum_bps(),
+        );
+        let Some(bitrate) = bitrate else {
+            return;
+        };
+        self.target_bitrate_bps = bitrate;
+
+        let Some(encoder) = self.encoder.as_mut() else {
+            self.reconfigure_needed = true;
+            return;
+        };
+
+        let mut failed = false;
+        match usize::try_from(self.target_bitrate_bps) {
+            Ok(bitrate_bps) => {
+                if encoder.set_bitrate(bitrate_bps).is_err() {
+                    failed = true;
+                }
+            }
+            Err(_) => {
+                failed = true;
+            }
+        }
+        match usize::try_from(self.framerate) {
+            Ok(framerate) => {
+                if encoder.set_frame_rate(framerate.max(1), 1).is_err() {
+                    failed = true;
+                }
+            }
+            Err(_) => {
+                failed = true;
+            }
+        }
+        if failed {
+            self.reconfigure_needed = true;
+        }
     }
 
     fn get_encoder_info(&mut self) -> VideoEncoderEncoderInfo {
@@ -513,6 +594,77 @@ struct I420Frame {
     v: Vec<u8>,
 }
 
+enum I420Input<'a> {
+    Borrowed {
+        y: &'a [u8],
+        u: &'a [u8],
+        v: &'a [u8],
+    },
+    Owned(I420Frame),
+}
+
+fn frame_type_from_openh264(frame_type: FrameType) -> VideoFrameType {
+    match frame_type {
+        FrameType::Idr => VideoFrameType::Key,
+        FrameType::I | FrameType::P => VideoFrameType::Delta,
+    }
+}
+
+fn requested_frame_type(
+    frame_types: Option<VideoFrameTypeVectorRef<'_>>,
+) -> Option<VideoFrameType> {
+    frame_types.and_then(|frame_types| frame_types.get(0))
+}
+
+struct I420Layout {
+    width: usize,
+    height: usize,
+    stride_y: usize,
+    stride_u: usize,
+    stride_v: usize,
+    y_len: usize,
+    u_len: usize,
+    v_len: usize,
+}
+
+fn can_use_borrowed_i420(layout: I420Layout) -> bool {
+    if layout.width == 0 || layout.height == 0 {
+        return false;
+    }
+    let chroma_width = layout.width.div_ceil(2);
+    let chroma_height = layout.height.div_ceil(2);
+    let Some(y_size) = layout.width.checked_mul(layout.height) else {
+        return false;
+    };
+    let Some(uv_size) = chroma_width.checked_mul(chroma_height) else {
+        return false;
+    };
+    layout.stride_y == layout.width
+        && layout.stride_u == chroma_width
+        && layout.stride_v == chroma_width
+        && layout.y_len >= y_size
+        && layout.u_len >= uv_size
+        && layout.v_len >= uv_size
+}
+
+fn update_pause_state(
+    paused: &mut bool,
+    force_idr_on_resume: &mut bool,
+    bitrate_sum_bps: u32,
+    target_bitrate_sum_bps: u32,
+) -> Option<u32> {
+    let bitrate = bitrate_sum_bps.max(target_bitrate_sum_bps);
+    if bitrate == 0 {
+        *paused = true;
+        return None;
+    }
+    if *paused {
+        *paused = false;
+        *force_idr_on_resume = true;
+    }
+    Some(bitrate.max(1))
+}
+
 fn append_annexb_nalu(out: &mut Vec<u8>, data: &[u8]) {
     if data.is_empty() {
         return;
@@ -566,6 +718,7 @@ fn copy_plane(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shiguredo_webrtc::{VideoFrameType, VideoFrameTypeVector};
 
     fn openh264_path() -> Option<String> {
         std::env::var("OPENH264_PATH").ok()
@@ -643,5 +796,78 @@ mod tests {
             None,
         );
         assert!(resolved_with_profile_level_id.is_some());
+    }
+
+    #[test]
+    fn openh264_frame_type_mapping_is_compatible_with_cpp() {
+        assert_eq!(
+            frame_type_from_openh264(FrameType::Idr),
+            VideoFrameType::Key
+        );
+        assert_eq!(
+            frame_type_from_openh264(FrameType::I),
+            VideoFrameType::Delta
+        );
+        assert_eq!(
+            frame_type_from_openh264(FrameType::P),
+            VideoFrameType::Delta
+        );
+    }
+
+    #[test]
+    fn openh264_requested_frame_type_uses_first_entry() {
+        assert_eq!(requested_frame_type(None), None);
+
+        let mut frame_types = VideoFrameTypeVector::new(2);
+        frame_types.push(VideoFrameType::Empty);
+        frame_types.push(VideoFrameType::Key);
+        assert_eq!(
+            requested_frame_type(Some(frame_types.as_ref())),
+            Some(VideoFrameType::Empty)
+        );
+    }
+
+    #[test]
+    fn openh264_can_use_borrowed_i420_only_for_contiguous_planes() {
+        assert!(can_use_borrowed_i420(I420Layout {
+            width: 640,
+            height: 480,
+            stride_y: 640,
+            stride_u: 320,
+            stride_v: 320,
+            y_len: 640 * 480,
+            u_len: 320 * 240,
+            v_len: 320 * 240,
+        }));
+        assert!(!can_use_borrowed_i420(I420Layout {
+            width: 640,
+            height: 480,
+            stride_y: 672,
+            stride_u: 320,
+            stride_v: 320,
+            y_len: 640 * 480,
+            u_len: 320 * 240,
+            v_len: 320 * 240,
+        }));
+    }
+
+    #[test]
+    fn openh264_pause_state_sets_force_idr_on_resume() {
+        let mut paused = false;
+        let mut force_idr_on_resume = false;
+
+        assert_eq!(
+            update_pause_state(&mut paused, &mut force_idr_on_resume, 0, 0),
+            None
+        );
+        assert!(paused);
+        assert!(!force_idr_on_resume);
+
+        assert_eq!(
+            update_pause_state(&mut paused, &mut force_idr_on_resume, 120_000, 100_000),
+            Some(120_000)
+        );
+        assert!(!paused);
+        assert!(force_idr_on_resume);
     }
 }
