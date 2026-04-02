@@ -180,19 +180,6 @@ impl VideoEncoderHandler for Openh264VideoEncoder {
         else {
             return VideoCodecStatus::Error;
         };
-        let frame_width_usize = match usize::try_from(frame_width) {
-            Ok(v) => v,
-            Err(_) => return VideoCodecStatus::Error,
-        };
-        let frame_height_usize = match usize::try_from(frame_height) {
-            Ok(v) => v,
-            Err(_) => return VideoCodecStatus::Error,
-        };
-        let Some((y, u, v)) =
-            split_i420_data(i420_frame.data(), frame_width_usize, frame_height_usize)
-        else {
-            return VideoCodecStatus::Error;
-        };
 
         let force_idr_from_resume = self.force_idr_on_resume;
         let options = EncodeOptions {
@@ -200,7 +187,12 @@ impl VideoEncoderHandler for Openh264VideoEncoder {
                 || matches!(requested_frame_type, Some(VideoFrameType::Key)),
         };
         let encoder = self.encoder.as_mut().expect("encoder should exist");
-        let encoded = encoder.encode(y, u, v, &options);
+        let encoded = encoder.encode(
+            i420_frame.y_data(),
+            i420_frame.u_data(),
+            i420_frame.v_data(),
+            &options,
+        );
         let encoded = match encoded {
             Ok(v) => v,
             Err(_) => {
@@ -582,22 +574,6 @@ fn has_annexb_start_code(data: &[u8]) -> bool {
         || (data.len() >= 3 && data[0] == 0 && data[1] == 0 && data[2] == 1)
 }
 
-fn split_i420_data(data: &[u8], width: usize, height: usize) -> Option<(&[u8], &[u8], &[u8])> {
-    if width == 0 || height == 0 {
-        return None;
-    }
-    let chroma_width = width.div_ceil(2);
-    let chroma_height = height.div_ceil(2);
-    let y_size = width.checked_mul(height)?;
-    let uv_size = chroma_width.checked_mul(chroma_height)?;
-    let u_end = y_size.checked_add(uv_size)?;
-    let v_end = u_end.checked_add(uv_size)?;
-    let y = data.get(..y_size)?;
-    let u = data.get(y_size..u_end)?;
-    let v = data.get(u_end..v_end)?;
-    Some((y, u, v))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -708,36 +684,6 @@ mod tests {
             requested_frame_type(Some(frame_types.as_ref())),
             Some(VideoFrameType::Empty)
         );
-    }
-
-    #[test]
-    fn openh264_split_i420_data_returns_planes_for_odd_size() {
-        let width = 5usize;
-        let height = 3usize;
-        let y_size = width * height;
-        let uv_size = width.div_ceil(2) * height.div_ceil(2);
-        let data = (0u8..(y_size + uv_size + uv_size) as u8).collect::<Vec<_>>();
-
-        let Some((y, u, v)) = split_i420_data(&data, width, height) else {
-            panic!("split_i420_data must return planes");
-        };
-        assert_eq!(y.len(), y_size);
-        assert_eq!(u.len(), uv_size);
-        assert_eq!(v.len(), uv_size);
-        assert_eq!(y[0], 0);
-        assert_eq!(u[0], y_size as u8);
-        assert_eq!(v[0], (y_size + uv_size) as u8);
-    }
-
-    #[test]
-    fn openh264_split_i420_data_returns_none_for_short_input() {
-        let width = 4usize;
-        let height = 4usize;
-        let y_size = width * height;
-        let uv_size = width.div_ceil(2) * height.div_ceil(2);
-        let data = vec![0u8; y_size + uv_size + uv_size - 1];
-
-        assert!(split_i420_data(&data, width, height).is_none());
     }
 
     #[test]
