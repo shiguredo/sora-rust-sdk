@@ -97,21 +97,24 @@ fn wait_for_frame_count(
 }
 
 /// テスト用: 最初のデバイスから、相性違いに備えた複数のキャプチャ設定候補を作る。
-fn first_device_capture_config_candidates(max_configs: usize) -> Option<Vec<VideoCaptureConfig>> {
+fn first_device_capture_config_candidates(
+    max_configs: usize,
+) -> Result<Vec<VideoCaptureConfig>, String> {
     if max_configs == 0 {
-        return Some(Vec::new());
+        return Ok(Vec::new());
     }
 
-    let device_list = VideoDeviceList::enumerate().ok()?;
+    let device_list = VideoDeviceList::enumerate()
+        .map_err(|e| format!("video device enumeration failed: {:?}", e))?;
     if device_list.is_empty() {
-        return None;
+        return Err("video device list is empty".to_owned());
     }
 
     let device = &device_list.devices()[0];
     let device_id = device.unique_id().ok();
     let formats = device.formats();
     if formats.is_empty() {
-        return None;
+        return Err("video device formats are empty".to_owned());
     }
 
     let preferred_index = formats
@@ -141,7 +144,7 @@ fn first_device_capture_config_candidates(max_configs: usize) -> Option<Vec<Vide
         });
     }
 
-    Some(configs)
+    Ok(configs)
 }
 
 #[test]
@@ -325,11 +328,9 @@ fn test_video_capture_frame_received() {
     let mut attempt_errors = Vec::new();
 
     let configs = match first_device_capture_config_candidates(MAX_ATTEMPTS) {
-        Some(c) if !c.is_empty() => c,
-        Some(_) | None => {
-            println!("ビデオデバイスが見つかりません（スキップ）");
-            return;
-        }
+        Ok(c) if !c.is_empty() => c,
+        Ok(_) => panic!("video capture config candidates are empty"),
+        Err(e) => panic!("{}", e),
     };
     println!("video capture config candidates: {}", configs.len());
 
