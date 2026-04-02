@@ -11,7 +11,7 @@
 
 ## develop
 
-- [UPDATE] `shiguredo_webrtc` を 0.146.3-canary.2 に上げる
+- [UPDATE] `shiguredo_webrtc` を 0.146.3 に上げる
   - @sile
 - [ADD] Windows に対応する
   - @melpon
