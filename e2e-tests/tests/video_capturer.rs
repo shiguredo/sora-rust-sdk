@@ -1,6 +1,6 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 use serial_test::serial;
 use shiguredo_video_device::{
@@ -31,13 +31,59 @@ fn first_device_capture_config() -> Option<VideoCaptureConfig> {
 
     // VideoFormat の min_fps/max_fps がデバイスの実際の対応フレームレート（離散値）と
     // 一致しない場合があるため、広く対応されている 30fps を使用する
+    let min_fps = format.min_fps.ceil().max(1.0) as i32;
+    let max_fps = format.max_fps.floor().max(min_fps as f32) as i32;
+    let preferred_fps = 30_i32;
+    let selected_fps = preferred_fps.clamp(min_fps, max_fps);
+
     Some(VideoCaptureConfig {
         device_id,
         width: format.width,
         height: format.height,
-        fps: 30,
+        fps: selected_fps,
         pixel_format: None,
     })
+}
+
+/// テスト用: フレーム受信をタイムアウト付きで待機する。
+fn wait_for_frame_count(frame_count: &AtomicU32, timeout: Duration) -> u32 {
+    let started_at = Instant::now();
+    let poll_interval = Duration::from_millis(100);
+    let log_interval = Duration::from_millis(500);
+    let mut next_log_at = log_interval;
+
+    loop {
+        let count = frame_count.load(Ordering::SeqCst);
+        if count > 0 {
+            println!(
+                "video capture received frame(s): count={}, elapsed_ms={}",
+                count,
+                started_at.elapsed().as_millis()
+            );
+            return count;
+        }
+
+        let elapsed = started_at.elapsed();
+        if elapsed >= timeout {
+            println!(
+                "video capture timed out: count={}, timeout_ms={}",
+                count,
+                timeout.as_millis()
+            );
+            return count;
+        }
+
+        if elapsed >= next_log_at {
+            println!(
+                "video capture waiting for frame: elapsed_ms={}, count={}",
+                elapsed.as_millis(),
+                count
+            );
+            next_log_at += log_interval;
+        }
+
+        std::thread::sleep(poll_interval);
+    }
 }
 
 #[test]
@@ -227,9 +273,20 @@ fn test_video_capture_frame_received() {
 
     let frame_count = Arc::new(AtomicU32::new(0));
     let frame_count_clone = frame_count.clone();
+    let first_frame_logged = Arc::new(AtomicBool::new(false));
+    let first_frame_logged_clone = first_frame_logged.clone();
 
     let mut capture = match VideoCapture::new(config, move |frame: VideoFrame<'_>| {
-        frame_count_clone.fetch_add(1, Ordering::SeqCst);
+        let count = frame_count_clone.fetch_add(1, Ordering::SeqCst) + 1;
+        if !first_frame_logged_clone.swap(true, Ordering::SeqCst) {
+            println!(
+                "video capture first frame received: width={}, height={}, data_len={}, count={}",
+                frame.width,
+                frame.height,
+                frame.data.len(),
+                count
+            );
+        }
 
         // フレームの基本的な検証
         assert!(frame.width > 0, "幅が 0 以下");
@@ -249,13 +306,17 @@ fn test_video_capture_frame_received() {
         "キャプチャ開始に失敗: {:?}",
         start_result.err()
     );
+    println!(
+        "video capture started: width={}, height={}, fps={}",
+        capture.config().width,
+        capture.config().height,
+        capture.config().fps
+    );
 
-    // フレームを受け取る時間を確保（1秒）
-    std::thread::sleep(Duration::from_secs(1));
+    let count = wait_for_frame_count(frame_count.as_ref(), Duration::from_secs(5));
 
     capture.stop();
 
-    let count = frame_count.load(Ordering::SeqCst);
-    assert!(count > 0, "フレームを受信できませんでした");
-    println!("受信したフレーム数: {}", count);
+    assert!(count > 0, "failed to receive video frame");
+    println!("video capture frame count: {}", count);
 }
