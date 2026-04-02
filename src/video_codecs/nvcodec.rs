@@ -392,10 +392,6 @@ impl VideoCodecCapability for NvCodecVideoCodecCapability {
         VideoCodecImplementation::new("nvcodec", "NVIDIA NVENC/NVDEC")
     }
 
-    fn is_supported(&self, _direction: CodecDirection, codec_type: VideoCodecType) -> bool {
-        codec_type == VideoCodecType::H264
-    }
-
     fn resolve_sdp_format(
         &self,
         _direction: CodecDirection,

@@ -221,6 +221,105 @@ pub fn verify_stats_field_positive(
     sum_stats_field_for_type(stats_json, stat_type, field_name) > 0
 }
 
+/// 統計情報から video RTP の codec が期待する mimeType か確認する。
+pub fn verify_video_codec_mime_type(
+    stats_json: &JsonString,
+    stat_type: &str,
+    expected_mime_type: &str,
+) -> bool {
+    use nojson::RawJson;
+    use std::collections::HashSet;
+
+    let json_str = stats_json.to_string();
+    let Ok(json) = RawJson::parse(&json_str) else {
+        return false;
+    };
+    let value = json.value();
+    let Ok(array) = value.to_array() else {
+        return false;
+    };
+
+    let mut expected_codec_ids = HashSet::new();
+    let mut video_codec_ids = Vec::new();
+
+    for item in array {
+        let Ok(type_member) = item.to_member("type") else {
+            continue;
+        };
+        let Some(type_value) = type_member.optional() else {
+            continue;
+        };
+        let type_str: std::result::Result<String, _> = type_value.try_into();
+        let Ok(type_str) = type_str else {
+            continue;
+        };
+
+        if type_str == "codec" {
+            let mime_type = item
+                .to_member("mimeType")
+                .ok()
+                .and_then(|m| m.optional())
+                .and_then(|v| {
+                    let value: std::result::Result<String, _> = v.try_into();
+                    value.ok()
+                });
+            let Some(mime_type) = mime_type else {
+                continue;
+            };
+            if !mime_type.eq_ignore_ascii_case(expected_mime_type) {
+                continue;
+            }
+            let codec_id = item
+                .to_member("id")
+                .ok()
+                .and_then(|m| m.optional())
+                .and_then(|v| {
+                    let value: std::result::Result<String, _> = v.try_into();
+                    value.ok()
+                });
+            if let Some(codec_id) = codec_id {
+                expected_codec_ids.insert(codec_id);
+            }
+            continue;
+        }
+
+        if type_str != stat_type {
+            continue;
+        }
+
+        let kind = item
+            .to_member("kind")
+            .ok()
+            .and_then(|m| m.optional())
+            .and_then(|v| {
+                let value: std::result::Result<String, _> = v.try_into();
+                value.ok()
+            });
+        if kind.as_deref() != Some("video") {
+            continue;
+        }
+
+        let codec_id = item
+            .to_member("codecId")
+            .ok()
+            .and_then(|m| m.optional())
+            .and_then(|v| {
+                let value: std::result::Result<String, _> = v.try_into();
+                value.ok()
+            });
+        if let Some(codec_id) = codec_id {
+            video_codec_ids.push(codec_id);
+        }
+    }
+
+    if expected_codec_ids.is_empty() {
+        return false;
+    }
+    video_codec_ids
+        .iter()
+        .any(|codec_id| expected_codec_ids.contains(codec_id))
+}
+
 /// 統計情報から data-channel タイプのエントリを検索し、指定した label が存在するか確認する。
 ///
 /// WebRTC 統計情報の JSON 配列をパースし、`data-channel` タイプを持つエントリを探して、
