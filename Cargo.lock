@@ -1407,6 +1407,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "shiguredo_openh264"
+version = "2026.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08588733ad03a7110b7132a250d560b496be9a8616ef2e2833fdcccee88f88d0"
+dependencies = [
+ "bindgen",
+ "shiguredo_toml",
+]
+
+[[package]]
 name = "shiguredo_toml"
 version = "2026.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1507,6 +1517,7 @@ dependencies = [
  "shiguredo_http11",
  "shiguredo_mp4",
  "shiguredo_nvcodec",
+ "shiguredo_openh264",
  "shiguredo_webrtc",
  "shiguredo_websocket",
  "tokio",
@@ -2214,3 +2225,7 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+
+[[patch.unused]]
+name = "shiguredo_webrtc"
+version = "0.146.3-canary.4"

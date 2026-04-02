@@ -39,3 +39,5 @@ pub use crate::video_codecs::mp4::{
 };
 #[cfg(feature = "nvcodec")]
 pub use crate::video_codecs::nvcodec::NvCodecVideoCodecCapability;
+#[cfg(feature = "openh264")]
+pub use crate::video_codecs::openh264::Openh264VideoCodecCapability;

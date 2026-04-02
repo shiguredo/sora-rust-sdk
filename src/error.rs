@@ -3,6 +3,8 @@ use std::io;
 
 use nojson::JsonParseError;
 use shiguredo_http11::{Error as Http11Error, auth::AuthError, uri::UriError};
+#[cfg(feature = "openh264")]
+use shiguredo_openh264::Error as Openh264Error;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::client::SoraClientCommand;
@@ -112,6 +114,8 @@ pub enum Error {
     InvalidVideoCodecPreference {
         reason: String,
     },
+    #[cfg(feature = "openh264")]
+    Openh264(Openh264Error),
     RpcTimeout,
     SignalingUrlsEmpty,
     AllSignalingUrlsFailed {
@@ -255,6 +259,8 @@ impl std::fmt::Display for Error {
             Error::InvalidVideoCodecPreference { reason } => {
                 write!(f, "VideoCodecPreference が不正です: {reason}")
             }
+            #[cfg(feature = "openh264")]
+            Error::Openh264(err) => write!(f, "OpenH264 error: {err}"),
             Error::RpcTimeout => f.write_str("RPC レスポンスがタイムアウトしました"),
             Error::SignalingUrlsEmpty => f.write_str("シグナリング URL が指定されていません"),
             Error::AllSignalingUrlsFailed { errors } => {
@@ -292,6 +298,8 @@ impl std::error::Error for Error {
             Error::Io(err) => Some(err),
             Error::JsonParse(err) => Some(err),
             Error::Webrtc(err) => Some(err),
+            #[cfg(feature = "openh264")]
+            Error::Openh264(err) => Some(err),
             Error::SimulcastSetParametersFailed { source } => Some(source),
             Error::Utf8DecodeFailed(err) => Some(err),
             Error::CommandSendFailed { source, .. } => Some(source),
@@ -352,6 +360,13 @@ impl From<JsonParseError> for Error {
 impl From<shiguredo_webrtc::Error> for Error {
     fn from(err: shiguredo_webrtc::Error) -> Self {
         Error::Webrtc(err)
+    }
+}
+
+#[cfg(feature = "openh264")]
+impl From<Openh264Error> for Error {
+    fn from(err: Openh264Error) -> Self {
+        Error::Openh264(err)
     }
 }
 

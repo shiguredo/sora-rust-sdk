@@ -21,6 +21,8 @@
   - @voluntas, @melpon
 - [ADD] Apple 環境で ObjC default VideoCodecFactory を利用する `InternalHwaVideoCodecCapability` を追加する
   - @melpon
+- [ADD] OpenH264 の `VideoCodecCapability` と e2e-tests / CI 実行を追加する
+  - @melpon
 - [UPDATE] `VideoCodecCapability::is_supported` のデフォルト実装を設定する
   - @melpon
 - [ADD] `VideoCodecCapability::get_supported_formats` を追加し、デフォルト実装も追加する

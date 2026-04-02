@@ -13,3 +13,7 @@ target/
 *.png
 
 .cargo/config.toml
+
+libopenh264*.so
+libopenh264*.dylib
+openh264*.dll
