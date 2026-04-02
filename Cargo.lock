@@ -1494,7 +1494,7 @@ dependencies = [
 
 [[package]]
 name = "sora_sdk"
-version = "2026.1.0-canary.4"
+version = "2026.1.0-canary.5"
 dependencies = [
  "aws-lc-rs",
  "flate2",
