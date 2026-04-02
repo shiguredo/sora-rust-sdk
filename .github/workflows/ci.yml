@@ -26,8 +26,6 @@ jobs:
           - ubuntu-22.04
           - ubuntu-22.04-arm
           - windows-2025
-          - group: Self
-            labels: [self-hosted, macOS, ARM64]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -53,8 +51,26 @@ jobs:
       - run: cargo clippy --workspace -- -D warnings
       - run: cargo test --workspace
 
+  ci-macos-self:
+    runs-on:
+      group: Self
+      labels: [self-hosted, macOS, ARM64]
+    timeout-minutes: 30
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v6
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+      - name: Update PATH
+        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+      - run: cp .cargo/config.toml.ci .cargo/config.toml
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace -- -D warnings
+      - run: cargo test --workspace
+
   slack_notify:
-    needs: [ci]
+    needs: [ci, ci-macos-self]
     runs-on: ubuntu-slim
     if: ${{ !cancelled() }}
     steps:
