@@ -32,6 +32,7 @@ systemctl --user enable --now pipewire pipewire-pulse
 | `--audio` | 任意 (値: `true`/`false`) | 音声の有効/無効 |
 | `--video` | 任意 (値: `true`/`false`) | 映像の有効/無効 |
 | `--video-codec-type` | 任意 (値: `vp8`/`vp9`/`av1`/`h264`/`h265`) | 映像コーデック |
+| `--openh264-path` | 任意 (値: ライブラリパス) | OpenH264 の動的ライブラリパス |
 | `--data-channel-signaling` | 任意 (値: `true`/`false`) | DataChannel 経由でシグナリングを行う |
 | `--ignore-disconnect-websocket` | 任意 (値: `true`/`false`) | DataChannel 使用時に WebSocket 切断を無視する |
 | `--simulcast` | 任意 (値: `true`/`false`) | サイマルキャストを有効にする |
@@ -42,6 +43,10 @@ systemctl --user enable --now pipewire pipewire-pulse
 | `--audio-input-device` | 任意 (値: デバイス名または ID、`media-device` feature 有効時のみ) | 使用するオーディオ入力デバイスの名前または ID |
 | `--help` | フラグ | ヘルプ表示 |
 | `--version` | フラグ | バージョン表示 |
+
+## 制約
+
+- `--input-mp4` と `--openh264-path` は同時に指定できません
 
 ## 実行例
 
@@ -76,6 +81,18 @@ cargo run -p sumomo -- \
   --signaling-url wss://sora-test.shiguredo.co.jp/signaling \
   --channel-id your-channel-id \
   --role recvonly
+```
+
+### OpenH264 を使って H.264 で接続する
+
+```bash
+cargo run -p sumomo -- \
+  --signaling-url wss://sora-test.shiguredo.co.jp/signaling \
+  --channel-id your-channel-id \
+  --role sendonly \
+  --video-codec-type h264 \
+  --openh264-path /path/to/libopenh264.so \
+  --duration 60
 ```
 
 ### デバイス一覧を表示する

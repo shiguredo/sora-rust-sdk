@@ -11,14 +11,14 @@ use std::thread;
 use rustls_pki_types::pem::PemObject;
 use shiguredo_webrtc::{
     AdaptFrameResult, AdaptedVideoTrackSource, I420Buffer, LibyuvFourcc, TimestampAligner,
-    VideoFrame, VideoFrameRef, VideoSink, VideoSinkHandler, VideoSinkWants, VideoTrackSource,
-    convert_from_i420, log, rtc_log_info, rtc_log_warning,
+    VideoCodecType, VideoFrame, VideoFrameRef, VideoSink, VideoSinkHandler, VideoSinkWants,
+    VideoTrackSource, convert_from_i420, log, rtc_log_info, rtc_log_warning,
 };
 #[cfg(feature = "media-device")]
 use shiguredo_webrtc::{AudioDeviceModule, AudioDeviceModuleHandler, AudioTransportRef};
 use sora_sdk::{
-    Mp4Error, Mp4PassthroughVideoCodecCapability, Mp4SampleReader, Mp4VideoCapturer, Role,
-    SoraClient, SoraClientContext, SoraClientContextConfig,
+    Mp4Error, Mp4PassthroughVideoCodecCapability, Mp4SampleReader, Mp4VideoCapturer,
+    Openh264VideoCodecCapability, Role, SoraClient, SoraClientContext, SoraClientContextConfig,
 };
 #[cfg(feature = "nvcodec")]
 use sora_sdk::{NvCodecVideoCodecCapability, VideoCodecCapability, VideoCodecPreference};
@@ -35,6 +35,7 @@ struct Args {
     video_codec_type: Option<String>,
     video_bit_rate: Option<u32>,
     input_mp4: Option<String>,
+    openh264_path: Option<String>,
     data_channel_signaling: Option<bool>,
     ignore_disconnect_websocket: Option<bool>,
     simulcast: Option<bool>,
@@ -202,6 +203,7 @@ fn parse_args() -> Result<Args> {
             turn_tls_insecure: false,
             turn_tls_ca_cert: None,
             input_mp4: None,
+            openh264_path: None,
             #[cfg(feature = "raw-player")]
             use_raw_player: false,
             video_input_device: None,
@@ -265,6 +267,11 @@ fn parse_args() -> Result<Args> {
 
     let input_mp4: Option<String> = noargs::opt("input-mp4")
         .doc("MP4 ファイルからエンコード済み映像をそのまま送信する")
+        .take(&mut args)
+        .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
+
+    let openh264_path: Option<String> = noargs::opt("openh264-path")
+        .doc("OpenH264 の動的ライブラリパス")
         .take(&mut args)
         .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
 
@@ -373,6 +380,7 @@ fn parse_args() -> Result<Args> {
         video_codec_type,
         video_bit_rate,
         input_mp4,
+        openh264_path,
         data_channel_signaling,
         ignore_disconnect_websocket,
         simulcast,
@@ -392,6 +400,68 @@ fn parse_args() -> Result<Args> {
         #[cfg(feature = "media-device")]
         list_devices: false,
     })
+}
+
+fn validate_args(args: &Args) -> Result<()> {
+    if args.input_mp4.is_some() && args.openh264_path.is_some() {
+        return Err(
+            io::Error::other("--input-mp4 and --openh264-path cannot be used together").into(),
+        );
+    }
+    Ok(())
+}
+
+fn build_context_config(
+    adm_config: sora_sdk::AdmConfig,
+    mp4_codec_type: Option<VideoCodecType>,
+    openh264_path: Option<&str>,
+) -> Result<SoraClientContextConfig> {
+    let mut context_config = SoraClientContextConfig {
+        adm_config,
+        ..Default::default()
+    };
+
+    if let Some(codec_type) = mp4_codec_type {
+        let passthrough_capability: Box<dyn VideoCodecCapability> =
+            Box::new(Mp4PassthroughVideoCodecCapability::new(codec_type));
+        let passthrough_preference =
+            VideoCodecPreference::new_from_capability(passthrough_capability.as_ref());
+        context_config
+            .video_codec_preference
+            .merge(&passthrough_preference);
+        context_config
+            .video_codec_capabilities
+            .push(passthrough_capability);
+    }
+
+    #[cfg(feature = "nvcodec")]
+    {
+        let nvcodec_capability: Box<dyn VideoCodecCapability> =
+            Box::new(NvCodecVideoCodecCapability::new());
+        let nvcodec_preference =
+            VideoCodecPreference::new_from_capability(nvcodec_capability.as_ref());
+        context_config
+            .video_codec_preference
+            .merge(&nvcodec_preference);
+        context_config
+            .video_codec_capabilities
+            .push(nvcodec_capability);
+    }
+
+    if let Some(path) = openh264_path {
+        let openh264_capability: Box<dyn VideoCodecCapability> =
+            Box::new(Openh264VideoCodecCapability::new(path)?);
+        let openh264_preference =
+            VideoCodecPreference::new_from_capability(openh264_capability.as_ref());
+        context_config
+            .video_codec_preference
+            .merge(&openh264_preference);
+        context_config
+            .video_codec_capabilities
+            .push(openh264_capability);
+    }
+
+    Ok(context_config)
 }
 
 /// ANSI 描画用の簡易レンダラー。
@@ -852,6 +922,13 @@ fn run_with_raw_player(args: Args) -> Result<()> {
     let client_cert = args.client_cert.clone();
     let client_key = args.client_key.clone();
     let ca_cert = args.ca_cert.clone();
+    let context_config = build_context_config(
+        sora_sdk::AdmConfig::NoAudioDevice,
+        None,
+        args.openh264_path.as_deref(),
+    )?;
+    let context = SoraClientContext::new_with_config(context_config)?;
+    let context_for_thread = context.clone();
 
     let handle = thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -860,7 +937,7 @@ fn run_with_raw_player(args: Args) -> Result<()> {
             .expect("Tokio ランタイムの作成に失敗しました");
 
         let _ = rt.block_on(async {
-            let context = SoraClientContext::new()?;
+            let context = context_for_thread.clone();
             let mut builder =
                 SoraClient::builder(context.clone(), signaling_urls, channel_id, role)
                 .on_notify({
@@ -1469,6 +1546,7 @@ async fn main() -> Result<()> {
     log::enable_threads();
 
     let args = parse_args()?;
+    validate_args(&args)?;
 
     #[cfg(feature = "media-device")]
     if args.list_devices {
@@ -1501,49 +1579,20 @@ async fn main() -> Result<()> {
         None
     };
 
-    let mut context_config = SoraClientContextConfig {
-        #[cfg(feature = "media-device")]
-        adm_config: if external_adm.is_some() {
-            sora_sdk::AdmConfig::UseExternal(external_adm.as_ref().unwrap().audio_device_module())
-        } else {
-            sora_sdk::AdmConfig::NoAudioDevice
-        },
-        #[cfg(not(feature = "media-device"))]
-        adm_config: sora_sdk::AdmConfig::NoAudioDevice,
-        ..Default::default()
-    };
-
-    // --input-mp4 が指定されている場合はパススルー capability を追加する
-    let mp4_state = if let Some((reader, codec_type)) = mp4_state {
-        let passthrough_capability: Box<dyn VideoCodecCapability> =
-            Box::new(Mp4PassthroughVideoCodecCapability::new(codec_type));
-        let passthrough_preference =
-            VideoCodecPreference::new_from_capability(passthrough_capability.as_ref());
-        context_config
-            .video_codec_preference
-            .merge(&passthrough_preference);
-        context_config
-            .video_codec_capabilities
-            .push(passthrough_capability);
-        Some((reader, codec_type))
+    #[cfg(feature = "media-device")]
+    let adm_config = if external_adm.is_some() {
+        sora_sdk::AdmConfig::UseExternal(external_adm.as_ref().unwrap().audio_device_module())
     } else {
-        None
+        sora_sdk::AdmConfig::NoAudioDevice
     };
+    #[cfg(not(feature = "media-device"))]
+    let adm_config = sora_sdk::AdmConfig::NoAudioDevice;
 
-    #[cfg(feature = "nvcodec")]
-    {
-        let nvcodec_capability: Box<dyn VideoCodecCapability> =
-            Box::new(NvCodecVideoCodecCapability::new());
-        let nvcodec_preference =
-            VideoCodecPreference::new_from_capability(nvcodec_capability.as_ref());
-        context_config
-            .video_codec_preference
-            .merge(&nvcodec_preference);
-        context_config
-            .video_codec_capabilities
-            .push(nvcodec_capability);
-    }
-
+    let context_config = build_context_config(
+        adm_config,
+        mp4_state.as_ref().map(|(_, codec_type)| *codec_type),
+        args.openh264_path.as_deref(),
+    )?;
     let context = SoraClientContext::new_with_config(context_config)?;
 
     // --audio-input-device が指定された場合は AudioDeviceCapturer を使用する

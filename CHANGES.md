@@ -34,3 +34,5 @@
 
 - [ADD] sumomo に --input-mp4 オプションを追加
   - @voluntas, @melpon
+- [ADD] sumomo に --openh264-path オプションを追加する
+  - @melpon
