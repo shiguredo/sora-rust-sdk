@@ -60,7 +60,6 @@ async fn run_sendonly_simulcast_outbound_layers(
     channel_suffix: &str,
     expected_encoder_impl_substring: Option<&str>,
 ) {
-    load_env();
     let urls = signaling_urls().expect("TEST_SIGNALING_URLS が必要");
     let channel_id = test_channel_id(channel_suffix);
 
@@ -141,14 +140,16 @@ async fn run_sendonly_simulcast_outbound_layers(
 
 #[tokio::test]
 async fn test_sendonly_simulcast_outbound_layers() {
+    load_env();
     let context = SoraClientContext::new().expect("コンテキスト作成失敗");
     run_sendonly_simulcast_outbound_layers(context, None, "simulcast-sendonly", None).await;
 }
 
 #[tokio::test]
 async fn test_sendonly_simulcast_outbound_layers_openh264_non_builtin() {
+    load_env();
     let Some(path) = openh264_path() else {
-        eprintln!("OPENH264_PATH is not set, skipping test");
+        eprintln!("OPENH264_PATH is not set, skipping OpenH264 non-builtin simulcast failure test");
         return;
     };
     let capability: Box<dyn VideoCodecCapability> = Box::new(
@@ -168,6 +169,7 @@ async fn test_sendonly_simulcast_outbound_layers_openh264_non_builtin() {
 #[cfg(feature = "nvcodec")]
 #[tokio::test]
 async fn test_sendonly_simulcast_outbound_layers_nvcodec_non_builtin() {
+    load_env();
     let capability: Box<dyn VideoCodecCapability> = Box::new(NvCodecVideoCodecCapability::new());
     let context = create_non_builtin_context(capability).expect("コンテキスト作成失敗");
     run_sendonly_simulcast_outbound_layers(
@@ -182,6 +184,7 @@ async fn test_sendonly_simulcast_outbound_layers_nvcodec_non_builtin() {
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 #[tokio::test]
 async fn test_sendonly_simulcast_outbound_layers_internal_hwa_non_builtin() {
+    load_env();
     let Some(capability) = InternalHwaVideoCodecCapability::new() else {
         eprintln!("InternalHwaVideoCodecCapability is not available, skipping test");
         return;

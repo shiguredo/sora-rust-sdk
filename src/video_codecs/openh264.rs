@@ -7,13 +7,13 @@ use shiguredo_openh264::{
 };
 use shiguredo_webrtc::{
     CodecSpecificInfo, EncodedImage, EncodedImageBuffer, EncodedImageRef, H264PacketizationMode,
-    I420Buffer, SdpVideoFormat, VideoCodecRef, VideoCodecStatus, VideoCodecType, VideoDecoder,
-    VideoDecoderDecodedImageCallbackPtr, VideoDecoderDecoderInfo, VideoDecoderHandler,
-    VideoDecoderSettingsRef, VideoEncoder, VideoEncoderEncodedImageCallbackPtr,
-    VideoEncoderEncodedImageCallbackRef, VideoEncoderEncodedImageCallbackResultError,
-    VideoEncoderEncoderInfo, VideoEncoderHandler, VideoEncoderRateControlParametersRef,
-    VideoEncoderSettingsRef, VideoFrame, VideoFrameRef, VideoFrameType, VideoFrameTypeVectorRef,
-    i420_copy,
+    I420Buffer, ScalabilityMode, SdpVideoFormat, VideoCodecRef, VideoCodecStatus, VideoCodecType,
+    VideoDecoder, VideoDecoderDecodedImageCallbackPtr, VideoDecoderDecoderInfo,
+    VideoDecoderHandler, VideoDecoderSettingsRef, VideoEncoder,
+    VideoEncoderEncodedImageCallbackPtr, VideoEncoderEncodedImageCallbackRef,
+    VideoEncoderEncodedImageCallbackResultError, VideoEncoderEncoderInfo, VideoEncoderHandler,
+    VideoEncoderRateControlParametersRef, VideoEncoderSettingsRef, VideoFrame, VideoFrameRef,
+    VideoFrameType, VideoFrameTypeVectorRef, i420_copy,
 };
 
 use crate::error::Result;
@@ -29,6 +29,7 @@ struct Openh264VideoEncoder {
     height: u32,
     framerate: u32,
     target_bitrate_bps: u32,
+    max_spatial_bitrate_bps: u32,
     reconfigure_needed: bool,
     paused: bool,
     force_idr_on_resume: bool,
@@ -44,6 +45,7 @@ impl Openh264VideoEncoder {
             height: 0,
             framerate: 30,
             target_bitrate_bps: 500_000,
+            max_spatial_bitrate_bps: 500_000 * 2,
             reconfigure_needed: false,
             paused: false,
             force_idr_on_resume: false,
@@ -108,6 +110,7 @@ impl Openh264VideoEncoder {
         };
 
         self.encoder = Some(Encoder::new(self.library.clone(), config)?);
+        self.max_spatial_bitrate_bps = self.target_bitrate_bps * 2;
         self.reconfigure_needed = false;
         Ok(())
     }
@@ -127,7 +130,7 @@ impl VideoEncoderHandler for Openh264VideoEncoder {
         self.width = codec.width().max(0) as u32;
         self.height = codec.height().max(0) as u32;
         self.framerate = codec.max_framerate().max(1);
-        self.target_bitrate_bps = codec.start_bitrate_kbps().saturating_mul(1000).max(1);
+        self.target_bitrate_bps = codec.start_bitrate_kbps().saturating_mul(1000);
         self.paused = false;
         self.force_idr_on_resume = false;
 
@@ -283,6 +286,10 @@ impl VideoEncoderHandler for Openh264VideoEncoder {
             self.reconfigure_needed = true;
             return;
         };
+        if self.target_bitrate_bps >= self.max_spatial_bitrate_bps {
+            self.reconfigure_needed = true;
+            return;
+        }
 
         let mut failed = false;
         match usize::try_from(self.target_bitrate_bps) {
@@ -485,7 +492,7 @@ impl VideoCodecCapability for Openh264VideoCodecCapability {
                 (String::from("level-asymmetry-allowed"), String::from("1")),
                 (String::from("packetization-mode"), String::from("1")),
             ]),
-            &[],
+            &[ScalabilityMode::L1T1],
         )]
     }
 

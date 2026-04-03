@@ -370,7 +370,7 @@ impl VideoCodecCapability for NvCodecVideoCodecCapability {
                 (String::from("level-asymmetry-allowed"), String::from("1")),
                 (String::from("packetization-mode"), String::from("1")),
             ]),
-            &[],
+            &[ScalabilityMode::L1T1],
         )]
     }
 
