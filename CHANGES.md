@@ -29,6 +29,8 @@
   - @melpon
 - [UPDATE] `nvcodec` / `openh264` で連続メモリ API を利用し、エンコード前の入力バッファを正規化するように修正する
   - @melpon
+- [FIX] 接続失敗時でも `PeerConnection` / `SoraClientContext` の破棄順序を保証するように保持フィールド順を調整する
+  - @melpon
 
 ### misc
 
