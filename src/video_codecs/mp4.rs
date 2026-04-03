@@ -13,7 +13,6 @@
 //!                                         (native VideoFrameBuffer)
 //!
 //! 対応コーデック: H.264, H.265, VP8, VP9, AV1
-use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -576,31 +575,29 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
         VideoCodecImplementation::new("mp4-passthrough", "MP4 Passthrough")
     }
 
-    fn resolve_sdp_format(
-        &self,
-        direction: CodecDirection,
-        codec_type: VideoCodecType,
-        _parameters: &HashMap<String, String>,
-        _scalability_mode: Option<&str>,
-    ) -> Option<SdpVideoFormat> {
-        if direction != CodecDirection::Encoder || codec_type != self.codec_type {
-            return None;
+    fn get_supported_formats(&self, direction: CodecDirection) -> Vec<SdpVideoFormat> {
+        if direction != CodecDirection::Encoder {
+            return Vec::new();
         }
-        match codec_type {
+        match self.codec_type {
             VideoCodecType::H264 => {
                 let mut format = SdpVideoFormat::new("H264");
                 format.parameters_mut().set("packetization-mode", "1");
-                Some(format)
+                vec![format]
             }
-            VideoCodecType::H265 => Some(SdpVideoFormat::new("H265")),
-            VideoCodecType::Vp8 => Some(SdpVideoFormat::new("VP8")),
-            VideoCodecType::Vp9 => Some(SdpVideoFormat::new("VP9")),
-            VideoCodecType::Av1 => Some(SdpVideoFormat::new("AV1")),
-            _ => None,
+            VideoCodecType::H265 => vec![SdpVideoFormat::new("H265")],
+            VideoCodecType::Vp8 => vec![SdpVideoFormat::new("VP8")],
+            VideoCodecType::Vp9 => vec![SdpVideoFormat::new("VP9")],
+            VideoCodecType::Av1 => vec![SdpVideoFormat::new("AV1")],
+            _ => Vec::new(),
         }
     }
 
-    fn create_video_encoder(&self, format: &SdpVideoFormat) -> Option<VideoEncoder> {
+    fn create_video_encoder(
+        &self,
+        _env: shiguredo_webrtc::EnvironmentRef<'_>,
+        format: &SdpVideoFormat,
+    ) -> Option<VideoEncoder> {
         let Ok(format_name) = format.name() else {
             return None;
         };
@@ -616,7 +613,11 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
     }
 
     /// デコーダーは提供しない (パススルーは送信専用)。
-    fn create_video_decoder(&self, _format: &SdpVideoFormat) -> Option<VideoDecoder> {
+    fn create_video_decoder(
+        &self,
+        _env: shiguredo_webrtc::EnvironmentRef<'_>,
+        _format: &SdpVideoFormat,
+    ) -> Option<VideoDecoder> {
         None
     }
 }
@@ -729,34 +730,35 @@ mod tests {
 
         assert!(
             capability
-                .create_video_encoder(&SdpVideoFormat::new("H264"))
+                .create_video_encoder(
+                    shiguredo_webrtc::Environment::new().as_ref(),
+                    &SdpVideoFormat::new("H264"),
+                )
                 .is_some()
         );
         assert!(
             capability
-                .create_video_encoder(&SdpVideoFormat::new("VP9"))
+                .create_video_encoder(
+                    shiguredo_webrtc::Environment::new().as_ref(),
+                    &SdpVideoFormat::new("VP9"),
+                )
                 .is_none()
         );
         assert!(
             capability
-                .create_video_decoder(&SdpVideoFormat::new("H264"))
+                .create_video_decoder(
+                    shiguredo_webrtc::Environment::new().as_ref(),
+                    &SdpVideoFormat::new("H264"),
+                )
                 .is_none()
         );
 
-        let resolved = capability.resolve_sdp_format(
-            CodecDirection::Encoder,
-            VideoCodecType::H264,
-            &HashMap::new(),
-            None,
-        );
+        let resolved =
+            capability.resolve_sdp_format(CodecDirection::Encoder, &SdpVideoFormat::new("H264"));
         assert!(resolved.is_some());
 
-        let unresolved = capability.resolve_sdp_format(
-            CodecDirection::Encoder,
-            VideoCodecType::Vp8,
-            &HashMap::new(),
-            None,
-        );
+        let unresolved =
+            capability.resolve_sdp_format(CodecDirection::Encoder, &SdpVideoFormat::new("VP8"));
         assert!(unresolved.is_none());
     }
 

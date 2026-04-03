@@ -11,6 +11,13 @@
 
 ## develop
 
+- [CHANGE] `VideoCodecCapability` の SDP format 解決 API を `SdpVideoFormat` ベースに再設計する
+  - `resolve_sdp_format` の `codec_type` / `parameters` / `scalability_mode` を廃止し、`SdpVideoFormat` 引数で解決する
+  - `get_supported_formats` を `Option<Vec<SdpVideoFormat>>` から `Vec<SdpVideoFormat>` に変更して必須化する
+  - `resolve_sdp_format` のデフォルト実装を `fuzzy_match_sdp_video_format` ベースに変更し、`internal_factory.rs` を削除する
+  - `create_video_encoder` に `EnvironmentRef` 引数を追加し、factory と全 capability 実装を追従する
+  - `PreferenceCodec` から `scalability_mode` / `parameters` を削除する
+  - @melpon
 - [CHANGE] `VideoCodecCapability` の create API の戻り値を concrete 型に変更する
   - `create_video_encoder` / `create_video_decoder` の戻り値を `Option<VideoEncoder>` / `Option<VideoDecoder>` に変更する
   - `SoraVideoEncoderFactory` / `SoraVideoDecoderFactory` と各 `VideoCodecCapability` 実装を新シグネチャへ追従する
@@ -26,6 +33,10 @@
 - [ADD] Apple 環境で ObjC default VideoCodecFactory を利用する `InternalHwaVideoCodecCapability` を追加する
   - @melpon
 - [ADD] OpenH264 の `VideoCodecCapability` と e2e-tests / CI 実行を追加する
+  - @melpon
+- [ADD] `VideoCodecCapability::adapt_video_encoder` を追加し `SoraVideoEncoderFactory` で `SimulcastEncoderAdapter` を適用する
+  - @melpon
+- [ADD] non-builtin encoder (OpenH264 / nvcodec / internal_hwa) の simulcast e2e テストを追加する
   - @melpon
 - [UPDATE] `VideoCodecCapability::is_supported` のデフォルト実装を設定する
   - @melpon

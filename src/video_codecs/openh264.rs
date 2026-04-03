@@ -477,33 +477,23 @@ impl VideoCodecCapability for Openh264VideoCodecCapability {
         VideoCodecImplementation::new("openh264", "OpenH264")
     }
 
-    fn resolve_sdp_format(
-        &self,
-        _direction: CodecDirection,
-        codec_type: VideoCodecType,
-        parameters: &HashMap<String, String>,
-        _scalability_mode: Option<&str>,
-    ) -> Option<SdpVideoFormat> {
-        if codec_type != VideoCodecType::H264 {
-            return None;
-        }
-
-        let mut h264_params = HashMap::from([
-            (String::from("level-asymmetry-allowed"), String::from("1")),
-            (String::from("packetization-mode"), String::from("1")),
-        ]);
-        if let Some(profile_level_id) = parameters.get("profile-level-id") {
-            h264_params.insert(String::from("profile-level-id"), profile_level_id.clone());
-        }
-
-        Some(SdpVideoFormat::new_with_parameters(
+    #[expect(unused_variables)]
+    fn get_supported_formats(&self, direction: CodecDirection) -> Vec<SdpVideoFormat> {
+        vec![SdpVideoFormat::new_with_parameters(
             "H264",
-            &h264_params,
+            &HashMap::from([
+                (String::from("level-asymmetry-allowed"), String::from("1")),
+                (String::from("packetization-mode"), String::from("1")),
+            ]),
             &[],
-        ))
+        )]
     }
 
-    fn create_video_encoder(&self, format: &SdpVideoFormat) -> Option<VideoEncoder> {
+    fn create_video_encoder(
+        &self,
+        _env: shiguredo_webrtc::EnvironmentRef<'_>,
+        format: &SdpVideoFormat,
+    ) -> Option<VideoEncoder> {
         if format.name().ok().as_deref() == Some("H264") {
             Some(VideoEncoder::new_with_handler(Box::new(
                 Openh264VideoEncoder::new(self.library.clone()),
@@ -513,7 +503,11 @@ impl VideoCodecCapability for Openh264VideoCodecCapability {
         }
     }
 
-    fn create_video_decoder(&self, format: &SdpVideoFormat) -> Option<VideoDecoder> {
+    fn create_video_decoder(
+        &self,
+        _env: shiguredo_webrtc::EnvironmentRef<'_>,
+        format: &SdpVideoFormat,
+    ) -> Option<VideoDecoder> {
         if format.name().ok().as_deref() == Some("H264") {
             Some(VideoDecoder::new_with_handler(Box::new(
                 Openh264VideoDecoder::new(self.library.clone()),
@@ -605,32 +599,39 @@ mod tests {
 
         assert!(
             capability
-                .create_video_encoder(&SdpVideoFormat::new("H264"))
+                .create_video_encoder(
+                    shiguredo_webrtc::Environment::new().as_ref(),
+                    &SdpVideoFormat::new("H264"),
+                )
                 .is_some()
         );
         assert!(
             capability
-                .create_video_encoder(&SdpVideoFormat::new("H265"))
+                .create_video_encoder(
+                    shiguredo_webrtc::Environment::new().as_ref(),
+                    &SdpVideoFormat::new("H265"),
+                )
                 .is_none()
         );
         assert!(
             capability
-                .create_video_decoder(&SdpVideoFormat::new("H264"))
+                .create_video_decoder(
+                    shiguredo_webrtc::Environment::new().as_ref(),
+                    &SdpVideoFormat::new("H264"),
+                )
                 .is_some()
         );
         assert!(
             capability
-                .create_video_decoder(&SdpVideoFormat::new("H265"))
+                .create_video_decoder(
+                    shiguredo_webrtc::Environment::new().as_ref(),
+                    &SdpVideoFormat::new("H265"),
+                )
                 .is_none()
         );
 
         let resolved = capability
-            .resolve_sdp_format(
-                CodecDirection::Encoder,
-                VideoCodecType::H264,
-                &HashMap::new(),
-                None,
-            )
+            .resolve_sdp_format(CodecDirection::Encoder, &SdpVideoFormat::new("H264"))
             .expect("h264 format should be resolved");
         let params = resolved
             .to_owned()
@@ -648,9 +649,11 @@ mod tests {
 
         let resolved_with_profile_level_id = capability.resolve_sdp_format(
             CodecDirection::Encoder,
-            VideoCodecType::H264,
-            &HashMap::from([(String::from("profile-level-id"), String::from("42e01f"))]),
-            None,
+            &SdpVideoFormat::new_with_parameters(
+                "H264",
+                &HashMap::from([(String::from("profile-level-id"), String::from("42e01f"))]),
+                &[],
+            ),
         );
         assert!(resolved_with_profile_level_id.is_some());
     }

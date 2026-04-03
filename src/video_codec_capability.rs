@@ -1,6 +1,7 @@
-use std::collections::HashMap;
-
-use shiguredo_webrtc::{SdpVideoFormat, VideoCodecType, VideoDecoder, VideoEncoder};
+use shiguredo_webrtc::{
+    EnvironmentRef, SdpVideoFormat, VideoCodecType, VideoDecoder, VideoEncoder,
+    fuzzy_match_sdp_video_format,
+};
 
 use nojson::{DisplayJson, JsonFormatter, JsonParseError, RawJsonValue};
 
@@ -74,22 +75,31 @@ impl<'text, 'raw> TryFrom<RawJsonValue<'text, 'raw>> for CodecDirection {
 
 pub trait VideoCodecCapability: Send {
     fn get_implementation(&self) -> VideoCodecImplementation;
-    fn get_supported_formats(&self, _direction: CodecDirection) -> Option<Vec<SdpVideoFormat>> {
-        None
-    }
+    fn get_supported_formats(&self, direction: CodecDirection) -> Vec<SdpVideoFormat>;
     fn is_supported(&self, direction: CodecDirection, codec_type: VideoCodecType) -> bool {
-        self.resolve_sdp_format(direction, codec_type, &HashMap::new(), None)
-            .is_some()
+        let Some(codec_name) = codec_type.as_str() else {
+            return false;
+        };
+        let requested = SdpVideoFormat::new(codec_name);
+        self.resolve_sdp_format(direction, &requested).is_some()
     }
     fn resolve_sdp_format(
         &self,
         direction: CodecDirection,
-        codec_type: VideoCodecType,
-        parameters: &HashMap<String, String>,
-        scalability_mode: Option<&str>,
-    ) -> Option<SdpVideoFormat>;
-    fn create_video_encoder(&self, format: &SdpVideoFormat) -> Option<VideoEncoder>;
-    fn create_video_decoder(&self, format: &SdpVideoFormat) -> Option<VideoDecoder>;
+        format: &SdpVideoFormat,
+    ) -> Option<SdpVideoFormat> {
+        fuzzy_match_sdp_video_format(&self.get_supported_formats(direction), format.as_ref())
+    }
+    fn create_video_encoder(
+        &self,
+        env: EnvironmentRef<'_>,
+        format: &SdpVideoFormat,
+    ) -> Option<VideoEncoder>;
+    fn create_video_decoder(
+        &self,
+        env: EnvironmentRef<'_>,
+        format: &SdpVideoFormat,
+    ) -> Option<VideoDecoder>;
 }
 
 impl DisplayJson for VideoCodecImplementation {
@@ -130,21 +140,19 @@ mod tests {
             VideoCodecImplementation::new("mock", "Mock Codec")
         }
 
-        fn resolve_sdp_format(
-            &self,
-            _direction: CodecDirection,
-            codec_type: VideoCodecType,
-            _parameters: &HashMap<String, String>,
-            _scalability_mode: Option<&str>,
-        ) -> Option<SdpVideoFormat> {
-            if codec_type == VideoCodecType::H264 {
-                Some(SdpVideoFormat::new("H264"))
-            } else {
-                None
+        fn get_supported_formats(&self, direction: CodecDirection) -> Vec<SdpVideoFormat> {
+            match direction {
+                CodecDirection::Encoder | CodecDirection::Decoder => {
+                    vec![SdpVideoFormat::new("H264")]
+                }
             }
         }
 
-        fn create_video_encoder(&self, format: &SdpVideoFormat) -> Option<VideoEncoder> {
+        fn create_video_encoder(
+            &self,
+            _env: EnvironmentRef<'_>,
+            format: &SdpVideoFormat,
+        ) -> Option<VideoEncoder> {
             if format.name().ok().as_deref() == Some("H264") {
                 Some(VideoEncoder::new_with_handler(Box::new(StubVideoEncoder)))
             } else {
@@ -152,7 +160,11 @@ mod tests {
             }
         }
 
-        fn create_video_decoder(&self, format: &SdpVideoFormat) -> Option<VideoDecoder> {
+        fn create_video_decoder(
+            &self,
+            _env: EnvironmentRef<'_>,
+            format: &SdpVideoFormat,
+        ) -> Option<VideoDecoder> {
             if format.name().ok().as_deref() == Some("H264") {
                 Some(VideoDecoder::new_with_handler(Box::new(StubVideoDecoder)))
             } else {
@@ -177,7 +189,16 @@ mod tests {
         assert!(capability.is_supported(CodecDirection::Encoder, VideoCodecType::H264));
         assert!(capability.is_supported(CodecDirection::Decoder, VideoCodecType::H264));
         let h264 = SdpVideoFormat::new("H264");
-        assert!(capability.create_video_encoder(&h264).is_some());
-        assert!(capability.create_video_decoder(&h264).is_some());
+        let env = shiguredo_webrtc::Environment::new();
+        assert!(
+            capability
+                .create_video_encoder(env.as_ref(), &h264)
+                .is_some()
+        );
+        assert!(
+            capability
+                .create_video_decoder(env.as_ref(), &h264)
+                .is_some()
+        );
     }
 }

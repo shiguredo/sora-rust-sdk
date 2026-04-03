@@ -1,26 +1,31 @@
-use std::collections::HashMap;
+use shiguredo_webrtc::{
+    EnvironmentRef, SdpVideoFormat, VideoDecoder, VideoDecoderFactory, VideoEncoder,
+    VideoEncoderFactory,
+};
 
-use shiguredo_webrtc::{SdpVideoFormat, VideoCodecType, VideoDecoder, VideoEncoder};
-use shiguredo_webrtc::{VideoDecoderFactory, VideoEncoderFactory};
+#[cfg(test)]
+use shiguredo_webrtc::VideoCodecType;
 
 use crate::video_codec_capability::{
     CodecDirection, VideoCodecCapability, VideoCodecImplementation,
 };
 
-use super::internal_factory::FactoryBackedVideoCodecCapability;
-
 pub struct InternalVideoCodecCapability {
-    inner: FactoryBackedVideoCodecCapability,
+    implementation: VideoCodecImplementation,
+    encoder_factory: VideoEncoderFactory,
+    decoder_factory: VideoDecoderFactory,
 }
 
 impl InternalVideoCodecCapability {
     pub fn new() -> Self {
-        let inner = FactoryBackedVideoCodecCapability::new(
-            VideoCodecImplementation::new("internal", "WebRTC built-in VideoCodecFactory"),
-            VideoEncoderFactory::builtin(),
-            VideoDecoderFactory::builtin(),
-        );
-        Self { inner }
+        Self {
+            implementation: VideoCodecImplementation::new(
+                "internal",
+                "WebRTC built-in VideoCodecFactory",
+            ),
+            encoder_factory: VideoEncoderFactory::builtin(),
+            decoder_factory: VideoDecoderFactory::builtin(),
+        }
     }
 }
 
@@ -32,30 +37,30 @@ impl Default for InternalVideoCodecCapability {
 
 impl VideoCodecCapability for InternalVideoCodecCapability {
     fn get_implementation(&self) -> VideoCodecImplementation {
-        self.inner.get_implementation()
+        self.implementation.clone()
     }
 
-    fn get_supported_formats(&self, direction: CodecDirection) -> Option<Vec<SdpVideoFormat>> {
-        Some(self.inner.get_supported_formats(direction))
+    fn get_supported_formats(&self, direction: CodecDirection) -> Vec<SdpVideoFormat> {
+        match direction {
+            CodecDirection::Encoder => self.encoder_factory.get_supported_formats(),
+            CodecDirection::Decoder => self.decoder_factory.get_supported_formats(),
+        }
     }
 
-    fn resolve_sdp_format(
+    fn create_video_encoder(
         &self,
-        direction: CodecDirection,
-        codec_type: VideoCodecType,
-        parameters: &HashMap<String, String>,
-        scalability_mode: Option<&str>,
-    ) -> Option<SdpVideoFormat> {
-        self.inner
-            .resolve_sdp_format(direction, codec_type, parameters, scalability_mode)
+        env: EnvironmentRef<'_>,
+        format: &SdpVideoFormat,
+    ) -> Option<VideoEncoder> {
+        self.encoder_factory.create(env, format.as_ref())
     }
 
-    fn create_video_encoder(&self, format: &SdpVideoFormat) -> Option<VideoEncoder> {
-        self.inner.create_video_encoder(format)
-    }
-
-    fn create_video_decoder(&self, format: &SdpVideoFormat) -> Option<VideoDecoder> {
-        self.inner.create_video_decoder(format)
+    fn create_video_decoder(
+        &self,
+        env: EnvironmentRef<'_>,
+        format: &SdpVideoFormat,
+    ) -> Option<VideoDecoder> {
+        self.decoder_factory.create(env, format.as_ref())
     }
 }
 
@@ -73,22 +78,23 @@ mod tests {
     fn internal_capability_creates_supported_encoder_and_decoder() {
         let capability = InternalVideoCodecCapability::new();
 
-        let encoder_formats = capability
-            .get_supported_formats(CodecDirection::Encoder)
-            .expect("encoder formats must be available");
+        let encoder_formats = capability.get_supported_formats(CodecDirection::Encoder);
+        let env = shiguredo_webrtc::Environment::new();
         for format in &encoder_formats {
             assert!(
-                capability.create_video_encoder(format).is_some(),
+                capability
+                    .create_video_encoder(env.as_ref(), format)
+                    .is_some(),
                 "encoder must be created for a supported format",
             );
         }
 
-        let decoder_formats = capability
-            .get_supported_formats(CodecDirection::Decoder)
-            .expect("decoder formats must be available");
+        let decoder_formats = capability.get_supported_formats(CodecDirection::Decoder);
         for format in &decoder_formats {
             assert!(
-                capability.create_video_decoder(format).is_some(),
+                capability
+                    .create_video_decoder(env.as_ref(), format)
+                    .is_some(),
                 "decoder must be created for a supported format",
             );
         }
@@ -99,19 +105,18 @@ mod tests {
         let capability = InternalVideoCodecCapability::new();
         let codec_type = capability
             .get_supported_formats(CodecDirection::Encoder)
-            .expect("encoder formats must be available")
             .into_iter()
             .find_map(|format| {
                 let name = format.name().ok()?;
                 VideoCodecType::try_from(name.as_str()).ok()
             })
             .expect("at least one encoder codec must be supported");
-        let resolved = capability.resolve_sdp_format(
-            CodecDirection::Encoder,
-            codec_type,
-            &HashMap::new(),
-            Some("INVALID_MODE"),
+        let requested = SdpVideoFormat::new(
+            codec_type
+                .as_str()
+                .expect("known codec must have valid codec name"),
         );
+        let resolved = capability.resolve_sdp_format(CodecDirection::Encoder, &requested);
         assert!(resolved.is_some());
     }
 }

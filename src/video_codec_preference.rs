@@ -1,6 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
-use shiguredo_webrtc::VideoCodecType;
+use shiguredo_webrtc::{SdpVideoFormat, VideoCodecType};
 
 use nojson::{DisplayJson, Json, JsonFormatter, JsonParseError, RawJsonValue};
 
@@ -14,8 +14,6 @@ pub struct PreferenceCodec {
     direction: CodecDirection,
     codec_type: VideoCodecType,
     implementation: VideoCodecImplementation,
-    scalability_mode: Option<String>,
-    parameters: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -28,15 +26,11 @@ impl PreferenceCodec {
         direction: CodecDirection,
         codec_type: VideoCodecType,
         implementation: VideoCodecImplementation,
-        scalability_mode: Option<String>,
-        parameters: HashMap<String, String>,
     ) -> Self {
         Self {
             direction,
             codec_type,
             implementation,
-            scalability_mode,
-            parameters,
         }
     }
 
@@ -50,14 +44,6 @@ impl PreferenceCodec {
 
     pub fn implementation(&self) -> &VideoCodecImplementation {
         &self.implementation
-    }
-
-    pub fn scalability_mode(&self) -> Option<&str> {
-        self.scalability_mode.as_deref()
-    }
-
-    pub fn parameters(&self) -> &HashMap<String, String> {
-        &self.parameters
     }
 
     pub fn set_implementation(&mut self, implementation: VideoCodecImplementation) {
@@ -86,8 +72,6 @@ impl VideoCodecPreference {
                         direction,
                         codec_type,
                         implementation.clone(),
-                        None,
-                        HashMap::new(),
                     ));
                 }
             }
@@ -124,8 +108,6 @@ impl VideoCodecPreference {
         direction: CodecDirection,
         codec_type: VideoCodecType,
         implementation: VideoCodecImplementation,
-        scalability_mode: Option<String>,
-        parameters: HashMap<String, String>,
     ) -> &mut PreferenceCodec {
         if let Some(index) = self
             .codecs
@@ -134,13 +116,8 @@ impl VideoCodecPreference {
         {
             return &mut self.codecs[index];
         }
-        self.codecs.push(PreferenceCodec::new(
-            direction,
-            codec_type,
-            implementation,
-            scalability_mode,
-            parameters,
-        ));
+        self.codecs
+            .push(PreferenceCodec::new(direction, codec_type, implementation));
         self.codecs
             .last_mut()
             .expect("codecs must contain one element after push")
@@ -156,8 +133,6 @@ impl VideoCodecPreference {
         for codec in &preference.codecs {
             if let Some(existing) = self.find_mut(codec.direction, codec.codec_type) {
                 existing.implementation = codec.implementation.clone();
-                existing.scalability_mode = codec.scalability_mode.clone();
-                existing.parameters = codec.parameters.clone();
             } else {
                 self.codecs.push(codec.clone());
             }
@@ -171,14 +146,7 @@ impl DisplayJson for PreferenceCodec {
         f.object(|f| {
             f.member("direction", self.direction.as_str())?;
             f.member("codec_type", codec_type)?;
-            f.member("implementation", &self.implementation)?;
-            if let Some(scalability_mode) = &self.scalability_mode {
-                f.member("scalability_mode", scalability_mode)?;
-            }
-            if !self.parameters.is_empty() {
-                f.member("parameters", &self.parameters)?;
-            }
-            Ok(())
+            f.member("implementation", &self.implementation)
         })
     }
 }
@@ -191,23 +159,10 @@ impl<'text, 'raw> TryFrom<RawJsonValue<'text, 'raw>> for PreferenceCodec {
         let codec_type = parse_video_codec_type(value.to_member("codec_type")?.required()?)?;
         let implementation: VideoCodecImplementation =
             value.to_member("implementation")?.required()?.try_into()?;
-        let scalability_mode: Option<String> = value
-            .to_member("scalability_mode")?
-            .optional()
-            .map(TryInto::try_into)
-            .transpose()?;
-        let parameters: HashMap<String, String> = value
-            .to_member("parameters")?
-            .optional()
-            .map(TryInto::try_into)
-            .transpose()?
-            .unwrap_or_default();
         Ok(Self {
             direction,
             codec_type,
             implementation,
-            scalability_mode,
-            parameters,
         })
     }
 }
@@ -320,9 +275,12 @@ fn validate_codec(
     if capability
         .resolve_sdp_format(
             codec.direction(),
-            codec.codec_type(),
-            codec.parameters(),
-            codec.scalability_mode(),
+            &SdpVideoFormat::new(
+                codec
+                    .codec_type()
+                    .as_str()
+                    .expect("known codec type must be converted to codec name"),
+            ),
         )
         .is_none()
     {
@@ -381,7 +339,8 @@ mod tests {
     use super::*;
     use crate::error::Error;
     use shiguredo_webrtc::{
-        SdpVideoFormat, VideoDecoder, VideoDecoderHandler, VideoEncoder, VideoEncoderHandler,
+        EnvironmentRef, SdpVideoFormat, VideoDecoder, VideoDecoderHandler, VideoEncoder,
+        VideoEncoderHandler,
     };
 
     struct StubVideoEncoder;
@@ -422,13 +381,26 @@ mod tests {
             }
         }
 
+        fn get_supported_formats(&self, direction: CodecDirection) -> Vec<SdpVideoFormat> {
+            let supported = match direction {
+                CodecDirection::Encoder => &self.encoder_supported,
+                CodecDirection::Decoder => &self.decoder_supported,
+            };
+            supported
+                .iter()
+                .filter_map(|codec_type| codec_type.as_str().map(SdpVideoFormat::new))
+                .collect()
+        }
+
         fn resolve_sdp_format(
             &self,
             direction: CodecDirection,
-            codec_type: VideoCodecType,
-            parameters: &HashMap<String, String>,
-            scalability_mode: Option<&str>,
+            format: &SdpVideoFormat,
         ) -> Option<shiguredo_webrtc::SdpVideoFormat> {
+            let codec_type = format
+                .name()
+                .ok()
+                .and_then(|name| VideoCodecType::try_from(name.as_str()).ok())?;
             let supported = self.is_supported(direction, codec_type);
             if !supported {
                 return None;
@@ -438,30 +410,14 @@ mod tests {
             if codec_type == VideoCodecType::H264 {
                 format.parameters_mut().set("packetization-mode", "1");
             }
-            if !parameters.is_empty() {
-                let format_params = format
-                    .parameters_mut()
-                    .iter()
-                    .collect::<HashMap<String, String>>();
-                if !parameters
-                    .iter()
-                    .all(|(k, v)| format_params.get(k).is_some_and(|value| value == v))
-                {
-                    return None;
-                }
-            }
-            if let Some(mode_text) = scalability_mode
-                && !format.scalability_modes().iter().any(|mode| {
-                    mode.as_str()
-                        .is_ok_and(|format_mode_text| format_mode_text == mode_text)
-                })
-            {
-                return None;
-            }
             Some(format)
         }
 
-        fn create_video_encoder(&self, format: &SdpVideoFormat) -> Option<VideoEncoder> {
+        fn create_video_encoder(
+            &self,
+            _env: EnvironmentRef<'_>,
+            format: &SdpVideoFormat,
+        ) -> Option<VideoEncoder> {
             let codec_type = format
                 .name()
                 .ok()
@@ -473,7 +429,11 @@ mod tests {
             }
         }
 
-        fn create_video_decoder(&self, format: &SdpVideoFormat) -> Option<VideoDecoder> {
+        fn create_video_decoder(
+            &self,
+            _env: EnvironmentRef<'_>,
+            format: &SdpVideoFormat,
+        ) -> Option<VideoDecoder> {
             let codec_type = format
                 .name()
                 .ok()
@@ -491,7 +451,7 @@ mod tests {
         codec_type: VideoCodecType,
         implementation: VideoCodecImplementation,
     ) -> PreferenceCodec {
-        PreferenceCodec::new(direction, codec_type, implementation, None, HashMap::new())
+        PreferenceCodec::new(direction, codec_type, implementation)
     }
 
     fn sample_capabilities() -> Vec<Box<dyn VideoCodecCapability>> {
@@ -571,8 +531,6 @@ mod tests {
             CodecDirection::Encoder,
             VideoCodecType::H264,
             VideoCodecImplementation::new("nvcodec", "NVIDIA NVENC/NVDEC"),
-            Some(String::from("L1T1")),
-            HashMap::from([(String::from("packetization-mode"), String::from("1"))]),
         );
         assert_round_trip(codec);
     }
@@ -780,8 +738,6 @@ mod tests {
             CodecDirection::Encoder,
             VideoCodecType::H264,
             VideoCodecImplementation::new("nvcodec", "NVIDIA NVENC/NVDEC"),
-            None,
-            HashMap::new(),
         );
         codec.set_implementation(VideoCodecImplementation::new(
             "nvcodec",
