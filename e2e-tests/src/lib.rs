@@ -166,6 +166,11 @@ pub fn api_url() -> Option<String> {
     env::var("TEST_API_URL").ok()
 }
 
+/// OpenH264 動的ライブラリのパスを取得する (設定されている場合)。
+pub fn openh264_path() -> Option<String> {
+    env::var("OPENH264_PATH").ok()
+}
+
 /// 統計情報から指定した type のエントリを検索し、指定したフィールドの値を合計して返す。
 ///
 /// WebRTC 統計情報の JSON 配列をパースし、`stat_type` に一致する type を持つエントリを探して、

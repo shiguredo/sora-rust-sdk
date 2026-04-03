@@ -10,6 +10,7 @@ env:
   TEST_CHANNEL_ID_PREFIX: ${{ secrets.TEST_CHANNEL_ID_PREFIX }}
   TEST_SECRET_KEY: ${{ secrets.TEST_SECRET_KEY }}
   TEST_API_URL: ${{ secrets.TEST_API_URL }}
+  OPENH264_VERSION: "2.6.0"
 
 permissions:
   contents: read
@@ -40,12 +41,26 @@ jobs:
             libwayland-dev libxkbcommon-dev \
             libasound2-dev libpulse-dev libpipewire-0.3-dev \
             libvulkan-dev \
-            libdbus-1-dev libudev-dev libdrm-dev libgbm-dev
+            libdbus-1-dev libudev-dev libdrm-dev libgbm-dev \
+            libclang-dev
+
       - run: rustup update stable
       - uses: shiguredo/github-actions/.github/actions/rust-cache@main
         with:
           os: ${{ matrix.os }}
           toolchain: stable
+
+      - uses: shiguredo/github-actions/.github/actions/download-openh264@main
+        if: ${{ runner.environment != 'self-hosted' }}
+        id: openh264
+        with:
+          openh264_version: ${{ env.OPENH264_VERSION }}
+          use-cache: true
+      - name: Set OpenH264 path
+        if: ${{ runner.environment != 'self-hosted' && steps.openh264.outputs.openh264_path }}
+        run: echo "OPENH264_PATH=${{ steps.openh264.outputs.openh264_path }}" >> $GITHUB_ENV
+        shell: bash
+
       - run: cp .cargo/config.toml.ci .cargo/config.toml
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace -- -D warnings
@@ -59,11 +74,25 @@ jobs:
     steps:
       - name: Checkout sources
         uses: actions/checkout@v6
+      - name: Remove old target
+        run: rm -rf target/
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
       - name: Update PATH
         run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - uses: shiguredo/github-actions/.github/actions/download-openh264@main
+        if: ${{ runner.environment != 'self-hosted' }}
+        id: openh264
+        with:
+          openh264_version: ${{ env.OPENH264_VERSION }}
+          use-cache: true
+      - name: Set OpenH264 path
+        if: ${{ runner.environment != 'self-hosted' && steps.openh264.outputs.openh264_path }}
+        run: echo "OPENH264_PATH=${{ steps.openh264.outputs.openh264_path }}" >> $GITHUB_ENV
+        shell: bash
+
       - run: cp .cargo/config.toml.ci .cargo/config.toml
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace -- -D warnings

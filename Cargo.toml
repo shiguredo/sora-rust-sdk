@@ -2,7 +2,7 @@
 members = ["examples/sumomo", "e2e-tests"]
 
 [workspace.dependencies]
-shiguredo_webrtc = { version = "=0.146.3" }
+shiguredo_webrtc = { version = "=0.147.1-canary.0" }
 
 [package]
 name = "sora_sdk"
@@ -18,14 +18,16 @@ readme = "README.md"
 include = ["/src/**", "/LICENSE", "/README.md"]
 
 [features]
-default = []
+default = ["openh264"]
 nvcodec = ["dep:shiguredo_nvcodec"]
+openh264 = ["dep:shiguredo_openh264"]
 
 [dependencies]
 shiguredo_webrtc = { workspace = true }
 shiguredo_http11 = "2026.1.1"
 shiguredo_websocket = "2026.1.0"
 shiguredo_nvcodec = { version = "2025.2.2", optional = true }
+shiguredo_openh264 = { version = "2026.1.0", optional = true }
 shiguredo_mp4 = "2026.3"
 nojson = "0.3"
 rand = "0.9"

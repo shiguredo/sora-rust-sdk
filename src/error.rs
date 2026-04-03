@@ -2,7 +2,7 @@
 use std::io;
 
 use nojson::JsonParseError;
-use shiguredo_http11::{Error as Http11Error, auth::AuthError, uri::UriError};
+use shiguredo_http11::{auth::AuthError, uri::UriError};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::client::SoraClientCommand;
@@ -32,7 +32,7 @@ pub enum Error {
         path: String,
     },
     ProxyUrlQueryNotAllowed,
-    ProxyConnectDecode(Http11Error),
+    ProxyConnectDecode(shiguredo_http11::Error),
     ProxyConnectResponseMissing,
     ProxyConnectStatusNotSuccessful {
         status_code: u16,
@@ -112,6 +112,8 @@ pub enum Error {
     InvalidVideoCodecPreference {
         reason: String,
     },
+    #[cfg(feature = "openh264")]
+    Openh264(shiguredo_openh264::Error),
     RpcTimeout,
     SignalingUrlsEmpty,
     AllSignalingUrlsFailed {
@@ -255,6 +257,8 @@ impl std::fmt::Display for Error {
             Error::InvalidVideoCodecPreference { reason } => {
                 write!(f, "VideoCodecPreference が不正です: {reason}")
             }
+            #[cfg(feature = "openh264")]
+            Error::Openh264(err) => write!(f, "OpenH264 error: {err}"),
             Error::RpcTimeout => f.write_str("RPC レスポンスがタイムアウトしました"),
             Error::SignalingUrlsEmpty => f.write_str("シグナリング URL が指定されていません"),
             Error::AllSignalingUrlsFailed { errors } => {
@@ -292,6 +296,8 @@ impl std::error::Error for Error {
             Error::Io(err) => Some(err),
             Error::JsonParse(err) => Some(err),
             Error::Webrtc(err) => Some(err),
+            #[cfg(feature = "openh264")]
+            Error::Openh264(err) => Some(err),
             Error::SimulcastSetParametersFailed { source } => Some(source),
             Error::Utf8DecodeFailed(err) => Some(err),
             Error::CommandSendFailed { source, .. } => Some(source),
@@ -319,8 +325,8 @@ impl From<UriError> for Error {
     }
 }
 
-impl From<Http11Error> for Error {
-    fn from(err: Http11Error) -> Self {
+impl From<shiguredo_http11::Error> for Error {
+    fn from(err: shiguredo_http11::Error) -> Self {
         Error::ProxyConnectDecode(err)
     }
 }
@@ -352,6 +358,13 @@ impl From<JsonParseError> for Error {
 impl From<shiguredo_webrtc::Error> for Error {
     fn from(err: shiguredo_webrtc::Error) -> Self {
         Error::Webrtc(err)
+    }
+}
+
+#[cfg(feature = "openh264")]
+impl From<shiguredo_openh264::Error> for Error {
+    fn from(err: shiguredo_openh264::Error) -> Self {
+        Error::Openh264(err)
     }
 }
 
