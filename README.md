@@ -40,6 +40,7 @@ Please read <https://github.com/shiguredo/oss/blob/master/README.en.md> before u
 - TURN-TLS 対応
 - HTTP プロキシ対応
 - VP8 / VP9 / AV1 / H.264 / H.265 対応
+- MP4 ファイルから無変換での音声・映像送信対応
 - 複数クライアント同時実行対応
 
 ## 使い方
