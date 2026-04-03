@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use shiguredo_webrtc::{SdpVideoFormat, VideoCodecType, VideoDecoderHandler, VideoEncoderHandler};
+use shiguredo_webrtc::{SdpVideoFormat, VideoCodecType, VideoDecoder, VideoEncoder};
 use shiguredo_webrtc::{VideoDecoderFactory, VideoEncoderFactory};
 
 use crate::video_codec_capability::{
@@ -46,17 +46,11 @@ impl VideoCodecCapability for InternalHwaVideoCodecCapability {
             .resolve_sdp_format(direction, codec_type, parameters, scalability_mode)
     }
 
-    fn create_video_encoder(
-        &self,
-        format: &SdpVideoFormat,
-    ) -> Option<Box<dyn VideoEncoderHandler>> {
+    fn create_video_encoder(&self, format: &SdpVideoFormat) -> Option<VideoEncoder> {
         self.inner.create_video_encoder(format)
     }
 
-    fn create_video_decoder(
-        &self,
-        format: &SdpVideoFormat,
-    ) -> Option<Box<dyn VideoDecoderHandler>> {
+    fn create_video_decoder(&self, format: &SdpVideoFormat) -> Option<VideoDecoder> {
         self.inner.create_video_decoder(format)
     }
 }

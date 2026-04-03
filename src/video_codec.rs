@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use shiguredo_webrtc::{
-    EnvironmentRef, SdpVideoFormat, SdpVideoFormatRef, VideoCodecType, VideoDecoderFactoryHandler,
-    VideoDecoderHandler, VideoEncoderFactoryHandler, VideoEncoderHandler,
+    EnvironmentRef, SdpVideoFormat, SdpVideoFormatRef, VideoCodecType, VideoDecoder,
+    VideoDecoderFactoryHandler, VideoEncoder, VideoEncoderFactoryHandler,
 };
 
 use crate::video_codec_capability::{
@@ -58,7 +58,7 @@ impl VideoEncoderFactoryHandler for SoraVideoEncoderFactory {
         &mut self,
         env: EnvironmentRef<'_>,
         format: SdpVideoFormatRef<'_>,
-    ) -> Option<Box<dyn VideoEncoderHandler>> {
+    ) -> Option<VideoEncoder> {
         let format_name = format.name().ok()?;
         let codec_type = VideoCodecType::try_from(format_name.as_str()).ok()?;
         let preference = self.preference.find(CodecDirection::Encoder, codec_type)?;
@@ -85,7 +85,7 @@ impl VideoDecoderFactoryHandler for SoraVideoDecoderFactory {
         &mut self,
         env: EnvironmentRef<'_>,
         format: SdpVideoFormatRef<'_>,
-    ) -> Option<Box<dyn VideoDecoderHandler>> {
+    ) -> Option<VideoDecoder> {
         let format_name = format.name().ok()?;
         let codec_type = VideoCodecType::try_from(format_name.as_str()).ok()?;
         let preference = self.preference.find(CodecDirection::Decoder, codec_type)?;
@@ -181,7 +181,7 @@ mod tests {
 
     use super::*;
     use crate::video_codec_preference::PreferenceCodec;
-    use shiguredo_webrtc::ScalabilityMode;
+    use shiguredo_webrtc::{ScalabilityMode, VideoDecoderHandler, VideoEncoderHandler};
 
     struct StubVideoEncoder;
     impl VideoEncoderHandler for StubVideoEncoder {}
@@ -315,31 +315,25 @@ mod tests {
             }
         }
 
-        fn create_video_encoder(
-            &self,
-            format: &SdpVideoFormat,
-        ) -> Option<Box<dyn VideoEncoderHandler>> {
+        fn create_video_encoder(&self, format: &SdpVideoFormat) -> Option<VideoEncoder> {
             let codec_type = format
                 .name()
                 .ok()
                 .and_then(|name| VideoCodecType::try_from(name.as_str()).ok())?;
             if self.is_supported(CodecDirection::Encoder, codec_type) {
-                Some(Box::new(StubVideoEncoder))
+                Some(VideoEncoder::new_with_handler(Box::new(StubVideoEncoder)))
             } else {
                 None
             }
         }
 
-        fn create_video_decoder(
-            &self,
-            format: &SdpVideoFormat,
-        ) -> Option<Box<dyn VideoDecoderHandler>> {
+        fn create_video_decoder(&self, format: &SdpVideoFormat) -> Option<VideoDecoder> {
             let codec_type = format
                 .name()
                 .ok()
                 .and_then(|name| VideoCodecType::try_from(name.as_str()).ok())?;
             if self.is_supported(CodecDirection::Decoder, codec_type) {
-                Some(Box::new(StubVideoDecoder))
+                Some(VideoDecoder::new_with_handler(Box::new(StubVideoDecoder)))
             } else {
                 None
             }

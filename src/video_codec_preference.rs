@@ -380,7 +380,9 @@ fn parse_video_codec_type(
 mod tests {
     use super::*;
     use crate::error::Error;
-    use shiguredo_webrtc::{SdpVideoFormat, VideoDecoderHandler, VideoEncoderHandler};
+    use shiguredo_webrtc::{
+        SdpVideoFormat, VideoDecoder, VideoDecoderHandler, VideoEncoder, VideoEncoderHandler,
+    };
 
     struct StubVideoEncoder;
     impl VideoEncoderHandler for StubVideoEncoder {}
@@ -459,31 +461,25 @@ mod tests {
             Some(format)
         }
 
-        fn create_video_encoder(
-            &self,
-            format: &SdpVideoFormat,
-        ) -> Option<Box<dyn VideoEncoderHandler>> {
+        fn create_video_encoder(&self, format: &SdpVideoFormat) -> Option<VideoEncoder> {
             let codec_type = format
                 .name()
                 .ok()
                 .and_then(|name| VideoCodecType::try_from(name.as_str()).ok())?;
             if self.is_supported(CodecDirection::Encoder, codec_type) {
-                Some(Box::new(StubVideoEncoder))
+                Some(VideoEncoder::new_with_handler(Box::new(StubVideoEncoder)))
             } else {
                 None
             }
         }
 
-        fn create_video_decoder(
-            &self,
-            format: &SdpVideoFormat,
-        ) -> Option<Box<dyn VideoDecoderHandler>> {
+        fn create_video_decoder(&self, format: &SdpVideoFormat) -> Option<VideoDecoder> {
             let codec_type = format
                 .name()
                 .ok()
                 .and_then(|name| VideoCodecType::try_from(name.as_str()).ok())?;
             if self.is_supported(CodecDirection::Decoder, codec_type) {
-                Some(Box::new(StubVideoDecoder))
+                Some(VideoDecoder::new_with_handler(Box::new(StubVideoDecoder)))
             } else {
                 None
             }

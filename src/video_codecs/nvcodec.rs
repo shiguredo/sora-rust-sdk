@@ -6,12 +6,12 @@ use shiguredo_nvcodec::{
 use shiguredo_webrtc::{
     CodecSpecificInfo, EncodedImage, EncodedImageBuffer, EncodedImageRef, H264PacketizationMode,
     I420Buffer, NV12Buffer, SdpVideoFormat, VideoCodecRef, VideoCodecStatus, VideoCodecType,
-    VideoDecoderDecodedImageCallbackPtr, VideoDecoderDecoderInfo, VideoDecoderHandler,
-    VideoDecoderSettingsRef, VideoEncoderEncodedImageCallbackPtr,
-    VideoEncoderEncodedImageCallbackRef, VideoEncoderEncodedImageCallbackResultError,
-    VideoEncoderEncoderInfo, VideoEncoderHandler, VideoEncoderRateControlParametersRef,
-    VideoEncoderSettingsRef, VideoFrame, VideoFrameRef, VideoFrameType, VideoFrameTypeVectorRef,
-    i420_to_nv12, nv12_to_i420,
+    VideoDecoder, VideoDecoderDecodedImageCallbackPtr, VideoDecoderDecoderInfo,
+    VideoDecoderHandler, VideoDecoderSettingsRef, VideoEncoder,
+    VideoEncoderEncodedImageCallbackPtr, VideoEncoderEncodedImageCallbackRef,
+    VideoEncoderEncodedImageCallbackResultError, VideoEncoderEncoderInfo, VideoEncoderHandler,
+    VideoEncoderRateControlParametersRef, VideoEncoderSettingsRef, VideoFrame, VideoFrameRef,
+    VideoFrameType, VideoFrameTypeVectorRef, i420_to_nv12, nv12_to_i420,
 };
 
 use crate::video_codec_capability::{
@@ -389,23 +389,21 @@ impl VideoCodecCapability for NvCodecVideoCodecCapability {
         ))
     }
 
-    fn create_video_encoder(
-        &self,
-        format: &SdpVideoFormat,
-    ) -> Option<Box<dyn VideoEncoderHandler>> {
+    fn create_video_encoder(&self, format: &SdpVideoFormat) -> Option<VideoEncoder> {
         if format.name().ok().as_deref() == Some("H264") {
-            Some(Box::new(NvCodecVideoEncoder::new()))
+            Some(VideoEncoder::new_with_handler(Box::new(
+                NvCodecVideoEncoder::new(),
+            )))
         } else {
             None
         }
     }
 
-    fn create_video_decoder(
-        &self,
-        format: &SdpVideoFormat,
-    ) -> Option<Box<dyn VideoDecoderHandler>> {
+    fn create_video_decoder(&self, format: &SdpVideoFormat) -> Option<VideoDecoder> {
         if format.name().ok().as_deref() == Some("H264") {
-            Some(Box::new(NvCodecVideoDecoder::new()))
+            Some(VideoDecoder::new_with_handler(Box::new(
+                NvCodecVideoDecoder::new(),
+            )))
         } else {
             None
         }

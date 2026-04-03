@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use shiguredo_webrtc::{SdpVideoFormat, VideoCodecType, VideoDecoderHandler, VideoEncoderHandler};
+use shiguredo_webrtc::{SdpVideoFormat, VideoCodecType, VideoDecoder, VideoEncoder};
 
 use nojson::{DisplayJson, JsonFormatter, JsonParseError, RawJsonValue};
 
@@ -88,10 +88,8 @@ pub trait VideoCodecCapability: Send {
         parameters: &HashMap<String, String>,
         scalability_mode: Option<&str>,
     ) -> Option<SdpVideoFormat>;
-    fn create_video_encoder(&self, format: &SdpVideoFormat)
-    -> Option<Box<dyn VideoEncoderHandler>>;
-    fn create_video_decoder(&self, format: &SdpVideoFormat)
-    -> Option<Box<dyn VideoDecoderHandler>>;
+    fn create_video_encoder(&self, format: &SdpVideoFormat) -> Option<VideoEncoder>;
+    fn create_video_decoder(&self, format: &SdpVideoFormat) -> Option<VideoDecoder>;
 }
 
 impl DisplayJson for VideoCodecImplementation {
@@ -117,6 +115,7 @@ impl<'text, 'raw> TryFrom<RawJsonValue<'text, 'raw>> for VideoCodecImplementatio
 mod tests {
     use super::*;
     use nojson::Json;
+    use shiguredo_webrtc::{VideoDecoderHandler, VideoEncoderHandler};
 
     struct StubVideoEncoder;
     impl VideoEncoderHandler for StubVideoEncoder {}
@@ -145,23 +144,17 @@ mod tests {
             }
         }
 
-        fn create_video_encoder(
-            &self,
-            format: &SdpVideoFormat,
-        ) -> Option<Box<dyn VideoEncoderHandler>> {
+        fn create_video_encoder(&self, format: &SdpVideoFormat) -> Option<VideoEncoder> {
             if format.name().ok().as_deref() == Some("H264") {
-                Some(Box::new(StubVideoEncoder))
+                Some(VideoEncoder::new_with_handler(Box::new(StubVideoEncoder)))
             } else {
                 None
             }
         }
 
-        fn create_video_decoder(
-            &self,
-            format: &SdpVideoFormat,
-        ) -> Option<Box<dyn VideoDecoderHandler>> {
+        fn create_video_decoder(&self, format: &SdpVideoFormat) -> Option<VideoDecoder> {
             if format.name().ok().as_deref() == Some("H264") {
-                Some(Box::new(StubVideoDecoder))
+                Some(VideoDecoder::new_with_handler(Box::new(StubVideoDecoder)))
             } else {
                 None
             }

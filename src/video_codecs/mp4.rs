@@ -22,11 +22,12 @@ use std::thread;
 use shiguredo_webrtc::{
     AdaptFrameResult, AdaptedVideoTrackSource, CodecSpecificInfo, EncodedImage, EncodedImageBuffer,
     H264PacketizationMode, I420Buffer, SdpVideoFormat, TimestampAligner, VideoCodecRef,
-    VideoCodecStatus, VideoCodecType, VideoDecoderHandler, VideoEncoderEncodedImageCallbackPtr,
-    VideoEncoderEncodedImageCallbackRef, VideoEncoderEncodedImageCallbackResultError,
-    VideoEncoderEncoderInfo, VideoEncoderHandler, VideoEncoderRateControlParametersRef,
-    VideoEncoderSettingsRef, VideoFrame, VideoFrameBuffer, VideoFrameBufferHandler, VideoFrameRef,
-    VideoFrameType, VideoFrameTypeVectorRef, VideoTrackSource, rtc_log_info, rtc_log_warning,
+    VideoCodecStatus, VideoCodecType, VideoDecoder, VideoEncoder,
+    VideoEncoderEncodedImageCallbackPtr, VideoEncoderEncodedImageCallbackRef,
+    VideoEncoderEncodedImageCallbackResultError, VideoEncoderEncoderInfo, VideoEncoderHandler,
+    VideoEncoderRateControlParametersRef, VideoEncoderSettingsRef, VideoFrame, VideoFrameBuffer,
+    VideoFrameBufferHandler, VideoFrameRef, VideoFrameType, VideoFrameTypeVectorRef,
+    VideoTrackSource, rtc_log_info, rtc_log_warning,
 };
 
 use crate::video_codec_capability::{
@@ -599,10 +600,7 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
         }
     }
 
-    fn create_video_encoder(
-        &self,
-        format: &SdpVideoFormat,
-    ) -> Option<Box<dyn VideoEncoderHandler>> {
+    fn create_video_encoder(&self, format: &SdpVideoFormat) -> Option<VideoEncoder> {
         let Ok(format_name) = format.name() else {
             return None;
         };
@@ -612,14 +610,13 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
         if format_codec_type != self.codec_type {
             return None;
         }
-        Some(Box::new(Mp4PassthroughEncoder { callback: None }))
+        Some(VideoEncoder::new_with_handler(Box::new(
+            Mp4PassthroughEncoder { callback: None },
+        )))
     }
 
     /// デコーダーは提供しない (パススルーは送信専用)。
-    fn create_video_decoder(
-        &self,
-        _format: &SdpVideoFormat,
-    ) -> Option<Box<dyn VideoDecoderHandler>> {
+    fn create_video_decoder(&self, _format: &SdpVideoFormat) -> Option<VideoDecoder> {
         None
     }
 }

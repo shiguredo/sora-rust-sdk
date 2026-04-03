@@ -11,6 +11,10 @@
 
 ## develop
 
+- [CHANGE] `VideoCodecCapability` の create API の戻り値を concrete 型に変更する
+  - `create_video_encoder` / `create_video_decoder` の戻り値を `Option<VideoEncoder>` / `Option<VideoDecoder>` に変更する
+  - `SoraVideoEncoderFactory` / `SoraVideoDecoderFactory` と各 `VideoCodecCapability` 実装を新シグネチャへ追従する
+  - @melpon
 - [UPDATE] `shiguredo_webrtc` を 0.147.0 に上げる
   - @sile, @melpon
 - [ADD] Windows に対応する

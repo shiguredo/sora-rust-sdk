@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use shiguredo_webrtc::{
-    Environment, SdpVideoFormat, VideoCodecType, VideoDecoderFactory, VideoDecoderHandler,
-    VideoEncoderFactory, VideoEncoderHandler, fuzzy_match_sdp_video_format,
+    Environment, SdpVideoFormat, VideoCodecType, VideoDecoder, VideoDecoderFactory, VideoEncoder,
+    VideoEncoderFactory, fuzzy_match_sdp_video_format,
 };
 
 use crate::video_codec_capability::{
@@ -73,28 +73,14 @@ impl VideoCodecCapability for FactoryBackedVideoCodecCapability {
         fuzzy_match_sdp_video_format(&formats, requested.as_ref())
     }
 
-    fn create_video_encoder(
-        &self,
-        format: &SdpVideoFormat,
-    ) -> Option<Box<dyn VideoEncoderHandler>> {
+    fn create_video_encoder(&self, format: &SdpVideoFormat) -> Option<VideoEncoder> {
         let env = Environment::new();
-        let encoder = self
-            .encoder_factory
-            .create(env.as_ref(), format.as_ref())
-            .map(Box::new)?;
-        Some(encoder)
+        self.encoder_factory.create(env.as_ref(), format.as_ref())
     }
 
-    fn create_video_decoder(
-        &self,
-        format: &SdpVideoFormat,
-    ) -> Option<Box<dyn VideoDecoderHandler>> {
+    fn create_video_decoder(&self, format: &SdpVideoFormat) -> Option<VideoDecoder> {
         let env = Environment::new();
-        let decoder = self
-            .decoder_factory
-            .create(env.as_ref(), format.as_ref())
-            .map(Box::new)?;
-        Some(decoder)
+        self.decoder_factory.create(env.as_ref(), format.as_ref())
     }
 }
 

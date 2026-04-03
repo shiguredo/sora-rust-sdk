@@ -7,9 +7,9 @@ use shiguredo_openh264::{
 };
 use shiguredo_webrtc::{
     CodecSpecificInfo, EncodedImage, EncodedImageBuffer, EncodedImageRef, H264PacketizationMode,
-    I420Buffer, SdpVideoFormat, VideoCodecRef, VideoCodecStatus, VideoCodecType,
+    I420Buffer, SdpVideoFormat, VideoCodecRef, VideoCodecStatus, VideoCodecType, VideoDecoder,
     VideoDecoderDecodedImageCallbackPtr, VideoDecoderDecoderInfo, VideoDecoderHandler,
-    VideoDecoderSettingsRef, VideoEncoderEncodedImageCallbackPtr,
+    VideoDecoderSettingsRef, VideoEncoder, VideoEncoderEncodedImageCallbackPtr,
     VideoEncoderEncodedImageCallbackRef, VideoEncoderEncodedImageCallbackResultError,
     VideoEncoderEncoderInfo, VideoEncoderHandler, VideoEncoderRateControlParametersRef,
     VideoEncoderSettingsRef, VideoFrame, VideoFrameRef, VideoFrameType, VideoFrameTypeVectorRef,
@@ -503,23 +503,21 @@ impl VideoCodecCapability for Openh264VideoCodecCapability {
         ))
     }
 
-    fn create_video_encoder(
-        &self,
-        format: &SdpVideoFormat,
-    ) -> Option<Box<dyn VideoEncoderHandler>> {
+    fn create_video_encoder(&self, format: &SdpVideoFormat) -> Option<VideoEncoder> {
         if format.name().ok().as_deref() == Some("H264") {
-            Some(Box::new(Openh264VideoEncoder::new(self.library.clone())))
+            Some(VideoEncoder::new_with_handler(Box::new(
+                Openh264VideoEncoder::new(self.library.clone()),
+            )))
         } else {
             None
         }
     }
 
-    fn create_video_decoder(
-        &self,
-        format: &SdpVideoFormat,
-    ) -> Option<Box<dyn VideoDecoderHandler>> {
+    fn create_video_decoder(&self, format: &SdpVideoFormat) -> Option<VideoDecoder> {
         if format.name().ok().as_deref() == Some("H264") {
-            Some(Box::new(Openh264VideoDecoder::new(self.library.clone())))
+            Some(VideoDecoder::new_with_handler(Box::new(
+                Openh264VideoDecoder::new(self.library.clone()),
+            )))
         } else {
             None
         }
