@@ -67,7 +67,6 @@ pub struct TlsConfig {
 type IceServerUrlConfigurer = dyn Fn(&mut IceServer, &[String]) + Send + Sync;
 
 pub struct SoraClientBuilder {
-    context: Arc<SoraClientContext>,
     signaling_urls: Vec<String>,
     channel_id: String,
     role: Role,
@@ -120,6 +119,8 @@ pub struct SoraClientBuilder {
     disconnect_wait_timeout: Duration,
     tls_config: TlsConfig,
     user_agent: Option<String>,
+    // 他の保持オブジェクトより最後に破棄する必要がある。
+    context: Arc<SoraClientContext>,
 }
 
 impl SoraClientBuilder {
@@ -130,7 +131,6 @@ impl SoraClientBuilder {
         role: Role,
     ) -> Self {
         Self {
-            context,
             signaling_urls,
             channel_id,
             role,
@@ -172,6 +172,7 @@ impl SoraClientBuilder {
             disconnect_wait_timeout: Duration::from_secs(5),
             tls_config: TlsConfig::default(),
             user_agent: None,
+            context,
         }
     }
 
@@ -528,11 +529,6 @@ impl SoraClientHandle {
 pub struct SoraClient {
     data_channels: HashMap<String, ManagedDataChannel>,
     data_channel_configs: Vec<DataChannelConfig>,
-    pc: PeerConnection,
-    // Observer を保持しておく必要がある (ドロップすると PeerConnection への通知が止まる)
-    #[allow(dead_code)]
-    pc_observer: PeerConnectionObserver,
-    config: SoraClientBuilder,
     offer_simulcast: bool,
     simulcast_encodings: Vec<SimulcastEncodingConfig>,
     video_sender: Option<RtpSender>,
@@ -544,6 +540,14 @@ pub struct SoraClient {
     proxy: Option<ParsedProxyInfo>,
     selected_signaling_url: Option<String>,
     connected_signaling_url: Option<String>,
+    // 依存するオブジェクトを先に破棄するため、PeerConnection は後ろに保持する。
+    pc: PeerConnection,
+    // Observer を保持しておく必要がある (ドロップすると PeerConnection への通知が止まる)。
+    // PeerConnection の破棄までは生存させるため、pc の後に保持する。
+    #[allow(dead_code)]
+    pc_observer: PeerConnectionObserver,
+    // context を最後に破棄するため、config は最後に保持する。
+    config: SoraClientBuilder,
 }
 
 struct PendingRpcRequest {
@@ -723,9 +727,6 @@ impl SoraClient {
         let client = Self {
             data_channels: HashMap::new(),
             data_channel_configs: Vec::new(),
-            pc,
-            pc_observer: observer,
-            config,
             offer_simulcast: false,
             simulcast_encodings: Vec::new(),
             video_sender: None,
@@ -737,6 +738,9 @@ impl SoraClient {
             proxy,
             selected_signaling_url: None,
             connected_signaling_url: None,
+            pc,
+            pc_observer: observer,
+            config,
         };
         Ok((client, handle))
     }
@@ -1782,15 +1786,6 @@ impl SoraClient {
         }
 
         Ok(())
-    }
-}
-
-impl Drop for SoraClient {
-    fn drop(&mut self) {
-        // DataChannel は PeerConnection のシグナリングスレッドを使用するため、
-        // PeerConnection より先にドロップする必要がある
-        self.data_channels.clear();
-        self.video_sender.take();
     }
 }
 

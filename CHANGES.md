@@ -25,6 +25,8 @@
   - @melpon
 - [ADD] `VideoCodecCapability::get_supported_formats` を追加し、デフォルト実装も追加する
   - @melpon
+- [FIX] 接続失敗時でも `PeerConnection` / `SoraClientContext` の破棄順序を保証するように保持フィールド順を調整する
+  - @melpon
 
 ### misc
 
