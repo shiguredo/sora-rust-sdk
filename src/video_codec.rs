@@ -144,17 +144,17 @@ fn find_capability<'a>(
         .find(|capability| capability.get_implementation() == implementation.clone())
 }
 
-pub struct SimulcastEncoderAdapterSupport {
+pub struct SimulcastCapabilityHelper {
     primary_factory: VideoEncoderFactory,
 }
 
-struct SimulcastEncoderFactoryHandler<GetSupportedFormats, CreateEncoder> {
+struct DelegatingVideoEncoderFactoryHandler<GetSupportedFormats, CreateEncoder> {
     get_supported_formats: GetSupportedFormats,
     create_encoder: CreateEncoder,
 }
 
 impl<GetSupportedFormats, CreateEncoder> VideoEncoderFactoryHandler
-    for SimulcastEncoderFactoryHandler<GetSupportedFormats, CreateEncoder>
+    for DelegatingVideoEncoderFactoryHandler<GetSupportedFormats, CreateEncoder>
 where
     GetSupportedFormats: FnMut() -> Vec<SdpVideoFormat> + Send + 'static,
     CreateEncoder: for<'a> FnMut(EnvironmentRef<'a>, SdpVideoFormatRef<'a>) -> Option<VideoEncoder>
@@ -174,7 +174,7 @@ where
     }
 }
 
-impl SimulcastEncoderAdapterSupport {
+impl SimulcastCapabilityHelper {
     pub fn new(primary_factory: VideoEncoderFactory) -> Self {
         Self { primary_factory }
     }
@@ -190,7 +190,7 @@ impl SimulcastEncoderAdapterSupport {
             + 'static,
     {
         let primary_factory =
-            VideoEncoderFactory::new_with_handler(Box::new(SimulcastEncoderFactoryHandler {
+            VideoEncoderFactory::new_with_handler(Box::new(DelegatingVideoEncoderFactoryHandler {
                 get_supported_formats,
                 create_encoder,
             }));

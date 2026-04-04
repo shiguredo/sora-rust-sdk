@@ -17,7 +17,7 @@ use shiguredo_webrtc::{
 };
 
 use crate::error::Result;
-use crate::video_codec::SimulcastEncoderAdapterSupport;
+use crate::video_codec::SimulcastCapabilityHelper;
 use crate::video_codec_capability::{
     CodecDirection, VideoCodecCapability, VideoCodecImplementation,
 };
@@ -476,7 +476,7 @@ impl VideoDecoderHandler for Openh264VideoDecoder {
 
 pub struct Openh264VideoCodecCapability {
     library: Openh264Library,
-    simulcast_encoder_adapter_support: SimulcastEncoderAdapterSupport,
+    simulcast_capability_helper: SimulcastCapabilityHelper,
 }
 
 impl Openh264VideoCodecCapability {
@@ -491,7 +491,7 @@ impl Openh264VideoCodecCapability {
         let encoder_library = library.clone();
         Ok(Self {
             library,
-            simulcast_encoder_adapter_support: SimulcastEncoderAdapterSupport::new_with_builder(
+            simulcast_capability_helper: SimulcastCapabilityHelper::new_with_builder(
                 openh264_supported_formats,
                 {
                     let library = encoder_library;
@@ -520,7 +520,7 @@ impl VideoCodecCapability for Openh264VideoCodecCapability {
         env: shiguredo_webrtc::EnvironmentRef<'_>,
         format: &SdpVideoFormat,
     ) -> Option<VideoEncoder> {
-        self.simulcast_encoder_adapter_support
+        self.simulcast_capability_helper
             .create_video_encoder(env, format)
     }
 

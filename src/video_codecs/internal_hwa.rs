@@ -3,14 +3,14 @@ use shiguredo_webrtc::{
     VideoEncoderFactory,
 };
 
-use crate::video_codec::SimulcastEncoderAdapterSupport;
+use crate::video_codec::SimulcastCapabilityHelper;
 use crate::video_codec_capability::{
     CodecDirection, VideoCodecCapability, VideoCodecImplementation,
 };
 
 pub struct InternalHwaVideoCodecCapability {
     implementation: VideoCodecImplementation,
-    simulcast_encoder_adapter_support: SimulcastEncoderAdapterSupport,
+    simulcast_capability_helper: SimulcastCapabilityHelper,
     decoder_factory: VideoDecoderFactory,
 }
 
@@ -23,7 +23,7 @@ impl InternalHwaVideoCodecCapability {
                 "internal-hwa",
                 "WebRTC ObjC default VideoCodecFactory",
             ),
-            simulcast_encoder_adapter_support: SimulcastEncoderAdapterSupport::new(encoder_factory),
+            simulcast_capability_helper: SimulcastCapabilityHelper::new(encoder_factory),
             decoder_factory,
         })
     }
@@ -36,9 +36,7 @@ impl VideoCodecCapability for InternalHwaVideoCodecCapability {
 
     fn get_supported_formats(&self, direction: CodecDirection) -> Vec<SdpVideoFormat> {
         match direction {
-            CodecDirection::Encoder => self
-                .simulcast_encoder_adapter_support
-                .get_supported_formats(),
+            CodecDirection::Encoder => self.simulcast_capability_helper.get_supported_formats(),
             CodecDirection::Decoder => self.decoder_factory.get_supported_formats(),
         }
     }
@@ -48,7 +46,7 @@ impl VideoCodecCapability for InternalHwaVideoCodecCapability {
         env: EnvironmentRef<'_>,
         format: &SdpVideoFormat,
     ) -> Option<VideoEncoder> {
-        self.simulcast_encoder_adapter_support
+        self.simulcast_capability_helper
             .create_video_encoder(env, format)
     }
 

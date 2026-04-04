@@ -14,7 +14,7 @@ use shiguredo_webrtc::{
     VideoFrameType, VideoFrameTypeVectorRef, i420_to_nv12, nv12_to_i420,
 };
 
-use crate::video_codec::SimulcastEncoderAdapterSupport;
+use crate::video_codec::SimulcastCapabilityHelper;
 use crate::video_codec_capability::{
     CodecDirection, VideoCodecCapability, VideoCodecImplementation,
 };
@@ -357,13 +357,13 @@ impl VideoDecoderHandler for NvCodecVideoDecoder {
 }
 
 pub struct NvCodecVideoCodecCapability {
-    simulcast_encoder_adapter_support: SimulcastEncoderAdapterSupport,
+    simulcast_capability_helper: SimulcastCapabilityHelper,
 }
 
 impl NvCodecVideoCodecCapability {
     pub fn new() -> Self {
         Self {
-            simulcast_encoder_adapter_support: SimulcastEncoderAdapterSupport::new_with_builder(
+            simulcast_capability_helper: SimulcastCapabilityHelper::new_with_builder(
                 nvcodec_supported_formats,
                 |_env: EnvironmentRef<'_>, format| {
                     Some(VideoEncoder::new_with_handler(Box::new(
@@ -395,7 +395,7 @@ impl VideoCodecCapability for NvCodecVideoCodecCapability {
         env: shiguredo_webrtc::EnvironmentRef<'_>,
         format: &SdpVideoFormat,
     ) -> Option<VideoEncoder> {
-        self.simulcast_encoder_adapter_support
+        self.simulcast_capability_helper
             .create_video_encoder(env, format)
     }
 
