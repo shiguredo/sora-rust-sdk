@@ -23,7 +23,9 @@ pub use crate::types::{
     OpusParams, ProxyInfo, Role, SignalingDirection, SignalingType, Video, VideoAV1Params,
     VideoCodecType, VideoH264Params, VideoH265Params, VideoVP9Params,
 };
-pub use crate::video_codec::{SoraVideoDecoderFactory, SoraVideoEncoderFactory};
+pub use crate::video_codec::{
+    SimulcastCapabilityHelper, SoraVideoDecoderFactory, SoraVideoEncoderFactory,
+};
 pub use crate::video_codec_capability::{
     CodecDirection, VideoCodecCapability, VideoCodecImplementation,
 };

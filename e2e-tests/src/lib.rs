@@ -377,6 +377,7 @@ pub struct VideoOutboundRidStat {
     pub rid: String,
     pub bytes_sent: u64,
     pub packets_sent: u64,
+    pub encoder_implementation: Option<String>,
 }
 
 /// 統計情報から video outbound-rtp の rid ごとの送信情報を抽出する。
@@ -453,10 +454,20 @@ pub fn collect_video_outbound_rid_stats(stats_json: &JsonString) -> Vec<VideoOut
             })
             .unwrap_or(0);
 
+        let encoder_implementation = item
+            .to_member("encoderImplementation")
+            .ok()
+            .and_then(|m| m.optional())
+            .and_then(|v| {
+                let value: std::result::Result<String, _> = v.try_into();
+                value.ok()
+            });
+
         out.push(VideoOutboundRidStat {
             rid,
             bytes_sent,
             packets_sent,
+            encoder_implementation,
         });
     }
     out

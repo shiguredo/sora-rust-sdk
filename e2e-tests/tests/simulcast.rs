@@ -4,10 +4,19 @@ use std::time::Duration;
 
 use e2e_tests::{
     FakeVideoCapturer, FakeVideoCapturerConfig, build_metadata_with_access_token,
-    build_sender_tracks, count_active_simulcast_layers, generate_channel_id, has_simulcast_rids,
-    load_env, secret_key, signaling_urls,
+    build_sender_tracks, collect_video_outbound_rid_stats, count_active_simulcast_layers,
+    generate_channel_id, has_simulcast_rids, load_env, openh264_path, secret_key, signaling_urls,
 };
-use sora_sdk::{Role, SoraClient, SoraClientContext};
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+use shiguredo_webrtc::VideoCodecType;
+#[cfg(feature = "nvcodec")]
+use sora_sdk::NvCodecVideoCodecCapability;
+use sora_sdk::{
+    AdmConfig, Openh264VideoCodecCapability, Role, SoraClient, SoraClientContext,
+    SoraClientContextConfig, Video, VideoCodecCapability, VideoCodecPreference,
+};
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+use sora_sdk::{CodecDirection, InternalHwaVideoCodecCapability};
 
 fn test_channel_id(suffix: &str) -> String {
     format!("{}-{}", generate_channel_id(), suffix)
@@ -35,14 +44,27 @@ async fn wait_for_connected(flag: &Arc<AtomicBool>, timeout_secs: u64) {
     assert!(wait.is_ok(), "接続待機がタイムアウトしました");
 }
 
-#[tokio::test]
-async fn test_sendonly_simulcast_outbound_layers() {
-    load_env();
+fn create_non_builtin_context(
+    capability: Box<dyn VideoCodecCapability>,
+) -> sora_sdk::Result<Arc<SoraClientContext>> {
+    let preference = VideoCodecPreference::new_from_capability(capability.as_ref());
+    let config = SoraClientContextConfig {
+        adm_config: AdmConfig::default(),
+        video_codec_preference: preference,
+        video_codec_capabilities: vec![capability],
+    };
+    SoraClientContext::new_with_config(config)
+}
 
+async fn run_sendonly_simulcast_outbound_layers(
+    context: Arc<SoraClientContext>,
+    video: Option<Video>,
+    channel_suffix: &str,
+    expected_encoder_impl_substrings: &[&str],
+) {
     let urls = signaling_urls().expect("TEST_SIGNALING_URLS が必要");
-    let channel_id = test_channel_id("simulcast-sendonly");
+    let channel_id = test_channel_id(channel_suffix);
 
-    let context = SoraClientContext::new().expect("コンテキスト作成失敗");
     let mut capturer = FakeVideoCapturer::new(simulcast_video_capturer_config())
         .expect("FakeVideoCapturer 作成失敗");
     let (video_track, audio_track) =
@@ -58,6 +80,9 @@ async fn test_sendonly_simulcast_outbound_layers() {
         .on_notify(move |_| {
             connected_clone.store(true, Ordering::SeqCst);
         });
+    if let Some(video) = video {
+        builder = builder.video(video);
+    }
 
     if let Some(token) = secret_key() {
         builder = builder.metadata(build_metadata_with_access_token(&token));
@@ -73,6 +98,7 @@ async fn test_sendonly_simulcast_outbound_layers() {
     tokio::time::sleep(Duration::from_secs(8)).await;
 
     let stats = handle.get_stats().await.expect("get_stats に失敗しました");
+    let rid_stats = collect_video_outbound_rid_stats(&stats);
 
     assert!(
         has_simulcast_rids(&stats, &["r0", "r1", "r2"]),
@@ -82,12 +108,110 @@ async fn test_sendonly_simulcast_outbound_layers() {
         count_active_simulcast_layers(&stats, 500, 5) >= 2,
         "有効な simulcast layer 数が不足しています"
     );
+    assert!(
+        !expected_encoder_impl_substrings.is_empty(),
+        "expected_encoder_impl_substrings must contain at least one entry"
+    );
+    let mut sorted_rid_stats = rid_stats;
+    sorted_rid_stats.sort_by(|a, b| a.rid.cmp(&b.rid));
+    for (index, stat) in sorted_rid_stats.iter().enumerate() {
+        assert_eq!(stat.rid, format!("r{index}"));
+        assert!(
+            stat.bytes_sent > 500 && stat.packets_sent > 5,
+            "rid={} の送信量が不足しています: bytesSent={}, packetsSent={}",
+            stat.rid,
+            stat.bytes_sent,
+            stat.packets_sent
+        );
+        let Some(encoder_implementation) = &stat.encoder_implementation else {
+            panic!("rid={} に encoderImplementation がありません", stat.rid);
+        };
+        for expected_substring in expected_encoder_impl_substrings {
+            assert!(
+                encoder_implementation.contains(expected_substring),
+                "rid={} の encoderImplementation が期待値を含みません: actual={}, expected_substring={}",
+                stat.rid,
+                encoder_implementation,
+                expected_substring
+            );
+        }
+    }
 
     handle
         .disconnect()
         .await
         .expect("disconnect の実行に失敗しました");
     run_task.abort();
+}
+
+#[tokio::test]
+async fn test_sendonly_simulcast_outbound_layers() {
+    load_env();
+    let context = SoraClientContext::new().expect("コンテキスト作成失敗");
+    run_sendonly_simulcast_outbound_layers(
+        context,
+        Some(Video::new_vp8(None)),
+        "simulcast-sendonly",
+        // libvpx は EncoderInfo::supports_simulcast == true であるため、
+        // SimulcastEncoderAdapter を使用していてもバイパスモードになって単一のエンコーダーとして扱われる
+        &["libvpx"],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_sendonly_simulcast_outbound_layers_openh264() {
+    load_env();
+    let Some(path) = openh264_path() else {
+        eprintln!("OPENH264_PATH is not set, skipping OpenH264 non-builtin simulcast failure test");
+        return;
+    };
+    let capability: Box<dyn VideoCodecCapability> = Box::new(
+        Openh264VideoCodecCapability::new(path)
+            .expect("Openh264VideoCodecCapability の作成に失敗しました"),
+    );
+    let context = create_non_builtin_context(capability).expect("コンテキスト作成失敗");
+    run_sendonly_simulcast_outbound_layers(
+        context,
+        Some(Video::new_h264(None, None)),
+        "simulcast-sendonly-openh264",
+        &["SimulcastEncoderAdapter", "OpenH264"],
+    )
+    .await;
+}
+
+#[cfg(feature = "nvcodec")]
+#[tokio::test]
+async fn test_sendonly_simulcast_outbound_layers_nvcodec() {
+    load_env();
+    let capability: Box<dyn VideoCodecCapability> = Box::new(NvCodecVideoCodecCapability::new());
+    let context = create_non_builtin_context(capability).expect("コンテキスト作成失敗");
+    run_sendonly_simulcast_outbound_layers(
+        context,
+        Some(Video::new_h264(None, None)),
+        "simulcast-sendonly-nvcodec",
+        &["SimulcastEncoderAdapter", "NvCodec"],
+    )
+    .await;
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[tokio::test]
+async fn test_sendonly_simulcast_outbound_layers_internal_hwa() {
+    load_env();
+    let Some(capability) = InternalHwaVideoCodecCapability::new() else {
+        eprintln!("InternalHwaVideoCodecCapability is not available, skipping test");
+        return;
+    };
+    let capability: Box<dyn VideoCodecCapability> = Box::new(capability);
+    let context = create_non_builtin_context(capability).expect("コンテキスト作成失敗");
+    run_sendonly_simulcast_outbound_layers(
+        context,
+        Some(Video::new_h264(None, None)),
+        "simulcast-sendonly-internal-hwa",
+        &["SimulcastEncoderAdapter", "VideoToolbox"],
+    )
+    .await;
 }
 
 #[tokio::test]
