@@ -32,6 +32,8 @@ pub use crate::video_codec_capability::{
 pub use crate::video_codec_preference::{
     PreferenceCodec, VideoCodecPreference, validate_video_codec_preference,
 };
+#[cfg(feature = "amf")]
+pub use crate::video_codecs::amf::AmfVideoCodecCapability;
 pub use crate::video_codecs::internal::InternalVideoCodecCapability;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub use crate::video_codecs::internal_hwa::InternalHwaVideoCodecCapability;

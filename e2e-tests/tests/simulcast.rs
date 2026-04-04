@@ -7,16 +7,22 @@ use e2e_tests::{
     build_sender_tracks, collect_video_outbound_rid_stats, count_active_simulcast_layers,
     generate_channel_id, has_simulcast_rids, load_env, openh264_path, secret_key, signaling_urls,
 };
-#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[cfg(feature = "amf")]
+use serial_test::serial;
+#[cfg(any(feature = "amf", target_os = "macos", target_os = "ios"))]
 use shiguredo_webrtc::VideoCodecType;
+#[cfg(feature = "amf")]
+use sora_sdk::AmfVideoCodecCapability;
+#[cfg(any(feature = "amf", target_os = "macos", target_os = "ios"))]
+use sora_sdk::CodecDirection;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+use sora_sdk::InternalHwaVideoCodecCapability;
 #[cfg(feature = "nvcodec")]
 use sora_sdk::NvCodecVideoCodecCapability;
 use sora_sdk::{
     AdmConfig, Openh264VideoCodecCapability, Role, SoraClient, SoraClientContext,
     SoraClientContextConfig, Video, VideoCodecCapability, VideoCodecPreference,
 };
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-use sora_sdk::{CodecDirection, InternalHwaVideoCodecCapability};
 
 fn test_channel_id(suffix: &str) -> String {
     format!("{}-{}", generate_channel_id(), suffix)
@@ -193,6 +199,65 @@ async fn test_sendonly_simulcast_outbound_layers_nvcodec() {
         &["SimulcastEncoderAdapter", "NvCodec"],
     )
     .await;
+}
+
+#[cfg(feature = "amf")]
+fn amf_simulcast_supported_codecs() -> Option<Vec<VideoCodecType>> {
+    let capability = match AmfVideoCodecCapability::new() {
+        Ok(capability) => capability,
+        Err(err) => {
+            eprintln!("AMF capability is not available, skipping test: {err}");
+            return None;
+        }
+    };
+
+    let mut codec_types = Vec::new();
+    for codec_type in [
+        VideoCodecType::H264,
+        VideoCodecType::H265,
+        VideoCodecType::Av1,
+    ] {
+        if capability.is_supported(CodecDirection::Encoder, codec_type) {
+            codec_types.push(codec_type);
+        }
+    }
+    if codec_types.is_empty() {
+        eprintln!("AMF has no encoder support, skipping simulcast test");
+        return None;
+    }
+
+    Some(codec_types)
+}
+
+#[cfg(feature = "amf")]
+#[tokio::test]
+#[serial]
+async fn test_sendonly_simulcast_outbound_layers_amf() {
+    load_env();
+    let Some(codec_types) = amf_simulcast_supported_codecs() else {
+        return;
+    };
+
+    for codec_type in codec_types {
+        let (video, codec_label) = match codec_type {
+            VideoCodecType::H264 => (Video::new_h264(None, None), "h264"),
+            VideoCodecType::H265 => (Video::new_h265(None, None), "h265"),
+            VideoCodecType::Av1 => (Video::new_av1(None, None), "av1"),
+            _ => continue,
+        };
+
+        let capability: Box<dyn VideoCodecCapability> = Box::new(
+            AmfVideoCodecCapability::new().expect("AmfVideoCodecCapability の作成に失敗しました"),
+        );
+        let context = create_non_builtin_context(capability).expect("コンテキスト作成失敗");
+        run_sendonly_simulcast_outbound_layers(
+            context,
+            Some(video),
+            &format!("simulcast-sendonly-amf-{codec_label}"),
+            &["SimulcastEncoderAdapter", "AMF"],
+        )
+        .await;
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]

@@ -1362,6 +1362,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "shiguredo_amf"
+version = "2026.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c835fc2ab1455c60b04dbcafb16f9e29d0cf9b5b19efac6aa48d2017dcec4515"
+dependencies = [
+ "bindgen",
+ "log",
+ "shiguredo_toml",
+]
+
+[[package]]
 name = "shiguredo_audio_device"
 version = "2026.1.0-canary.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1512,6 +1523,7 @@ dependencies = [
  "rustls",
  "rustls-platform-verifier",
  "rustls-webpki",
+ "shiguredo_amf",
  "shiguredo_http11",
  "shiguredo_mp4",
  "shiguredo_nvcodec",

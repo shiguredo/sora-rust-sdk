@@ -38,6 +38,9 @@
   - @melpon
 - [ADD] non-builtin encoder (OpenH264 / nvcodec / internal_hwa) の simulcast e2e テストを追加する
   - @melpon
+- [ADD] AMD AMF に対応する
+  - `shiguredo_amf` を利用した `AmfVideoCodecCapability` を追加し、H264/H265/AV1 の対応可否を動的判定してエンコーダー/デコーダーを提供する
+  - @melpon
 - [UPDATE] `VideoCodecCapability::is_supported` のデフォルト実装を設定する
   - @melpon
 - [ADD] `VideoCodecCapability::get_supported_formats` を追加し、デフォルト実装も追加する
