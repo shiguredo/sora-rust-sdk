@@ -60,7 +60,7 @@ async fn run_sendonly_simulcast_outbound_layers(
     context: Arc<SoraClientContext>,
     video: Option<Video>,
     channel_suffix: &str,
-    expected_encoder_impl_substring: Option<&str>,
+    expected_encoder_impl_substrings: &[&str],
 ) {
     let urls = signaling_urls().expect("TEST_SIGNALING_URLS が必要");
     let channel_id = test_channel_id(channel_suffix);
@@ -108,27 +108,31 @@ async fn run_sendonly_simulcast_outbound_layers(
         count_active_simulcast_layers(&stats, 500, 5) >= 2,
         "有効な simulcast layer 数が不足しています"
     );
-    if let Some(expected_impl) = expected_encoder_impl_substring {
-        let mut sorted_rid_stats = rid_stats;
-        sorted_rid_stats.sort_by(|a, b| a.rid.cmp(&b.rid));
-        for (index, stat) in sorted_rid_stats.iter().enumerate() {
-            assert_eq!(stat.rid, format!("r{index}"));
+    assert!(
+        !expected_encoder_impl_substrings.is_empty(),
+        "expected_encoder_impl_substrings must contain at least one entry"
+    );
+    let mut sorted_rid_stats = rid_stats;
+    sorted_rid_stats.sort_by(|a, b| a.rid.cmp(&b.rid));
+    for (index, stat) in sorted_rid_stats.iter().enumerate() {
+        assert_eq!(stat.rid, format!("r{index}"));
+        assert!(
+            stat.bytes_sent > 500 && stat.packets_sent > 5,
+            "rid={} の送信量が不足しています: bytesSent={}, packetsSent={}",
+            stat.rid,
+            stat.bytes_sent,
+            stat.packets_sent
+        );
+        let Some(encoder_implementation) = &stat.encoder_implementation else {
+            panic!("rid={} に encoderImplementation がありません", stat.rid);
+        };
+        for expected_substring in expected_encoder_impl_substrings {
             assert!(
-                stat.bytes_sent > 500 && stat.packets_sent > 5,
-                "rid={} の送信量が不足しています: bytesSent={}, packetsSent={}",
-                stat.rid,
-                stat.bytes_sent,
-                stat.packets_sent
-            );
-            let Some(encoder_implementation) = &stat.encoder_implementation else {
-                panic!("rid={} に encoderImplementation がありません", stat.rid);
-            };
-            assert!(
-                encoder_implementation.contains(expected_impl),
+                encoder_implementation.contains(expected_substring),
                 "rid={} の encoderImplementation が期待値を含みません: actual={}, expected_substring={}",
                 stat.rid,
                 encoder_implementation,
-                expected_impl
+                expected_substring
             );
         }
     }
@@ -144,11 +148,19 @@ async fn run_sendonly_simulcast_outbound_layers(
 async fn test_sendonly_simulcast_outbound_layers() {
     load_env();
     let context = SoraClientContext::new().expect("コンテキスト作成失敗");
-    run_sendonly_simulcast_outbound_layers(context, None, "simulcast-sendonly", None).await;
+    run_sendonly_simulcast_outbound_layers(
+        context,
+        Some(Video::new_vp8(None)),
+        "simulcast-sendonly",
+        // libvpx は EncoderInfo::supports_simulcast == true であるため、
+        // SimulcastEncoderAdapter を使用していてもバイパスモードになって単一のエンコーダーとして扱われる
+        &["libvpx"],
+    )
+    .await;
 }
 
 #[tokio::test]
-async fn test_sendonly_simulcast_outbound_layers_openh264_non_builtin() {
+async fn test_sendonly_simulcast_outbound_layers_openh264() {
     load_env();
     let Some(path) = openh264_path() else {
         eprintln!("OPENH264_PATH is not set, skipping OpenH264 non-builtin simulcast failure test");
@@ -163,14 +175,14 @@ async fn test_sendonly_simulcast_outbound_layers_openh264_non_builtin() {
         context,
         Some(Video::new_h264(None, None)),
         "simulcast-sendonly-openh264",
-        Some("SimulcastEncoderAdapter"),
+        &["SimulcastEncoderAdapter", "OpenH264"],
     )
     .await;
 }
 
 #[cfg(feature = "nvcodec")]
 #[tokio::test]
-async fn test_sendonly_simulcast_outbound_layers_nvcodec_non_builtin() {
+async fn test_sendonly_simulcast_outbound_layers_nvcodec() {
     load_env();
     let capability: Box<dyn VideoCodecCapability> = Box::new(NvCodecVideoCodecCapability::new());
     let context = create_non_builtin_context(capability).expect("コンテキスト作成失敗");
@@ -178,7 +190,7 @@ async fn test_sendonly_simulcast_outbound_layers_nvcodec_non_builtin() {
         context,
         Some(Video::new_h264(None, None)),
         "simulcast-sendonly-nvcodec",
-        Some("SimulcastEncoderAdapter"),
+        &["SimulcastEncoderAdapter", "NvCodec"],
     )
     .await;
 }
@@ -191,23 +203,24 @@ async fn test_sendonly_simulcast_outbound_layers_internal_hwa_non_builtin() {
         eprintln!("InternalHwaVideoCodecCapability is not available, skipping test");
         return;
     };
-    let video = if capability.is_supported(CodecDirection::Encoder, VideoCodecType::H264) {
-        Video::new_h264(None, None)
-    } else if capability.is_supported(CodecDirection::Encoder, VideoCodecType::Vp8) {
-        Video::new_vp8(None)
-    } else {
-        eprintln!(
-            "InternalHwaVideoCodecCapability does not support H264/VP8 encoder, skipping test"
-        );
-        return;
-    };
+    let (video, expected_encoder_name) =
+        if capability.is_supported(CodecDirection::Encoder, VideoCodecType::H264) {
+            (Video::new_h264(None, None), "VideoToolbox")
+        } else if capability.is_supported(CodecDirection::Encoder, VideoCodecType::Vp8) {
+            (Video::new_vp8(None), "libvpx")
+        } else {
+            eprintln!(
+                "InternalHwaVideoCodecCapability does not support H264/VP8 encoder, skipping test"
+            );
+            return;
+        };
     let capability: Box<dyn VideoCodecCapability> = Box::new(capability);
     let context = create_non_builtin_context(capability).expect("コンテキスト作成失敗");
     run_sendonly_simulcast_outbound_layers(
         context,
         Some(video),
         "simulcast-sendonly-internal-hwa",
-        Some("SimulcastEncoderAdapter"),
+        &["SimulcastEncoderAdapter", expected_encoder_name],
     )
     .await;
 }
