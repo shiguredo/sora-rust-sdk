@@ -5,8 +5,8 @@ use shiguredo_nvcodec::{
 };
 use shiguredo_webrtc::{
     CodecSpecificInfo, EncodedImage, EncodedImageBuffer, EncodedImageRef, EnvironmentRef,
-    H264PacketizationMode, I420Buffer, NV12Buffer, SdpVideoFormat, SdpVideoFormatRef,
-    VideoCodecRef, VideoCodecStatus, VideoCodecType, VideoDecoder,
+    H264PacketizationMode, I420Buffer, NV12Buffer, ScalabilityMode, SdpVideoFormat,
+    SdpVideoFormatRef, VideoCodecRef, VideoCodecStatus, VideoCodecType, VideoDecoder,
     VideoDecoderDecodedImageCallbackPtr, VideoDecoderDecoderInfo, VideoDecoderHandler,
     VideoDecoderSettingsRef, VideoEncoder, VideoEncoderEncodedImageCallbackPtr,
     VideoEncoderEncodedImageCallbackRef, VideoEncoderEncodedImageCallbackResultError,
@@ -366,7 +366,7 @@ impl NvCodecVideoCodecCapability {
         Self {
             simulcast_capability_helper: SimulcastCapabilityHelper::new_with_builder(
                 nvcodec_supported_formats,
-                |_env: EnvironmentRef<'_>, format| {
+                |_env, _format| {
                     Some(VideoEncoder::new_with_handler(Box::new(
                         NvCodecVideoEncoder::new(),
                     )))
@@ -502,7 +502,7 @@ mod tests {
         let capability = NvCodecVideoCodecCapability::new();
         let env = Environment::new();
         let format = SdpVideoFormat::new("H264");
-        let mut encoder = capability
+        let encoder = capability
             .create_video_encoder(env.as_ref(), format.as_ref())
             .expect("encoder must be created for supported format");
         let info = encoder.get_encoder_info();
