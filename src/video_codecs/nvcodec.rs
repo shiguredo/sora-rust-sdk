@@ -393,7 +393,7 @@ impl VideoCodecCapability for NvCodecVideoCodecCapability {
 
     fn create_video_encoder(
         &self,
-        env: shiguredo_webrtc::EnvironmentRef<'_>,
+        env: EnvironmentRef<'_>,
         format: SdpVideoFormatRef<'_>,
     ) -> Option<VideoEncoder> {
         self.simulcast_capability_helper
@@ -402,7 +402,7 @@ impl VideoCodecCapability for NvCodecVideoCodecCapability {
 
     fn create_video_decoder(
         &self,
-        _env: shiguredo_webrtc::EnvironmentRef<'_>,
+        _env: EnvironmentRef<'_>,
         format: SdpVideoFormatRef<'_>,
     ) -> Option<VideoDecoder> {
         let Ok(format_name) = format.name() else {
