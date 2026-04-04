@@ -73,10 +73,22 @@ impl<'text, 'raw> TryFrom<RawJsonValue<'text, 'raw>> for CodecDirection {
     }
 }
 
+/// `VideoCodecCapability` は、各 codec 実装ごとの差分を吸収するためのインターフェース。
+///
+/// 各エンコーダー/デコーダーの実装ごとに `VideoCodecCapability` を実装することで
+/// Sora クライアントから利用可能になる。
 pub trait VideoCodecCapability: Send {
+    /// この capability を識別する実装情報を返す。
+    ///
+    /// 実装名は `VideoCodecPreference` との突き合わせに利用されるため、実装ごとに一意である必要がある。
     fn get_implementation(&self) -> VideoCodecImplementation;
-    /// 指定した方向とコーデックタイプでサポートされている SDP フォーマットのリストを返す。
+
+    /// 指定したエンコーダー/デコーダーでサポートされている SDP フォーマットのリストを返す。
     fn get_supported_formats(&self, direction: CodecDirection) -> Vec<SdpVideoFormat>;
+
+    /// 指定方向で `codec_type` が利用可能かどうかを返す。
+    ///
+    /// デフォルト実装では `resolve_sdp_format()` による解決可否で判定する。
     fn is_supported(&self, direction: CodecDirection, codec_type: VideoCodecType) -> bool {
         let Some(codec_name) = codec_type.as_str() else {
             return false;
@@ -84,6 +96,11 @@ pub trait VideoCodecCapability: Send {
         let requested = SdpVideoFormat::new(codec_name);
         self.resolve_sdp_format(direction, &requested).is_some()
     }
+
+    /// 要求 `format` に対して、実装が実際に利用する具体的な SDP フォーマットを解決する。
+    ///
+    /// デフォルト実装は `get_supported_formats()` に対する
+    /// `fuzzy_match_sdp_video_format()` を使う。
     fn resolve_sdp_format(
         &self,
         direction: CodecDirection,
@@ -91,6 +108,7 @@ pub trait VideoCodecCapability: Send {
     ) -> Option<SdpVideoFormat> {
         fuzzy_match_sdp_video_format(&self.get_supported_formats(direction), format.as_ref())
     }
+
     /// 指定したフォーマットでエンコーダーがサポートされている場合は VideoEncoder を返す。
     ///
     /// create_video_encoder() は get_supported_formats() で返されるフォーマットのいずれかとマッチするフォーマットで呼び出されることが想定されている。
@@ -103,6 +121,7 @@ pub trait VideoCodecCapability: Send {
     ) -> Option<VideoEncoder> {
         None
     }
+
     /// 指定したフォーマットでデコーダーがサポートされている場合は VideoDecoder を返す。
     ///
     /// create_video_decoder() は get_supported_formats() で返されるフォーマットのいずれかとマッチするフォーマットで呼び出されることが想定されている。
