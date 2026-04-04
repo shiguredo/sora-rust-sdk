@@ -7,6 +7,8 @@ use e2e_tests::{
     build_sender_tracks, collect_video_outbound_rid_stats, count_active_simulcast_layers,
     generate_channel_id, has_simulcast_rids, load_env, openh264_path, secret_key, signaling_urls,
 };
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+use shiguredo_webrtc::VideoCodecType;
 #[cfg(feature = "nvcodec")]
 use sora_sdk::NvCodecVideoCodecCapability;
 use sora_sdk::{
@@ -14,7 +16,7 @@ use sora_sdk::{
     SoraClientContextConfig, Video, VideoCodecCapability, VideoCodecPreference,
 };
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-use sora_sdk::{CodecDirection, InternalHwaVideoCodecCapability, VideoCodecType};
+use sora_sdk::{CodecDirection, InternalHwaVideoCodecCapability};
 
 fn test_channel_id(suffix: &str) -> String {
     format!("{}-{}", generate_channel_id(), suffix)

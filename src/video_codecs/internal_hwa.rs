@@ -1,10 +1,11 @@
 use shiguredo_webrtc::{
-    EnvironmentRef, SdpVideoFormat, VideoCodecType, VideoDecoder, VideoDecoderFactory,
-    VideoEncoder, VideoEncoderFactory,
+    EnvironmentRef, SdpVideoFormat, VideoDecoder, VideoDecoderFactory, VideoEncoder,
+    VideoEncoderFactory,
 };
 
+use crate::video_codec::SimulcastEncoderAdapterSupport;
 use crate::video_codec_capability::{
-    CodecDirection, SimulcastEncoderAdapterSupport, VideoCodecCapability, VideoCodecImplementation,
+    CodecDirection, VideoCodecCapability, VideoCodecImplementation,
 };
 
 pub struct InternalHwaVideoCodecCapability {
@@ -63,6 +64,7 @@ impl VideoCodecCapability for InternalHwaVideoCodecCapability {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shiguredo_webrtc::VideoCodecType;
 
     #[test]
     fn internal_hwa_capability_is_available() {
@@ -131,7 +133,7 @@ mod tests {
             return;
         };
         let env = shiguredo_webrtc::Environment::new();
-        let mut encoder = capability
+        let encoder = capability
             .create_video_encoder(env.as_ref(), &format)
             .expect("encoder must be created for supported format");
         let info = encoder.get_encoder_info();
