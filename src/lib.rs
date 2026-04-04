@@ -24,7 +24,8 @@ pub use crate::types::{
     VideoCodecType, VideoH264Params, VideoH265Params, VideoVP9Params,
 };
 pub use crate::video_codec::{
-    SimulcastCapabilityHelper, SoraVideoDecoderFactory, SoraVideoEncoderFactory,
+    AlignmentEncoderAdapter, SimulcastCapabilityHelper, SoraVideoDecoderFactory,
+    SoraVideoEncoderFactory,
 };
 pub use crate::video_codec_capability::{
     CodecDirection, VideoCodecCapability, VideoCodecImplementation,

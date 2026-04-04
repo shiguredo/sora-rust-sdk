@@ -22,7 +22,7 @@
   - `create_video_encoder` / `create_video_decoder` の戻り値を `Option<VideoEncoder>` / `Option<VideoDecoder>` に変更する
   - `SoraVideoEncoderFactory` / `SoraVideoDecoderFactory` と各 `VideoCodecCapability` 実装を新シグネチャへ追従する
   - @melpon
-- [UPDATE] `shiguredo_webrtc` を 0.147.1-canary.1 に上げる
+- [UPDATE] `shiguredo_webrtc` を 0.147.1-canary.2 に上げる
   - @sile, @melpon
 - [ADD] Windows に対応する
   - @melpon
@@ -40,6 +40,8 @@
   - @melpon
 - [ADD] AMD AMF に対応する
   - `shiguredo_amf` を利用した `AmfVideoCodecCapability` を追加し、H264/H265/AV1 の対応可否を動的判定してエンコーダー/デコーダーを提供する
+  - @melpon
+- [ADD] `AlignmentEncoderAdapter` を追加する
   - @melpon
 - [UPDATE] `VideoCodecCapability::is_supported` のデフォルト実装を設定する
   - @melpon

@@ -18,7 +18,7 @@ use shiguredo_webrtc::{
 };
 
 use crate::error::Result;
-use crate::video_codec::SimulcastCapabilityHelper;
+use crate::video_codec::{AlignmentEncoderAdapter, SimulcastCapabilityHelper};
 use crate::video_codec_capability::{
     CodecDirection, VideoCodecCapability, VideoCodecImplementation,
 };
@@ -546,9 +546,15 @@ impl AmfVideoCodecCapability {
                     if !encoder_codec_types.contains(&codec_type) {
                         return None;
                     }
-                    Some(VideoEncoder::new_with_handler(Box::new(
-                        AmfVideoEncoder::new(codec_type),
-                    )))
+                    let encoder =
+                        VideoEncoder::new_with_handler(Box::new(AmfVideoEncoder::new(codec_type)));
+                    if codec_type == VideoCodecType::Av1 {
+                        Some(VideoEncoder::new_with_handler(Box::new(
+                            AlignmentEncoderAdapter::new(encoder, VideoCodecType::Av1, 64, 16),
+                        )))
+                    } else {
+                        Some(encoder)
+                    }
                 }
             },
         );

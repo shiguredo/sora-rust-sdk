@@ -1,9 +1,12 @@
 use std::sync::{Arc, Mutex};
 
 use shiguredo_webrtc::{
-    EnvironmentRef, SdpVideoFormat, SdpVideoFormatRef, SimulcastEncoderAdapter, VideoCodecType,
-    VideoDecoder, VideoDecoderFactoryHandler, VideoEncoder, VideoEncoderFactory,
-    VideoEncoderFactoryHandler,
+    EnvironmentRef, SdpVideoFormat, SdpVideoFormatRef, SimulcastEncoderAdapter, VideoCodec,
+    VideoCodecRef, VideoCodecStatus, VideoCodecType, VideoDecoder, VideoDecoderFactoryHandler,
+    VideoEncoder, VideoEncoderEncodedImageCallbackRef, VideoEncoderEncoderInfo,
+    VideoEncoderFactory, VideoEncoderFactoryHandler, VideoEncoderHandler,
+    VideoEncoderRateControlParametersRef, VideoEncoderSettingsRef, VideoFrame, VideoFrameRef,
+    VideoFrameTypeVectorRef,
 };
 
 use crate::video_codec_capability::{
@@ -142,6 +145,247 @@ fn find_capability<'a>(
         .find(|capability| capability.get_implementation() == implementation.clone())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FrameSize {
+    width: i32,
+    height: i32,
+}
+
+fn align_down(value: i32, alignment: i32) -> i32 {
+    if value <= 0 || alignment <= 1 {
+        return value;
+    }
+    let aligned = value - (value % alignment);
+    if aligned > 0 { aligned } else { value }
+}
+
+fn align_frame_size(
+    size: FrameSize,
+    horizontal_alignment: i32,
+    vertical_alignment: i32,
+) -> FrameSize {
+    FrameSize {
+        width: align_down(size.width, horizontal_alignment),
+        height: align_down(size.height, vertical_alignment),
+    }
+}
+
+fn apply_alignment_to_codec(
+    codec: &mut VideoCodec,
+    codec_type: VideoCodecType,
+    horizontal_alignment: i32,
+    vertical_alignment: i32,
+) -> Option<FrameSize> {
+    if codec.codec_type() != codec_type {
+        return None;
+    }
+
+    let aligned_codec_size = align_frame_size(
+        FrameSize {
+            width: codec.width(),
+            height: codec.height(),
+        },
+        horizontal_alignment,
+        vertical_alignment,
+    );
+    if aligned_codec_size.width <= 0 || aligned_codec_size.height <= 0 {
+        return None;
+    }
+
+    codec.set_width(aligned_codec_size.width);
+    codec.set_height(aligned_codec_size.height);
+
+    for index in 0..codec.number_of_simulcast_streams() {
+        let Some(mut stream) = codec.simulcast_stream(index) else {
+            continue;
+        };
+        let aligned_stream_size = align_frame_size(
+            FrameSize {
+                width: stream.width(),
+                height: stream.height(),
+            },
+            horizontal_alignment,
+            vertical_alignment,
+        );
+        if aligned_stream_size.width <= 0 || aligned_stream_size.height <= 0 {
+            continue;
+        }
+        stream.set_width(aligned_stream_size.width);
+        stream.set_height(aligned_stream_size.height);
+    }
+
+    Some(aligned_codec_size)
+}
+
+fn compute_center_crop(
+    frame_width: i32,
+    frame_height: i32,
+    target_width: i32,
+    target_height: i32,
+) -> Option<(i32, i32, i32, i32)> {
+    if frame_width <= 0 || frame_height <= 0 || target_width <= 0 || target_height <= 0 {
+        return None;
+    }
+
+    let lhs = i64::from(frame_width) * i64::from(target_height);
+    let rhs = i64::from(frame_height) * i64::from(target_width);
+    let (mut crop_width, mut crop_height) = if lhs > rhs {
+        (
+            (i64::from(frame_height) * i64::from(target_width) / i64::from(target_height)) as i32,
+            frame_height,
+        )
+    } else {
+        (
+            frame_width,
+            (i64::from(frame_width) * i64::from(target_height) / i64::from(target_width)) as i32,
+        )
+    };
+
+    crop_width = crop_width.clamp(1, frame_width);
+    crop_height = crop_height.clamp(1, frame_height);
+    if crop_width > 1 {
+        crop_width &= !1;
+    }
+    if crop_height > 1 {
+        crop_height &= !1;
+    }
+    if crop_width <= 0 || crop_height <= 0 {
+        return None;
+    }
+
+    let mut offset_x = (frame_width - crop_width) / 2;
+    let mut offset_y = (frame_height - crop_height) / 2;
+    if offset_x > 0 {
+        offset_x &= !1;
+    }
+    if offset_y > 0 {
+        offset_y &= !1;
+    }
+
+    Some((offset_x.max(0), offset_y.max(0), crop_width, crop_height))
+}
+
+pub struct AlignmentEncoderAdapter {
+    encoder: VideoEncoder,
+    codec_type: VideoCodecType,
+    horizontal_alignment: i32,
+    vertical_alignment: i32,
+    target_size: Option<FrameSize>,
+}
+
+impl AlignmentEncoderAdapter {
+    pub fn new(
+        encoder: VideoEncoder,
+        codec_type: VideoCodecType,
+        horizontal_alignment: i32,
+        vertical_alignment: i32,
+    ) -> Self {
+        Self {
+            encoder,
+            codec_type,
+            horizontal_alignment,
+            vertical_alignment,
+            target_size: None,
+        }
+    }
+
+    fn build_aligned_frame(
+        &self,
+        frame: VideoFrameRef<'_>,
+        target_size: FrameSize,
+    ) -> Option<VideoFrame> {
+        let frame_width = frame.width();
+        let frame_height = frame.height();
+        if frame_width <= 0 || frame_height <= 0 {
+            return None;
+        }
+        if frame_width == target_size.width && frame_height == target_size.height {
+            return Some(frame.to_owned());
+        }
+
+        let (offset_x, offset_y, crop_width, crop_height) = compute_center_crop(
+            frame_width,
+            frame_height,
+            target_size.width,
+            target_size.height,
+        )?;
+
+        let mut source_buffer = frame.buffer();
+        let aligned_buffer = source_buffer.crop_and_scale(
+            offset_x,
+            offset_y,
+            crop_width,
+            crop_height,
+            target_size.width,
+            target_size.height,
+        )?;
+
+        let mut aligned_frame = frame.to_owned();
+        aligned_frame.set_video_frame_buffer(&aligned_buffer);
+        Some(aligned_frame)
+    }
+}
+
+impl VideoEncoderHandler for AlignmentEncoderAdapter {
+    fn init_encode(
+        &mut self,
+        codec: VideoCodecRef<'_>,
+        settings: VideoEncoderSettingsRef<'_>,
+    ) -> VideoCodecStatus {
+        let mut codec_settings = codec.to_owned();
+        self.target_size = apply_alignment_to_codec(
+            &mut codec_settings,
+            self.codec_type,
+            self.horizontal_alignment,
+            self.vertical_alignment,
+        );
+        self.encoder.init_encode(codec_settings.as_ref(), settings)
+    }
+
+    fn encode(
+        &mut self,
+        frame: VideoFrameRef<'_>,
+        frame_types: Option<VideoFrameTypeVectorRef<'_>>,
+    ) -> VideoCodecStatus {
+        let Some(target_size) = self.target_size else {
+            return self.encoder.encode(frame, frame_types);
+        };
+        let Some(aligned_frame) = self.build_aligned_frame(frame, target_size) else {
+            return VideoCodecStatus::Error;
+        };
+        self.encoder.encode(aligned_frame.as_ref(), frame_types)
+    }
+
+    fn register_encode_complete_callback(
+        &mut self,
+        callback: Option<VideoEncoderEncodedImageCallbackRef<'_>>,
+    ) -> VideoCodecStatus {
+        self.encoder.register_encode_complete_callback(callback)
+    }
+
+    fn release(&mut self) -> VideoCodecStatus {
+        self.encoder.release()
+    }
+
+    fn set_rates(&mut self, parameters: VideoEncoderRateControlParametersRef<'_>) {
+        self.encoder.set_rates(parameters);
+    }
+
+    fn get_encoder_info(&mut self) -> VideoEncoderEncoderInfo {
+        let mut info = self.encoder.get_encoder_info();
+        let implementation_name = info.implementation_name().unwrap_or_default();
+        if implementation_name.contains("AlignmentEncoderAdapter") {
+            return info;
+        }
+        if implementation_name.is_empty() {
+            info.set_implementation_name("AlignmentEncoderAdapter");
+        } else {
+            info.set_implementation_name(&format!("{implementation_name} AlignmentEncoderAdapter"));
+        }
+        info
+    }
+}
+
 pub struct SimulcastCapabilityHelper {
     primary_factory: VideoEncoderFactory,
 }
@@ -224,6 +468,15 @@ mod tests {
 
     struct StubVideoDecoder;
     impl VideoDecoderHandler for StubVideoDecoder {}
+
+    struct StubVideoEncoderWithInfoName;
+    impl VideoEncoderHandler for StubVideoEncoderWithInfoName {
+        fn get_encoder_info(&mut self) -> VideoEncoderEncoderInfo {
+            let mut info = VideoEncoderEncoderInfo::new();
+            info.set_implementation_name("StubEncoder");
+            info
+        }
+    }
 
     struct MockCapability {
         implementation: VideoCodecImplementation,
@@ -570,6 +823,129 @@ mod tests {
         let vp8 = SdpVideoFormat::new("VP8");
         assert!(
             VideoDecoderFactoryHandler::create(&mut factory, env.as_ref(), vp8.as_ref()).is_none()
+        );
+    }
+
+    #[test]
+    fn alignment_updates_codec_and_simulcast_streams() {
+        let mut codec = VideoCodec::new();
+        codec.set_codec_type(VideoCodecType::Av1);
+        codec.set_width(321);
+        codec.set_height(181);
+        codec.set_number_of_simulcast_streams(2);
+        codec
+            .simulcast_stream(0)
+            .expect("simulcast stream 0 が必要")
+            .set_width(321);
+        codec
+            .simulcast_stream(0)
+            .expect("simulcast stream 0 が必要")
+            .set_height(181);
+        codec
+            .simulcast_stream(1)
+            .expect("simulcast stream 1 が必要")
+            .set_width(161);
+        codec
+            .simulcast_stream(1)
+            .expect("simulcast stream 1 が必要")
+            .set_height(91);
+
+        let aligned =
+            apply_alignment_to_codec(&mut codec, VideoCodecType::Av1, 64, 16).expect("整列失敗");
+        assert_eq!(
+            aligned,
+            FrameSize {
+                width: 320,
+                height: 176
+            }
+        );
+        assert_eq!(codec.width(), 320);
+        assert_eq!(codec.height(), 176);
+        assert_eq!(
+            codec
+                .simulcast_stream(0)
+                .expect("simulcast stream 0 が必要")
+                .width(),
+            320
+        );
+        assert_eq!(
+            codec
+                .simulcast_stream(0)
+                .expect("simulcast stream 0 が必要")
+                .height(),
+            176
+        );
+        assert_eq!(
+            codec
+                .simulcast_stream(1)
+                .expect("simulcast stream 1 が必要")
+                .width(),
+            128
+        );
+        assert_eq!(
+            codec
+                .simulcast_stream(1)
+                .expect("simulcast stream 1 が必要")
+                .height(),
+            80
+        );
+    }
+
+    #[test]
+    fn alignment_is_not_applied_to_other_codec() {
+        let mut codec = VideoCodec::new();
+        codec.set_codec_type(VideoCodecType::H264);
+        codec.set_width(321);
+        codec.set_height(181);
+        codec.set_number_of_simulcast_streams(1);
+        codec
+            .simulcast_stream(0)
+            .expect("simulcast stream 0 が必要")
+            .set_width(321);
+        codec
+            .simulcast_stream(0)
+            .expect("simulcast stream 0 が必要")
+            .set_height(181);
+
+        assert!(apply_alignment_to_codec(&mut codec, VideoCodecType::Av1, 64, 16).is_none());
+        assert_eq!(codec.width(), 321);
+        assert_eq!(codec.height(), 181);
+        assert_eq!(
+            codec
+                .simulcast_stream(0)
+                .expect("simulcast stream 0 が必要")
+                .width(),
+            321
+        );
+        assert_eq!(
+            codec
+                .simulcast_stream(0)
+                .expect("simulcast stream 0 が必要")
+                .height(),
+            181
+        );
+    }
+
+    #[test]
+    fn alignment_encoder_adapter_encoder_info_contains_adapter_name() {
+        let base = VideoEncoder::new_with_handler(Box::new(StubVideoEncoderWithInfoName));
+        let encoder = VideoEncoder::new_with_handler(Box::new(AlignmentEncoderAdapter::new(
+            base,
+            VideoCodecType::Av1,
+            64,
+            16,
+        )));
+        let info = encoder.get_encoder_info();
+        let implementation_name = info
+            .implementation_name()
+            .expect("implementation_name の取得に失敗");
+        assert!(
+            implementation_name.contains("AlignmentEncoderAdapter"),
+            "AlignmentEncoderAdapter を含む実装名が必要: {implementation_name}",
+        );
+        assert!(
+            implementation_name.contains("StubEncoder"),
+            "元の implementation_name を保持する必要があります: {implementation_name}",
         );
     }
 }
