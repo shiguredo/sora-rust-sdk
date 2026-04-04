@@ -66,42 +66,22 @@ jobs:
       - run: cargo clippy --workspace -- -D warnings
       - run: cargo test --workspace
 
-  ci-macos-self:
+  ci-self-hosted:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS ARM64
+            labels: [self-hosted, macOS, ARM64, Apple-M1]
+            features: "--features openh264"
+            test_args: "-- --skip test_video_capture_frame_received"
+          - name: Linux x64 NVIDIA Video Codec SDK
+            labels: [self-hosted, linux, x64, NVIDIA-Video-Codec-SDK]
+            features: "--features openh264,nvcodec"
+            test_args: ""
     runs-on:
       group: Self
-      labels: [self-hosted, macOS, ARM64, Apple-M1]
-    timeout-minutes: 30
-    steps:
-      - name: Checkout sources
-        uses: actions/checkout@v6
-      - name: Remove old target
-        run: rm -rf target/
-      - name: Install Rust
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-      - name: Update PATH
-        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-
-      - uses: shiguredo/github-actions/.github/actions/download-openh264@main
-        if: ${{ runner.environment != 'self-hosted' }}
-        id: openh264
-        with:
-          openh264_version: ${{ env.OPENH264_VERSION }}
-          use-cache: true
-      - name: Set OpenH264 path
-        if: ${{ runner.environment != 'self-hosted' && steps.openh264.outputs.openh264_path }}
-        run: echo "OPENH264_PATH=${{ steps.openh264.outputs.openh264_path }}" >> $GITHUB_ENV
-        shell: bash
-
-      - run: cp .cargo/config.toml.ci .cargo/config.toml
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace -- -D warnings
-      - run: cargo test --workspace -- --skip test_video_capture_frame_received
-
-  ci-nvcodec-self:
-    runs-on:
-      group: Self
-      labels: [self-hosted, linux, x64, NVIDIA-Video-Codec-SDK]
+      labels: ${{ matrix.labels }}
     timeout-minutes: 30
     steps:
       - name: Checkout sources
@@ -116,11 +96,11 @@ jobs:
 
       - run: cp .cargo/config.toml.ci .cargo/config.toml
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace -- -D warnings
-      - run: cargo test --workspace -- --skip test_video_capture_frame_received
+      - run: cargo clippy --workspace ${{ matrix.features }} -- -D warnings
+      - run: cargo test --workspace ${{ matrix.features }} ${{ matrix.test_args }}
 
   slack_notify:
-    needs: [ci, ci-macos-self]
+    needs: [ci, ci-self-hosted]
     runs-on: ubuntu-slim
     if: ${{ !cancelled() }}
     steps:
