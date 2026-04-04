@@ -58,15 +58,17 @@ impl NvCodecVideoEncoder {
         if self.width == 0 || self.height == 0 {
             return Err(());
         }
-        let mut config = EncoderConfig::default();
-        config.width = self.width;
-        config.height = self.height;
-        config.max_encode_width = Some(self.width);
-        config.max_encode_height = Some(self.height);
-        config.fps_numerator = self.framerate.max(1);
-        config.fps_denominator = 1;
-        config.target_bitrate = Some(self.target_bitrate_bps.max(1));
-        config.rate_control_mode = RateControlMode::Cbr;
+        let config = EncoderConfig {
+            width: self.width,
+            height: self.height,
+            max_encode_width: Some(self.width),
+            max_encode_height: Some(self.height),
+            fps_numerator: self.framerate.max(1),
+            fps_denominator: 1,
+            target_bitrate: Some(self.target_bitrate_bps.max(1)),
+            rate_control_mode: RateControlMode::Cbr,
+            ..Default::default()
+        };
         self.encoder = Encoder::new_h264(config).ok();
         self.reconfigure_needed = false;
         self.encoder.as_ref().map(|_| ()).ok_or(())
@@ -114,10 +116,8 @@ impl VideoEncoderHandler for NvCodecVideoEncoder {
             self.height = frame_height;
             self.reconfigure_needed = true;
         }
-        if self.reconfigure_needed || self.encoder.is_none() {
-            if self.rebuild_encoder().is_err() {
-                return VideoCodecStatus::Error;
-            }
+        if (self.reconfigure_needed || self.encoder.is_none()) && self.rebuild_encoder().is_err() {
+            return VideoCodecStatus::Error;
         }
 
         let mut frame_buffer = frame.buffer();
