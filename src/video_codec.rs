@@ -59,14 +59,13 @@ impl VideoEncoderFactoryHandler for SoraVideoEncoderFactory {
         env: EnvironmentRef<'_>,
         format: SdpVideoFormatRef<'_>,
     ) -> Option<VideoEncoder> {
-        let requested = format.to_owned();
-        let format_name = requested.name().ok()?;
+        let format_name = format.name().ok()?;
         let codec_type = VideoCodecType::try_from(format_name.as_str()).ok()?;
         let preference = self.preference.find(CodecDirection::Encoder, codec_type)?;
         let capabilities = self.capabilities.lock().unwrap();
         let capability = find_capability(&capabilities, preference.implementation())?;
-        let resolved = capability.resolve_sdp_format(CodecDirection::Encoder, &requested)?;
-        capability.create_video_encoder(env, &resolved)
+        let resolved = capability.resolve_sdp_format(CodecDirection::Encoder, format)?;
+        capability.create_video_encoder(env, resolved.as_ref())
     }
 }
 
@@ -81,14 +80,13 @@ impl VideoDecoderFactoryHandler for SoraVideoDecoderFactory {
         env: EnvironmentRef<'_>,
         format: SdpVideoFormatRef<'_>,
     ) -> Option<VideoDecoder> {
-        let requested = format.to_owned();
-        let format_name = requested.name().ok()?;
+        let format_name = format.name().ok()?;
         let codec_type = VideoCodecType::try_from(format_name.as_str()).ok()?;
         let preference = self.preference.find(CodecDirection::Decoder, codec_type)?;
         let capabilities = self.capabilities.lock().unwrap();
         let capability = find_capability(&capabilities, preference.implementation())?;
-        let resolved = capability.resolve_sdp_format(CodecDirection::Decoder, &requested)?;
-        capability.create_video_decoder(env, &resolved)
+        let resolved = capability.resolve_sdp_format(CodecDirection::Decoder, format)?;
+        capability.create_video_decoder(env, resolved.as_ref())
     }
 }
 
@@ -204,10 +202,10 @@ impl SimulcastCapabilityHelper {
     pub fn create_video_encoder(
         &self,
         env: EnvironmentRef<'_>,
-        format: &SdpVideoFormat,
+        format: SdpVideoFormatRef<'_>,
     ) -> Option<VideoEncoder> {
         Some(
-            SimulcastEncoderAdapter::new(env, &self.primary_factory, None, format.as_ref())
+            SimulcastEncoderAdapter::new(env, &self.primary_factory, None, format)
                 .cast_to_video_encoder(),
         )
     }
@@ -299,7 +297,7 @@ mod tests {
         fn resolve_sdp_format(
             &self,
             direction: CodecDirection,
-            format: &SdpVideoFormat,
+            format: SdpVideoFormatRef<'_>,
         ) -> Option<SdpVideoFormat> {
             let codec_type = format
                 .name()
@@ -373,7 +371,7 @@ mod tests {
         fn create_video_encoder(
             &self,
             _env: EnvironmentRef<'_>,
-            format: &SdpVideoFormat,
+            format: SdpVideoFormatRef<'_>,
         ) -> Option<VideoEncoder> {
             let codec_type = format
                 .name()
@@ -389,7 +387,7 @@ mod tests {
         fn create_video_decoder(
             &self,
             _env: EnvironmentRef<'_>,
-            format: &SdpVideoFormat,
+            format: SdpVideoFormatRef<'_>,
         ) -> Option<VideoDecoder> {
             let codec_type = format
                 .name()

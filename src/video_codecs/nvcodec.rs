@@ -5,13 +5,14 @@ use shiguredo_nvcodec::{
 };
 use shiguredo_webrtc::{
     CodecSpecificInfo, EncodedImage, EncodedImageBuffer, EncodedImageRef, EnvironmentRef,
-    H264PacketizationMode, I420Buffer, NV12Buffer, SdpVideoFormat, VideoCodecRef, VideoCodecStatus,
-    VideoCodecType, VideoDecoder, VideoDecoderDecodedImageCallbackPtr, VideoDecoderDecoderInfo,
-    VideoDecoderHandler, VideoDecoderSettingsRef, VideoEncoder,
-    VideoEncoderEncodedImageCallbackPtr, VideoEncoderEncodedImageCallbackRef,
-    VideoEncoderEncodedImageCallbackResultError, VideoEncoderEncoderInfo, VideoEncoderHandler,
-    VideoEncoderRateControlParametersRef, VideoEncoderSettingsRef, VideoFrame, VideoFrameRef,
-    VideoFrameType, VideoFrameTypeVectorRef, i420_to_nv12, nv12_to_i420,
+    H264PacketizationMode, I420Buffer, NV12Buffer, SdpVideoFormat, SdpVideoFormatRef,
+    VideoCodecRef, VideoCodecStatus, VideoCodecType, VideoDecoder,
+    VideoDecoderDecodedImageCallbackPtr, VideoDecoderDecoderInfo, VideoDecoderHandler,
+    VideoDecoderSettingsRef, VideoEncoder, VideoEncoderEncodedImageCallbackPtr,
+    VideoEncoderEncodedImageCallbackRef, VideoEncoderEncodedImageCallbackResultError,
+    VideoEncoderEncoderInfo, VideoEncoderHandler, VideoEncoderRateControlParametersRef,
+    VideoEncoderSettingsRef, VideoFrame, VideoFrameRef, VideoFrameType, VideoFrameTypeVectorRef,
+    i420_to_nv12, nv12_to_i420,
 };
 
 use crate::video_codec::SimulcastCapabilityHelper;
@@ -393,7 +394,7 @@ impl VideoCodecCapability for NvCodecVideoCodecCapability {
     fn create_video_encoder(
         &self,
         env: shiguredo_webrtc::EnvironmentRef<'_>,
-        format: &SdpVideoFormat,
+        format: SdpVideoFormatRef<'_>,
     ) -> Option<VideoEncoder> {
         self.simulcast_capability_helper
             .create_video_encoder(env, format)
@@ -402,8 +403,14 @@ impl VideoCodecCapability for NvCodecVideoCodecCapability {
     fn create_video_decoder(
         &self,
         _env: shiguredo_webrtc::EnvironmentRef<'_>,
-        format: &SdpVideoFormat,
+        format: SdpVideoFormatRef<'_>,
     ) -> Option<VideoDecoder> {
+        let Ok(format_name) = format.name() else {
+            return None;
+        };
+        if VideoCodecType::try_from(format_name.as_str()).ok() != Some(VideoCodecType::H264) {
+            return None;
+        }
         Some(VideoDecoder::new_with_handler(Box::new(
             NvCodecVideoDecoder::new(),
         )))
@@ -429,7 +436,7 @@ mod tests {
             capability
                 .create_video_encoder(
                     shiguredo_webrtc::Environment::new().as_ref(),
-                    &SdpVideoFormat::new("H264"),
+                    SdpVideoFormat::new("H264").as_ref(),
                 )
                 .is_some()
         );
@@ -437,7 +444,7 @@ mod tests {
             capability
                 .create_video_encoder(
                     shiguredo_webrtc::Environment::new().as_ref(),
-                    &SdpVideoFormat::new("H265"),
+                    SdpVideoFormat::new("H265").as_ref(),
                 )
                 .is_none()
         );
@@ -445,7 +452,7 @@ mod tests {
             capability
                 .create_video_decoder(
                     shiguredo_webrtc::Environment::new().as_ref(),
-                    &SdpVideoFormat::new("H264"),
+                    SdpVideoFormat::new("H264").as_ref(),
                 )
                 .is_some()
         );
@@ -453,13 +460,16 @@ mod tests {
             capability
                 .create_video_decoder(
                     shiguredo_webrtc::Environment::new().as_ref(),
-                    &SdpVideoFormat::new("H265"),
+                    SdpVideoFormat::new("H265").as_ref(),
                 )
                 .is_none()
         );
 
         let resolved = capability
-            .resolve_sdp_format(CodecDirection::Encoder, &SdpVideoFormat::new("H264"))
+            .resolve_sdp_format(
+                CodecDirection::Encoder,
+                SdpVideoFormat::new("H264").as_ref(),
+            )
             .expect("h264 format should be resolved");
         let params = resolved
             .to_owned()
@@ -477,11 +487,12 @@ mod tests {
 
         let resolved_with_packetization_mode_0 = capability.resolve_sdp_format(
             CodecDirection::Encoder,
-            &SdpVideoFormat::new_with_parameters(
+            SdpVideoFormat::new_with_parameters(
                 "H264",
                 &HashMap::from([(String::from("packetization-mode"), String::from("0"))]),
                 &[],
-            ),
+            )
+            .as_ref(),
         );
         assert!(resolved_with_packetization_mode_0.is_some());
     }
@@ -492,7 +503,7 @@ mod tests {
         let env = Environment::new();
         let format = SdpVideoFormat::new("H264");
         let mut encoder = capability
-            .create_video_encoder(env.as_ref(), &format)
+            .create_video_encoder(env.as_ref(), format.as_ref())
             .expect("encoder must be created for supported format");
         let info = encoder.get_encoder_info();
         let implementation_name = info

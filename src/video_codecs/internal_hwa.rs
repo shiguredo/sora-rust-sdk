@@ -1,6 +1,6 @@
 use shiguredo_webrtc::{
-    EnvironmentRef, SdpVideoFormat, VideoDecoder, VideoDecoderFactory, VideoEncoder,
-    VideoEncoderFactory,
+    EnvironmentRef, SdpVideoFormat, SdpVideoFormatRef, VideoDecoder, VideoDecoderFactory,
+    VideoEncoder, VideoEncoderFactory,
 };
 
 use crate::video_codec::SimulcastCapabilityHelper;
@@ -44,7 +44,7 @@ impl VideoCodecCapability for InternalHwaVideoCodecCapability {
     fn create_video_encoder(
         &self,
         env: EnvironmentRef<'_>,
-        format: &SdpVideoFormat,
+        format: SdpVideoFormatRef<'_>,
     ) -> Option<VideoEncoder> {
         self.simulcast_capability_helper
             .create_video_encoder(env, format)
@@ -53,9 +53,9 @@ impl VideoCodecCapability for InternalHwaVideoCodecCapability {
     fn create_video_decoder(
         &self,
         env: EnvironmentRef<'_>,
-        format: &SdpVideoFormat,
+        format: SdpVideoFormatRef<'_>,
     ) -> Option<VideoDecoder> {
-        self.decoder_factory.create(env, format.as_ref())
+        self.decoder_factory.create(env, format)
     }
 }
 
@@ -102,7 +102,7 @@ mod tests {
         for format in &encoder_formats {
             assert!(
                 capability
-                    .create_video_encoder(env.as_ref(), format)
+                    .create_video_encoder(env.as_ref(), format.as_ref())
                     .is_some(),
                 "encoder must be created for a supported format",
             );
@@ -112,7 +112,7 @@ mod tests {
         for format in &decoder_formats {
             assert!(
                 capability
-                    .create_video_decoder(env.as_ref(), format)
+                    .create_video_decoder(env.as_ref(), format.as_ref())
                     .is_some(),
                 "decoder must be created for a supported format",
             );
@@ -132,7 +132,7 @@ mod tests {
         };
         let env = shiguredo_webrtc::Environment::new();
         let encoder = capability
-            .create_video_encoder(env.as_ref(), &format)
+            .create_video_encoder(env.as_ref(), format.as_ref())
             .expect("encoder must be created for supported format");
         let info = encoder.get_encoder_info();
         let implementation_name = info

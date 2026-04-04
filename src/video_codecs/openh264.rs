@@ -7,9 +7,9 @@ use shiguredo_openh264::{
 };
 use shiguredo_webrtc::{
     CodecSpecificInfo, EncodedImage, EncodedImageBuffer, EncodedImageRef, H264PacketizationMode,
-    I420Buffer, ScalabilityMode, SdpVideoFormat, VideoCodecRef, VideoCodecStatus, VideoCodecType,
-    VideoDecoder, VideoDecoderDecodedImageCallbackPtr, VideoDecoderDecoderInfo,
-    VideoDecoderHandler, VideoDecoderSettingsRef, VideoEncoder,
+    I420Buffer, ScalabilityMode, SdpVideoFormat, SdpVideoFormatRef, VideoCodecRef,
+    VideoCodecStatus, VideoCodecType, VideoDecoder, VideoDecoderDecodedImageCallbackPtr,
+    VideoDecoderDecoderInfo, VideoDecoderHandler, VideoDecoderSettingsRef, VideoEncoder,
     VideoEncoderEncodedImageCallbackPtr, VideoEncoderEncodedImageCallbackRef,
     VideoEncoderEncodedImageCallbackResultError, VideoEncoderEncoderInfo, VideoEncoderHandler,
     VideoEncoderRateControlParametersRef, VideoEncoderSettingsRef, VideoFrame, VideoFrameRef,
@@ -518,7 +518,7 @@ impl VideoCodecCapability for Openh264VideoCodecCapability {
     fn create_video_encoder(
         &self,
         env: shiguredo_webrtc::EnvironmentRef<'_>,
-        format: &SdpVideoFormat,
+        format: SdpVideoFormatRef<'_>,
     ) -> Option<VideoEncoder> {
         self.simulcast_capability_helper
             .create_video_encoder(env, format)
@@ -528,7 +528,7 @@ impl VideoCodecCapability for Openh264VideoCodecCapability {
     fn create_video_decoder(
         &self,
         env: shiguredo_webrtc::EnvironmentRef<'_>,
-        format: &SdpVideoFormat,
+        format: SdpVideoFormatRef<'_>,
     ) -> Option<VideoDecoder> {
         Some(VideoDecoder::new_with_handler(Box::new(
             Openh264VideoDecoder::new(self.library.clone()),
@@ -620,7 +620,7 @@ mod tests {
             capability
                 .create_video_encoder(
                     shiguredo_webrtc::Environment::new().as_ref(),
-                    &SdpVideoFormat::new("H264"),
+                    SdpVideoFormat::new("H264").as_ref(),
                 )
                 .is_some()
         );
@@ -628,13 +628,16 @@ mod tests {
             capability
                 .create_video_decoder(
                     shiguredo_webrtc::Environment::new().as_ref(),
-                    &SdpVideoFormat::new("H264"),
+                    SdpVideoFormat::new("H264").as_ref(),
                 )
                 .is_some()
         );
 
         let resolved = capability
-            .resolve_sdp_format(CodecDirection::Encoder, &SdpVideoFormat::new("H264"))
+            .resolve_sdp_format(
+                CodecDirection::Encoder,
+                SdpVideoFormat::new("H264").as_ref(),
+            )
             .expect("h264 format should be resolved");
         let params = resolved
             .to_owned()
@@ -652,11 +655,12 @@ mod tests {
 
         let resolved_with_profile_level_id = capability.resolve_sdp_format(
             CodecDirection::Encoder,
-            &SdpVideoFormat::new_with_parameters(
+            SdpVideoFormat::new_with_parameters(
                 "H264",
                 &HashMap::from([(String::from("profile-level-id"), String::from("42e01f"))]),
                 &[],
-            ),
+            )
+            .as_ref(),
         );
         assert!(resolved_with_profile_level_id.is_some());
     }
@@ -721,7 +725,7 @@ mod tests {
         let env = Environment::new();
         let format = SdpVideoFormat::new("H264");
         let encoder = capability
-            .create_video_encoder(env.as_ref(), &format)
+            .create_video_encoder(env.as_ref(), format.as_ref())
             .expect("encoder must be created for supported format");
         let info = encoder.get_encoder_info();
         let implementation_name = info

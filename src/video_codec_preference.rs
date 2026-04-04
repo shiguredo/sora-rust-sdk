@@ -272,16 +272,14 @@ fn validate_codec(
         });
     }
 
+    let requested = SdpVideoFormat::new(
+        codec
+            .codec_type()
+            .as_str()
+            .expect("known codec type must be converted to codec name"),
+    );
     if capability
-        .resolve_sdp_format(
-            codec.direction(),
-            &SdpVideoFormat::new(
-                codec
-                    .codec_type()
-                    .as_str()
-                    .expect("known codec type must be converted to codec name"),
-            ),
-        )
+        .resolve_sdp_format(codec.direction(), requested.as_ref())
         .is_none()
     {
         return Err(Error::InvalidVideoCodecPreference {
@@ -339,8 +337,8 @@ mod tests {
     use super::*;
     use crate::error::Error;
     use shiguredo_webrtc::{
-        EnvironmentRef, SdpVideoFormat, VideoDecoder, VideoDecoderHandler, VideoEncoder,
-        VideoEncoderHandler,
+        EnvironmentRef, SdpVideoFormat, SdpVideoFormatRef, VideoDecoder, VideoDecoderHandler,
+        VideoEncoder, VideoEncoderHandler,
     };
 
     struct StubVideoEncoder;
@@ -395,7 +393,7 @@ mod tests {
         fn resolve_sdp_format(
             &self,
             direction: CodecDirection,
-            format: &SdpVideoFormat,
+            format: SdpVideoFormatRef<'_>,
         ) -> Option<shiguredo_webrtc::SdpVideoFormat> {
             let codec_type = format
                 .name()
@@ -416,7 +414,7 @@ mod tests {
         fn create_video_encoder(
             &self,
             _env: EnvironmentRef<'_>,
-            format: &SdpVideoFormat,
+            format: SdpVideoFormatRef<'_>,
         ) -> Option<VideoEncoder> {
             let codec_type = format
                 .name()
@@ -432,7 +430,7 @@ mod tests {
         fn create_video_decoder(
             &self,
             _env: EnvironmentRef<'_>,
-            format: &SdpVideoFormat,
+            format: SdpVideoFormatRef<'_>,
         ) -> Option<VideoDecoder> {
             let codec_type = format
                 .name()

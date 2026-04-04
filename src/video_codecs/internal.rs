@@ -1,6 +1,6 @@
 use shiguredo_webrtc::{
-    EnvironmentRef, SdpVideoFormat, VideoDecoder, VideoDecoderFactory, VideoEncoder,
-    VideoEncoderFactory,
+    EnvironmentRef, SdpVideoFormat, SdpVideoFormatRef, VideoDecoder, VideoDecoderFactory,
+    VideoEncoder, VideoEncoderFactory,
 };
 
 #[cfg(test)]
@@ -50,17 +50,17 @@ impl VideoCodecCapability for InternalVideoCodecCapability {
     fn create_video_encoder(
         &self,
         env: EnvironmentRef<'_>,
-        format: &SdpVideoFormat,
+        format: SdpVideoFormatRef<'_>,
     ) -> Option<VideoEncoder> {
-        self.encoder_factory.create(env, format.as_ref())
+        self.encoder_factory.create(env, format)
     }
 
     fn create_video_decoder(
         &self,
         env: EnvironmentRef<'_>,
-        format: &SdpVideoFormat,
+        format: SdpVideoFormatRef<'_>,
     ) -> Option<VideoDecoder> {
-        self.decoder_factory.create(env, format.as_ref())
+        self.decoder_factory.create(env, format)
     }
 }
 
@@ -83,7 +83,7 @@ mod tests {
         for format in &encoder_formats {
             assert!(
                 capability
-                    .create_video_encoder(env.as_ref(), format)
+                    .create_video_encoder(env.as_ref(), format.as_ref())
                     .is_some(),
                 "encoder must be created for a supported format",
             );
@@ -93,7 +93,7 @@ mod tests {
         for format in &decoder_formats {
             assert!(
                 capability
-                    .create_video_decoder(env.as_ref(), format)
+                    .create_video_decoder(env.as_ref(), format.as_ref())
                     .is_some(),
                 "decoder must be created for a supported format",
             );
@@ -116,7 +116,7 @@ mod tests {
                 .as_str()
                 .expect("known codec must have valid codec name"),
         );
-        let resolved = capability.resolve_sdp_format(CodecDirection::Encoder, &requested);
+        let resolved = capability.resolve_sdp_format(CodecDirection::Encoder, requested.as_ref());
         assert!(resolved.is_some());
     }
 }

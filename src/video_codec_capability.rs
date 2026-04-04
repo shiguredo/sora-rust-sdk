@@ -1,5 +1,5 @@
 use shiguredo_webrtc::{
-    EnvironmentRef, SdpVideoFormat, VideoCodecType, VideoDecoder, VideoEncoder,
+    EnvironmentRef, SdpVideoFormat, SdpVideoFormatRef, VideoCodecType, VideoDecoder, VideoEncoder,
     fuzzy_match_sdp_video_format,
 };
 
@@ -94,7 +94,8 @@ pub trait VideoCodecCapability: Send {
             return false;
         };
         let requested = SdpVideoFormat::new(codec_name);
-        self.resolve_sdp_format(direction, &requested).is_some()
+        self.resolve_sdp_format(direction, requested.as_ref())
+            .is_some()
     }
 
     /// 要求 `format` に対して、実装が実際に利用する具体的な SDP フォーマットを解決する。
@@ -104,9 +105,9 @@ pub trait VideoCodecCapability: Send {
     fn resolve_sdp_format(
         &self,
         direction: CodecDirection,
-        format: &SdpVideoFormat,
+        format: SdpVideoFormatRef<'_>,
     ) -> Option<SdpVideoFormat> {
-        fuzzy_match_sdp_video_format(&self.get_supported_formats(direction), format.as_ref())
+        fuzzy_match_sdp_video_format(&self.get_supported_formats(direction), format)
     }
 
     /// 指定したフォーマットでエンコーダーがサポートされている場合は VideoEncoder を返す。
@@ -117,7 +118,7 @@ pub trait VideoCodecCapability: Send {
     fn create_video_encoder(
         &self,
         env: EnvironmentRef<'_>,
-        format: &SdpVideoFormat,
+        format: SdpVideoFormatRef<'_>,
     ) -> Option<VideoEncoder> {
         None
     }
@@ -130,7 +131,7 @@ pub trait VideoCodecCapability: Send {
     fn create_video_decoder(
         &self,
         env: EnvironmentRef<'_>,
-        format: &SdpVideoFormat,
+        format: SdpVideoFormatRef<'_>,
     ) -> Option<VideoDecoder> {
         None
     }
@@ -185,7 +186,7 @@ mod tests {
         fn create_video_encoder(
             &self,
             _env: EnvironmentRef<'_>,
-            format: &SdpVideoFormat,
+            format: SdpVideoFormatRef<'_>,
         ) -> Option<VideoEncoder> {
             if format.name().ok().as_deref() == Some("H264") {
                 Some(VideoEncoder::new_with_handler(Box::new(StubVideoEncoder)))
@@ -197,7 +198,7 @@ mod tests {
         fn create_video_decoder(
             &self,
             _env: EnvironmentRef<'_>,
-            format: &SdpVideoFormat,
+            format: SdpVideoFormatRef<'_>,
         ) -> Option<VideoDecoder> {
             if format.name().ok().as_deref() == Some("H264") {
                 Some(VideoDecoder::new_with_handler(Box::new(StubVideoDecoder)))
@@ -226,12 +227,12 @@ mod tests {
         let env = shiguredo_webrtc::Environment::new();
         assert!(
             capability
-                .create_video_encoder(env.as_ref(), &h264)
+                .create_video_encoder(env.as_ref(), h264.as_ref())
                 .is_some()
         );
         assert!(
             capability
-                .create_video_decoder(env.as_ref(), &h264)
+                .create_video_decoder(env.as_ref(), h264.as_ref())
                 .is_some()
         );
     }

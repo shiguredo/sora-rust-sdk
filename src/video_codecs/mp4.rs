@@ -20,8 +20,8 @@ use std::thread;
 
 use shiguredo_webrtc::{
     AdaptFrameResult, AdaptedVideoTrackSource, CodecSpecificInfo, EncodedImage, EncodedImageBuffer,
-    H264PacketizationMode, I420Buffer, SdpVideoFormat, TimestampAligner, VideoCodecRef,
-    VideoCodecStatus, VideoCodecType, VideoDecoder, VideoEncoder,
+    H264PacketizationMode, I420Buffer, SdpVideoFormat, SdpVideoFormatRef, TimestampAligner,
+    VideoCodecRef, VideoCodecStatus, VideoCodecType, VideoDecoder, VideoEncoder,
     VideoEncoderEncodedImageCallbackPtr, VideoEncoderEncodedImageCallbackRef,
     VideoEncoderEncodedImageCallbackResultError, VideoEncoderEncoderInfo, VideoEncoderHandler,
     VideoEncoderRateControlParametersRef, VideoEncoderSettingsRef, VideoFrame, VideoFrameBuffer,
@@ -596,7 +596,7 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
     fn create_video_encoder(
         &self,
         _env: shiguredo_webrtc::EnvironmentRef<'_>,
-        format: &SdpVideoFormat,
+        format: SdpVideoFormatRef<'_>,
     ) -> Option<VideoEncoder> {
         let Ok(format_name) = format.name() else {
             return None;
@@ -616,7 +616,7 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
     fn create_video_decoder(
         &self,
         _env: shiguredo_webrtc::EnvironmentRef<'_>,
-        _format: &SdpVideoFormat,
+        _format: SdpVideoFormatRef<'_>,
     ) -> Option<VideoDecoder> {
         None
     }
@@ -732,7 +732,7 @@ mod tests {
             capability
                 .create_video_encoder(
                     shiguredo_webrtc::Environment::new().as_ref(),
-                    &SdpVideoFormat::new("H264"),
+                    SdpVideoFormat::new("H264").as_ref(),
                 )
                 .is_some()
         );
@@ -740,7 +740,7 @@ mod tests {
             capability
                 .create_video_encoder(
                     shiguredo_webrtc::Environment::new().as_ref(),
-                    &SdpVideoFormat::new("VP9"),
+                    SdpVideoFormat::new("VP9").as_ref(),
                 )
                 .is_none()
         );
@@ -748,17 +748,19 @@ mod tests {
             capability
                 .create_video_decoder(
                     shiguredo_webrtc::Environment::new().as_ref(),
-                    &SdpVideoFormat::new("H264"),
+                    SdpVideoFormat::new("H264").as_ref(),
                 )
                 .is_none()
         );
 
-        let resolved =
-            capability.resolve_sdp_format(CodecDirection::Encoder, &SdpVideoFormat::new("H264"));
+        let resolved = capability.resolve_sdp_format(
+            CodecDirection::Encoder,
+            SdpVideoFormat::new("H264").as_ref(),
+        );
         assert!(resolved.is_some());
 
-        let unresolved =
-            capability.resolve_sdp_format(CodecDirection::Encoder, &SdpVideoFormat::new("VP8"));
+        let unresolved = capability
+            .resolve_sdp_format(CodecDirection::Encoder, SdpVideoFormat::new("VP8").as_ref());
         assert!(unresolved.is_none());
     }
 
