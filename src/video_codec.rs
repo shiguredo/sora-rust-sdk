@@ -145,12 +145,6 @@ fn find_capability<'a>(
         .find(|capability| capability.get_implementation() == implementation.clone())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FrameSize {
-    width: i32,
-    height: i32,
-}
-
 fn align_down(value: i32, alignment: i32) -> i32 {
     if value <= 0 || alignment <= 1 {
         return value;
@@ -159,118 +153,56 @@ fn align_down(value: i32, alignment: i32) -> i32 {
     if aligned > 0 { aligned } else { value }
 }
 
-fn align_frame_size(
-    size: FrameSize,
-    horizontal_alignment: i32,
-    vertical_alignment: i32,
-) -> FrameSize {
-    FrameSize {
-        width: align_down(size.width, horizontal_alignment),
-        height: align_down(size.height, vertical_alignment),
-    }
-}
-
 fn apply_alignment_to_codec(
     codec: &mut VideoCodec,
     codec_type: VideoCodecType,
     horizontal_alignment: i32,
     vertical_alignment: i32,
-) -> Option<FrameSize> {
+) -> Option<(i32, i32)> {
     if codec.codec_type() != codec_type {
         return None;
     }
 
-    let aligned_codec_size = align_frame_size(
-        FrameSize {
-            width: codec.width(),
-            height: codec.height(),
-        },
-        horizontal_alignment,
-        vertical_alignment,
-    );
-    if aligned_codec_size.width <= 0 || aligned_codec_size.height <= 0 {
+    let aligned_codec_width = align_down(codec.width(), horizontal_alignment);
+    let aligned_codec_height = align_down(codec.height(), vertical_alignment);
+    if aligned_codec_width <= 0 || aligned_codec_height <= 0 {
         return None;
     }
 
-    codec.set_width(aligned_codec_size.width);
-    codec.set_height(aligned_codec_size.height);
+    codec.set_width(aligned_codec_width);
+    codec.set_height(aligned_codec_height);
 
     for index in 0..codec.number_of_simulcast_streams() {
         let Some(mut stream) = codec.simulcast_stream(index) else {
             continue;
         };
-        let aligned_stream_size = align_frame_size(
-            FrameSize {
-                width: stream.width(),
-                height: stream.height(),
-            },
-            horizontal_alignment,
-            vertical_alignment,
-        );
-        if aligned_stream_size.width <= 0 || aligned_stream_size.height <= 0 {
+        let aligned_stream_width = align_down(stream.width(), horizontal_alignment);
+        let aligned_stream_height = align_down(stream.height(), vertical_alignment);
+        if aligned_stream_width <= 0 || aligned_stream_height <= 0 {
             continue;
         }
-        stream.set_width(aligned_stream_size.width);
-        stream.set_height(aligned_stream_size.height);
+        stream.set_width(aligned_stream_width);
+        stream.set_height(aligned_stream_height);
     }
 
-    Some(aligned_codec_size)
+    Some((aligned_codec_width, aligned_codec_height))
 }
 
-fn compute_center_crop(
-    frame_width: i32,
-    frame_height: i32,
-    target_width: i32,
-    target_height: i32,
-) -> Option<(i32, i32, i32, i32)> {
-    if frame_width <= 0 || frame_height <= 0 || target_width <= 0 || target_height <= 0 {
-        return None;
-    }
-
-    let lhs = i64::from(frame_width) * i64::from(target_height);
-    let rhs = i64::from(frame_height) * i64::from(target_width);
-    let (mut crop_width, mut crop_height) = if lhs > rhs {
-        (
-            (i64::from(frame_height) * i64::from(target_width) / i64::from(target_height)) as i32,
-            frame_height,
-        )
-    } else {
-        (
-            frame_width,
-            (i64::from(frame_width) * i64::from(target_height) / i64::from(target_width)) as i32,
-        )
-    };
-
-    crop_width = crop_width.clamp(1, frame_width);
-    crop_height = crop_height.clamp(1, frame_height);
-    if crop_width > 1 {
-        crop_width &= !1;
-    }
-    if crop_height > 1 {
-        crop_height &= !1;
-    }
-    if crop_width <= 0 || crop_height <= 0 {
-        return None;
-    }
-
-    let mut offset_x = (frame_width - crop_width) / 2;
-    let mut offset_y = (frame_height - crop_height) / 2;
-    if offset_x > 0 {
-        offset_x &= !1;
-    }
-    if offset_y > 0 {
-        offset_y &= !1;
-    }
-
-    Some((offset_x.max(0), offset_y.max(0), crop_width, crop_height))
-}
-
+/// エンコーダー固有の解像度アライメント制約を吸収するアダプター。
+///
+/// このアダプターを使うと、下流のエンコーダーに対して、
+/// 入力フレームを指定されたアライメント制約に合わせたサイズに crop する。
+///
+/// アライメント時、align up ではなく align down する。
+/// つまり 1080 サイズの入力映像を 16 でアライメントすると 1088 ではなく 1072 サイズになる。
+///
+/// 溢れた領域は削除されるため、画面端の情報が失われる可能性がある点に注意。
 pub struct AlignmentEncoderAdapter {
     encoder: VideoEncoder,
     codec_type: VideoCodecType,
     horizontal_alignment: i32,
     vertical_alignment: i32,
-    target_size: Option<FrameSize>,
+    target_size: Option<(i32, i32)>,
 }
 
 impl AlignmentEncoderAdapter {
@@ -292,32 +224,35 @@ impl AlignmentEncoderAdapter {
     fn build_aligned_frame(
         &self,
         frame: VideoFrameRef<'_>,
-        target_size: FrameSize,
+        target_width: i32,
+        target_height: i32,
     ) -> Option<VideoFrame> {
         let frame_width = frame.width();
         let frame_height = frame.height();
         if frame_width <= 0 || frame_height <= 0 {
             return None;
         }
-        if frame_width == target_size.width && frame_height == target_size.height {
+        if frame_width == target_width && frame_height == target_height {
             return Some(frame.to_owned());
         }
+        if frame_width < target_width || frame_height < target_height {
+            return None;
+        }
 
-        let (offset_x, offset_y, crop_width, crop_height) = compute_center_crop(
-            frame_width,
-            frame_height,
-            target_size.width,
-            target_size.height,
-        )?;
+        let mut offset_x = (frame_width - target_width) / 2;
+        let mut offset_y = (frame_height - target_height) / 2;
+        // I420/NV12 などのクロップは偶数ピクセル単位でしか行えないので偶数に丸める
+        offset_x &= !1;
+        offset_y &= !1;
 
         let mut source_buffer = frame.buffer();
         let aligned_buffer = source_buffer.crop_and_scale(
             offset_x,
             offset_y,
-            crop_width,
-            crop_height,
-            target_size.width,
-            target_size.height,
+            target_width,
+            target_height,
+            target_width,
+            target_height,
         )?;
 
         let mut aligned_frame = frame.to_owned();
@@ -332,6 +267,8 @@ impl VideoEncoderHandler for AlignmentEncoderAdapter {
         codec: VideoCodecRef<'_>,
         settings: VideoEncoderSettingsRef<'_>,
     ) -> VideoCodecStatus {
+        // WebRTC 側の InitEncode は元々 const VideoCodec* を受けるため、
+        // 入力設定は直接変更せずコピーを編集して下流へ渡す。
         let mut codec_settings = codec.to_owned();
         self.target_size = apply_alignment_to_codec(
             &mut codec_settings,
@@ -347,10 +284,11 @@ impl VideoEncoderHandler for AlignmentEncoderAdapter {
         frame: VideoFrameRef<'_>,
         frame_types: Option<VideoFrameTypeVectorRef<'_>>,
     ) -> VideoCodecStatus {
-        let Some(target_size) = self.target_size else {
+        let Some((target_width, target_height)) = self.target_size else {
             return self.encoder.encode(frame, frame_types);
         };
-        let Some(aligned_frame) = self.build_aligned_frame(frame, target_size) else {
+        let Some(aligned_frame) = self.build_aligned_frame(frame, target_width, target_height)
+        else {
             return VideoCodecStatus::Error;
         };
         self.encoder.encode(aligned_frame.as_ref(), frame_types)
@@ -852,13 +790,7 @@ mod tests {
 
         let aligned =
             apply_alignment_to_codec(&mut codec, VideoCodecType::Av1, 64, 16).expect("整列失敗");
-        assert_eq!(
-            aligned,
-            FrameSize {
-                width: 320,
-                height: 176
-            }
-        );
+        assert_eq!(aligned, (320, 176));
         assert_eq!(codec.width(), 320);
         assert_eq!(codec.height(), 176);
         assert_eq!(

@@ -549,6 +549,21 @@ impl AmfVideoCodecCapability {
                     let encoder =
                         VideoEncoder::new_with_handler(Box::new(AmfVideoEncoder::new(codec_type)));
                     if codec_type == VideoCodecType::Av1 {
+                        // AMF AV1 エンコーダーは 64x16 のアライメント制約があるため、アダプターを噛ませて対応する。
+                        //
+                        // AMF AV1 では `AMF_VIDEO_ENCODER_AV1_ALIGNMENT_MODE` が定義されており、
+                        // `64X16_ONLY` / `64X16_1080P_CODED_1082` /
+                        // `NO_RESTRICTIONS` / `8X2_ONLY` のモードが存在する。
+                        // デフォルトでは `64X16_ONLY` が選ばれ、その場合は
+                        // 64x16 に揃っていない解像度を渡すと `AMF_NOT_SUPPORTED` になる
+                        // （例: 320x180 は高さ 180 が 16 の倍数でないため失敗）。
+                        //
+                        // `NO_RESTRICTIONS` モードであればエンコード時にアライメント制約は存在しないが、
+                        // 出力される映像が 64x16 に align up されて出力されてしまう。
+                        //
+                        // また `shiguredo_amf` 2026.1.0 の公開 API では
+                        // `Av1AlignmentMode` を切り替える設定項目が露出していない。
+                        // そのため SDK 側でアダプターを噛ませて吸収する。
                         Some(VideoEncoder::new_with_handler(Box::new(
                             AlignmentEncoderAdapter::new(encoder, VideoCodecType::Av1, 64, 16),
                         )))
