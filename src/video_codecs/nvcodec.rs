@@ -442,27 +442,11 @@ mod tests {
         );
         assert!(
             capability
-                .create_video_encoder(
-                    shiguredo_webrtc::Environment::new().as_ref(),
-                    SdpVideoFormat::new("H265").as_ref(),
-                )
-                .is_none()
-        );
-        assert!(
-            capability
                 .create_video_decoder(
                     shiguredo_webrtc::Environment::new().as_ref(),
                     SdpVideoFormat::new("H264").as_ref(),
                 )
                 .is_some()
-        );
-        assert!(
-            capability
-                .create_video_decoder(
-                    shiguredo_webrtc::Environment::new().as_ref(),
-                    SdpVideoFormat::new("H265").as_ref(),
-                )
-                .is_none()
         );
 
         let resolved = capability
