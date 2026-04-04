@@ -75,6 +75,7 @@ impl<'text, 'raw> TryFrom<RawJsonValue<'text, 'raw>> for CodecDirection {
 
 pub trait VideoCodecCapability: Send {
     fn get_implementation(&self) -> VideoCodecImplementation;
+    /// 指定した方向とコーデックタイプでサポートされている SDP フォーマットのリストを返す。
     fn get_supported_formats(&self, direction: CodecDirection) -> Vec<SdpVideoFormat>;
     fn is_supported(&self, direction: CodecDirection, codec_type: VideoCodecType) -> bool {
         let Some(codec_name) = codec_type.as_str() else {
@@ -90,6 +91,10 @@ pub trait VideoCodecCapability: Send {
     ) -> Option<SdpVideoFormat> {
         fuzzy_match_sdp_video_format(&self.get_supported_formats(direction), format.as_ref())
     }
+    /// 指定したフォーマットでエンコーダーがサポートされている場合は VideoEncoder を返す。
+    ///
+    /// create_video_encoder() は get_supported_formats() で返されるフォーマットのいずれかとマッチするフォーマットで呼び出されることが想定されている。
+    /// get_supported_formats() で返されないフォーマットで呼び出された場合の動作は実装に依存するため、None が返されることは保証されない。
     #[expect(unused_variables)]
     fn create_video_encoder(
         &self,
@@ -98,6 +103,10 @@ pub trait VideoCodecCapability: Send {
     ) -> Option<VideoEncoder> {
         None
     }
+    /// 指定したフォーマットでデコーダーがサポートされている場合は VideoDecoder を返す。
+    ///
+    /// create_video_decoder() は get_supported_formats() で返されるフォーマットのいずれかとマッチするフォーマットで呼び出されることが想定されている。
+    /// get_supported_formats() で返されないフォーマットで呼び出された場合の動作は実装に依存するため、None が返されることは保証されない。
     #[expect(unused_variables)]
     fn create_video_decoder(
         &self,
