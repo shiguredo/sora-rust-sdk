@@ -17,9 +17,21 @@ use shiguredo_webrtc::{
 };
 
 use crate::error::Result;
+use crate::video_codec::SimulcastEncoderAdapterSupport;
 use crate::video_codec_capability::{
     CodecDirection, VideoCodecCapability, VideoCodecImplementation,
 };
+
+fn openh264_supported_formats() -> Vec<SdpVideoFormat> {
+    vec![SdpVideoFormat::new_with_parameters(
+        "H264",
+        &HashMap::from([
+            (String::from("level-asymmetry-allowed"), String::from("1")),
+            (String::from("packetization-mode"), String::from("1")),
+        ]),
+        &[ScalabilityMode::L1T1],
+    )]
+}
 
 struct Openh264VideoEncoder {
     callback: Option<VideoEncoderEncodedImageCallbackPtr>,
@@ -464,6 +476,7 @@ impl VideoDecoderHandler for Openh264VideoDecoder {
 
 pub struct Openh264VideoCodecCapability {
     library: Openh264Library,
+    simulcast_encoder_adapter_support: SimulcastEncoderAdapterSupport,
 }
 
 impl Openh264VideoCodecCapability {
@@ -475,7 +488,21 @@ impl Openh264VideoCodecCapability {
                 reason: "OpenH264 does not support both encoder and decoder".to_string(),
             });
         }
-        Ok(Self { library })
+        let encoder_library = library.clone();
+        Ok(Self {
+            library,
+            simulcast_encoder_adapter_support: SimulcastEncoderAdapterSupport::new_with_builder(
+                openh264_supported_formats,
+                {
+                    let library = encoder_library;
+                    move |_env, _format| {
+                        Some(VideoEncoder::new_with_handler(Box::new(
+                            Openh264VideoEncoder::new(library.clone()),
+                        )))
+                    }
+                },
+            ),
+        })
     }
 }
 
@@ -484,44 +511,28 @@ impl VideoCodecCapability for Openh264VideoCodecCapability {
         VideoCodecImplementation::new("openh264", "OpenH264")
     }
 
-    #[expect(unused_variables)]
-    fn get_supported_formats(&self, direction: CodecDirection) -> Vec<SdpVideoFormat> {
-        vec![SdpVideoFormat::new_with_parameters(
-            "H264",
-            &HashMap::from([
-                (String::from("level-asymmetry-allowed"), String::from("1")),
-                (String::from("packetization-mode"), String::from("1")),
-            ]),
-            &[ScalabilityMode::L1T1],
-        )]
+    fn get_supported_formats(&self, _direction: CodecDirection) -> Vec<SdpVideoFormat> {
+        openh264_supported_formats()
     }
 
     fn create_video_encoder(
         &self,
-        _env: shiguredo_webrtc::EnvironmentRef<'_>,
+        env: shiguredo_webrtc::EnvironmentRef<'_>,
         format: &SdpVideoFormat,
     ) -> Option<VideoEncoder> {
-        if format.name().ok().as_deref() == Some("H264") {
-            Some(VideoEncoder::new_with_handler(Box::new(
-                Openh264VideoEncoder::new(self.library.clone()),
-            )))
-        } else {
-            None
-        }
+        self.simulcast_encoder_adapter_support
+            .create_video_encoder(env, format)
     }
 
+    #[expect(unused_variables)]
     fn create_video_decoder(
         &self,
-        _env: shiguredo_webrtc::EnvironmentRef<'_>,
+        env: shiguredo_webrtc::EnvironmentRef<'_>,
         format: &SdpVideoFormat,
     ) -> Option<VideoDecoder> {
-        if format.name().ok().as_deref() == Some("H264") {
-            Some(VideoDecoder::new_with_handler(Box::new(
-                Openh264VideoDecoder::new(self.library.clone()),
-            )))
-        } else {
-            None
-        }
+        Some(VideoDecoder::new_with_handler(Box::new(
+            Openh264VideoDecoder::new(self.library.clone()),
+        )))
     }
 }
 
@@ -576,6 +587,7 @@ fn has_annexb_start_code(data: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shiguredo_webrtc::Environment;
     use shiguredo_webrtc::{VideoFrameType, VideoFrameTypeVector};
 
     fn openh264_path() -> Option<String> {
@@ -712,5 +724,28 @@ mod tests {
         );
         assert!(!paused);
         assert!(force_idr_on_resume);
+    }
+
+    #[test]
+    fn openh264_create_video_encoder_uses_simulcast_adapter() {
+        let Some(path) = openh264_path() else {
+            println!("SKIP: OPENH264_PATH is not set");
+            return;
+        };
+        let capability = Openh264VideoCodecCapability::new(path)
+            .expect("Openh264VideoCodecCapability::new must succeed");
+        let env = Environment::new();
+        let format = SdpVideoFormat::new("H264");
+        let encoder = capability
+            .create_video_encoder(env.as_ref(), &format)
+            .expect("encoder must be created for supported format");
+        let info = encoder.get_encoder_info();
+        let implementation_name = info
+            .implementation_name()
+            .expect("implementation_name の取得に失敗");
+        assert!(
+            implementation_name.contains("SimulcastEncoderAdapter"),
+            "adapter encoder では SimulcastEncoderAdapter を含む実装名が必要: {implementation_name}",
+        );
     }
 }

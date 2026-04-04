@@ -4,9 +4,9 @@ use shiguredo_nvcodec::{
     Decoder, DecoderConfig, Encoder, EncoderConfig, PictureType, RateControlMode,
 };
 use shiguredo_webrtc::{
-    CodecSpecificInfo, EncodedImage, EncodedImageBuffer, EncodedImageRef, H264PacketizationMode,
-    I420Buffer, NV12Buffer, SdpVideoFormat, VideoCodecRef, VideoCodecStatus, VideoCodecType,
-    VideoDecoder, VideoDecoderDecodedImageCallbackPtr, VideoDecoderDecoderInfo,
+    CodecSpecificInfo, EncodedImage, EncodedImageBuffer, EncodedImageRef, EnvironmentRef,
+    H264PacketizationMode, I420Buffer, NV12Buffer, SdpVideoFormat, VideoCodecRef, VideoCodecStatus,
+    VideoCodecType, VideoDecoder, VideoDecoderDecodedImageCallbackPtr, VideoDecoderDecoderInfo,
     VideoDecoderHandler, VideoDecoderSettingsRef, VideoEncoder,
     VideoEncoderEncodedImageCallbackPtr, VideoEncoderEncodedImageCallbackRef,
     VideoEncoderEncodedImageCallbackResultError, VideoEncoderEncoderInfo, VideoEncoderHandler,
@@ -14,9 +14,21 @@ use shiguredo_webrtc::{
     VideoFrameType, VideoFrameTypeVectorRef, i420_to_nv12, nv12_to_i420,
 };
 
+use crate::video_codec::SimulcastEncoderAdapterSupport;
 use crate::video_codec_capability::{
     CodecDirection, VideoCodecCapability, VideoCodecImplementation,
 };
+
+fn nvcodec_supported_formats() -> Vec<SdpVideoFormat> {
+    vec![SdpVideoFormat::new_with_parameters(
+        "H264",
+        &HashMap::from([
+            (String::from("level-asymmetry-allowed"), String::from("1")),
+            (String::from("packetization-mode"), String::from("1")),
+        ]),
+        &[ScalabilityMode::L1T1],
+    )]
+}
 
 struct NvCodecVideoEncoder {
     callback: Option<VideoEncoderEncodedImageCallbackPtr>,
@@ -344,11 +356,22 @@ impl VideoDecoderHandler for NvCodecVideoDecoder {
     }
 }
 
-pub struct NvCodecVideoCodecCapability;
+pub struct NvCodecVideoCodecCapability {
+    simulcast_encoder_adapter_support: SimulcastEncoderAdapterSupport,
+}
 
 impl NvCodecVideoCodecCapability {
     pub fn new() -> Self {
-        Self
+        Self {
+            simulcast_encoder_adapter_support: SimulcastEncoderAdapterSupport::new_with_builder(
+                nvcodec_supported_formats,
+                |_env: EnvironmentRef<'_>, format| {
+                    Some(VideoEncoder::new_with_handler(Box::new(
+                        NvCodecVideoEncoder::new(),
+                    )))
+                },
+            ),
+        }
     }
 }
 
@@ -363,29 +386,17 @@ impl VideoCodecCapability for NvCodecVideoCodecCapability {
         VideoCodecImplementation::new("nvcodec", "NVIDIA NVENC/NVDEC")
     }
 
-    fn get_supported_formats(&self, direction: CodecDirection) -> Vec<SdpVideoFormat> {
-        vec![SdpVideoFormat::new_with_parameters(
-            "H264",
-            &HashMap::from([
-                (String::from("level-asymmetry-allowed"), String::from("1")),
-                (String::from("packetization-mode"), String::from("1")),
-            ]),
-            &[ScalabilityMode::L1T1],
-        )]
+    fn get_supported_formats(&self, _direction: CodecDirection) -> Vec<SdpVideoFormat> {
+        nvcodec_supported_formats()
     }
 
     fn create_video_encoder(
         &self,
-        _env: shiguredo_webrtc::EnvironmentRef<'_>,
+        env: shiguredo_webrtc::EnvironmentRef<'_>,
         format: &SdpVideoFormat,
     ) -> Option<VideoEncoder> {
-        if format.name().ok().as_deref() == Some("H264") {
-            Some(VideoEncoder::new_with_handler(Box::new(
-                NvCodecVideoEncoder::new(),
-            )))
-        } else {
-            None
-        }
+        self.simulcast_encoder_adapter_support
+            .create_video_encoder(env, format)
     }
 
     fn create_video_decoder(
@@ -393,19 +404,16 @@ impl VideoCodecCapability for NvCodecVideoCodecCapability {
         _env: shiguredo_webrtc::EnvironmentRef<'_>,
         format: &SdpVideoFormat,
     ) -> Option<VideoDecoder> {
-        if format.name().ok().as_deref() == Some("H264") {
-            Some(VideoDecoder::new_with_handler(Box::new(
-                NvCodecVideoDecoder::new(),
-            )))
-        } else {
-            None
-        }
+        Some(VideoDecoder::new_with_handler(Box::new(
+            NvCodecVideoDecoder::new(),
+        )))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shiguredo_webrtc::{Environment, SdpVideoFormat};
 
     #[test]
     fn nvcodec_capability_supports_only_h264() {
@@ -476,5 +484,23 @@ mod tests {
             ),
         );
         assert!(resolved_with_packetization_mode_0.is_some());
+    }
+
+    #[test]
+    fn nvcodec_simulcast_adapter_encoder_info_contains_adapter_name() {
+        let capability = NvCodecVideoCodecCapability::new();
+        let env = Environment::new();
+        let format = SdpVideoFormat::new("H264");
+        let mut encoder = capability
+            .create_video_encoder(env.as_ref(), &format)
+            .expect("encoder must be created for supported format");
+        let info = encoder.get_encoder_info();
+        let implementation_name = info
+            .implementation_name()
+            .expect("implementation_name の取得に失敗");
+        assert!(
+            implementation_name.contains("SimulcastEncoderAdapter"),
+            "adapter encoder では SimulcastEncoderAdapter を含む実装名が必要: {implementation_name}",
+        );
     }
 }

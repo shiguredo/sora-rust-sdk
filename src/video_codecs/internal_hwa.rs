@@ -4,12 +4,12 @@ use shiguredo_webrtc::{
 };
 
 use crate::video_codec_capability::{
-    CodecDirection, VideoCodecCapability, VideoCodecImplementation,
+    CodecDirection, SimulcastEncoderAdapterSupport, VideoCodecCapability, VideoCodecImplementation,
 };
 
 pub struct InternalHwaVideoCodecCapability {
     implementation: VideoCodecImplementation,
-    encoder_factory: VideoEncoderFactory,
+    simulcast_encoder_adapter_support: SimulcastEncoderAdapterSupport,
     decoder_factory: VideoDecoderFactory,
 }
 
@@ -22,7 +22,7 @@ impl InternalHwaVideoCodecCapability {
                 "internal-hwa",
                 "WebRTC ObjC default VideoCodecFactory",
             ),
-            encoder_factory,
+            simulcast_encoder_adapter_support: SimulcastEncoderAdapterSupport::new(encoder_factory),
             decoder_factory,
         })
     }
@@ -35,7 +35,9 @@ impl VideoCodecCapability for InternalHwaVideoCodecCapability {
 
     fn get_supported_formats(&self, direction: CodecDirection) -> Vec<SdpVideoFormat> {
         match direction {
-            CodecDirection::Encoder => self.encoder_factory.get_supported_formats(),
+            CodecDirection::Encoder => self
+                .simulcast_encoder_adapter_support
+                .get_supported_formats(),
             CodecDirection::Decoder => self.decoder_factory.get_supported_formats(),
         }
     }
@@ -45,7 +47,8 @@ impl VideoCodecCapability for InternalHwaVideoCodecCapability {
         env: EnvironmentRef<'_>,
         format: &SdpVideoFormat,
     ) -> Option<VideoEncoder> {
-        self.encoder_factory.create(env, format.as_ref())
+        self.simulcast_encoder_adapter_support
+            .create_video_encoder(env, format)
     }
 
     fn create_video_decoder(
@@ -114,5 +117,30 @@ mod tests {
                 "decoder must be created for a supported format",
             );
         }
+    }
+
+    #[test]
+    fn internal_hwa_capability_create_video_encoder_uses_simulcast_adapter() {
+        let capability = InternalHwaVideoCodecCapability::new()
+            .expect("InternalHwaVideoCodecCapability must be available");
+        let Some(format) = capability
+            .get_supported_formats(CodecDirection::Encoder)
+            .into_iter()
+            .next()
+        else {
+            return;
+        };
+        let env = shiguredo_webrtc::Environment::new();
+        let mut encoder = capability
+            .create_video_encoder(env.as_ref(), &format)
+            .expect("encoder must be created for supported format");
+        let info = encoder.get_encoder_info();
+        let implementation_name = info
+            .implementation_name()
+            .expect("implementation_name の取得に失敗");
+        assert!(
+            implementation_name.contains("SimulcastEncoderAdapter"),
+            "adapter encoder では SimulcastEncoderAdapter を含む実装名が必要: {implementation_name}",
+        );
     }
 }

@@ -90,16 +90,22 @@ pub trait VideoCodecCapability: Send {
     ) -> Option<SdpVideoFormat> {
         fuzzy_match_sdp_video_format(&self.get_supported_formats(direction), format.as_ref())
     }
+    #[expect(unused_variables)]
     fn create_video_encoder(
         &self,
         env: EnvironmentRef<'_>,
         format: &SdpVideoFormat,
-    ) -> Option<VideoEncoder>;
+    ) -> Option<VideoEncoder> {
+        None
+    }
+    #[expect(unused_variables)]
     fn create_video_decoder(
         &self,
         env: EnvironmentRef<'_>,
         format: &SdpVideoFormat,
-    ) -> Option<VideoDecoder>;
+    ) -> Option<VideoDecoder> {
+        None
+    }
 }
 
 impl DisplayJson for VideoCodecImplementation {

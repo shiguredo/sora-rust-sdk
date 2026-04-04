@@ -1,8 +1,9 @@
 use std::sync::{Arc, Mutex};
 
 use shiguredo_webrtc::{
-    EnvironmentRef, SdpVideoFormat, SdpVideoFormatRef, VideoCodecType, VideoDecoder,
-    VideoDecoderFactoryHandler, VideoEncoder, VideoEncoderFactoryHandler,
+    EnvironmentRef, SdpVideoFormat, SdpVideoFormatRef, SimulcastEncoderAdapter, VideoCodecType,
+    VideoDecoder, VideoDecoderFactoryHandler, VideoEncoder, VideoEncoderFactory,
+    VideoEncoderFactoryHandler,
 };
 
 use crate::video_codec_capability::{
@@ -141,6 +142,75 @@ fn find_capability<'a>(
         .iter()
         .map(|capability| capability.as_ref())
         .find(|capability| capability.get_implementation() == implementation.clone())
+}
+
+pub struct SimulcastEncoderAdapterSupport {
+    primary_factory: VideoEncoderFactory,
+}
+
+struct SimulcastEncoderFactoryHandler<GetSupportedFormats, CreateEncoder> {
+    get_supported_formats: GetSupportedFormats,
+    create_encoder: CreateEncoder,
+}
+
+impl<GetSupportedFormats, CreateEncoder> VideoEncoderFactoryHandler
+    for SimulcastEncoderFactoryHandler<GetSupportedFormats, CreateEncoder>
+where
+    GetSupportedFormats: FnMut() -> Vec<SdpVideoFormat> + Send + 'static,
+    CreateEncoder: for<'a> FnMut(EnvironmentRef<'a>, SdpVideoFormatRef<'a>) -> Option<VideoEncoder>
+        + Send
+        + 'static,
+{
+    fn get_supported_formats(&mut self) -> Vec<SdpVideoFormat> {
+        (self.get_supported_formats)()
+    }
+
+    fn create(
+        &mut self,
+        env: EnvironmentRef<'_>,
+        format: SdpVideoFormatRef<'_>,
+    ) -> Option<VideoEncoder> {
+        (self.create_encoder)(env, format)
+    }
+}
+
+impl SimulcastEncoderAdapterSupport {
+    pub fn new(primary_factory: VideoEncoderFactory) -> Self {
+        Self { primary_factory }
+    }
+
+    pub fn new_with_builder<GetSupportedFormats, CreateEncoder>(
+        get_supported_formats: GetSupportedFormats,
+        create_encoder: CreateEncoder,
+    ) -> Self
+    where
+        GetSupportedFormats: FnMut() -> Vec<SdpVideoFormat> + Send + 'static,
+        CreateEncoder: for<'a> FnMut(EnvironmentRef<'a>, SdpVideoFormatRef<'a>) -> Option<VideoEncoder>
+            + Send
+            + 'static,
+    {
+        let primary_factory =
+            VideoEncoderFactory::new_with_handler(Box::new(SimulcastEncoderFactoryHandler {
+                get_supported_formats,
+                create_encoder,
+            }));
+        Self { primary_factory }
+    }
+
+    pub fn get_supported_formats(&self) -> Vec<SdpVideoFormat> {
+        self.primary_factory.get_supported_formats()
+    }
+
+    pub fn create_video_encoder(
+        &self,
+        env: EnvironmentRef<'_>,
+        format: &SdpVideoFormat,
+    ) -> Option<VideoEncoder> {
+        Some(
+            SimulcastEncoderAdapter::new(env, &self.primary_factory, None, format.as_ref())
+                .cast_to_video_encoder(),
+        )
+    }
 }
 
 #[cfg(test)]

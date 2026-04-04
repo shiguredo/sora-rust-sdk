@@ -34,7 +34,7 @@
   - @melpon
 - [ADD] OpenH264 の `VideoCodecCapability` と e2e-tests / CI 実行を追加する
   - @melpon
-- [ADD] `VideoCodecCapability::adapt_video_encoder` を追加し `SoraVideoEncoderFactory` で `SimulcastEncoderAdapter` を適用する
+- [ADD] `SimulcastEncoderAdapterSupport` を追加し、`SoraVideoEncoderFactory` で `internal_hwa` / `nvcodec` / `openh264` に `SimulcastEncoderAdapter` を適用する
   - @melpon
 - [ADD] non-builtin encoder (OpenH264 / nvcodec / internal_hwa) の simulcast e2e テストを追加する
   - @melpon
