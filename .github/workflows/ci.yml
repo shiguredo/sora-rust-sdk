@@ -78,7 +78,7 @@ jobs:
             features: "--features openh264,nvcodec"
             test_args: ""
           - labels:  [self-hosted, linux, x64, AMD-AMF]
-            features: "--features amf,nvcodec"
+            features: "--features openh264,amf"
             test_args: ""
     runs-on:
       group: Self
