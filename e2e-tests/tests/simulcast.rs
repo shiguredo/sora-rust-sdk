@@ -197,30 +197,19 @@ async fn test_sendonly_simulcast_outbound_layers_nvcodec() {
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 #[tokio::test]
-async fn test_sendonly_simulcast_outbound_layers_internal_hwa_non_builtin() {
+async fn test_sendonly_simulcast_outbound_layers_internal_hwa() {
     load_env();
     let Some(capability) = InternalHwaVideoCodecCapability::new() else {
         eprintln!("InternalHwaVideoCodecCapability is not available, skipping test");
         return;
     };
-    let (video, expected_encoder_name) =
-        if capability.is_supported(CodecDirection::Encoder, VideoCodecType::H264) {
-            (Video::new_h264(None, None), "VideoToolbox")
-        } else if capability.is_supported(CodecDirection::Encoder, VideoCodecType::Vp8) {
-            (Video::new_vp8(None), "libvpx")
-        } else {
-            eprintln!(
-                "InternalHwaVideoCodecCapability does not support H264/VP8 encoder, skipping test"
-            );
-            return;
-        };
     let capability: Box<dyn VideoCodecCapability> = Box::new(capability);
     let context = create_non_builtin_context(capability).expect("コンテキスト作成失敗");
     run_sendonly_simulcast_outbound_layers(
         context,
-        Some(video),
+        Some(Video::new_h264(None, None)),
         "simulcast-sendonly-internal-hwa",
-        &["SimulcastEncoderAdapter", expected_encoder_name],
+        &["SimulcastEncoderAdapter", "VideoToolbox"],
     )
     .await;
 }
