@@ -58,3 +58,5 @@
   - @voluntas, @melpon
 - [ADD] sumomo に --openh264-path オプションを追加する
   - @melpon
+- [ADD] sumomo に --video-codec-implementation オプションを追加し AMF を選択できるようにする
+  - @melpon

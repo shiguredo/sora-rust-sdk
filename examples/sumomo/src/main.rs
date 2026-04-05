@@ -16,14 +16,15 @@ use shiguredo_webrtc::{
 };
 #[cfg(feature = "media-device")]
 use shiguredo_webrtc::{AudioDeviceModule, AudioDeviceModuleHandler, AudioTransportRef};
+#[cfg(feature = "amf")]
+use sora_sdk::AmfVideoCodecCapability;
+#[cfg(feature = "nvcodec")]
+use sora_sdk::NvCodecVideoCodecCapability;
 use sora_sdk::{
     Mp4Error, Mp4PassthroughVideoCodecCapability, Mp4SampleReader, Mp4VideoCapturer,
     Openh264VideoCodecCapability, Role, SoraClient, SoraClientContext, SoraClientContextConfig,
+    VideoCodecCapability, VideoCodecPreference,
 };
-#[cfg(feature = "nvcodec")]
-use sora_sdk::{NvCodecVideoCodecCapability, VideoCodecCapability, VideoCodecPreference};
-#[cfg(not(feature = "nvcodec"))]
-use sora_sdk::{VideoCodecCapability, VideoCodecPreference};
 use tokio::sync::mpsc;
 
 struct Args {
@@ -33,6 +34,7 @@ struct Args {
     audio: Option<bool>,
     video: Option<bool>,
     video_codec_type: Option<String>,
+    video_codec_implementation: VideoCodecImplementationSelection,
     video_bit_rate: Option<u32>,
     input_mp4: Option<String>,
     openh264_path: Option<String>,
@@ -54,6 +56,29 @@ struct Args {
     audio_input_device: Option<String>,
     #[cfg(feature = "media-device")]
     list_devices: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum VideoCodecImplementationSelection {
+    #[default]
+    Auto,
+    Internal,
+    Amf,
+    Nvcodec,
+    Openh264,
+}
+
+impl VideoCodecImplementationSelection {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(Self::Auto),
+            "internal" => Some(Self::Internal),
+            "amf" => Some(Self::Amf),
+            "nvcodec" => Some(Self::Nvcodec),
+            "openh264" => Some(Self::Openh264),
+            _ => None,
+        }
+    }
 }
 
 enum AppEvent {
@@ -191,6 +216,7 @@ fn parse_args() -> Result<Args> {
             audio: None,
             video: None,
             video_codec_type: None,
+            video_codec_implementation: VideoCodecImplementationSelection::Auto,
             video_bit_rate: None,
             data_channel_signaling: None,
             ignore_disconnect_websocket: None,
@@ -255,6 +281,16 @@ fn parse_args() -> Result<Args> {
             "vp8" | "vp9" | "av1" | "h264" | "h265" => Ok(o.value().to_string()),
             _ => Err("video-codec-type は vp8/vp9/av1/h264/h265 で指定してください"),
         })?;
+
+    let video_codec_implementation: Option<VideoCodecImplementationSelection> =
+        noargs::opt("video-codec-implementation")
+            .doc("映像コーデック実装 (auto/internal/amf/nvcodec/openh264)")
+            .take(&mut args)
+            .present_and_then(|o| {
+                VideoCodecImplementationSelection::parse(o.value()).ok_or(
+            "video-codec-implementation は auto/internal/amf/nvcodec/openh264 で指定してください",
+        )
+            })?;
 
     let video_bit_rate: Option<u32> = noargs::opt("video-bit-rate")
         .doc("映像ビットレート (kbps)")
@@ -378,6 +414,7 @@ fn parse_args() -> Result<Args> {
         audio,
         video,
         video_codec_type,
+        video_codec_implementation: video_codec_implementation.unwrap_or_default(),
         video_bit_rate,
         input_mp4,
         openh264_path,
@@ -408,13 +445,62 @@ fn validate_args(args: &Args) -> Result<()> {
             io::Error::other("--input-mp4 and --openh264-path cannot be used together").into(),
         );
     }
+
+    match args.video_codec_implementation {
+        VideoCodecImplementationSelection::Openh264 => {
+            if args.openh264_path.is_none() {
+                return Err(io::Error::other(
+                    "--video-codec-implementation openh264 requires --openh264-path",
+                )
+                .into());
+            }
+        }
+        VideoCodecImplementationSelection::Auto => {}
+        VideoCodecImplementationSelection::Internal
+        | VideoCodecImplementationSelection::Amf
+        | VideoCodecImplementationSelection::Nvcodec => {
+            if args.openh264_path.is_some() {
+                return Err(io::Error::other(
+                    "--openh264-path is only available with --video-codec-implementation auto or openh264",
+                )
+                .into());
+            }
+        }
+    }
+
+    #[cfg(not(feature = "amf"))]
+    if args.video_codec_implementation == VideoCodecImplementationSelection::Amf {
+        return Err(io::Error::other(
+            "AMF is not enabled in this build. Rebuild sumomo with --features amf",
+        )
+        .into());
+    }
+
+    #[cfg(not(feature = "nvcodec"))]
+    if args.video_codec_implementation == VideoCodecImplementationSelection::Nvcodec {
+        return Err(io::Error::other(
+            "NVCodec is not enabled in this build. Rebuild sumomo with --features nvcodec",
+        )
+        .into());
+    }
+
     Ok(())
+}
+
+fn add_video_codec_capability(
+    context_config: &mut SoraClientContextConfig,
+    capability: Box<dyn VideoCodecCapability>,
+) {
+    let preference = VideoCodecPreference::new_from_capability(capability.as_ref());
+    context_config.video_codec_preference.merge(&preference);
+    context_config.video_codec_capabilities.push(capability);
 }
 
 fn build_context_config(
     adm_config: sora_sdk::AdmConfig,
     mp4_codec_type: Option<VideoCodecType>,
     openh264_path: Option<&str>,
+    video_codec_implementation: VideoCodecImplementationSelection,
 ) -> Result<SoraClientContextConfig> {
     let mut context_config = SoraClientContextConfig {
         adm_config,
@@ -424,41 +510,63 @@ fn build_context_config(
     if let Some(codec_type) = mp4_codec_type {
         let passthrough_capability: Box<dyn VideoCodecCapability> =
             Box::new(Mp4PassthroughVideoCodecCapability::new(codec_type));
-        let passthrough_preference =
-            VideoCodecPreference::new_from_capability(passthrough_capability.as_ref());
-        context_config
-            .video_codec_preference
-            .merge(&passthrough_preference);
-        context_config
-            .video_codec_capabilities
-            .push(passthrough_capability);
+        add_video_codec_capability(&mut context_config, passthrough_capability);
     }
 
-    #[cfg(feature = "nvcodec")]
-    {
-        let nvcodec_capability: Box<dyn VideoCodecCapability> =
-            Box::new(NvCodecVideoCodecCapability::new());
-        let nvcodec_preference =
-            VideoCodecPreference::new_from_capability(nvcodec_capability.as_ref());
-        context_config
-            .video_codec_preference
-            .merge(&nvcodec_preference);
-        context_config
-            .video_codec_capabilities
-            .push(nvcodec_capability);
-    }
+    match video_codec_implementation {
+        VideoCodecImplementationSelection::Auto => {
+            #[cfg(feature = "nvcodec")]
+            {
+                let nvcodec_capability: Box<dyn VideoCodecCapability> =
+                    Box::new(NvCodecVideoCodecCapability::new());
+                add_video_codec_capability(&mut context_config, nvcodec_capability);
+            }
 
-    if let Some(path) = openh264_path {
-        let openh264_capability: Box<dyn VideoCodecCapability> =
-            Box::new(Openh264VideoCodecCapability::new(path)?);
-        let openh264_preference =
-            VideoCodecPreference::new_from_capability(openh264_capability.as_ref());
-        context_config
-            .video_codec_preference
-            .merge(&openh264_preference);
-        context_config
-            .video_codec_capabilities
-            .push(openh264_capability);
+            if let Some(path) = openh264_path {
+                let openh264_capability: Box<dyn VideoCodecCapability> =
+                    Box::new(Openh264VideoCodecCapability::new(path)?);
+                add_video_codec_capability(&mut context_config, openh264_capability);
+            }
+        }
+        VideoCodecImplementationSelection::Internal => {}
+        VideoCodecImplementationSelection::Amf => {
+            #[cfg(feature = "amf")]
+            {
+                let amf_capability: Box<dyn VideoCodecCapability> =
+                    Box::new(AmfVideoCodecCapability::new()?);
+                add_video_codec_capability(&mut context_config, amf_capability);
+            }
+            #[cfg(not(feature = "amf"))]
+            {
+                return Err(io::Error::other(
+                    "AMF is not enabled in this build. Rebuild sumomo with --features amf",
+                )
+                .into());
+            }
+        }
+        VideoCodecImplementationSelection::Nvcodec => {
+            #[cfg(feature = "nvcodec")]
+            {
+                let nvcodec_capability: Box<dyn VideoCodecCapability> =
+                    Box::new(NvCodecVideoCodecCapability::new());
+                add_video_codec_capability(&mut context_config, nvcodec_capability);
+            }
+            #[cfg(not(feature = "nvcodec"))]
+            {
+                return Err(io::Error::other(
+                    "NVCodec is not enabled in this build. Rebuild sumomo with --features nvcodec",
+                )
+                .into());
+            }
+        }
+        VideoCodecImplementationSelection::Openh264 => {
+            let path = openh264_path.ok_or_else(|| {
+                io::Error::other("--video-codec-implementation openh264 requires --openh264-path")
+            })?;
+            let openh264_capability: Box<dyn VideoCodecCapability> =
+                Box::new(Openh264VideoCodecCapability::new(path)?);
+            add_video_codec_capability(&mut context_config, openh264_capability);
+        }
     }
 
     Ok(context_config)
@@ -922,10 +1030,12 @@ fn run_with_raw_player(args: Args) -> Result<()> {
     let client_cert = args.client_cert.clone();
     let client_key = args.client_key.clone();
     let ca_cert = args.ca_cert.clone();
+    let video_codec_implementation = args.video_codec_implementation;
     let context_config = build_context_config(
         sora_sdk::AdmConfig::NoAudioDevice,
         None,
         args.openh264_path.as_deref(),
+        video_codec_implementation,
     )?;
     let context = SoraClientContext::new_with_config(context_config)?;
     let context_for_thread = context.clone();
@@ -1592,6 +1702,7 @@ async fn main() -> Result<()> {
         adm_config,
         mp4_state.as_ref().map(|(_, codec_type)| *codec_type),
         args.openh264_path.as_deref(),
+        args.video_codec_implementation,
     )?;
     let context = SoraClientContext::new_with_config(context_config)?;
 
