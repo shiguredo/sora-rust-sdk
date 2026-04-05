@@ -65,3 +65,5 @@
   - @melpon
 - [ADD] sumomo に --video-codec-implementation オプションを追加し AMF を選択できるようにする
   - @melpon
+- [ADD] sumomo に --video-codec-list オプションを追加し capability と preference を表示できるようにする
+  - @melpon
