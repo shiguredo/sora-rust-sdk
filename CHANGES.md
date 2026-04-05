@@ -34,13 +34,13 @@
   - @melpon
 - [ADD] MP4 ファイルからエンコード済み映像をパススルー送信する機能を追加
   - @voluntas, @melpon
-- [ADD] Apple 環境で ObjC default VideoCodecFactory を利用する `InternalHwaVideoCodecCapability` を追加する
+- [ADD] Apple 環境で ObjC default VideoCodecFactory を利用する `InternalAppleVideoCodecCapability` を追加する
   - @melpon
 - [ADD] OpenH264 の `VideoCodecCapability` と e2e-tests / CI 実行を追加する
   - @melpon
-- [ADD] `SimulcastCapabilityHelper` を追加し、`SoraVideoEncoderFactory` で `internal_hwa` / `nvcodec` / `openh264` に `SimulcastEncoderAdapter` を適用する
+- [ADD] `SimulcastCapabilityHelper` を追加し、`SoraVideoEncoderFactory` で `internal_apple` / `nvcodec` / `openh264` に `SimulcastEncoderAdapter` を適用する
   - @melpon
-- [ADD] non-builtin encoder (OpenH264 / nvcodec / internal_hwa) の simulcast e2e テストを追加する
+- [ADD] non-builtin encoder (OpenH264 / nvcodec / internal_apple) の simulcast e2e テストを追加する
   - @melpon
 - [ADD] AMD AMF に対応する
   - `shiguredo_amf` を利用した `AmfVideoCodecCapability` を追加し、H264/H265/AV1 の対応可否を動的判定してエンコーダー/デコーダーを提供する
@@ -66,4 +66,6 @@
 - [ADD] sumomo に --openh264-path オプションを追加する
   - @melpon
 - [ADD] sumomo に --video-codec-implementation オプションを追加し AMF を選択できるようにする
+  - @melpon
+- [ADD] sumomo に --video-codec-list オプションを追加し capability と preference を表示できるようにする
   - @melpon

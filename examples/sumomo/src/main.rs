@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as FmtWrite;
 use std::io;
+use std::io::IsTerminal;
 use std::io::Write as IoWrite;
 use std::sync::Arc;
 #[cfg(feature = "media-device")]
@@ -19,7 +20,7 @@ use shiguredo_webrtc::{AudioDeviceModule, AudioDeviceModuleHandler, AudioTranspo
 #[cfg(feature = "amf")]
 use sora_sdk::AmfVideoCodecCapability;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-use sora_sdk::InternalHwaVideoCodecCapability;
+use sora_sdk::InternalAppleVideoCodecCapability;
 #[cfg(feature = "nvcodec")]
 use sora_sdk::NvCodecVideoCodecCapability;
 use sora_sdk::{
@@ -40,6 +41,7 @@ struct Args {
     video_bit_rate: Option<u32>,
     input_mp4: Option<String>,
     openh264_path: Option<String>,
+    video_codec_list: bool,
     data_channel_signaling: Option<bool>,
     ignore_disconnect_websocket: Option<bool>,
     simulcast: Option<bool>,
@@ -63,7 +65,7 @@ struct Args {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum VideoCodecImplementationSelection {
     Internal,
-    InternalHwa,
+    InternalApple,
     Amf,
     Nvcodec,
     Openh264,
@@ -73,11 +75,21 @@ impl VideoCodecImplementationSelection {
     fn parse(value: &str) -> Option<Self> {
         match value {
             "internal" => Some(Self::Internal),
-            "internal-hwa" => Some(Self::InternalHwa),
+            "internal-apple" => Some(Self::InternalApple),
             "amf" => Some(Self::Amf),
             "nvcodec" => Some(Self::Nvcodec),
             "openh264" => Some(Self::Openh264),
             _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Internal => "internal",
+            Self::InternalApple => "internal-apple",
+            Self::Amf => "amf",
+            Self::Nvcodec => "nvcodec",
+            Self::Openh264 => "openh264",
         }
     }
 }
@@ -108,7 +120,7 @@ impl VideoCodecImplementationSelections {
         let mut selections = Vec::new();
         for value in values {
             let selection = VideoCodecImplementationSelection::parse(value).ok_or(
-                "video-codec-implementation must be auto/internal/internal-hwa/amf/nvcodec/openh264",
+                "video-codec-implementation must be auto/internal/internal-apple/amf/nvcodec/openh264",
             )?;
             if !seen.insert(selection) {
                 return Err(
@@ -245,6 +257,60 @@ fn parse_args() -> Result<Args> {
 
     noargs::HELP_FLAG.take_help(&mut args);
 
+    // codec list モードは接続処理を行わず、表示用オプションだけを解釈して即終了する。
+    let video_codec_list = noargs::flag("video-codec-list")
+        .doc("利用可能な映像コーデック実装と選択優先順位を表示して終了する")
+        .take(&mut args)
+        .is_present();
+
+    if video_codec_list {
+        // preference 計算に必要な実装優先順だけ先に解釈する。
+        let video_codec_implementation: Option<VideoCodecImplementationSelections> =
+            noargs::opt("video-codec-implementation")
+                .doc("映像コーデック実装 (auto または internal/internal-apple/amf/nvcodec/openh264 のカンマ区切り)")
+                .take(&mut args)
+                .present_and_then(|o| VideoCodecImplementationSelections::parse(o.value()))?;
+
+        // OpenH264 の可用性判定に必要なパスを受け取る。
+        let openh264_path: Option<String> = noargs::opt("openh264-path")
+            .doc("OpenH264 の動的ライブラリパス")
+            .take(&mut args)
+            .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
+
+        let _ = args.finish();
+        return Ok(Args {
+            signaling_urls: Vec::new(),
+            channel_id: String::new(),
+            role: Role::RecvOnly,
+            audio: None,
+            video: None,
+            video_codec_type: None,
+            video_codec_implementation: video_codec_implementation.unwrap_or_default(),
+            video_bit_rate: None,
+            input_mp4: None,
+            openh264_path,
+            video_codec_list: true,
+            data_channel_signaling: None,
+            ignore_disconnect_websocket: None,
+            simulcast: None,
+            insecure: false,
+            client_cert: None,
+            client_key: None,
+            ca_cert: None,
+            duration: None,
+            turn_tls_insecure: false,
+            turn_tls_ca_cert: None,
+            #[cfg(feature = "raw-player")]
+            use_raw_player: false,
+            #[cfg(feature = "media-device")]
+            video_input_device: None,
+            #[cfg(feature = "media-device")]
+            audio_input_device: None,
+            #[cfg(feature = "media-device")]
+            list_devices: false,
+        });
+    }
+
     // --list-devices は他のオプションなしで使用できる
     #[cfg(feature = "media-device")]
     let list_devices = noargs::flag("list-devices")
@@ -277,6 +343,7 @@ fn parse_args() -> Result<Args> {
             turn_tls_ca_cert: None,
             input_mp4: None,
             openh264_path: None,
+            video_codec_list: false,
             #[cfg(feature = "raw-player")]
             use_raw_player: false,
             video_input_device: None,
@@ -331,7 +398,7 @@ fn parse_args() -> Result<Args> {
 
     let video_codec_implementation: Option<VideoCodecImplementationSelections> =
         noargs::opt("video-codec-implementation")
-            .doc("映像コーデック実装 (auto または internal/internal-hwa/amf/nvcodec/openh264 のカンマ区切り)")
+            .doc("映像コーデック実装 (auto または internal/internal-apple/amf/nvcodec/openh264 のカンマ区切り)")
             .take(&mut args)
             .present_and_then(|o| {
                 VideoCodecImplementationSelections::parse(o.value())
@@ -463,6 +530,7 @@ fn parse_args() -> Result<Args> {
         video_bit_rate,
         input_mp4,
         openh264_path,
+        video_codec_list: false,
         data_channel_signaling,
         ignore_disconnect_websocket,
         simulcast,
@@ -485,12 +553,14 @@ fn parse_args() -> Result<Args> {
 }
 
 fn validate_args(args: &Args) -> Result<()> {
+    // mp4 passthrough と OpenH264 ライブラリ指定は排他的。
     if args.input_mp4.is_some() && args.openh264_path.is_some() {
         return Err(
             io::Error::other("--input-mp4 and --openh264-path cannot be used together").into(),
         );
     }
 
+    // OpenH264 は実装選択とライブラリパスがセットで必要。
     let openh264_selected = args
         .video_codec_implementation
         .contains(VideoCodecImplementationSelection::Openh264);
@@ -575,12 +645,14 @@ fn build_context_config(
                             Box::new(InternalVideoCodecCapability::new());
                         add_video_codec_capability(&mut context_config, internal_capability);
                     }
-                    VideoCodecImplementationSelection::InternalHwa => {
+                    VideoCodecImplementationSelection::InternalApple => {
                         #[cfg(any(target_os = "macos", target_os = "ios"))]
                         {
                             let capability =
-                                InternalHwaVideoCodecCapability::new().ok_or_else(|| {
-                                    io::Error::other("internal-hwa is not available on this device")
+                                InternalAppleVideoCodecCapability::new().ok_or_else(|| {
+                                    io::Error::other(
+                                        "internal-apple is not available on this device",
+                                    )
                                 })?;
                             let capability: Box<dyn VideoCodecCapability> = Box::new(capability);
                             add_video_codec_capability(&mut context_config, capability);
@@ -588,7 +660,7 @@ fn build_context_config(
                         #[cfg(not(any(target_os = "macos", target_os = "ios")))]
                         {
                             return Err(io::Error::other(
-                                "internal-hwa is not supported on this platform",
+                                "internal-apple is not supported on this platform",
                             )
                             .into());
                         }
@@ -639,6 +711,508 @@ fn build_context_config(
     }
 
     Ok(context_config)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VideoCodecCapabilityReport {
+    implementation: String,
+    selected: bool,
+    available: bool,
+    unavailable_reason: Option<String>,
+    encoder_codecs: Vec<String>,
+    decoder_codecs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VideoCodecPreferenceReport {
+    codec: String,
+    encoder: Option<String>,
+    decoder: Option<String>,
+}
+
+// --video-codec-list の表示用に、capability と preference を分離して保持する。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VideoCodecListReport {
+    capabilities: Vec<VideoCodecCapabilityReport>,
+    preference: Vec<VideoCodecPreferenceReport>,
+}
+
+// capability 実体を保持し、最終表示用 report を組み立てるための内部表現。
+struct VideoCodecCapabilityProbe {
+    selection: VideoCodecImplementationSelection,
+    selected: bool,
+    capability: Option<Box<dyn VideoCodecCapability>>,
+    unavailable_reason: Option<String>,
+}
+
+fn known_video_codec_types() -> [VideoCodecType; 5] {
+    // preference は既知 codec を常に表示する。
+    [
+        VideoCodecType::Vp8,
+        VideoCodecType::Vp9,
+        VideoCodecType::Av1,
+        VideoCodecType::H264,
+        VideoCodecType::H265,
+    ]
+}
+
+fn codec_name(codec_type: VideoCodecType) -> String {
+    codec_type
+        .as_str()
+        .unwrap_or("unknown")
+        .to_ascii_lowercase()
+}
+
+fn supported_codec_names(
+    capability: &dyn VideoCodecCapability,
+    direction: sora_sdk::CodecDirection,
+) -> Vec<String> {
+    // 既知 codec 一覧に対して capability の対応可否を評価する。
+    known_video_codec_types()
+        .into_iter()
+        .filter(|codec_type| capability.is_supported(direction, *codec_type))
+        .map(codec_name)
+        .collect()
+}
+
+fn has_any_codec_support(capability: &dyn VideoCodecCapability) -> bool {
+    known_video_codec_types().into_iter().any(|codec_type| {
+        capability.is_supported(sora_sdk::CodecDirection::Encoder, codec_type)
+            || capability.is_supported(sora_sdk::CodecDirection::Decoder, codec_type)
+    })
+}
+
+fn is_selection_selected(
+    args: &Args,
+    selection: VideoCodecImplementationSelection,
+    capability_available: bool,
+) -> bool {
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    let _ = capability_available;
+
+    // selected は「ユーザーが選択したか」を示し、available とは独立して扱う。
+    match &args.video_codec_implementation {
+        VideoCodecImplementationSelections::Manual(selections) => selections.contains(&selection),
+        VideoCodecImplementationSelections::Auto => match selection {
+            VideoCodecImplementationSelection::Internal => true,
+            VideoCodecImplementationSelection::InternalApple => {
+                #[cfg(any(target_os = "macos", target_os = "ios"))]
+                {
+                    capability_available
+                }
+                #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+                {
+                    false
+                }
+            }
+            VideoCodecImplementationSelection::Amf
+            | VideoCodecImplementationSelection::Nvcodec
+            | VideoCodecImplementationSelection::Openh264 => false,
+        },
+    }
+}
+
+fn probe_internal(args: &Args) -> VideoCodecCapabilityProbe {
+    let capability: Box<dyn VideoCodecCapability> = Box::new(InternalVideoCodecCapability::new());
+    let (capability, unavailable_reason) = if has_any_codec_support(capability.as_ref()) {
+        (Some(capability), None)
+    } else {
+        (
+            None,
+            Some("internal does not support any encoder or decoder codec".to_string()),
+        )
+    };
+    let selected = is_selection_selected(
+        args,
+        VideoCodecImplementationSelection::Internal,
+        capability.is_some(),
+    );
+    VideoCodecCapabilityProbe {
+        selection: VideoCodecImplementationSelection::Internal,
+        selected,
+        capability,
+        unavailable_reason,
+    }
+}
+
+fn probe_internal_apple(args: &Args) -> VideoCodecCapabilityProbe {
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    let (capability, unavailable_reason) = match InternalAppleVideoCodecCapability::new() {
+        Some(capability) => {
+            let capability: Box<dyn VideoCodecCapability> = Box::new(capability);
+            if has_any_codec_support(capability.as_ref()) {
+                (Some(capability), None)
+            } else {
+                (
+                    None,
+                    Some(
+                        "internal-apple does not support any encoder or decoder codec".to_string(),
+                    ),
+                )
+            }
+        }
+        None => (
+            None,
+            Some("internal-apple is not available on this device".to_string()),
+        ),
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    let (capability, unavailable_reason) = (
+        None,
+        Some("internal-apple is not supported on this platform".to_string()),
+    );
+    let selected = is_selection_selected(
+        args,
+        VideoCodecImplementationSelection::InternalApple,
+        capability.is_some(),
+    );
+    VideoCodecCapabilityProbe {
+        selection: VideoCodecImplementationSelection::InternalApple,
+        selected,
+        capability,
+        unavailable_reason,
+    }
+}
+
+fn probe_amf(args: &Args) -> VideoCodecCapabilityProbe {
+    #[cfg(feature = "amf")]
+    let (capability, unavailable_reason) = match AmfVideoCodecCapability::new() {
+        Ok(capability) => {
+            let capability: Box<dyn VideoCodecCapability> = Box::new(capability);
+            if has_any_codec_support(capability.as_ref()) {
+                (Some(capability), None)
+            } else {
+                (
+                    None,
+                    Some("AMF does not support any encoder or decoder codec".to_string()),
+                )
+            }
+        }
+        Err(err) => (None, Some(err.to_string())),
+    };
+    #[cfg(not(feature = "amf"))]
+    let (capability, unavailable_reason) = (
+        None,
+        Some("AMF is not enabled in this build. Rebuild sumomo with --features amf".to_string()),
+    );
+    let selected = is_selection_selected(
+        args,
+        VideoCodecImplementationSelection::Amf,
+        capability.is_some(),
+    );
+    VideoCodecCapabilityProbe {
+        selection: VideoCodecImplementationSelection::Amf,
+        selected,
+        capability,
+        unavailable_reason,
+    }
+}
+
+fn probe_nvcodec(args: &Args) -> VideoCodecCapabilityProbe {
+    #[cfg(feature = "nvcodec")]
+    let (capability, unavailable_reason) = {
+        let capability: Box<dyn VideoCodecCapability> =
+            Box::new(NvCodecVideoCodecCapability::new());
+        if has_any_codec_support(capability.as_ref()) {
+            (Some(capability), None)
+        } else {
+            (
+                None,
+                Some(
+                    "NVCodec does not support any encoder or decoder codec on this device"
+                        .to_string(),
+                ),
+            )
+        }
+    };
+    #[cfg(not(feature = "nvcodec"))]
+    let (capability, unavailable_reason) = (
+        None,
+        Some(
+            "NVCodec is not enabled in this build. Rebuild sumomo with --features nvcodec"
+                .to_string(),
+        ),
+    );
+    let selected = is_selection_selected(
+        args,
+        VideoCodecImplementationSelection::Nvcodec,
+        capability.is_some(),
+    );
+    VideoCodecCapabilityProbe {
+        selection: VideoCodecImplementationSelection::Nvcodec,
+        selected,
+        capability,
+        unavailable_reason,
+    }
+}
+
+fn probe_openh264(args: &Args) -> VideoCodecCapabilityProbe {
+    let (capability, unavailable_reason) = match args.openh264_path.as_deref() {
+        Some(path) => match Openh264VideoCodecCapability::new(path) {
+            Ok(capability) => {
+                let capability: Box<dyn VideoCodecCapability> = Box::new(capability);
+                if has_any_codec_support(capability.as_ref()) {
+                    (Some(capability), None)
+                } else {
+                    (
+                        None,
+                        Some("OpenH264 does not support any encoder or decoder codec".to_string()),
+                    )
+                }
+            }
+            Err(err) => (None, Some(format!("failed to initialize openh264: {err}"))),
+        },
+        None => (None, Some("--openh264-path is not specified".to_string())),
+    };
+    let selected = is_selection_selected(
+        args,
+        VideoCodecImplementationSelection::Openh264,
+        capability.is_some(),
+    );
+    VideoCodecCapabilityProbe {
+        selection: VideoCodecImplementationSelection::Openh264,
+        selected,
+        capability,
+        unavailable_reason,
+    }
+}
+
+fn collect_video_codec_capability_probes(args: &Args) -> Vec<VideoCodecCapabilityProbe> {
+    // 表示順を固定するため、実装ごとに明示的な順序で probe する。
+    vec![
+        probe_internal(args),
+        probe_internal_apple(args),
+        probe_amf(args),
+        probe_nvcodec(args),
+        probe_openh264(args),
+    ]
+}
+
+fn selected_implementations(
+    args: &Args,
+    probes: &[VideoCodecCapabilityProbe],
+) -> Vec<VideoCodecImplementationSelection> {
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    let _ = probes;
+
+    // preference 合成対象となる実装順を決定する。
+    match &args.video_codec_implementation {
+        VideoCodecImplementationSelections::Manual(selections) => selections.clone(),
+        VideoCodecImplementationSelections::Auto => {
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            {
+                let mut selections = vec![VideoCodecImplementationSelection::Internal];
+                if probes.iter().any(|probe| {
+                    probe.selection == VideoCodecImplementationSelection::InternalApple
+                        && probe.capability.is_some()
+                }) {
+                    selections.push(VideoCodecImplementationSelection::InternalApple);
+                }
+                selections
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+            {
+                vec![VideoCodecImplementationSelection::Internal]
+            }
+        }
+    }
+}
+
+fn collect_video_codec_preference_report(
+    args: &Args,
+    probes: &[VideoCodecCapabilityProbe],
+) -> Vec<VideoCodecPreferenceReport> {
+    let mut preference = VideoCodecPreference::default();
+    // selected された実装だけを順番に merge して最終 preference を作る。
+    for selection in selected_implementations(args, probes) {
+        let capability = probes
+            .iter()
+            .find(|probe| probe.selection == selection)
+            .and_then(|probe| probe.capability.as_deref());
+        if let Some(capability) = capability {
+            preference.merge(&VideoCodecPreference::new_from_capability(capability));
+        }
+    }
+
+    let mut reports = Vec::new();
+    // 表示は既知 codec を固定順で全て出す。
+    for codec_type in known_video_codec_types() {
+        let encoder = preference
+            .find(sora_sdk::CodecDirection::Encoder, codec_type)
+            .map(|codec| codec.implementation().name().to_string());
+        let decoder = preference
+            .find(sora_sdk::CodecDirection::Decoder, codec_type)
+            .map(|codec| codec.implementation().name().to_string());
+        reports.push(VideoCodecPreferenceReport {
+            codec: codec_name(codec_type),
+            encoder,
+            decoder,
+        });
+    }
+    reports
+}
+
+fn collect_video_codec_list_report(args: &Args) -> VideoCodecListReport {
+    let probes = collect_video_codec_capability_probes(args);
+
+    // capability probe 結果を表示用構造へ正規化する。
+    let capabilities = probes
+        .iter()
+        .map(|probe| {
+            let (encoder_codecs, decoder_codecs) = match probe.capability.as_deref() {
+                Some(capability) => (
+                    supported_codec_names(capability, sora_sdk::CodecDirection::Encoder),
+                    supported_codec_names(capability, sora_sdk::CodecDirection::Decoder),
+                ),
+                None => (Vec::new(), Vec::new()),
+            };
+            VideoCodecCapabilityReport {
+                implementation: probe.selection.name().to_string(),
+                selected: probe.selected,
+                available: probe.capability.is_some(),
+                unavailable_reason: probe.unavailable_reason.clone(),
+                encoder_codecs,
+                decoder_codecs,
+            }
+        })
+        .collect();
+
+    let preference = collect_video_codec_preference_report(args, &probes);
+
+    // capability と preference をひとまとまりで返す。
+    VideoCodecListReport {
+        capabilities,
+        preference,
+    }
+}
+
+fn is_ansi_output_enabled() -> bool {
+    // TTY 以外や no-color 指定時は装飾しない。
+    if !std::io::stdout().is_terminal() {
+        return false;
+    }
+    if std::env::var_os("NO_COLOR").is_some() {
+        return false;
+    }
+    !matches!(std::env::var("TERM").ok().as_deref(), Some("dumb"))
+}
+
+fn ansi_style(text: &str, code: &str, enabled: bool) -> String {
+    // ANSI 無効時は入力文字列をそのまま返す。
+    if !enabled {
+        return text.to_string();
+    }
+    format!("\x1b[{code}m{text}\x1b[0m")
+}
+
+fn build_preference_display_value(value: Option<&str>, ansi_enabled: bool) -> String {
+    // 未選択は (none) で表示し、ANSI 有効時のみ薄色にする。
+    match value {
+        Some(value) => value.to_string(),
+        None => ansi_style("(none)", "2", ansi_enabled),
+    }
+}
+
+fn build_video_codec_list_report_text(report: &VideoCodecListReport, ansi_enabled: bool) -> String {
+    let mut out = String::new();
+    // implementation 列は実データの最大幅に合わせて揃える。
+    let implementation_width = report
+        .capabilities
+        .iter()
+        .map(|capability| capability.implementation.chars().count())
+        .max()
+        .unwrap_or(0);
+
+    writeln!(out, "Video codec capability:").expect("write to string");
+    for capability in &report.capabilities {
+        let selected_mark = if capability.selected { "x" } else { " " };
+        let implementation = capability.implementation.as_str();
+        // capability は利用可否で表示内容を切り替える。
+        let body = if capability.available {
+            let encoder = if capability.encoder_codecs.is_empty() {
+                "(none)".to_string()
+            } else {
+                capability.encoder_codecs.join(", ")
+            };
+            let decoder = if capability.decoder_codecs.is_empty() {
+                "(none)".to_string()
+            } else {
+                capability.decoder_codecs.join(", ")
+            };
+            format!(
+                "- [{selected_mark}] {implementation:<implementation_width$} enc({encoder}) dec({decoder})",
+            )
+        } else if let Some(reason) = &capability.unavailable_reason {
+            format!(
+                "- [{selected_mark}] {implementation:<implementation_width$} :unavailable: {reason}",
+            )
+        } else {
+            format!(
+                "- [{selected_mark}] {implementation:<implementation_width$} :unavailable: unknown reason",
+            )
+        };
+
+        // selected は強調、unavailable は薄色で見分けやすくする。
+        let line = if capability.available {
+            if capability.selected {
+                ansi_style(&body, "1", ansi_enabled)
+            } else {
+                body
+            }
+        } else if capability.selected {
+            ansi_style(&body, "1;2", ansi_enabled)
+        } else {
+            ansi_style(&body, "2", ansi_enabled)
+        };
+        writeln!(out, "{line}").expect("write to string");
+    }
+
+    writeln!(out).expect("write to string");
+    writeln!(out, "Video codec preference:").expect("write to string");
+    // enc 列も実データの最大幅で揃える。
+    let encoder_width = report
+        .preference
+        .iter()
+        .map(|preference| {
+            preference
+                .encoder
+                .as_deref()
+                .unwrap_or("(none)")
+                .chars()
+                .count()
+        })
+        .max()
+        .unwrap_or(0);
+    for preference in &report.preference {
+        let encoder_plain = preference.encoder.as_deref().unwrap_or("(none)");
+        let encoder = format!(
+            "{}{}",
+            build_preference_display_value(preference.encoder.as_deref(), ansi_enabled),
+            // encoder_width の幅になるように右側を埋める。
+            " ".repeat(encoder_width.saturating_sub(encoder_plain.chars().count())),
+        );
+        let decoder = build_preference_display_value(preference.decoder.as_deref(), ansi_enabled);
+        writeln!(
+            out,
+            "- {:<4} enc: {} dec: {}",
+            preference.codec, encoder, decoder
+        )
+        .expect("write to string");
+    }
+    out
+}
+
+fn render_video_codec_list_report(report: &VideoCodecListReport) {
+    // ANSI 可否判定を反映して最終テキストを描画する。
+    let text = build_video_codec_list_report_text(report, is_ansi_output_enabled());
+    print!("{text}");
+}
+
+fn run_video_codec_list(args: &Args) -> Result<()> {
+    // --video-codec-list 専用の収集と描画だけ実行する。
+    let report = collect_video_codec_list_report(args);
+    render_video_codec_list_report(&report);
+    Ok(())
 }
 
 /// ANSI 描画用の簡易レンダラー。
@@ -1720,11 +2294,17 @@ impl AudioDeviceCapturer {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
+    let args = parse_args()?;
+
+    // codec list モードは接続処理を行わず早期終了する。
+    if args.video_codec_list {
+        return run_video_codec_list(&args);
+    }
+
     log::log_to_debug(log::Severity::Info);
     log::enable_timestamps();
     log::enable_threads();
 
-    let args = parse_args()?;
     validate_args(&args)?;
 
     #[cfg(feature = "media-device")]
@@ -2030,6 +2610,7 @@ mod tests {
             video_bit_rate: None,
             input_mp4: None,
             openh264_path: openh264_path.map(ToString::to_string),
+            video_codec_list: false,
             data_channel_signaling: None,
             ignore_disconnect_websocket: None,
             simulcast: None,
@@ -2068,12 +2649,12 @@ mod tests {
 
     #[test]
     fn parse_video_codec_implementation_multiple() {
-        let parsed = VideoCodecImplementationSelections::parse("internal-hwa,internal")
+        let parsed = VideoCodecImplementationSelections::parse("internal-apple,internal")
             .expect("manual list must be parsed successfully");
         assert_eq!(
             parsed,
             VideoCodecImplementationSelections::Manual(vec![
-                VideoCodecImplementationSelection::InternalHwa,
+                VideoCodecImplementationSelection::InternalApple,
                 VideoCodecImplementationSelection::Internal,
             ])
         );
@@ -2115,7 +2696,7 @@ mod tests {
             .expect_err("unknown value must fail");
         assert_eq!(
             err,
-            "video-codec-implementation must be auto/internal/internal-hwa/amf/nvcodec/openh264"
+            "video-codec-implementation must be auto/internal/internal-apple/amf/nvcodec/openh264"
         );
     }
 
@@ -2215,23 +2796,162 @@ mod tests {
         );
     }
 
+    #[test]
+    fn collect_video_codec_list_report_marks_internal_selected_in_auto() {
+        let args = test_args(VideoCodecImplementationSelections::Auto, None);
+        let report = collect_video_codec_list_report(&args);
+        let internal = report
+            .capabilities
+            .iter()
+            .find(|capability| capability.implementation == "internal")
+            .expect("internal capability must exist");
+        assert!(internal.selected);
+        assert!(internal.available);
+    }
+
+    #[test]
+    fn collect_video_codec_list_report_marks_openh264_reason_without_path() {
+        let args = test_args(
+            VideoCodecImplementationSelections::Manual(vec![
+                VideoCodecImplementationSelection::Openh264,
+            ]),
+            None,
+        );
+        let report = collect_video_codec_list_report(&args);
+        let openh264 = report
+            .capabilities
+            .iter()
+            .find(|capability| capability.implementation == "openh264")
+            .expect("openh264 capability must exist");
+        assert!(openh264.selected);
+        assert!(!openh264.available);
+        assert!(
+            openh264
+                .unavailable_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("--openh264-path is not specified"))
+        );
+    }
+
+    #[test]
+    fn collect_video_codec_list_report_preference_uses_selected_internal() {
+        let args = test_args(
+            VideoCodecImplementationSelections::Manual(vec![
+                VideoCodecImplementationSelection::Internal,
+            ]),
+            None,
+        );
+        let report = collect_video_codec_list_report(&args);
+        assert!(report.preference.iter().any(|preference| {
+            preference.encoder.as_deref() == Some("internal")
+                || preference.decoder.as_deref() == Some("internal")
+        }));
+    }
+
+    #[test]
+    fn build_video_codec_list_report_text_uses_single_line_format() {
+        let args = test_args(
+            VideoCodecImplementationSelections::Manual(vec![
+                VideoCodecImplementationSelection::Internal,
+            ]),
+            None,
+        );
+        let report = collect_video_codec_list_report(&args);
+        let text = build_video_codec_list_report_text(&report, false);
+        assert!(text.contains("Video codec capability:"));
+        assert!(text.contains("- [x] internal"));
+        assert!(text.contains(":unavailable:"));
+        assert!(text.contains("Video codec preference:"));
+        assert!(text.contains("- vp8"));
+        assert!(text.contains("- h264"));
+        assert!(text.contains("- h265"));
+        assert!(text.contains("enc: (none)"));
+    }
+
+    #[test]
+    fn build_video_codec_list_report_text_applies_ansi_styles() {
+        let args = test_args(
+            VideoCodecImplementationSelections::Manual(vec![
+                VideoCodecImplementationSelection::Internal,
+            ]),
+            None,
+        );
+        let report = collect_video_codec_list_report(&args);
+        let text = build_video_codec_list_report_text(&report, true);
+        assert!(text.contains("\x1b[1m- [x] internal"));
+        assert!(text.contains("\x1b[2m- [ ] openh264"));
+        assert!(text.contains(":unavailable: --openh264-path is not specified"));
+        assert!(text.contains("\x1b[2m(none)\x1b[0m"));
+    }
+
+    #[test]
+    fn build_video_codec_list_report_text_aligns_preference_with_ansi_none() {
+        let report = VideoCodecListReport {
+            capabilities: vec![],
+            preference: vec![
+                VideoCodecPreferenceReport {
+                    codec: "vp8".to_string(),
+                    encoder: None,
+                    decoder: Some("nvcodec".to_string()),
+                },
+                VideoCodecPreferenceReport {
+                    codec: "av1".to_string(),
+                    encoder: Some("nvcodec".to_string()),
+                    decoder: Some("nvcodec".to_string()),
+                },
+            ],
+        };
+        let text = build_video_codec_list_report_text(&report, true);
+        let plain = text.replace("\x1b[2m", "").replace("\x1b[0m", "");
+        assert!(plain.contains("- vp8  enc: (none)  dec: nvcodec"));
+        assert!(plain.contains("- av1  enc: nvcodec dec: nvcodec"));
+    }
+
+    #[test]
+    fn build_video_codec_list_report_text_aligns_capability_by_max_width() {
+        let report = VideoCodecListReport {
+            capabilities: vec![
+                VideoCodecCapabilityReport {
+                    implementation: "a".to_string(),
+                    selected: false,
+                    available: true,
+                    unavailable_reason: None,
+                    encoder_codecs: vec!["vp8".to_string()],
+                    decoder_codecs: vec!["vp8".to_string()],
+                },
+                VideoCodecCapabilityReport {
+                    implementation: "bbbb".to_string(),
+                    selected: false,
+                    available: true,
+                    unavailable_reason: None,
+                    encoder_codecs: vec!["vp8".to_string()],
+                    decoder_codecs: vec!["vp8".to_string()],
+                },
+            ],
+            preference: vec![],
+        };
+        let text = build_video_codec_list_report_text(&report, false);
+        assert!(text.contains("- [ ] a    enc(vp8) dec(vp8)"));
+        assert!(text.contains("- [ ] bbbb enc(vp8) dec(vp8)"));
+    }
+
     #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     #[test]
-    fn build_context_config_rejects_internal_hwa_on_unsupported_platform() {
+    fn build_context_config_rejects_internal_apple_on_unsupported_platform() {
         let result = build_context_config(
             sora_sdk::AdmConfig::NoAudioDevice,
             None,
             None,
             VideoCodecImplementationSelections::Manual(vec![
-                VideoCodecImplementationSelection::InternalHwa,
+                VideoCodecImplementationSelection::InternalApple,
             ]),
         );
         match result {
-            Ok(_) => panic!("internal-hwa must fail on unsupported platform"),
+            Ok(_) => panic!("internal-apple must fail on unsupported platform"),
             Err(err) => {
                 assert!(
                     err.to_string()
-                        .contains("internal-hwa is not supported on this platform")
+                        .contains("internal-apple is not supported on this platform")
                 );
             }
         }
@@ -2246,7 +2966,7 @@ mod tests {
             None,
             VideoCodecImplementationSelections::Manual(vec![
                 VideoCodecImplementationSelection::Internal,
-                VideoCodecImplementationSelection::InternalHwa,
+                VideoCodecImplementationSelection::InternalApple,
             ]),
         );
         match result {
@@ -2258,12 +2978,12 @@ mod tests {
                         shiguredo_webrtc::VideoCodecType::H264,
                     )
                     .expect("h264 encoder preference must exist");
-                assert_eq!(preference.implementation().name(), "internal-hwa");
+                assert_eq!(preference.implementation().name(), "internal-apple");
             }
             Err(err) => {
                 assert!(
                     err.to_string()
-                        .contains("internal-hwa is not available on this device")
+                        .contains("internal-apple is not available on this device")
                 );
             }
         }

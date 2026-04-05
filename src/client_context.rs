@@ -14,7 +14,7 @@ use crate::video_codec_capability::VideoCodecCapability;
 use crate::video_codec_preference::{VideoCodecPreference, validate_video_codec_preference};
 use crate::video_codecs::internal::InternalVideoCodecCapability;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-use crate::video_codecs::internal_hwa::InternalHwaVideoCodecCapability;
+use crate::video_codecs::internal_apple::InternalAppleVideoCodecCapability;
 
 #[derive(Clone, Default)]
 pub enum AdmConfig {
@@ -47,13 +47,13 @@ impl Default for SoraClientContextConfig {
         video_codec_capabilities.push(internal_capability);
 
         #[cfg(any(target_os = "macos", target_os = "ios"))]
-        if let Some(internal_hwa_capability) = InternalHwaVideoCodecCapability::new() {
-            let internal_hwa_capability: Box<dyn VideoCodecCapability> =
-                Box::new(internal_hwa_capability);
+        if let Some(internal_apple_capability) = InternalAppleVideoCodecCapability::new() {
+            let internal_apple_capability: Box<dyn VideoCodecCapability> =
+                Box::new(internal_apple_capability);
             video_codec_preference.merge(&VideoCodecPreference::new_from_capability(
-                internal_hwa_capability.as_ref(),
+                internal_apple_capability.as_ref(),
             ));
-            video_codec_capabilities.push(internal_hwa_capability);
+            video_codec_capabilities.push(internal_apple_capability);
         }
 
         Self {
@@ -187,16 +187,16 @@ mod tests {
 
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     #[test]
-    fn default_config_prefers_internal_hwa_for_supported_codecs() {
+    fn default_config_prefers_internal_apple_for_supported_codecs() {
         let config = SoraClientContextConfig::default();
-        let Some(internal_hwa_capability) = config
+        let Some(internal_apple_capability) = config
             .video_codec_capabilities
             .iter()
-            .find(|cap| cap.get_implementation().name() == "internal-hwa")
+            .find(|cap| cap.get_implementation().name() == "internal-apple")
         else {
             return;
         };
-        let internal_hwa_implementation = internal_hwa_capability.get_implementation();
+        let internal_apple_implementation = internal_apple_capability.get_implementation();
 
         for codec_type in [
             VideoCodecType::Vp8,
@@ -206,7 +206,7 @@ mod tests {
             VideoCodecType::Av1,
         ] {
             for direction in [CodecDirection::Encoder, CodecDirection::Decoder] {
-                if !internal_hwa_capability.is_supported(direction, codec_type) {
+                if !internal_apple_capability.is_supported(direction, codec_type) {
                     continue;
                 }
                 let preference = config
@@ -215,8 +215,8 @@ mod tests {
                     .expect("preference entry must exist");
                 assert_eq!(
                     preference.implementation(),
-                    &internal_hwa_implementation,
-                    "internal-hwa must be preferred for {direction:?} {codec_type:?}",
+                    &internal_apple_implementation,
+                    "internal-apple must be preferred for {direction:?} {codec_type:?}",
                 );
             }
         }

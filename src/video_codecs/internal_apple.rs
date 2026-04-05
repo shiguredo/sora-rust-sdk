@@ -8,19 +8,19 @@ use crate::video_codec_capability::{
     CodecDirection, VideoCodecCapability, VideoCodecImplementation,
 };
 
-pub struct InternalHwaVideoCodecCapability {
+pub struct InternalAppleVideoCodecCapability {
     implementation: VideoCodecImplementation,
     simulcast_capability_helper: SimulcastCapabilityHelper,
     decoder_factory: VideoDecoderFactory,
 }
 
-impl InternalHwaVideoCodecCapability {
+impl InternalAppleVideoCodecCapability {
     pub fn new() -> Option<Self> {
         let encoder_factory = VideoEncoderFactory::from_objc_default()?;
         let decoder_factory = VideoDecoderFactory::from_objc_default()?;
         Some(Self {
             implementation: VideoCodecImplementation::new(
-                "internal-hwa",
+                "internal-apple",
                 "WebRTC ObjC default VideoCodecFactory",
             ),
             simulcast_capability_helper: SimulcastCapabilityHelper::new(encoder_factory),
@@ -29,7 +29,7 @@ impl InternalHwaVideoCodecCapability {
     }
 }
 
-impl VideoCodecCapability for InternalHwaVideoCodecCapability {
+impl VideoCodecCapability for InternalAppleVideoCodecCapability {
     fn get_implementation(&self) -> VideoCodecImplementation {
         self.implementation.clone()
     }
@@ -65,24 +65,24 @@ mod tests {
     use shiguredo_webrtc::VideoCodecType;
 
     #[test]
-    fn internal_hwa_capability_is_available() {
+    fn internal_apple_capability_is_available() {
         assert!(
-            InternalHwaVideoCodecCapability::new().is_some(),
-            "InternalHwaVideoCodecCapability must be available on Apple platforms",
+            InternalAppleVideoCodecCapability::new().is_some(),
+            "InternalAppleVideoCodecCapability must be available on Apple platforms",
         );
     }
 
     #[test]
-    fn internal_hwa_capability_has_expected_implementation_name() {
-        let capability = InternalHwaVideoCodecCapability::new()
-            .expect("InternalHwaVideoCodecCapability must be available");
-        assert_eq!(capability.get_implementation().name(), "internal-hwa");
+    fn internal_apple_capability_has_expected_implementation_name() {
+        let capability = InternalAppleVideoCodecCapability::new()
+            .expect("InternalAppleVideoCodecCapability must be available");
+        assert_eq!(capability.get_implementation().name(), "internal-apple");
     }
 
     #[test]
-    fn internal_hwa_capability_supports_h264_h265() {
-        let capability = InternalHwaVideoCodecCapability::new()
-            .expect("InternalHwaVideoCodecCapability must be available");
+    fn internal_apple_capability_supports_h264_h265() {
+        let capability = InternalAppleVideoCodecCapability::new()
+            .expect("InternalAppleVideoCodecCapability must be available");
         assert!(capability.is_supported(CodecDirection::Encoder, VideoCodecType::H264));
         assert!(capability.is_supported(CodecDirection::Decoder, VideoCodecType::H264));
 
@@ -93,9 +93,9 @@ mod tests {
     }
 
     #[test]
-    fn internal_hwa_capability_creates_supported_encoder_and_decoder() {
-        let capability = InternalHwaVideoCodecCapability::new()
-            .expect("InternalHwaVideoCodecCapability must be available");
+    fn internal_apple_capability_creates_supported_encoder_and_decoder() {
+        let capability = InternalAppleVideoCodecCapability::new()
+            .expect("InternalAppleVideoCodecCapability must be available");
 
         let encoder_formats = capability.get_supported_formats(CodecDirection::Encoder);
         let env = shiguredo_webrtc::Environment::new();
@@ -120,9 +120,9 @@ mod tests {
     }
 
     #[test]
-    fn internal_hwa_capability_create_video_encoder_uses_simulcast_adapter() {
-        let capability = InternalHwaVideoCodecCapability::new()
-            .expect("InternalHwaVideoCodecCapability must be available");
+    fn internal_apple_capability_create_video_encoder_uses_simulcast_adapter() {
+        let capability = InternalAppleVideoCodecCapability::new()
+            .expect("InternalAppleVideoCodecCapability must be available");
         let Some(format) = capability
             .get_supported_formats(CodecDirection::Encoder)
             .into_iter()
