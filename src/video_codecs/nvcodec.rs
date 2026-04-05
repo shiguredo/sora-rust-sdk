@@ -538,7 +538,6 @@ impl NvCodecVideoCodecCapability {
             },
             {
                 let encoder_codec_types = encoder_codec_types.clone();
-                let device_id = device_id;
                 move |_env, format| {
                     let codec_type = codec_type_from_format(&format)?;
                     if !encoder_codec_types.contains(&codec_type) {
