@@ -71,13 +71,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: macOS ARM64
-            labels: [self-hosted, macOS, ARM64, Apple-M1]
+          - labels: [self-hosted, macOS, ARM64, Apple-M1]
             features: "--features openh264"
             test_args: "-- --skip test_video_capture_frame_received"
-          - name: Linux x64 NVIDIA Video Codec SDK
-            labels: [self-hosted, linux, x64, NVIDIA-Video-Codec-SDK]
+          - labels: [self-hosted, linux, x64, NVIDIA-Video-Codec-SDK]
             features: "--features openh264,nvcodec"
+            test_args: ""
+          - labels:  [self-hosted, linux, x64, AMD-AMF]
+            features: "--features openh264,amf"
             test_args: ""
     runs-on:
       group: Self

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as FmtWrite;
 use std::io;
 use std::io::Write as IoWrite;
@@ -16,14 +16,17 @@ use shiguredo_webrtc::{
 };
 #[cfg(feature = "media-device")]
 use shiguredo_webrtc::{AudioDeviceModule, AudioDeviceModuleHandler, AudioTransportRef};
-use sora_sdk::{
-    Mp4Error, Mp4PassthroughVideoCodecCapability, Mp4SampleReader, Mp4VideoCapturer,
-    Openh264VideoCodecCapability, Role, SoraClient, SoraClientContext, SoraClientContextConfig,
-};
+#[cfg(feature = "amf")]
+use sora_sdk::AmfVideoCodecCapability;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+use sora_sdk::InternalHwaVideoCodecCapability;
 #[cfg(feature = "nvcodec")]
-use sora_sdk::{NvCodecVideoCodecCapability, VideoCodecCapability, VideoCodecPreference};
-#[cfg(not(feature = "nvcodec"))]
-use sora_sdk::{VideoCodecCapability, VideoCodecPreference};
+use sora_sdk::NvCodecVideoCodecCapability;
+use sora_sdk::{
+    InternalVideoCodecCapability, Mp4Error, Mp4PassthroughVideoCodecCapability, Mp4SampleReader,
+    Mp4VideoCapturer, Openh264VideoCodecCapability, Role, SoraClient, SoraClientContext,
+    SoraClientContextConfig, VideoCodecCapability, VideoCodecPreference,
+};
 use tokio::sync::mpsc;
 
 struct Args {
@@ -33,6 +36,7 @@ struct Args {
     audio: Option<bool>,
     video: Option<bool>,
     video_codec_type: Option<String>,
+    video_codec_implementation: VideoCodecImplementationSelections,
     video_bit_rate: Option<u32>,
     input_mp4: Option<String>,
     openh264_path: Option<String>,
@@ -54,6 +58,74 @@ struct Args {
     audio_input_device: Option<String>,
     #[cfg(feature = "media-device")]
     list_devices: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum VideoCodecImplementationSelection {
+    Internal,
+    InternalHwa,
+    Amf,
+    Nvcodec,
+    Openh264,
+}
+
+impl VideoCodecImplementationSelection {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "internal" => Some(Self::Internal),
+            "internal-hwa" => Some(Self::InternalHwa),
+            "amf" => Some(Self::Amf),
+            "nvcodec" => Some(Self::Nvcodec),
+            "openh264" => Some(Self::Openh264),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum VideoCodecImplementationSelections {
+    #[default]
+    Auto,
+    Manual(Vec<VideoCodecImplementationSelection>),
+}
+
+impl VideoCodecImplementationSelections {
+    fn parse(value: &str) -> std::result::Result<Self, &'static str> {
+        let values: Vec<&str> = value.split(',').map(|v| v.trim()).collect();
+        if values.len() == 1 && values[0] == "auto" {
+            return Ok(Self::Auto);
+        }
+        if values.iter().any(|v| v.is_empty()) {
+            return Err("video-codec-implementation must not contain empty entries");
+        }
+        if values.contains(&"auto") {
+            return Err(
+                "video-codec-implementation auto cannot be combined with other implementations",
+            );
+        }
+
+        let mut seen = HashSet::new();
+        let mut selections = Vec::new();
+        for value in values {
+            let selection = VideoCodecImplementationSelection::parse(value).ok_or(
+                "video-codec-implementation must be auto/internal/internal-hwa/amf/nvcodec/openh264",
+            )?;
+            if !seen.insert(selection) {
+                return Err(
+                    "video-codec-implementation must not contain duplicate implementations",
+                );
+            }
+            selections.push(selection);
+        }
+        Ok(Self::Manual(selections))
+    }
+
+    fn contains(&self, selection: VideoCodecImplementationSelection) -> bool {
+        match self {
+            Self::Auto => false,
+            Self::Manual(selections) => selections.contains(&selection),
+        }
+    }
 }
 
 enum AppEvent {
@@ -191,6 +263,7 @@ fn parse_args() -> Result<Args> {
             audio: None,
             video: None,
             video_codec_type: None,
+            video_codec_implementation: VideoCodecImplementationSelections::Auto,
             video_bit_rate: None,
             data_channel_signaling: None,
             ignore_disconnect_websocket: None,
@@ -255,6 +328,14 @@ fn parse_args() -> Result<Args> {
             "vp8" | "vp9" | "av1" | "h264" | "h265" => Ok(o.value().to_string()),
             _ => Err("video-codec-type は vp8/vp9/av1/h264/h265 で指定してください"),
         })?;
+
+    let video_codec_implementation: Option<VideoCodecImplementationSelections> =
+        noargs::opt("video-codec-implementation")
+            .doc("映像コーデック実装 (auto または internal/internal-hwa/amf/nvcodec/openh264 のカンマ区切り)")
+            .take(&mut args)
+            .present_and_then(|o| {
+                VideoCodecImplementationSelections::parse(o.value())
+            })?;
 
     let video_bit_rate: Option<u32> = noargs::opt("video-bit-rate")
         .doc("映像ビットレート (kbps)")
@@ -378,6 +459,7 @@ fn parse_args() -> Result<Args> {
         audio,
         video,
         video_codec_type,
+        video_codec_implementation: video_codec_implementation.unwrap_or_default(),
         video_bit_rate,
         input_mp4,
         openh264_path,
@@ -408,57 +490,152 @@ fn validate_args(args: &Args) -> Result<()> {
             io::Error::other("--input-mp4 and --openh264-path cannot be used together").into(),
         );
     }
+
+    let openh264_selected = args
+        .video_codec_implementation
+        .contains(VideoCodecImplementationSelection::Openh264);
+    if openh264_selected && args.openh264_path.is_none() {
+        return Err(io::Error::other(
+            "--video-codec-implementation openh264 requires --openh264-path",
+        )
+        .into());
+    }
+    if !openh264_selected && args.openh264_path.is_some() {
+        return Err(io::Error::other(
+            "--openh264-path requires --video-codec-implementation to include openh264",
+        )
+        .into());
+    }
+
+    #[cfg(not(feature = "amf"))]
+    if args
+        .video_codec_implementation
+        .contains(VideoCodecImplementationSelection::Amf)
+    {
+        return Err(io::Error::other(
+            "AMF is not enabled in this build. Rebuild sumomo with --features amf",
+        )
+        .into());
+    }
+
+    #[cfg(not(feature = "nvcodec"))]
+    if args
+        .video_codec_implementation
+        .contains(VideoCodecImplementationSelection::Nvcodec)
+    {
+        return Err(io::Error::other(
+            "NVCodec is not enabled in this build. Rebuild sumomo with --features nvcodec",
+        )
+        .into());
+    }
+
     Ok(())
+}
+
+fn add_video_codec_capability(
+    context_config: &mut SoraClientContextConfig,
+    capability: Box<dyn VideoCodecCapability>,
+) {
+    let preference = VideoCodecPreference::new_from_capability(capability.as_ref());
+    context_config.video_codec_preference.merge(&preference);
+    context_config.video_codec_capabilities.push(capability);
 }
 
 fn build_context_config(
     adm_config: sora_sdk::AdmConfig,
     mp4_codec_type: Option<VideoCodecType>,
     openh264_path: Option<&str>,
+    video_codec_implementation: VideoCodecImplementationSelections,
 ) -> Result<SoraClientContextConfig> {
-    let mut context_config = SoraClientContextConfig {
-        adm_config,
-        ..Default::default()
+    let mut context_config = match video_codec_implementation {
+        VideoCodecImplementationSelections::Auto => SoraClientContextConfig {
+            adm_config,
+            ..Default::default()
+        },
+        VideoCodecImplementationSelections::Manual(_) => SoraClientContextConfig {
+            adm_config,
+            video_codec_preference: VideoCodecPreference::default(),
+            video_codec_capabilities: Vec::new(),
+        },
     };
 
     if let Some(codec_type) = mp4_codec_type {
         let passthrough_capability: Box<dyn VideoCodecCapability> =
             Box::new(Mp4PassthroughVideoCodecCapability::new(codec_type));
-        let passthrough_preference =
-            VideoCodecPreference::new_from_capability(passthrough_capability.as_ref());
-        context_config
-            .video_codec_preference
-            .merge(&passthrough_preference);
-        context_config
-            .video_codec_capabilities
-            .push(passthrough_capability);
+        add_video_codec_capability(&mut context_config, passthrough_capability);
     }
 
-    #[cfg(feature = "nvcodec")]
-    {
-        let nvcodec_capability: Box<dyn VideoCodecCapability> =
-            Box::new(NvCodecVideoCodecCapability::new());
-        let nvcodec_preference =
-            VideoCodecPreference::new_from_capability(nvcodec_capability.as_ref());
-        context_config
-            .video_codec_preference
-            .merge(&nvcodec_preference);
-        context_config
-            .video_codec_capabilities
-            .push(nvcodec_capability);
-    }
-
-    if let Some(path) = openh264_path {
-        let openh264_capability: Box<dyn VideoCodecCapability> =
-            Box::new(Openh264VideoCodecCapability::new(path)?);
-        let openh264_preference =
-            VideoCodecPreference::new_from_capability(openh264_capability.as_ref());
-        context_config
-            .video_codec_preference
-            .merge(&openh264_preference);
-        context_config
-            .video_codec_capabilities
-            .push(openh264_capability);
+    match video_codec_implementation {
+        VideoCodecImplementationSelections::Auto => {}
+        VideoCodecImplementationSelections::Manual(selections) => {
+            for selection in selections {
+                match selection {
+                    VideoCodecImplementationSelection::Internal => {
+                        let internal_capability: Box<dyn VideoCodecCapability> =
+                            Box::new(InternalVideoCodecCapability::new());
+                        add_video_codec_capability(&mut context_config, internal_capability);
+                    }
+                    VideoCodecImplementationSelection::InternalHwa => {
+                        #[cfg(any(target_os = "macos", target_os = "ios"))]
+                        {
+                            let capability =
+                                InternalHwaVideoCodecCapability::new().ok_or_else(|| {
+                                    io::Error::other("internal-hwa is not available on this device")
+                                })?;
+                            let capability: Box<dyn VideoCodecCapability> = Box::new(capability);
+                            add_video_codec_capability(&mut context_config, capability);
+                        }
+                        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+                        {
+                            return Err(io::Error::other(
+                                "internal-hwa is not supported on this platform",
+                            )
+                            .into());
+                        }
+                    }
+                    VideoCodecImplementationSelection::Amf => {
+                        #[cfg(feature = "amf")]
+                        {
+                            let amf_capability: Box<dyn VideoCodecCapability> =
+                                Box::new(AmfVideoCodecCapability::new()?);
+                            add_video_codec_capability(&mut context_config, amf_capability);
+                        }
+                        #[cfg(not(feature = "amf"))]
+                        {
+                            return Err(io::Error::other(
+                                "AMF is not enabled in this build. Rebuild sumomo with --features amf",
+                            )
+                            .into());
+                        }
+                    }
+                    VideoCodecImplementationSelection::Nvcodec => {
+                        #[cfg(feature = "nvcodec")]
+                        {
+                            let nvcodec_capability: Box<dyn VideoCodecCapability> =
+                                Box::new(NvCodecVideoCodecCapability::new());
+                            add_video_codec_capability(&mut context_config, nvcodec_capability);
+                        }
+                        #[cfg(not(feature = "nvcodec"))]
+                        {
+                            return Err(io::Error::other(
+                                "NVCodec is not enabled in this build. Rebuild sumomo with --features nvcodec",
+                            )
+                            .into());
+                        }
+                    }
+                    VideoCodecImplementationSelection::Openh264 => {
+                        let path = openh264_path.ok_or_else(|| {
+                            io::Error::other(
+                                "--video-codec-implementation openh264 requires --openh264-path",
+                            )
+                        })?;
+                        let openh264_capability: Box<dyn VideoCodecCapability> =
+                            Box::new(Openh264VideoCodecCapability::new(path)?);
+                        add_video_codec_capability(&mut context_config, openh264_capability);
+                    }
+                }
+            }
+        }
     }
 
     Ok(context_config)
@@ -922,10 +1099,12 @@ fn run_with_raw_player(args: Args) -> Result<()> {
     let client_cert = args.client_cert.clone();
     let client_key = args.client_key.clone();
     let ca_cert = args.ca_cert.clone();
+    let video_codec_implementation = args.video_codec_implementation.clone();
     let context_config = build_context_config(
         sora_sdk::AdmConfig::NoAudioDevice,
         None,
         args.openh264_path.as_deref(),
+        video_codec_implementation,
     )?;
     let context = SoraClientContext::new_with_config(context_config)?;
     let context_for_thread = context.clone();
@@ -1592,6 +1771,7 @@ async fn main() -> Result<()> {
         adm_config,
         mp4_state.as_ref().map(|(_, codec_type)| *codec_type),
         args.openh264_path.as_deref(),
+        args.video_codec_implementation.clone(),
     )?;
     let context = SoraClientContext::new_with_config(context_config)?;
 
@@ -1827,4 +2007,265 @@ async fn main() -> Result<()> {
     }
     run.await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    use sora_sdk::CodecDirection;
+
+    fn test_args(
+        video_codec_implementation: VideoCodecImplementationSelections,
+        openh264_path: Option<&str>,
+    ) -> Args {
+        Args {
+            signaling_urls: vec!["wss://example.com/signaling".to_string()],
+            channel_id: "test-channel".to_string(),
+            role: Role::SendOnly,
+            audio: None,
+            video: None,
+            video_codec_type: None,
+            video_codec_implementation,
+            video_bit_rate: None,
+            input_mp4: None,
+            openh264_path: openh264_path.map(ToString::to_string),
+            data_channel_signaling: None,
+            ignore_disconnect_websocket: None,
+            simulcast: None,
+            insecure: false,
+            client_cert: None,
+            client_key: None,
+            ca_cert: None,
+            duration: None,
+            turn_tls_insecure: false,
+            turn_tls_ca_cert: None,
+            #[cfg(feature = "raw-player")]
+            use_raw_player: false,
+            #[cfg(feature = "media-device")]
+            video_input_device: None,
+            #[cfg(feature = "media-device")]
+            audio_input_device: None,
+            #[cfg(feature = "media-device")]
+            list_devices: false,
+        }
+    }
+
+    fn capability_names(config: &SoraClientContextConfig) -> Vec<String> {
+        config
+            .video_codec_capabilities
+            .iter()
+            .map(|capability| capability.get_implementation().name().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn parse_video_codec_implementation_auto() {
+        let parsed = VideoCodecImplementationSelections::parse("auto")
+            .expect("auto must be parsed successfully");
+        assert_eq!(parsed, VideoCodecImplementationSelections::Auto);
+    }
+
+    #[test]
+    fn parse_video_codec_implementation_multiple() {
+        let parsed = VideoCodecImplementationSelections::parse("internal-hwa,internal")
+            .expect("manual list must be parsed successfully");
+        assert_eq!(
+            parsed,
+            VideoCodecImplementationSelections::Manual(vec![
+                VideoCodecImplementationSelection::InternalHwa,
+                VideoCodecImplementationSelection::Internal,
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_video_codec_implementation_rejects_auto_mix() {
+        let err = VideoCodecImplementationSelections::parse("auto,amf")
+            .expect_err("auto mixed list must fail");
+        assert_eq!(
+            err,
+            "video-codec-implementation auto cannot be combined with other implementations"
+        );
+    }
+
+    #[test]
+    fn parse_video_codec_implementation_rejects_duplicate() {
+        let err = VideoCodecImplementationSelections::parse("amf,amf")
+            .expect_err("duplicate list must fail");
+        assert_eq!(
+            err,
+            "video-codec-implementation must not contain duplicate implementations"
+        );
+    }
+
+    #[test]
+    fn parse_video_codec_implementation_rejects_empty_entry() {
+        let err = VideoCodecImplementationSelections::parse("amf,,nvcodec")
+            .expect_err("empty entry must fail");
+        assert_eq!(
+            err,
+            "video-codec-implementation must not contain empty entries"
+        );
+    }
+
+    #[test]
+    fn parse_video_codec_implementation_rejects_unknown_value() {
+        let err = VideoCodecImplementationSelections::parse("unknown")
+            .expect_err("unknown value must fail");
+        assert_eq!(
+            err,
+            "video-codec-implementation must be auto/internal/internal-hwa/amf/nvcodec/openh264"
+        );
+    }
+
+    #[test]
+    fn validate_args_accepts_openh264_with_path() {
+        let args = test_args(
+            VideoCodecImplementationSelections::Manual(vec![
+                VideoCodecImplementationSelection::Openh264,
+            ]),
+            Some("/tmp/libopenh264.so"),
+        );
+        assert!(validate_args(&args).is_ok());
+    }
+
+    #[test]
+    fn validate_args_rejects_openh264_without_path() {
+        let args = test_args(
+            VideoCodecImplementationSelections::Manual(vec![
+                VideoCodecImplementationSelection::Openh264,
+            ]),
+            None,
+        );
+        let err = validate_args(&args).expect_err("missing openh264 path must fail");
+        assert!(
+            err.to_string()
+                .contains("--video-codec-implementation openh264 requires --openh264-path")
+        );
+    }
+
+    #[test]
+    fn validate_args_rejects_openh264_path_without_openh264() {
+        let args = test_args(
+            VideoCodecImplementationSelections::Manual(vec![
+                VideoCodecImplementationSelection::Internal,
+            ]),
+            Some("/tmp/libopenh264.so"),
+        );
+        let err = validate_args(&args).expect_err("unexpected openh264 path must fail");
+        assert!(
+            err.to_string().contains(
+                "--openh264-path requires --video-codec-implementation to include openh264"
+            )
+        );
+    }
+
+    #[test]
+    fn validate_args_rejects_openh264_path_with_auto() {
+        let args = test_args(
+            VideoCodecImplementationSelections::Auto,
+            Some("/tmp/libopenh264.so"),
+        );
+        let err = validate_args(&args).expect_err("auto with openh264 path must fail");
+        assert!(
+            err.to_string().contains(
+                "--openh264-path requires --video-codec-implementation to include openh264"
+            )
+        );
+    }
+
+    #[test]
+    fn build_context_config_auto_uses_default_capabilities() {
+        let config = build_context_config(
+            sora_sdk::AdmConfig::NoAudioDevice,
+            None,
+            None,
+            VideoCodecImplementationSelections::Auto,
+        )
+        .expect("auto config must be built");
+
+        let default_config = SoraClientContextConfig::default();
+        assert_eq!(capability_names(&config), capability_names(&default_config));
+        assert_eq!(
+            config.video_codec_preference,
+            default_config.video_codec_preference
+        );
+    }
+
+    #[test]
+    fn build_context_config_manual_internal_only() {
+        let config = build_context_config(
+            sora_sdk::AdmConfig::NoAudioDevice,
+            None,
+            None,
+            VideoCodecImplementationSelections::Manual(vec![
+                VideoCodecImplementationSelection::Internal,
+            ]),
+        )
+        .expect("manual config must be built");
+        let names = capability_names(&config);
+        assert_eq!(names, vec!["internal".to_string()]);
+        assert!(
+            config
+                .video_codec_preference
+                .codecs()
+                .iter()
+                .any(|codec| codec.implementation().name() == "internal")
+        );
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    #[test]
+    fn build_context_config_rejects_internal_hwa_on_unsupported_platform() {
+        let result = build_context_config(
+            sora_sdk::AdmConfig::NoAudioDevice,
+            None,
+            None,
+            VideoCodecImplementationSelections::Manual(vec![
+                VideoCodecImplementationSelection::InternalHwa,
+            ]),
+        );
+        match result {
+            Ok(_) => panic!("internal-hwa must fail on unsupported platform"),
+            Err(err) => {
+                assert!(
+                    err.to_string()
+                        .contains("internal-hwa is not supported on this platform")
+                );
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[test]
+    fn build_context_config_manual_order_prefers_later_selection_on_apple() {
+        let result = build_context_config(
+            sora_sdk::AdmConfig::NoAudioDevice,
+            None,
+            None,
+            VideoCodecImplementationSelections::Manual(vec![
+                VideoCodecImplementationSelection::Internal,
+                VideoCodecImplementationSelection::InternalHwa,
+            ]),
+        );
+        match result {
+            Ok(config) => {
+                let preference = config
+                    .video_codec_preference
+                    .find(
+                        CodecDirection::Encoder,
+                        shiguredo_webrtc::VideoCodecType::H264,
+                    )
+                    .expect("h264 encoder preference must exist");
+                assert_eq!(preference.implementation().name(), "internal-hwa");
+            }
+            Err(err) => {
+                assert!(
+                    err.to_string()
+                        .contains("internal-hwa is not available on this device")
+                );
+            }
+        }
+    }
 }

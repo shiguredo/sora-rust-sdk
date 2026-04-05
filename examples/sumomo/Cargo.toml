@@ -25,6 +25,7 @@ tokio = { version = "1", features = [
 
 [features]
 default = []
+amf = ["sora_sdk/amf"]
 nvcodec = ["sora_sdk/nvcodec"]
 raw-player = ["dep:raw_player"]
 # Linux では追加で pipewire-pulse と libpulse-dev が必要:
