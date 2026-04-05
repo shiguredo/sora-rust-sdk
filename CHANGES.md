@@ -24,6 +24,8 @@
   - @melpon
 - [UPDATE] `shiguredo_webrtc` を 0.147.1-canary.2 に上げる
   - @sile, @melpon
+- [UPDATE] `shiguredo_nvcodec` を 2026.1.0 に上げる
+  - @melpon
 - [ADD] Windows に対応する
   - @melpon
 - [ADD] `SoraClientBuilder::ice_server_url_configurer` を追加する
