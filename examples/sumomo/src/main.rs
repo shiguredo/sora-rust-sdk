@@ -257,18 +257,21 @@ fn parse_args() -> Result<Args> {
 
     noargs::HELP_FLAG.take_help(&mut args);
 
+    // codec list モードは接続処理を行わず、表示用オプションだけを解釈して即終了する。
     let video_codec_list = noargs::flag("video-codec-list")
         .doc("利用可能な映像コーデック実装と選択優先順位を表示して終了する")
         .take(&mut args)
         .is_present();
 
     if video_codec_list {
+        // preference 計算に必要な実装優先順だけ先に解釈する。
         let video_codec_implementation: Option<VideoCodecImplementationSelections> =
             noargs::opt("video-codec-implementation")
                 .doc("映像コーデック実装 (auto または internal/internal-hwa/amf/nvcodec/openh264 のカンマ区切り)")
                 .take(&mut args)
                 .present_and_then(|o| VideoCodecImplementationSelections::parse(o.value()))?;
 
+        // OpenH264 の可用性判定に必要なパスを受け取る。
         let openh264_path: Option<String> = noargs::opt("openh264-path")
             .doc("OpenH264 の動的ライブラリパス")
             .take(&mut args)
@@ -550,12 +553,14 @@ fn parse_args() -> Result<Args> {
 }
 
 fn validate_args(args: &Args) -> Result<()> {
+    // mp4 passthrough と OpenH264 ライブラリ指定は排他的。
     if args.input_mp4.is_some() && args.openh264_path.is_some() {
         return Err(
             io::Error::other("--input-mp4 and --openh264-path cannot be used together").into(),
         );
     }
 
+    // OpenH264 は実装選択とライブラリパスがセットで必要。
     let openh264_selected = args
         .video_codec_implementation
         .contains(VideoCodecImplementationSelection::Openh264);
@@ -723,12 +728,14 @@ struct VideoCodecPreferenceReport {
     decoder: Option<String>,
 }
 
+// --video-codec-list の表示用に、capability と preference を分離して保持する。
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct VideoCodecListReport {
     capabilities: Vec<VideoCodecCapabilityReport>,
     preference: Vec<VideoCodecPreferenceReport>,
 }
 
+// capability 実体を保持し、最終表示用 report を組み立てるための内部表現。
 struct VideoCodecCapabilityProbe {
     selection: VideoCodecImplementationSelection,
     selected: bool,
@@ -737,6 +744,7 @@ struct VideoCodecCapabilityProbe {
 }
 
 fn known_video_codec_types() -> [VideoCodecType; 5] {
+    // preference は既知 codec を常に表示する。
     [
         VideoCodecType::Vp8,
         VideoCodecType::Vp9,
@@ -757,6 +765,7 @@ fn supported_codec_names(
     capability: &dyn VideoCodecCapability,
     direction: sora_sdk::CodecDirection,
 ) -> Vec<String> {
+    // 既知 codec 一覧に対して capability の対応可否を評価する。
     known_video_codec_types()
         .into_iter()
         .filter(|codec_type| capability.is_supported(direction, *codec_type))
@@ -779,6 +788,7 @@ fn is_selection_selected(
     #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     let _ = capability_available;
 
+    // selected は「ユーザーが選択したか」を示し、available とは独立して扱う。
     match &args.video_codec_implementation {
         VideoCodecImplementationSelections::Manual(selections) => selections.contains(&selection),
         VideoCodecImplementationSelections::Auto => match selection {
@@ -964,6 +974,7 @@ fn probe_openh264(args: &Args) -> VideoCodecCapabilityProbe {
 }
 
 fn collect_video_codec_capability_probes(args: &Args) -> Vec<VideoCodecCapabilityProbe> {
+    // 表示順を固定するため、実装ごとに明示的な順序で probe する。
     vec![
         probe_internal(args),
         probe_internal_hwa(args),
@@ -980,6 +991,7 @@ fn selected_implementations(
     #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     let _ = probes;
 
+    // preference 合成対象となる実装順を決定する。
     match &args.video_codec_implementation {
         VideoCodecImplementationSelections::Manual(selections) => selections.clone(),
         VideoCodecImplementationSelections::Auto => {
@@ -1007,6 +1019,7 @@ fn collect_video_codec_preference_report(
     probes: &[VideoCodecCapabilityProbe],
 ) -> Vec<VideoCodecPreferenceReport> {
     let mut preference = VideoCodecPreference::default();
+    // selected された実装だけを順番に merge して最終 preference を作る。
     for selection in selected_implementations(args, probes) {
         let capability = probes
             .iter()
@@ -1018,6 +1031,7 @@ fn collect_video_codec_preference_report(
     }
 
     let mut reports = Vec::new();
+    // 表示は既知 codec を固定順で全て出す。
     for codec_type in known_video_codec_types() {
         let encoder = preference
             .find(sora_sdk::CodecDirection::Encoder, codec_type)
@@ -1037,6 +1051,7 @@ fn collect_video_codec_preference_report(
 fn collect_video_codec_list_report(args: &Args) -> VideoCodecListReport {
     let probes = collect_video_codec_capability_probes(args);
 
+    // capability probe 結果を表示用構造へ正規化する。
     let capabilities = probes
         .iter()
         .map(|probe| {
@@ -1060,6 +1075,7 @@ fn collect_video_codec_list_report(args: &Args) -> VideoCodecListReport {
 
     let preference = collect_video_codec_preference_report(args, &probes);
 
+    // capability と preference をひとまとまりで返す。
     VideoCodecListReport {
         capabilities,
         preference,
@@ -1067,6 +1083,7 @@ fn collect_video_codec_list_report(args: &Args) -> VideoCodecListReport {
 }
 
 fn is_ansi_output_enabled() -> bool {
+    // TTY 以外や no-color 指定時は装飾しない。
     if !std::io::stdout().is_terminal() {
         return false;
     }
@@ -1077,46 +1094,61 @@ fn is_ansi_output_enabled() -> bool {
 }
 
 fn ansi_style(text: &str, code: &str, enabled: bool) -> String {
+    // ANSI 無効時は入力文字列をそのまま返す。
     if !enabled {
         return text.to_string();
     }
     format!("\x1b[{code}m{text}\x1b[0m")
 }
 
+fn build_preference_display_value(value: Option<&str>, ansi_enabled: bool) -> String {
+    // 未選択は (none) で表示し、ANSI 有効時のみ薄色にする。
+    match value {
+        Some(value) => value.to_string(),
+        None => ansi_style("(none)", "2", ansi_enabled),
+    }
+}
+
 fn build_video_codec_list_report_text(report: &VideoCodecListReport, ansi_enabled: bool) -> String {
     let mut out = String::new();
-    let dim_none = ansi_style("(none)", "2", ansi_enabled);
+    // implementation 列は実データの最大幅に合わせて揃える。
+    let implementation_width = report
+        .capabilities
+        .iter()
+        .map(|capability| capability.implementation.chars().count())
+        .max()
+        .unwrap_or(0);
 
     writeln!(out, "Video codec capability:").expect("write to string");
     for capability in &report.capabilities {
         let selected_mark = if capability.selected { "x" } else { " " };
+        let implementation = capability.implementation.as_str();
+        // capability は利用可否で表示内容を切り替える。
         let body = if capability.available {
+            let encoder = if capability.encoder_codecs.is_empty() {
+                "(none)".to_string()
+            } else {
+                capability.encoder_codecs.join(", ")
+            };
+            let decoder = if capability.decoder_codecs.is_empty() {
+                "(none)".to_string()
+            } else {
+                capability.decoder_codecs.join(", ")
+            };
             format!(
-                "- [{selected_mark}] {:<12} enc({}) dec({})",
-                capability.implementation,
-                if capability.encoder_codecs.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    capability.encoder_codecs.join(", ")
-                },
-                if capability.decoder_codecs.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    capability.decoder_codecs.join(", ")
-                },
+                "- [{selected_mark}] {implementation:<implementation_width$} enc({encoder}) dec({decoder})",
             )
         } else if let Some(reason) = &capability.unavailable_reason {
             format!(
-                "- [{selected_mark}] {:<12} :unavailable: {}",
-                capability.implementation, reason
+                "- [{selected_mark}] {implementation:<implementation_width$} :unavailable: {reason}",
             )
         } else {
             format!(
-                "- [{selected_mark}] {:<12} :unavailable: unknown reason",
-                capability.implementation
+                "- [{selected_mark}] {implementation:<implementation_width$} :unavailable: unknown reason",
             )
         };
 
+        // selected は強調、unavailable は薄色で見分けやすくする。
         let line = if capability.available {
             if capability.selected {
                 ansi_style(&body, "1", ansi_enabled)
@@ -1133,20 +1165,32 @@ fn build_video_codec_list_report_text(report: &VideoCodecListReport, ansi_enable
 
     writeln!(out).expect("write to string");
     writeln!(out, "Video codec preference:").expect("write to string");
+    // enc 列も実データの最大幅で揃える。
+    let encoder_width = report
+        .preference
+        .iter()
+        .map(|preference| {
+            preference
+                .encoder
+                .as_deref()
+                .unwrap_or("(none)")
+                .chars()
+                .count()
+        })
+        .max()
+        .unwrap_or(0);
     for preference in &report.preference {
-        let encoder = preference
-            .encoder
-            .as_deref()
-            .map(ToString::to_string)
-            .unwrap_or_else(|| dim_none.clone());
-        let decoder = preference
-            .decoder
-            .as_deref()
-            .map(ToString::to_string)
-            .unwrap_or_else(|| dim_none.clone());
+        let encoder_plain = preference.encoder.as_deref().unwrap_or("(none)");
+        let encoder = format!(
+            "{}{}",
+            build_preference_display_value(preference.encoder.as_deref(), ansi_enabled),
+            // encoder_width の幅になるように右側を埋める。
+            " ".repeat(encoder_width.saturating_sub(encoder_plain.chars().count())),
+        );
+        let decoder = build_preference_display_value(preference.decoder.as_deref(), ansi_enabled);
         writeln!(
             out,
-            "- {:<4} enc: {:<12} dec: {}",
+            "- {:<4} enc: {} dec: {}",
             preference.codec, encoder, decoder
         )
         .expect("write to string");
@@ -1155,11 +1199,13 @@ fn build_video_codec_list_report_text(report: &VideoCodecListReport, ansi_enable
 }
 
 fn render_video_codec_list_report(report: &VideoCodecListReport) {
+    // ANSI 可否判定を反映して最終テキストを描画する。
     let text = build_video_codec_list_report_text(report, is_ansi_output_enabled());
     print!("{text}");
 }
 
 fn run_video_codec_list(args: &Args) -> Result<()> {
+    // --video-codec-list 専用の収集と描画だけ実行する。
     let report = collect_video_codec_list_report(args);
     render_video_codec_list_report(&report);
     Ok(())
@@ -2246,6 +2292,7 @@ impl AudioDeviceCapturer {
 async fn main() -> Result<()> {
     let args = parse_args()?;
 
+    // codec list モードは接続処理を行わず早期終了する。
     if args.video_codec_list {
         return run_video_codec_list(&args);
     }
@@ -2831,6 +2878,57 @@ mod tests {
         assert!(text.contains("\x1b[2m- [ ] openh264"));
         assert!(text.contains(":unavailable: --openh264-path is not specified"));
         assert!(text.contains("\x1b[2m(none)\x1b[0m"));
+    }
+
+    #[test]
+    fn build_video_codec_list_report_text_aligns_preference_with_ansi_none() {
+        let report = VideoCodecListReport {
+            capabilities: vec![],
+            preference: vec![
+                VideoCodecPreferenceReport {
+                    codec: "vp8".to_string(),
+                    encoder: None,
+                    decoder: Some("nvcodec".to_string()),
+                },
+                VideoCodecPreferenceReport {
+                    codec: "av1".to_string(),
+                    encoder: Some("nvcodec".to_string()),
+                    decoder: Some("nvcodec".to_string()),
+                },
+            ],
+        };
+        let text = build_video_codec_list_report_text(&report, true);
+        let plain = text.replace("\x1b[2m", "").replace("\x1b[0m", "");
+        assert!(plain.contains("- vp8  enc: (none)  dec: nvcodec"));
+        assert!(plain.contains("- av1  enc: nvcodec dec: nvcodec"));
+    }
+
+    #[test]
+    fn build_video_codec_list_report_text_aligns_capability_by_max_width() {
+        let report = VideoCodecListReport {
+            capabilities: vec![
+                VideoCodecCapabilityReport {
+                    implementation: "a".to_string(),
+                    selected: false,
+                    available: true,
+                    unavailable_reason: None,
+                    encoder_codecs: vec!["vp8".to_string()],
+                    decoder_codecs: vec!["vp8".to_string()],
+                },
+                VideoCodecCapabilityReport {
+                    implementation: "bbbb".to_string(),
+                    selected: false,
+                    available: true,
+                    unavailable_reason: None,
+                    encoder_codecs: vec!["vp8".to_string()],
+                    decoder_codecs: vec!["vp8".to_string()],
+                },
+            ],
+            preference: vec![],
+        };
+        let text = build_video_codec_list_report_text(&report, false);
+        assert!(text.contains("- [ ] a    enc(vp8) dec(vp8)"));
+        assert!(text.contains("- [ ] bbbb enc(vp8) dec(vp8)"));
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "ios")))]
