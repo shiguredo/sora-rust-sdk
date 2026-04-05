@@ -1,6 +1,8 @@
 #![cfg(feature = "nvcodec")]
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -10,11 +12,33 @@ use e2e_tests::{
     verify_stats_field_positive, verify_video_codec_mime_type,
 };
 use serial_test::serial;
-use shiguredo_webrtc::VideoCodecType;
+use shiguredo_webrtc::{
+    VideoCodecType, VideoFrameRef, VideoSink, VideoSinkHandler, VideoSinkWants,
+};
 use sora_sdk::{
     CodecDirection, NvCodecVideoCodecCapability, Role, SoraClient, SoraClientContext,
     SoraClientContextConfig, Video, VideoCodecCapability, VideoCodecPreference,
 };
+
+const MIN_DECODED_VIDEO_FRAMES: usize = 3;
+
+struct DecodeCountVideoSinkHandler {
+    decoded_video_frames: Arc<AtomicUsize>,
+}
+
+impl DecodeCountVideoSinkHandler {
+    fn new(decoded_video_frames: Arc<AtomicUsize>) -> Self {
+        Self {
+            decoded_video_frames,
+        }
+    }
+}
+
+impl VideoSinkHandler for DecodeCountVideoSinkHandler {
+    fn on_frame(&mut self, _frame: VideoFrameRef<'_>) {
+        self.decoded_video_frames.fetch_add(1, Ordering::SeqCst);
+    }
+}
 
 fn test_channel_id(suffix: &str) -> String {
     let base = generate_channel_id();
@@ -124,7 +148,7 @@ async fn run_sendonly_recvonly_with_contexts(
     recvonly_context: Arc<SoraClientContext>,
     codec_type: VideoCodecType,
     suffix_prefix: &str,
-) {
+) -> std::result::Result<(), String> {
     let urls = signaling_urls().expect("TEST_SIGNALING_URLS is required");
     let codec_label = codec_label(codec_type);
     let expected_mime_type = codec_mime_type(codec_type);
@@ -135,13 +159,18 @@ async fn run_sendonly_recvonly_with_contexts(
 
     let recvonly_connected = Arc::new(AtomicBool::new(false));
     let recvonly_connected_clone = recvonly_connected.clone();
-    let track_received = Arc::new(AtomicUsize::new(0));
-    let track_received_clone = track_received.clone();
+    let video_track_received = Arc::new(AtomicUsize::new(0));
+    let video_track_received_clone = video_track_received.clone();
+    let decoded_video_frames = Arc::new(AtomicUsize::new(0));
+    let decoded_video_frames_clone = decoded_video_frames.clone();
+    let recvonly_video_sinks: Arc<Mutex<HashMap<String, VideoSink>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let recvonly_video_sinks_clone = recvonly_video_sinks.clone();
 
     let mut capturer = FakeVideoCapturer::new(FakeVideoCapturerConfig::default())
-        .expect("failed to create FakeVideoCapturer");
-    let (video_track, audio_track) =
-        build_sender_tracks(&sendonly_context, &mut capturer).expect("failed to build tracks");
+        .map_err(|e| format!("failed to create FakeVideoCapturer: {e}"))?;
+    let (video_track, audio_track) = build_sender_tracks(&sendonly_context, &mut capturer)
+        .map_err(|e| format!("failed to build tracks: {e}"))?;
 
     let mut sendonly_builder = SoraClient::builder(
         sendonly_context,
@@ -163,7 +192,7 @@ async fn run_sendonly_recvonly_with_contexts(
 
     let (sendonly_client, sendonly_handle) = sendonly_builder
         .build()
-        .expect("failed to build sendonly client");
+        .map_err(|e| format!("failed to build sendonly client: {e}"))?;
     let sendonly_task = tokio::spawn(async move {
         let _ = tokio::time::timeout(Duration::from_secs(30), sendonly_client.run()).await;
     });
@@ -177,7 +206,10 @@ async fn run_sendonly_recvonly_with_contexts(
         }
     })
     .await;
-    assert!(sendonly_wait.is_ok(), "sendonly connection timed out");
+    if sendonly_wait.is_err() {
+        sendonly_task.abort();
+        return Err("sendonly connection timed out".to_string());
+    }
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -187,8 +219,37 @@ async fn run_sendonly_recvonly_with_contexts(
             .on_notify(move |_| {
                 recvonly_connected_clone.store(true, Ordering::SeqCst);
             })
-            .on_track(move |_track| {
-                track_received_clone.fetch_add(1, Ordering::SeqCst);
+            .on_track(move |transceiver| {
+                let receiver = transceiver.receiver();
+                let track = receiver.track();
+                let kind = match track.kind() {
+                    Ok(kind) => kind,
+                    Err(_) => return,
+                };
+                if kind != "video" {
+                    return;
+                }
+
+                let track_id = match track.id() {
+                    Ok(id) => id,
+                    Err(_) => return,
+                };
+                let mut video_track = track.cast_to_video_track();
+                let mut sinks = match recvonly_video_sinks_clone.lock() {
+                    Ok(sinks) => sinks,
+                    Err(_) => return,
+                };
+                if sinks.contains_key(&track_id) {
+                    return;
+                }
+
+                let sink = VideoSink::new_with_handler(Box::new(DecodeCountVideoSinkHandler::new(
+                    decoded_video_frames_clone.clone(),
+                )));
+                let wants = VideoSinkWants::new();
+                video_track.add_or_update_sink(&sink, &wants);
+                sinks.insert(track_id, sink);
+                video_track_received_clone.fetch_add(1, Ordering::SeqCst);
             });
 
     if let Some(token) = secret_key() {
@@ -197,75 +258,92 @@ async fn run_sendonly_recvonly_with_contexts(
 
     let (recvonly_client, recvonly_handle) = recvonly_builder
         .build()
-        .expect("failed to build recvonly client");
+        .map_err(|e| format!("failed to build recvonly client: {e}"))?;
     let recvonly_task = tokio::spawn(async move {
         let _ = tokio::time::timeout(Duration::from_secs(30), recvonly_client.run()).await;
     });
 
-    let recvonly_wait = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if recvonly_connected.load(Ordering::SeqCst) {
-                break;
+    let result = async {
+        let recvonly_wait = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if recvonly_connected.load(Ordering::SeqCst) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+        })
+        .await;
+        if recvonly_wait.is_err() {
+            return Err("recvonly connection timed out".to_string());
         }
-    })
-    .await;
-    assert!(recvonly_wait.is_ok(), "recvonly connection timed out");
 
-    let track_wait = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if track_received.load(Ordering::SeqCst) > 0 {
-                break;
+        let video_track_wait = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if video_track_received.load(Ordering::SeqCst) > 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+        })
+        .await;
+        if video_track_wait.is_err() || video_track_received.load(Ordering::SeqCst) == 0 {
+            return Err("recvonly did not receive video tracks".to_string());
         }
-    })
+
+        let decoded_wait = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if decoded_video_frames.load(Ordering::SeqCst) >= MIN_DECODED_VIDEO_FRAMES {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+        if decoded_wait.is_err() || decoded_video_frames.load(Ordering::SeqCst) < MIN_DECODED_VIDEO_FRAMES {
+            return Err(format!(
+                "recvonly did not decode enough video frames: decoded={}, required={MIN_DECODED_VIDEO_FRAMES}",
+                decoded_video_frames.load(Ordering::SeqCst)
+            ));
+        }
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        let sendonly_stats = sendonly_handle
+            .get_stats()
+            .await
+            .map_err(|e| format!("failed to get sendonly stats: {e}"))?;
+        if !verify_stats_field_positive(&sendonly_stats, "outbound-rtp", "packetsSent") {
+            return Err("sendonly must send video packets".to_string());
+        }
+        if !verify_video_codec_mime_type(&sendonly_stats, "outbound-rtp", expected_mime_type) {
+            return Err(format!(
+                "sendonly outbound codec must match: expected={expected_mime_type}"
+            ));
+        }
+
+        let recvonly_stats = recvonly_handle
+            .get_stats()
+            .await
+            .map_err(|e| format!("failed to get recvonly stats: {e}"))?;
+        if !verify_stats_field_positive(&recvonly_stats, "inbound-rtp", "packetsReceived") {
+            return Err("recvonly must receive video packets".to_string());
+        }
+        if !verify_video_codec_mime_type(&recvonly_stats, "inbound-rtp", expected_mime_type) {
+            return Err(format!(
+                "recvonly inbound codec must match: expected={expected_mime_type}"
+            ));
+        }
+
+        Ok(())
+    }
     .await;
-    assert!(
-        track_wait.is_ok() && track_received.load(Ordering::SeqCst) > 0,
-        "recvonly did not receive tracks"
-    );
 
-    tokio::time::sleep(Duration::from_secs(5)).await;
-
-    let sendonly_stats = sendonly_handle
-        .get_stats()
-        .await
-        .expect("failed to get sendonly stats");
-    assert!(
-        verify_stats_field_positive(&sendonly_stats, "outbound-rtp", "packetsSent"),
-        "sendonly must send video packets"
-    );
-    assert!(
-        verify_video_codec_mime_type(&sendonly_stats, "outbound-rtp", expected_mime_type),
-        "sendonly outbound codec must match"
-    );
-
-    let recvonly_stats = recvonly_handle
-        .get_stats()
-        .await
-        .expect("failed to get recvonly stats");
-    assert!(
-        verify_stats_field_positive(&recvonly_stats, "inbound-rtp", "packetsReceived"),
-        "recvonly must receive video packets"
-    );
-    assert!(
-        verify_video_codec_mime_type(&recvonly_stats, "inbound-rtp", expected_mime_type),
-        "recvonly inbound codec must match"
-    );
-
-    sendonly_handle
-        .disconnect()
-        .await
-        .expect("failed to disconnect sendonly");
-    recvonly_handle
-        .disconnect()
-        .await
-        .expect("failed to disconnect recvonly");
+    let _ = sendonly_handle.disconnect().await;
+    let _ = recvonly_handle.disconnect().await;
 
     sendonly_task.abort();
     recvonly_task.abort();
+    result
 }
 
 async fn run_sendrecv_with_codec(codec_type: VideoCodecType) {
@@ -430,17 +508,33 @@ async fn test_nvcodec_sendonly_recvonly() {
         return;
     };
 
+    let mut failures = Vec::new();
     for codec_type in codec_types {
         let sendonly_context = create_nvcodec_context().expect("failed to create sendonly context");
         let recvonly_context = create_nvcodec_context().expect("failed to create recvonly context");
-        run_sendonly_recvonly_with_contexts(
+        match run_sendonly_recvonly_with_contexts(
             sendonly_context,
             recvonly_context,
             codec_type,
             "nvcodec",
         )
-        .await;
+        .await
+        {
+            Ok(()) => {
+                eprintln!(
+                    "nvcodec sendonly/recvonly passed for {}",
+                    codec_label(codec_type)
+                );
+            }
+            Err(error) => failures.push(format!("{}: {error}", codec_label(codec_type))),
+        }
     }
+
+    assert!(
+        failures.is_empty(),
+        "nvcodec sendonly/recvonly failures:\n{}",
+        failures.join("\n")
+    );
 }
 
 #[tokio::test]
@@ -482,6 +576,12 @@ async fn test_nvcodec_decoder_only_recvonly() {
             codec_type,
             "nvcodec-decoder-only",
         )
-        .await;
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "nvcodec decoder-only recvonly failed for {}: {error}",
+                codec_label(codec_type)
+            )
+        });
     }
 }
