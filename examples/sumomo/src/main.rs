@@ -20,7 +20,7 @@ use shiguredo_webrtc::{AudioDeviceModule, AudioDeviceModuleHandler, AudioTranspo
 #[cfg(feature = "amf")]
 use sora_sdk::AmfVideoCodecCapability;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-use sora_sdk::InternalHwaVideoCodecCapability;
+use sora_sdk::InternalAppleVideoCodecCapability;
 #[cfg(feature = "nvcodec")]
 use sora_sdk::NvCodecVideoCodecCapability;
 use sora_sdk::{
@@ -65,7 +65,7 @@ struct Args {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum VideoCodecImplementationSelection {
     Internal,
-    InternalHwa,
+    InternalApple,
     Amf,
     Nvcodec,
     Openh264,
@@ -75,7 +75,7 @@ impl VideoCodecImplementationSelection {
     fn parse(value: &str) -> Option<Self> {
         match value {
             "internal" => Some(Self::Internal),
-            "internal-hwa" => Some(Self::InternalHwa),
+            "internal-apple" => Some(Self::InternalApple),
             "amf" => Some(Self::Amf),
             "nvcodec" => Some(Self::Nvcodec),
             "openh264" => Some(Self::Openh264),
@@ -86,7 +86,7 @@ impl VideoCodecImplementationSelection {
     fn name(self) -> &'static str {
         match self {
             Self::Internal => "internal",
-            Self::InternalHwa => "internal-hwa",
+            Self::InternalApple => "internal-apple",
             Self::Amf => "amf",
             Self::Nvcodec => "nvcodec",
             Self::Openh264 => "openh264",
@@ -120,7 +120,7 @@ impl VideoCodecImplementationSelections {
         let mut selections = Vec::new();
         for value in values {
             let selection = VideoCodecImplementationSelection::parse(value).ok_or(
-                "video-codec-implementation must be auto/internal/internal-hwa/amf/nvcodec/openh264",
+                "video-codec-implementation must be auto/internal/internal-apple/amf/nvcodec/openh264",
             )?;
             if !seen.insert(selection) {
                 return Err(
@@ -267,7 +267,7 @@ fn parse_args() -> Result<Args> {
         // preference 計算に必要な実装優先順だけ先に解釈する。
         let video_codec_implementation: Option<VideoCodecImplementationSelections> =
             noargs::opt("video-codec-implementation")
-                .doc("映像コーデック実装 (auto または internal/internal-hwa/amf/nvcodec/openh264 のカンマ区切り)")
+                .doc("映像コーデック実装 (auto または internal/internal-apple/amf/nvcodec/openh264 のカンマ区切り)")
                 .take(&mut args)
                 .present_and_then(|o| VideoCodecImplementationSelections::parse(o.value()))?;
 
@@ -398,7 +398,7 @@ fn parse_args() -> Result<Args> {
 
     let video_codec_implementation: Option<VideoCodecImplementationSelections> =
         noargs::opt("video-codec-implementation")
-            .doc("映像コーデック実装 (auto または internal/internal-hwa/amf/nvcodec/openh264 のカンマ区切り)")
+            .doc("映像コーデック実装 (auto または internal/internal-apple/amf/nvcodec/openh264 のカンマ区切り)")
             .take(&mut args)
             .present_and_then(|o| {
                 VideoCodecImplementationSelections::parse(o.value())
@@ -645,12 +645,14 @@ fn build_context_config(
                             Box::new(InternalVideoCodecCapability::new());
                         add_video_codec_capability(&mut context_config, internal_capability);
                     }
-                    VideoCodecImplementationSelection::InternalHwa => {
+                    VideoCodecImplementationSelection::InternalApple => {
                         #[cfg(any(target_os = "macos", target_os = "ios"))]
                         {
                             let capability =
-                                InternalHwaVideoCodecCapability::new().ok_or_else(|| {
-                                    io::Error::other("internal-hwa is not available on this device")
+                                InternalAppleVideoCodecCapability::new().ok_or_else(|| {
+                                    io::Error::other(
+                                        "internal-apple is not available on this device",
+                                    )
                                 })?;
                             let capability: Box<dyn VideoCodecCapability> = Box::new(capability);
                             add_video_codec_capability(&mut context_config, capability);
@@ -658,7 +660,7 @@ fn build_context_config(
                         #[cfg(not(any(target_os = "macos", target_os = "ios")))]
                         {
                             return Err(io::Error::other(
-                                "internal-hwa is not supported on this platform",
+                                "internal-apple is not supported on this platform",
                             )
                             .into());
                         }
@@ -793,7 +795,7 @@ fn is_selection_selected(
         VideoCodecImplementationSelections::Manual(selections) => selections.contains(&selection),
         VideoCodecImplementationSelections::Auto => match selection {
             VideoCodecImplementationSelection::Internal => true,
-            VideoCodecImplementationSelection::InternalHwa => {
+            VideoCodecImplementationSelection::InternalApple => {
                 #[cfg(any(target_os = "macos", target_os = "ios"))]
                 {
                     capability_available
@@ -833,9 +835,9 @@ fn probe_internal(args: &Args) -> VideoCodecCapabilityProbe {
     }
 }
 
-fn probe_internal_hwa(args: &Args) -> VideoCodecCapabilityProbe {
+fn probe_internal_apple(args: &Args) -> VideoCodecCapabilityProbe {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
-    let (capability, unavailable_reason) = match InternalHwaVideoCodecCapability::new() {
+    let (capability, unavailable_reason) = match InternalAppleVideoCodecCapability::new() {
         Some(capability) => {
             let capability: Box<dyn VideoCodecCapability> = Box::new(capability);
             if has_any_codec_support(capability.as_ref()) {
@@ -843,27 +845,29 @@ fn probe_internal_hwa(args: &Args) -> VideoCodecCapabilityProbe {
             } else {
                 (
                     None,
-                    Some("internal-hwa does not support any encoder or decoder codec".to_string()),
+                    Some(
+                        "internal-apple does not support any encoder or decoder codec".to_string(),
+                    ),
                 )
             }
         }
         None => (
             None,
-            Some("internal-hwa is not available on this device".to_string()),
+            Some("internal-apple is not available on this device".to_string()),
         ),
     };
     #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     let (capability, unavailable_reason) = (
         None,
-        Some("internal-hwa is not supported on this platform".to_string()),
+        Some("internal-apple is not supported on this platform".to_string()),
     );
     let selected = is_selection_selected(
         args,
-        VideoCodecImplementationSelection::InternalHwa,
+        VideoCodecImplementationSelection::InternalApple,
         capability.is_some(),
     );
     VideoCodecCapabilityProbe {
-        selection: VideoCodecImplementationSelection::InternalHwa,
+        selection: VideoCodecImplementationSelection::InternalApple,
         selected,
         capability,
         unavailable_reason,
@@ -977,7 +981,7 @@ fn collect_video_codec_capability_probes(args: &Args) -> Vec<VideoCodecCapabilit
     // 表示順を固定するため、実装ごとに明示的な順序で probe する。
     vec![
         probe_internal(args),
-        probe_internal_hwa(args),
+        probe_internal_apple(args),
         probe_amf(args),
         probe_nvcodec(args),
         probe_openh264(args),
@@ -999,10 +1003,10 @@ fn selected_implementations(
             {
                 let mut selections = vec![VideoCodecImplementationSelection::Internal];
                 if probes.iter().any(|probe| {
-                    probe.selection == VideoCodecImplementationSelection::InternalHwa
+                    probe.selection == VideoCodecImplementationSelection::InternalApple
                         && probe.capability.is_some()
                 }) {
-                    selections.push(VideoCodecImplementationSelection::InternalHwa);
+                    selections.push(VideoCodecImplementationSelection::InternalApple);
                 }
                 selections
             }
@@ -2645,12 +2649,12 @@ mod tests {
 
     #[test]
     fn parse_video_codec_implementation_multiple() {
-        let parsed = VideoCodecImplementationSelections::parse("internal-hwa,internal")
+        let parsed = VideoCodecImplementationSelections::parse("internal-apple,internal")
             .expect("manual list must be parsed successfully");
         assert_eq!(
             parsed,
             VideoCodecImplementationSelections::Manual(vec![
-                VideoCodecImplementationSelection::InternalHwa,
+                VideoCodecImplementationSelection::InternalApple,
                 VideoCodecImplementationSelection::Internal,
             ])
         );
@@ -2692,7 +2696,7 @@ mod tests {
             .expect_err("unknown value must fail");
         assert_eq!(
             err,
-            "video-codec-implementation must be auto/internal/internal-hwa/amf/nvcodec/openh264"
+            "video-codec-implementation must be auto/internal/internal-apple/amf/nvcodec/openh264"
         );
     }
 
@@ -2933,21 +2937,21 @@ mod tests {
 
     #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     #[test]
-    fn build_context_config_rejects_internal_hwa_on_unsupported_platform() {
+    fn build_context_config_rejects_internal_apple_on_unsupported_platform() {
         let result = build_context_config(
             sora_sdk::AdmConfig::NoAudioDevice,
             None,
             None,
             VideoCodecImplementationSelections::Manual(vec![
-                VideoCodecImplementationSelection::InternalHwa,
+                VideoCodecImplementationSelection::InternalApple,
             ]),
         );
         match result {
-            Ok(_) => panic!("internal-hwa must fail on unsupported platform"),
+            Ok(_) => panic!("internal-apple must fail on unsupported platform"),
             Err(err) => {
                 assert!(
                     err.to_string()
-                        .contains("internal-hwa is not supported on this platform")
+                        .contains("internal-apple is not supported on this platform")
                 );
             }
         }
@@ -2962,7 +2966,7 @@ mod tests {
             None,
             VideoCodecImplementationSelections::Manual(vec![
                 VideoCodecImplementationSelection::Internal,
-                VideoCodecImplementationSelection::InternalHwa,
+                VideoCodecImplementationSelection::InternalApple,
             ]),
         );
         match result {
@@ -2974,12 +2978,12 @@ mod tests {
                         shiguredo_webrtc::VideoCodecType::H264,
                     )
                     .expect("h264 encoder preference must exist");
-                assert_eq!(preference.implementation().name(), "internal-hwa");
+                assert_eq!(preference.implementation().name(), "internal-apple");
             }
             Err(err) => {
                 assert!(
                     err.to_string()
-                        .contains("internal-hwa is not available on this device")
+                        .contains("internal-apple is not available on this device")
                 );
             }
         }

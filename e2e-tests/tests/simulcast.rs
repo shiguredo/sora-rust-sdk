@@ -16,7 +16,7 @@ use sora_sdk::AmfVideoCodecCapability;
 #[cfg(feature = "amf")]
 use sora_sdk::CodecDirection;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-use sora_sdk::InternalHwaVideoCodecCapability;
+use sora_sdk::InternalAppleVideoCodecCapability;
 #[cfg(feature = "nvcodec")]
 use sora_sdk::NvCodecVideoCodecCapability;
 use sora_sdk::{
@@ -262,10 +262,10 @@ async fn test_sendonly_simulcast_outbound_layers_amf() {
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 #[tokio::test]
-async fn test_sendonly_simulcast_outbound_layers_internal_hwa() {
+async fn test_sendonly_simulcast_outbound_layers_internal_apple() {
     load_env();
-    let Some(capability) = InternalHwaVideoCodecCapability::new() else {
-        eprintln!("InternalHwaVideoCodecCapability is not available, skipping test");
+    let Some(capability) = InternalAppleVideoCodecCapability::new() else {
+        eprintln!("InternalAppleVideoCodecCapability is not available, skipping test");
         return;
     };
     let capability: Box<dyn VideoCodecCapability> = Box::new(capability);
@@ -273,7 +273,7 @@ async fn test_sendonly_simulcast_outbound_layers_internal_hwa() {
     run_sendonly_simulcast_outbound_layers(
         context,
         Some(Video::new_h264(None, None)),
-        "simulcast-sendonly-internal-hwa",
+        "simulcast-sendonly-internal-apple",
         &["SimulcastEncoderAdapter", "VideoToolbox"],
     )
     .await;
