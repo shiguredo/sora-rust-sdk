@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 use shiguredo_nvcodec::{
-    Decoder, DecoderConfig, Encoder, EncoderConfig, PictureType, RateControlMode,
+    BufferFormat, CodecConfig, Decoder, DecoderCodec, DecoderConfig, EncodeOptions, Encoder,
+    EncoderConfig, H264EncoderConfig, PictureType, Preset, RateControlMode, SurfaceFormat,
+    TuningInfo,
 };
 use shiguredo_webrtc::{
     CodecSpecificInfo, EncodedImage, EncodedImageBuffer, EncodedImageRef, EnvironmentRef,
@@ -59,17 +61,26 @@ impl NvCodecVideoEncoder {
             return Err(());
         }
         let config = EncoderConfig {
+            codec: CodecConfig::H264(H264EncoderConfig {
+                profile: None,
+                idr_period: None,
+            }),
             width: self.width,
             height: self.height,
             max_encode_width: Some(self.width),
             max_encode_height: Some(self.height),
-            fps_numerator: self.framerate.max(1),
-            fps_denominator: 1,
-            target_bitrate: Some(self.target_bitrate_bps.max(1)),
+            framerate_num: self.framerate.max(1),
+            framerate_den: 1,
+            average_bitrate: Some(self.target_bitrate_bps.max(1)),
+            preset: Preset::P4,
+            tuning_info: TuningInfo::LOW_LATENCY,
             rate_control_mode: RateControlMode::Cbr,
-            ..Default::default()
+            gop_length: None,
+            frame_interval_p: 1,
+            buffer_format: BufferFormat::Nv12,
+            device_id: 0,
         };
-        self.encoder = Encoder::new_h264(config).ok();
+        self.encoder = Encoder::new(config).ok();
         self.reconfigure_needed = false;
         self.encoder.as_ref().map(|_| ()).ok_or(())
     }
@@ -160,7 +171,12 @@ impl VideoEncoderHandler for NvCodecVideoEncoder {
 
         let rtp_timestamp = frame.rtp_timestamp();
         let encoder = self.encoder.as_mut().expect("encoder should exist");
-        if encoder.encode(nv12.data()).is_err() {
+        let encode_options = EncodeOptions {
+            force_intra: false,
+            force_idr: false,
+            output_spspps: false,
+        };
+        if encoder.encode(nv12.data(), &encode_options).is_err() {
             return VideoCodecStatus::Error;
         }
 
@@ -245,9 +261,19 @@ impl NvCodecVideoDecoder {
         }
     }
 
+    fn h264_decoder_config() -> DecoderConfig {
+        DecoderConfig {
+            codec: DecoderCodec::H264,
+            device_id: 0,
+            max_num_decode_surfaces: 20,
+            max_display_delay: 0,
+            surface_format: SurfaceFormat::Nv12,
+        }
+    }
+
     fn ensure_decoder(&mut self) -> Result<(), ()> {
         if self.decoder.is_none() {
-            self.decoder = Decoder::new_h264(DecoderConfig::default()).ok();
+            self.decoder = Decoder::new(Self::h264_decoder_config()).ok();
         }
         self.decoder.as_ref().map(|_| ()).ok_or(())
     }
@@ -258,7 +284,7 @@ impl VideoDecoderHandler for NvCodecVideoDecoder {
         if settings.codec_type() != VideoCodecType::H264 {
             return false;
         }
-        self.decoder = Decoder::new_h264(DecoderConfig::default()).ok();
+        self.decoder = Decoder::new(Self::h264_decoder_config()).ok();
         self.decoder.is_some()
     }
 
