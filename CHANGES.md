@@ -26,6 +26,8 @@
   - @sile, @melpon
 - [UPDATE] `shiguredo_nvcodec` を 2026.1.0 に上げる
   - @melpon
+- [UPDATE] `nvcodec` の対応コーデック判定を `shiguredo_nvcodec::supported_codecs()` に統一し、`device_id` を API で指定可能にする
+  - @melpon
 - [ADD] Windows に対応する
   - @melpon
 - [ADD] `SoraClientBuilder::ice_server_url_configurer` を追加する

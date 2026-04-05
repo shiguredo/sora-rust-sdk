@@ -2,8 +2,9 @@ use std::collections::HashMap;
 
 use shiguredo_nvcodec::{
     Av1EncoderConfig, BufferFormat, CodecConfig, Decoder, DecoderCodec, DecoderConfig,
-    EncodeOptions, Encoder, EncoderCodec, EncoderConfig, H264EncoderConfig, HevcEncoderConfig,
-    PictureType, Preset, RateControlMode, SurfaceFormat, TuningInfo,
+    EncodeOptions, Encoder, EncoderConfig, H264EncoderConfig, HevcEncoderConfig, PictureType,
+    Preset, RateControlMode, SurfaceFormat, TuningInfo, VideoCodecType as NvCodecType,
+    supported_codecs,
 };
 use shiguredo_webrtc::{
     CodecSpecificInfo, EncodedImage, EncodedImageBuffer, EncodedImageRef, EnvironmentRef,
@@ -72,15 +73,6 @@ fn supported_formats_for_codec(codec_type: VideoCodecType) -> Vec<SdpVideoFormat
     }
 }
 
-fn encoder_codec(codec_type: VideoCodecType) -> Option<EncoderCodec> {
-    match codec_type {
-        VideoCodecType::H264 => Some(EncoderCodec::H264),
-        VideoCodecType::H265 => Some(EncoderCodec::Hevc),
-        VideoCodecType::Av1 => Some(EncoderCodec::Av1),
-        _ => None,
-    }
-}
-
 fn encoder_codec_config(codec_type: VideoCodecType) -> Option<CodecConfig> {
     match codec_type {
         VideoCodecType::H264 => Some(CodecConfig::H264(H264EncoderConfig {
@@ -110,22 +102,23 @@ fn decoder_codec(codec_type: VideoCodecType) -> Option<DecoderCodec> {
     }
 }
 
-fn collect_codec_availability() -> Vec<CodecAvailability> {
+fn collect_codec_availability(device_id: i32) -> Vec<CodecAvailability> {
+    let Ok(codec_infos) = supported_codecs(device_id) else {
+        return Vec::new();
+    };
+
     let mut codecs = Vec::new();
-    for codec_type in [
-        VideoCodecType::H264,
-        VideoCodecType::H265,
-        VideoCodecType::Av1,
-        VideoCodecType::Vp8,
-        VideoCodecType::Vp9,
-    ] {
-        let encoder_supported =
-            encoder_codec(codec_type).is_some_and(|codec| Encoder::query_caps(codec, 0).is_ok());
-        let decoder_supported = decoder_codec(codec_type).is_some_and(|codec| {
-            Decoder::query_caps(codec, 0)
-                .map(|caps| caps.is_supported)
-                .unwrap_or(false)
-        });
+    for info in codec_infos {
+        let codec_type = match info.codec {
+            NvCodecType::H264 => VideoCodecType::H264,
+            NvCodecType::Hevc => VideoCodecType::H265,
+            NvCodecType::Av1 => VideoCodecType::Av1,
+            NvCodecType::Vp8 => VideoCodecType::Vp8,
+            NvCodecType::Vp9 => VideoCodecType::Vp9,
+            NvCodecType::Jpeg => continue,
+        };
+        let encoder_supported = info.encoding.supported;
+        let decoder_supported = info.decoding.supported;
         if encoder_supported || decoder_supported {
             codecs.push(CodecAvailability {
                 codec_type,
@@ -142,6 +135,7 @@ struct NvCodecVideoEncoder {
     callback: Option<VideoEncoderEncodedImageCallbackPtr>,
     encoder: Option<Encoder>,
     codec_type: VideoCodecType,
+    device_id: i32,
     width: u32,
     height: u32,
     framerate: u32,
@@ -150,11 +144,12 @@ struct NvCodecVideoEncoder {
 }
 
 impl NvCodecVideoEncoder {
-    fn new(codec_type: VideoCodecType) -> Self {
+    fn new(codec_type: VideoCodecType, device_id: i32) -> Self {
         Self {
             callback: None,
             encoder: None,
             codec_type,
+            device_id,
             width: 0,
             height: 0,
             framerate: 30,
@@ -185,7 +180,7 @@ impl NvCodecVideoEncoder {
             gop_length: None,
             frame_interval_p: 1,
             buffer_format: BufferFormat::Nv12,
-            device_id: 0,
+            device_id: self.device_id,
         };
         self.encoder = Encoder::new(config).ok();
         self.reconfigure_needed = false;
@@ -362,14 +357,16 @@ struct NvCodecVideoDecoder {
     callback: Option<VideoDecoderDecodedImageCallbackPtr>,
     decoder: Option<Decoder>,
     codec_type: VideoCodecType,
+    device_id: i32,
 }
 
 impl NvCodecVideoDecoder {
-    fn new(codec_type: VideoCodecType) -> Self {
+    fn new(codec_type: VideoCodecType, device_id: i32) -> Self {
         Self {
             callback: None,
             decoder: None,
             codec_type,
+            device_id,
         }
     }
 
@@ -377,7 +374,7 @@ impl NvCodecVideoDecoder {
         let codec = decoder_codec(self.codec_type)?;
         Some(DecoderConfig {
             codec,
-            device_id: 0,
+            device_id: self.device_id,
             max_num_decode_surfaces: 20,
             max_display_delay: 0,
             surface_format: SurfaceFormat::Nv12,
@@ -503,16 +500,21 @@ impl VideoDecoderHandler for NvCodecVideoDecoder {
 }
 
 pub struct NvCodecVideoCodecCapability {
+    device_id: i32,
     codecs: Vec<CodecAvailability>,
     simulcast_capability_helper: SimulcastCapabilityHelper,
 }
 
 impl NvCodecVideoCodecCapability {
     pub fn new() -> Self {
-        Self::new_with_codecs(collect_codec_availability())
+        Self::new_with_device_id(0)
     }
 
-    fn new_with_codecs(codecs: Vec<CodecAvailability>) -> Self {
+    pub fn new_with_device_id(device_id: i32) -> Self {
+        Self::new_with_codecs_and_device_id(collect_codec_availability(device_id), device_id)
+    }
+
+    fn new_with_codecs_and_device_id(codecs: Vec<CodecAvailability>, device_id: i32) -> Self {
         let mut codecs = codecs;
         codecs.sort_by_key(|codec| codec_sort_key(codec.codec_type));
 
@@ -536,19 +538,21 @@ impl NvCodecVideoCodecCapability {
             },
             {
                 let encoder_codec_types = encoder_codec_types.clone();
+                let device_id = device_id;
                 move |_env, format| {
                     let codec_type = codec_type_from_format(&format)?;
                     if !encoder_codec_types.contains(&codec_type) {
                         return None;
                     }
                     Some(VideoEncoder::new_with_handler(Box::new(
-                        NvCodecVideoEncoder::new(codec_type),
+                        NvCodecVideoEncoder::new(codec_type, device_id),
                     )))
                 }
             },
         );
 
         Self {
+            device_id,
             codecs,
             simulcast_capability_helper,
         }
@@ -606,7 +610,7 @@ impl VideoCodecCapability for NvCodecVideoCodecCapability {
             return None;
         }
         Some(VideoDecoder::new_with_handler(Box::new(
-            NvCodecVideoDecoder::new(codec_type),
+            NvCodecVideoDecoder::new(codec_type, self.device_id),
         )))
     }
 }
@@ -614,7 +618,7 @@ impl VideoCodecCapability for NvCodecVideoCodecCapability {
 #[cfg(test)]
 impl NvCodecVideoCodecCapability {
     fn new_for_test(codecs: Vec<CodecAvailability>) -> Self {
-        Self::new_with_codecs(codecs)
+        Self::new_with_codecs_and_device_id(codecs, 0)
     }
 }
 
@@ -643,6 +647,15 @@ mod tests {
             true,
         )]);
         assert_eq!(capability.get_implementation().name(), "nvcodec");
+    }
+
+    #[test]
+    fn nvcodec_capability_accepts_device_id_configuration() {
+        let capability = NvCodecVideoCodecCapability::new_with_codecs_and_device_id(
+            vec![test_codec(VideoCodecType::H264, true, true)],
+            7,
+        );
+        assert_eq!(capability.device_id, 7);
     }
 
     #[test]
