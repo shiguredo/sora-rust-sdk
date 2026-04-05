@@ -41,6 +41,9 @@
 - [ADD] AMD AMF に対応する
   - `shiguredo_amf` を利用した `AmfVideoCodecCapability` を追加し、H264/H265/AV1 の対応可否を動的判定してエンコーダー/デコーダーを提供する
   - @melpon
+- [ADD] `nvcodec` の対応コーデックを拡張する
+  - `NvCodecVideoCodecCapability` を H264/H265/AV1 エンコードと H264/H265/AV1/VP8/VP9 デコードの動的判定に対応する
+  - @melpon
 - [ADD] `AlignmentEncoderAdapter` を追加する
   - @melpon
 - [UPDATE] `VideoCodecCapability::is_supported` のデフォルト実装を設定する
