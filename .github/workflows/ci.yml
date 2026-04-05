@@ -73,13 +73,10 @@ jobs:
         include:
           - labels: [self-hosted, macOS, ARM64, Apple-M1]
             features: "--features openh264"
-            test_args: "-- --skip test_video_capture_frame_received"
           - labels: [self-hosted, linux, x64, NVIDIA-Video-Codec-SDK]
             features: "--features openh264,nvcodec"
-            test_args: ""
           - labels:  [self-hosted, linux, x64, AMD-AMF]
             features: "--features openh264,amf"
-            test_args: ""
     runs-on:
       group: Self
       labels: ${{ matrix.labels }}
@@ -98,7 +95,7 @@ jobs:
       - run: cp .cargo/config.toml.ci .cargo/config.toml
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace ${{ matrix.features }} -- -D warnings
-      - run: cargo test --workspace ${{ matrix.features }} ${{ matrix.test_args }}
+      - run: cargo test --workspace ${{ matrix.features }} -- --skip test_video_capture_frame_received
 
   slack_notify:
     needs: [ci, ci-self-hosted]
