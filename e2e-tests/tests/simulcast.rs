@@ -9,11 +9,11 @@ use e2e_tests::{
 };
 #[cfg(feature = "amf")]
 use serial_test::serial;
-#[cfg(any(feature = "amf", target_os = "macos", target_os = "ios"))]
+#[cfg(feature = "amf")]
 use shiguredo_webrtc::VideoCodecType;
 #[cfg(feature = "amf")]
 use sora_sdk::AmfVideoCodecCapability;
-#[cfg(any(feature = "amf", target_os = "macos", target_os = "ios"))]
+#[cfg(feature = "amf")]
 use sora_sdk::CodecDirection;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 use sora_sdk::InternalHwaVideoCodecCapability;

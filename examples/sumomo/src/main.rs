@@ -2184,14 +2184,12 @@ mod tests {
             VideoCodecImplementationSelections::Auto,
         )
         .expect("auto config must be built");
-        let names = capability_names(&config);
-        assert!(names.iter().any(|name| name == "internal"));
-        assert!(
-            config
-                .video_codec_preference
-                .codecs()
-                .iter()
-                .any(|codec| codec.implementation().name() == "internal")
+
+        let default_config = SoraClientContextConfig::default();
+        assert_eq!(capability_names(&config), capability_names(&default_config));
+        assert_eq!(
+            config.video_codec_preference,
+            default_config.video_codec_preference
         );
     }
 
