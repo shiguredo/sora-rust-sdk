@@ -1004,7 +1004,7 @@ fn selected_implementations(
                 }) {
                     selections.push(VideoCodecImplementationSelection::InternalHwa);
                 }
-                return selections;
+                selections
             }
             #[cfg(not(any(target_os = "macos", target_os = "ios")))]
             {
