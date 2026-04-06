@@ -94,14 +94,14 @@ impl DisplayJson for JsonString {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OpusParams {
-    channels: Option<u32>,
-    maxplaybackrate: Option<u32>,
-    minptime: Option<u32>,
-    ptime: Option<u32>,
-    stereo: Option<bool>,
-    sprop_stereo: Option<bool>,
-    useinbandfec: Option<bool>,
-    usedtx: Option<bool>,
+    pub channels: Option<u32>,
+    pub maxplaybackrate: Option<u32>,
+    pub minptime: Option<u32>,
+    pub ptime: Option<u32>,
+    pub stereo: Option<bool>,
+    pub sprop_stereo: Option<bool>,
+    pub useinbandfec: Option<bool>,
+    pub usedtx: Option<bool>,
 }
 
 impl DisplayJson for OpusParams {
@@ -220,7 +220,7 @@ impl DisplayJson for Audio {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VideoVP9Params {
     // 0..3
-    profile_id: Option<u32>,
+    pub profile_id: Option<u32>,
 }
 
 impl DisplayJson for VideoVP9Params {
@@ -236,9 +236,9 @@ impl DisplayJson for VideoVP9Params {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VideoH264Params {
-    profile_level_id: Option<String>,
+    pub profile_level_id: Option<String>,
     // sora.conf で h264_b_frame = true を設定する必要があります
-    b_frame: Option<bool>,
+    pub b_frame: Option<bool>,
 }
 
 impl DisplayJson for VideoH264Params {
@@ -257,15 +257,15 @@ impl DisplayJson for VideoH264Params {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VideoH265Params {
-    level_id: Option<String>,
+    pub level_id: Option<String>,
     // 0..31
-    profile_id: Option<u32>,
+    pub profile_id: Option<u32>,
     // 0..1
-    tier_flag: Option<u32>,
+    pub tier_flag: Option<u32>,
     // "SRST" | "MRST" | "MRMT"
-    tx_mode: Option<String>,
+    pub tx_mode: Option<String>,
     // sora.conf で h265_b_frame = true を設定する必要があります
-    b_frame: Option<bool>,
+    pub b_frame: Option<bool>,
 }
 
 impl DisplayJson for VideoH265Params {
@@ -294,11 +294,11 @@ impl DisplayJson for VideoH265Params {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VideoAV1Params {
     // 0..2
-    profile: Option<u32>,
+    pub profile: Option<u32>,
     // 0..31
-    level_idx: Option<u32>,
+    pub level_idx: Option<u32>,
     // 0..1
-    tier: Option<u32>,
+    pub tier: Option<u32>,
 }
 
 impl DisplayJson for VideoAV1Params {
@@ -519,5 +519,95 @@ impl DisplayJson for Video {
                 Ok(())
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nojson::Json;
+
+    #[test]
+    fn audio_new_opus_serializes_opus_params() {
+        let opus_params = OpusParams {
+            channels: Some(2),
+            maxplaybackrate: Some(48_000),
+            minptime: Some(10),
+            ptime: Some(20),
+            stereo: Some(true),
+            sprop_stereo: Some(true),
+            useinbandfec: Some(true),
+            usedtx: Some(false),
+        };
+        let audio = Audio::new_opus(Some(64_000), Some(opus_params));
+        let json = Json(&audio).to_string();
+
+        assert_eq!(
+            json,
+            r#"{"codec_type":"OPUS","bit_rate":64000,"opus_params":{"channels":2,"maxplaybackrate":48000,"minptime":10,"ptime":20,"stereo":true,"sprop_stereo":true,"useinbandfec":true,"usedtx":false}}"#
+        );
+    }
+
+    #[test]
+    fn video_new_vp9_serializes_vp9_params() {
+        let vp9_params = VideoVP9Params {
+            profile_id: Some(2),
+        };
+        let video = Video::new_vp9(Some(512_000), Some(vp9_params));
+        let json = Json(&video).to_string();
+
+        assert_eq!(
+            json,
+            r#"{"codec_type":"VP9","bit_rate":512000,"vp9_params":{"profile_id":2}}"#
+        );
+    }
+
+    #[test]
+    fn video_new_av1_serializes_av1_params() {
+        let av1_params = VideoAV1Params {
+            profile: Some(1),
+            level_idx: Some(10),
+            tier: Some(1),
+        };
+        let video = Video::new_av1(Some(768_000), Some(av1_params));
+        let json = Json(&video).to_string();
+
+        assert_eq!(
+            json,
+            r#"{"codec_type":"AV1","bit_rate":768000,"av1_params":{"profile":1,"level_idx":10,"tier":1}}"#
+        );
+    }
+
+    #[test]
+    fn video_new_h264_serializes_h264_params() {
+        let h264_params = VideoH264Params {
+            profile_level_id: Some("42e01f".to_string()),
+            b_frame: Some(true),
+        };
+        let video = Video::new_h264(Some(1_000_000), Some(h264_params));
+        let json = Json(&video).to_string();
+
+        assert_eq!(
+            json,
+            r#"{"codec_type":"H264","bit_rate":1000000,"h264_params":{"profile_level_id":"42e01f","b_frame":true}}"#
+        );
+    }
+
+    #[test]
+    fn video_new_h265_serializes_h265_params() {
+        let h265_params = VideoH265Params {
+            level_id: Some("120".to_string()),
+            profile_id: Some(1),
+            tier_flag: Some(0),
+            tx_mode: Some("MRST".to_string()),
+            b_frame: Some(false),
+        };
+        let video = Video::new_h265(Some(1_200_000), Some(h265_params));
+        let json = Json(&video).to_string();
+
+        assert_eq!(
+            json,
+            r#"{"codec_type":"H265","bit_rate":1200000,"h265_params":{"level_id":"120","profile_id":1,"tier_flag":0,"tx_mode":"MRST","b_frame":false}}"#
+        );
     }
 }
