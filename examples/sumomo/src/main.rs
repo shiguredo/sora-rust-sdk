@@ -1,6 +1,8 @@
 #[cfg(feature = "media-device")]
 mod adm;
 mod args;
+#[cfg(feature = "media-device")]
+mod audio_device;
 mod error;
 mod fake;
 #[cfg(test)]
@@ -18,11 +20,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 #[cfg(feature = "media-device")]
-use adm::{AudioDeviceCapturer, SumomoAdm};
+use adm::SumomoAdm;
 use args::{
     Args, VideoCodecImplementationSelection, VideoCodecImplementationSelections, parse_args,
     validate_args,
 };
+#[cfg(feature = "media-device")]
+use audio_device::AudioDeviceCapturer;
 use error::{AppError, Result};
 use fake::{FakeVideoCapturer, FakeVideoCapturerConfig};
 use rustls_pki_types::pem::PemObject;
