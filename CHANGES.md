@@ -11,6 +11,8 @@
 
 ## develop
 
+- [CHANGE] `validate_video_codec_preference` の `capabilities` 引数を `&Vec<Box<dyn VideoCodecCapability>>` から `&[Box<dyn VideoCodecCapability>]` に変更する
+  - @melpon
 - [CHANGE] `VideoCodecCapability` の SDP format 解決 API を `SdpVideoFormatRef` ベースに再設計する
   - `resolve_sdp_format` の `codec_type` / `parameters` / `scalability_mode` を廃止し、`SdpVideoFormatRef` 引数で解決する
   - `get_supported_formats` を `Option<Vec<SdpVideoFormat>>` から `Vec<SdpVideoFormat>` に変更して必須化する
