@@ -61,6 +61,8 @@
 
 ### misc
 
+- [UPDATE] sumomo の `main.rs` を分割して責務を整理する
+  - @melpon
 - [ADD] sumomo に --input-mp4 オプションを追加
   - @voluntas, @melpon
 - [ADD] sumomo に --openh264-path オプションを追加する
