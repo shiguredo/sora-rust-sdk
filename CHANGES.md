@@ -58,6 +58,8 @@
   - @melpon
 - [UPDATE] `nvcodec` / `openh264` で連続メモリ API を利用し、エンコード前の入力バッファを正規化するように修正する
   - @melpon
+- [FIX] `on_encoded_image` 実行後に非 `Ok` を受けた場合でも `VideoCodecStatus::Error` を返さず、警告を出して処理を継続する
+  - @codex
 - [FIX] 接続失敗時でも `PeerConnection` / `SoraClientContext` の破棄順序を保証するように保持フィールド順を調整する
   - @melpon
 - [FIX] DataChannel 経由の ping で stats 付き pong を返すように修正する

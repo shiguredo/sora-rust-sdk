@@ -13,7 +13,7 @@ use shiguredo_webrtc::{
     VideoEncoderEncodedImageCallbackPtr, VideoEncoderEncodedImageCallbackRef,
     VideoEncoderEncodedImageCallbackResultError, VideoEncoderEncoderInfo, VideoEncoderHandler,
     VideoEncoderRateControlParametersRef, VideoEncoderSettingsRef, VideoFrame, VideoFrameRef,
-    VideoFrameType, VideoFrameTypeVectorRef, i420_copy,
+    VideoFrameType, VideoFrameTypeVectorRef, i420_copy, rtc_log_warning,
 };
 
 use crate::error::Result;
@@ -258,7 +258,9 @@ impl VideoEncoderHandler for Openh264VideoEncoder {
             callback.on_encoded_image(encoded_image.as_ref(), Some(codec_specific_info.as_ref()))
         };
         if result.error() != VideoEncoderEncodedImageCallbackResultError::Ok {
-            return VideoCodecStatus::Error;
+            rtc_log_warning!(
+                "OpenH264: on_encoded_image returned non-Ok status; continue encoding to avoid libwebrtc crash"
+            );
         }
 
         VideoCodecStatus::Ok
