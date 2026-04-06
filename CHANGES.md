@@ -64,7 +64,7 @@
   - @melpon
 - [FIX] `connect_tcp` で IPv4 優先の固定ソートを廃止し、名前解決順で接続するように修正する
   - @melpon
-- [FIX] `OpusParams` と `Video*Params` のフィールドを公開し、利用者がパラメータを構築して `Audio` / `Video` に反映できるように修正する
+- [FIX] `AudioOpusParams` と `Video*Params` のフィールドを公開し、利用者がパラメータを構築して `Audio` / `Video` に反映できるように修正する
   - @melpon
 
 ### misc

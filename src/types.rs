@@ -93,7 +93,7 @@ impl DisplayJson for JsonString {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct OpusParams {
+pub struct AudioOpusParams {
     pub channels: Option<u32>,
     pub maxplaybackrate: Option<u32>,
     pub minptime: Option<u32>,
@@ -104,7 +104,7 @@ pub struct OpusParams {
     pub usedtx: Option<bool>,
 }
 
-impl DisplayJson for OpusParams {
+impl DisplayJson for AudioOpusParams {
     fn fmt(&self, f: &mut JsonFormatter<'_, '_>) -> std::fmt::Result {
         f.object(|f| {
             if let Some(channels) = self.channels {
@@ -176,7 +176,7 @@ pub enum Audio {
     Audio {
         codec_type: Option<AudioCodecType>,
         bit_rate: Option<u32>,
-        opus_params: Option<OpusParams>,
+        opus_params: Option<AudioOpusParams>,
     },
 }
 
@@ -184,7 +184,7 @@ impl Audio {
     pub fn new_bool(enabled: bool) -> Self {
         Self::Bool(enabled)
     }
-    pub fn new_opus(bit_rate: Option<u32>, opus_params: Option<OpusParams>) -> Self {
+    pub fn new_opus(bit_rate: Option<u32>, opus_params: Option<AudioOpusParams>) -> Self {
         Self::Audio {
             codec_type: Some(AudioCodecType::OPUS),
             bit_rate,
@@ -529,7 +529,7 @@ mod tests {
 
     #[test]
     fn audio_new_opus_serializes_opus_params() {
-        let opus_params = OpusParams {
+        let opus_params = AudioOpusParams {
             channels: Some(2),
             maxplaybackrate: Some(48_000),
             minptime: Some(10),
