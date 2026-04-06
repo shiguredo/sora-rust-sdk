@@ -60,6 +60,8 @@
   - @melpon
 - [FIX] 接続失敗時でも `PeerConnection` / `SoraClientContext` の破棄順序を保証するように保持フィールド順を調整する
   - @melpon
+- [FIX] DataChannel 経由の ping で stats 付き pong を返すように修正する
+  - @melpon
 
 ### misc
 

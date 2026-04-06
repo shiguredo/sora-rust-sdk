@@ -1736,8 +1736,13 @@ impl SoraClient {
                         );
                         self.send_signaling_message(&reanswer_text)?;
                     }
-                    IncomingMessageData::Ping { .. } => {
-                        let pong = OutgoingMessage::new_pong(None);
+                    IncomingMessageData::Ping { stats } => {
+                        let pong = if stats.unwrap_or(false) {
+                            let reports = self.get_stats().await.ok();
+                            OutgoingMessage::new_pong(reports)
+                        } else {
+                            OutgoingMessage::new_pong(None)
+                        };
                         let pong_text = Json(pong).to_string();
                         on_signaling_message(
                             SignalingType::DataChannel,
