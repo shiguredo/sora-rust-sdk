@@ -63,6 +63,8 @@
 
 - [UPDATE] sumomo の `main.rs` を分割して責務を整理する
   - @melpon
+- [UPDATE] sumomo の `run_with_raw_player` と通常経路の接続初期化を共通化し、`raw-player` 経路のオプション対応を拡張する
+  - @melpon
 - [ADD] sumomo に --input-mp4 オプションを追加
   - @voluntas, @melpon
 - [ADD] sumomo に --openh264-path オプションを追加する
