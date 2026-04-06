@@ -185,7 +185,7 @@ impl<'text, 'raw> TryFrom<RawJsonValue<'text, 'raw>> for VideoCodecPreference {
 
 pub fn validate_video_codec_preference(
     preference: &VideoCodecPreference,
-    capabilities: &Vec<Box<dyn VideoCodecCapability>>,
+    capabilities: &[Box<dyn VideoCodecCapability>],
 ) -> Result<()> {
     validate_capabilities(capabilities)?;
 
@@ -298,10 +298,11 @@ fn find_capability<'a>(
     capabilities: &'a [Box<dyn VideoCodecCapability>],
     implementation: &VideoCodecImplementation,
 ) -> Option<&'a dyn VideoCodecCapability> {
+    let implementation_name = implementation.name();
     capabilities
         .iter()
         .map(|capability| capability.as_ref())
-        .find(|capability| capability.get_implementation() == implementation.clone())
+        .find(|capability| capability.get_implementation().name() == implementation_name)
 }
 
 fn codec_capability_summary(
@@ -574,6 +575,14 @@ mod tests {
         let preference = sample_preference();
         let capabilities = sample_capabilities();
         assert!(validate_video_codec_preference(&preference, &capabilities).is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_slice_capabilities() {
+        let preference = sample_preference();
+        let capabilities = sample_capabilities();
+        let capabilities_slice: &[Box<dyn VideoCodecCapability>] = capabilities.as_slice();
+        assert!(validate_video_codec_preference(&preference, capabilities_slice).is_ok());
     }
 
     #[test]

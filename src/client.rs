@@ -1736,8 +1736,13 @@ impl SoraClient {
                         );
                         self.send_signaling_message(&reanswer_text)?;
                     }
-                    IncomingMessageData::Ping { .. } => {
-                        let pong = OutgoingMessage::new_pong(None);
+                    IncomingMessageData::Ping { stats } => {
+                        let pong = if stats.unwrap_or(false) {
+                            let reports = self.get_stats().await.ok();
+                            OutgoingMessage::new_pong(reports)
+                        } else {
+                            OutgoingMessage::new_pong(None)
+                        };
                         let pong_text = Json(pong).to_string();
                         on_signaling_message(
                             SignalingType::DataChannel,
@@ -2246,22 +2251,17 @@ async fn connect_tcp(host: &str, port: u16, deadline: tokio::time::Instant) -> R
             port,
         });
     }
-    let (ipv4_addrs, ipv6_addrs): (Vec<_>, Vec<_>) =
-        addrs.into_iter().partition(|addr| addr.is_ipv4());
-    let ordered_addrs = [ipv4_addrs, ipv6_addrs].concat();
-
-    let tcp_stream =
-        tokio::time::timeout_at(deadline, TcpStream::connect(ordered_addrs.as_slice()))
-            .await
-            .map_err(|_| Error::TcpConnectTimeout {
-                host: host.to_string(),
-                port,
-            })?
-            .map_err(|e| Error::TcpConnect {
-                host: host.to_string(),
-                port,
-                source: e,
-            })?;
+    let tcp_stream = tokio::time::timeout_at(deadline, TcpStream::connect(addrs.as_slice()))
+        .await
+        .map_err(|_| Error::TcpConnectTimeout {
+            host: host.to_string(),
+            port,
+        })?
+        .map_err(|e| Error::TcpConnect {
+            host: host.to_string(),
+            port,
+            source: e,
+        })?;
     Ok(tcp_stream)
 }
 

@@ -7,7 +7,6 @@ use e2e_tests::{
     build_sender_tracks, collect_video_outbound_rid_stats, count_active_simulcast_layers,
     generate_channel_id, has_simulcast_rids, load_env, openh264_path, secret_key, signaling_urls,
 };
-#[cfg(feature = "amf")]
 use serial_test::serial;
 #[cfg(feature = "amf")]
 use shiguredo_webrtc::VideoCodecType;
@@ -166,6 +165,7 @@ async fn test_sendonly_simulcast_outbound_layers() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_sendonly_simulcast_outbound_layers_openh264() {
     load_env();
     let Some(path) = openh264_path() else {
@@ -188,6 +188,7 @@ async fn test_sendonly_simulcast_outbound_layers_openh264() {
 
 #[cfg(feature = "nvcodec")]
 #[tokio::test]
+#[serial]
 async fn test_sendonly_simulcast_outbound_layers_nvcodec() {
     load_env();
     let capability: Box<dyn VideoCodecCapability> = Box::new(NvCodecVideoCodecCapability::new());
