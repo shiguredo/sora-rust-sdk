@@ -31,3 +31,6 @@ raw-player = ["dep:raw_player"]
 # Linux では追加で pipewire-pulse と libpulse-dev が必要:
 #   sudo apt install pipewire-pulse libpulse-dev
 media-device = ["dep:shiguredo_video_device", "dep:shiguredo_audio_device"]
+
+[dev-dependencies]
+serial_test = "3"

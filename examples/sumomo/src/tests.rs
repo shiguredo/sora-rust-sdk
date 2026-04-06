@@ -162,6 +162,7 @@ fn validate_args_rejects_openh264_path_with_auto() {
     );
 }
 
+#[serial_test::serial]
 #[test]
 fn build_context_config_auto_uses_default_capabilities() {
     let config = build_context_config(
@@ -180,6 +181,7 @@ fn build_context_config_auto_uses_default_capabilities() {
     );
 }
 
+#[serial_test::serial]
 #[test]
 fn build_context_config_manual_internal_only() {
     let config = build_context_config(
@@ -202,6 +204,7 @@ fn build_context_config_manual_internal_only() {
     );
 }
 
+#[serial_test::serial]
 #[test]
 fn collect_video_codec_list_report_marks_internal_selected_in_auto() {
     let args = test_args(VideoCodecImplementationSelections::Auto, None);
@@ -215,6 +218,7 @@ fn collect_video_codec_list_report_marks_internal_selected_in_auto() {
     assert!(internal.available);
 }
 
+#[serial_test::serial]
 #[test]
 fn collect_video_codec_list_report_marks_openh264_reason_without_path() {
     let args = test_args(
@@ -239,6 +243,7 @@ fn collect_video_codec_list_report_marks_openh264_reason_without_path() {
     );
 }
 
+#[serial_test::serial]
 #[test]
 fn collect_video_codec_list_report_preference_uses_selected_internal() {
     let args = test_args(
@@ -254,6 +259,7 @@ fn collect_video_codec_list_report_preference_uses_selected_internal() {
     }));
 }
 
+#[serial_test::serial]
 #[test]
 fn build_video_codec_list_report_text_uses_single_line_format() {
     let args = test_args(
@@ -274,6 +280,7 @@ fn build_video_codec_list_report_text_uses_single_line_format() {
     assert!(text.contains("enc: (none)"));
 }
 
+#[serial_test::serial]
 #[test]
 fn build_video_codec_list_report_text_applies_ansi_styles() {
     let args = test_args(
@@ -342,6 +349,7 @@ fn build_video_codec_list_report_text_aligns_capability_by_max_width() {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+#[serial_test::serial]
 #[test]
 fn build_context_config_rejects_internal_apple_on_unsupported_platform() {
     let result = build_context_config(
@@ -364,6 +372,7 @@ fn build_context_config_rejects_internal_apple_on_unsupported_platform() {
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
+#[serial_test::serial]
 #[test]
 fn build_context_config_manual_order_prefers_later_selection_on_apple() {
     let result = build_context_config(

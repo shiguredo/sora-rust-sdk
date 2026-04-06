@@ -1544,6 +1544,7 @@ dependencies = [
  "nojson",
  "raw_player",
  "rustls-pki-types",
+ "serial_test",
  "shiguredo_audio_device",
  "shiguredo_video_device",
  "shiguredo_webrtc",
