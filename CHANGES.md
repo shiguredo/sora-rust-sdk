@@ -63,6 +63,11 @@
   - @melpon
 - [FIX] 接続失敗時でも `PeerConnection` / `SoraClientContext` の破棄順序を保証するように保持フィールド順を調整する
   - @melpon
+- [FIX] e2e-tests の映像送受信判定を修正する
+  - video トラック / video RTP 限定に修正し、音声のみで誤検知しないようにする
+  - `on_track` の受信カウントを video のみに限定する
+  - `packetsSent` / `packetsReceived` の判定を kind=video の RTP 統計に限定する
+  - @melpon
 
 ### misc
 

@@ -5,7 +5,7 @@ use std::time::Duration;
 use e2e_tests::{
     FakeVideoCapturer, FakeVideoCapturerConfig, build_metadata_with_access_token,
     build_sender_tracks, generate_channel_id, load_env, secret_key, signaling_urls,
-    verify_stats_field_positive,
+    verify_video_stats_field_positive,
 };
 use sora_sdk::{Role, SoraClient, SoraClientContext};
 
@@ -50,7 +50,16 @@ async fn test_sendrecv_bidirectional() {
             .on_notify(move |_| {
                 client1_connected_clone.store(true, Ordering::SeqCst);
             })
-            .on_track(move |_track| {
+            .on_track(move |transceiver| {
+                let receiver = transceiver.receiver();
+                let track = receiver.track();
+                let kind = match track.kind() {
+                    Ok(kind) => kind,
+                    Err(_) => return,
+                };
+                if kind != "video" {
+                    return;
+                }
                 println!("クライアント 1: トラックを受信しました");
                 client1_track_received_clone.fetch_add(1, Ordering::SeqCst);
             });
@@ -102,7 +111,16 @@ async fn test_sendrecv_bidirectional() {
         .on_notify(move |_| {
             client2_connected_clone.store(true, Ordering::SeqCst);
         })
-        .on_track(move |_track| {
+        .on_track(move |transceiver| {
+            let receiver = transceiver.receiver();
+            let track = receiver.track();
+            let kind = match track.kind() {
+                Ok(kind) => kind,
+                Err(_) => return,
+            };
+            if kind != "video" {
+                return;
+            }
             println!("クライアント 2: トラックを受信しました");
             client2_track_received_clone.fetch_add(1, Ordering::SeqCst);
         });
@@ -186,21 +204,21 @@ async fn test_sendrecv_bidirectional() {
 
     // 統計情報に outbound-rtp が含まれ、packetsSent が 0 より大きいことを確認
     assert!(
-        verify_stats_field_positive(&stats1, "outbound-rtp", "packetsSent"),
+        verify_video_stats_field_positive(&stats1, "outbound-rtp", "packetsSent"),
         "クライアント 1 の outbound-rtp の packetsSent が 0 より大きくありません"
     );
     assert!(
-        verify_stats_field_positive(&stats2, "outbound-rtp", "packetsSent"),
+        verify_video_stats_field_positive(&stats2, "outbound-rtp", "packetsSent"),
         "クライアント 2 の outbound-rtp の packetsSent が 0 より大きくありません"
     );
 
     // 統計情報に inbound-rtp が含まれ、packetsReceived が 0 より大きいことを確認
     assert!(
-        verify_stats_field_positive(&stats1, "inbound-rtp", "packetsReceived"),
+        verify_video_stats_field_positive(&stats1, "inbound-rtp", "packetsReceived"),
         "クライアント 1 の inbound-rtp の packetsReceived が 0 より大きくありません"
     );
     assert!(
-        verify_stats_field_positive(&stats2, "inbound-rtp", "packetsReceived"),
+        verify_video_stats_field_positive(&stats2, "inbound-rtp", "packetsReceived"),
         "クライアント 2 の inbound-rtp の packetsReceived が 0 より大きくありません"
     );
 

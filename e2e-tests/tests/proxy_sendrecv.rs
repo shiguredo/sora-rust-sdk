@@ -8,7 +8,7 @@ use std::time::Duration;
 use e2e_tests::{
     FakeVideoCapturer, FakeVideoCapturerConfig, build_metadata_with_access_token,
     build_sender_tracks, generate_channel_id, load_env, secret_key, signaling_urls,
-    sum_stats_field_for_type, verify_stats_field_positive,
+    sum_video_stats_field_for_type, verify_video_stats_field_positive,
 };
 use shiguredo_http11::{RequestDecoder, Response, host::Host, uri::Uri};
 use sora_sdk::{ProxyInfo, Role, SoraClient, SoraClientContext};
@@ -437,7 +437,16 @@ async fn test_sendrecv_bidirectional_via_proxy() {
             .on_notify(move |_| {
                 client1_connected_clone.store(true, Ordering::SeqCst);
             })
-            .on_track(move |_track| {
+            .on_track(move |transceiver| {
+                let receiver = transceiver.receiver();
+                let track = receiver.track();
+                let kind = match track.kind() {
+                    Ok(kind) => kind,
+                    Err(_) => return,
+                };
+                if kind != "video" {
+                    return;
+                }
                 client1_track_received_clone.fetch_add(1, Ordering::SeqCst);
             });
 
@@ -481,7 +490,16 @@ async fn test_sendrecv_bidirectional_via_proxy() {
         .on_notify(move |_| {
             client2_connected_clone.store(true, Ordering::SeqCst);
         })
-        .on_track(move |_track| {
+        .on_track(move |transceiver| {
+            let receiver = transceiver.receiver();
+            let track = receiver.track();
+            let kind = match track.kind() {
+                Ok(kind) => kind,
+                Err(_) => return,
+            };
+            if kind != "video" {
+                return;
+            }
             client2_track_received_clone.fetch_add(1, Ordering::SeqCst);
         })
         .ice_server_url_configurer(|server, urls| {
@@ -553,27 +571,29 @@ async fn test_sendrecv_bidirectional_via_proxy() {
         .expect("クライアント 2 の get_stats に失敗しました");
 
     assert!(
-        verify_stats_field_positive(&stats1, "outbound-rtp", "packetsSent"),
+        verify_video_stats_field_positive(&stats1, "outbound-rtp", "packetsSent"),
         "クライアント 1 の outbound-rtp packetsSent が 0 より大きくありません"
     );
     assert!(
-        verify_stats_field_positive(&stats2, "outbound-rtp", "packetsSent"),
+        verify_video_stats_field_positive(&stats2, "outbound-rtp", "packetsSent"),
         "クライアント 2 の outbound-rtp packetsSent が 0 より大きくありません"
     );
     assert!(
-        verify_stats_field_positive(&stats1, "inbound-rtp", "packetsReceived"),
+        verify_video_stats_field_positive(&stats1, "inbound-rtp", "packetsReceived"),
         "クライアント 1 の inbound-rtp packetsReceived が 0 より大きくありません"
     );
     assert!(
-        verify_stats_field_positive(&stats2, "inbound-rtp", "packetsReceived"),
+        verify_video_stats_field_positive(&stats2, "inbound-rtp", "packetsReceived"),
         "クライアント 2 の inbound-rtp packetsReceived が 0 より大きくありません"
     );
-    let client1_outbound_rtp_bytes = sum_stats_field_for_type(&stats1, "outbound-rtp", "bytesSent");
-    let client2_outbound_rtp_bytes = sum_stats_field_for_type(&stats2, "outbound-rtp", "bytesSent");
+    let client1_outbound_rtp_bytes =
+        sum_video_stats_field_for_type(&stats1, "outbound-rtp", "bytesSent");
+    let client2_outbound_rtp_bytes =
+        sum_video_stats_field_for_type(&stats2, "outbound-rtp", "bytesSent");
     let client1_inbound_rtp_bytes =
-        sum_stats_field_for_type(&stats1, "inbound-rtp", "bytesReceived");
+        sum_video_stats_field_for_type(&stats1, "inbound-rtp", "bytesReceived");
     let client2_inbound_rtp_bytes =
-        sum_stats_field_for_type(&stats2, "inbound-rtp", "bytesReceived");
+        sum_video_stats_field_for_type(&stats2, "inbound-rtp", "bytesReceived");
     assert!(
         client1_outbound_rtp_bytes >= MIN_RTP_BYTES_PER_CLIENT,
         "クライアント 1 の outbound-rtp bytesSent が不足しています: bytes={}, min={}",

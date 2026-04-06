@@ -389,6 +389,23 @@ async fn run_sendrecv_with_codec(codec_type: VideoCodecType) {
         .expect("failed to get client2 stats");
 
     assert!(
+        verify_video_stats_field_positive(&stats1, "outbound-rtp", "packetsSent"),
+        "client1 outbound video packets must be sent"
+    );
+    assert!(
+        verify_video_stats_field_positive(&stats1, "inbound-rtp", "packetsReceived"),
+        "client1 inbound video packets must be received"
+    );
+    assert!(
+        verify_video_stats_field_positive(&stats2, "outbound-rtp", "packetsSent"),
+        "client2 outbound video packets must be sent"
+    );
+    assert!(
+        verify_video_stats_field_positive(&stats2, "inbound-rtp", "packetsReceived"),
+        "client2 inbound video packets must be received"
+    );
+
+    assert!(
         verify_video_codec_mime_type(&stats1, "outbound-rtp", expected_mime_type),
         "client1 outbound codec must match"
     );

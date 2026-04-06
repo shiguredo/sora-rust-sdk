@@ -406,7 +406,16 @@ async fn test_sendrecv_simulcast_persists_after_reoffer() {
         .on_notify(move |_| {
             connected_b_clone.store(true, Ordering::SeqCst);
         })
-        .on_track(move |_track| {
+        .on_track(move |transceiver| {
+            let receiver = transceiver.receiver();
+            let track = receiver.track();
+            let kind = match track.kind() {
+                Ok(kind) => kind,
+                Err(_) => return,
+            };
+            if kind != "video" {
+                return;
+            }
             track_received_b_clone.fetch_add(1, Ordering::SeqCst);
         });
 

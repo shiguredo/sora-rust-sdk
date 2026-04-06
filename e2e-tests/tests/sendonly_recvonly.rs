@@ -5,7 +5,7 @@ use std::time::Duration;
 use e2e_tests::{
     FakeVideoCapturer, FakeVideoCapturerConfig, build_metadata_with_access_token,
     build_sender_tracks, generate_channel_id, load_env, secret_key, signaling_urls,
-    verify_stats_field_positive,
+    verify_video_stats_field_positive,
 };
 use sora_sdk::{Role, SoraClient, SoraClientContext};
 
@@ -98,7 +98,16 @@ async fn test_sendonly_then_recvonly() {
             .on_notify(move |_| {
                 recvonly_connected_clone.store(true, Ordering::SeqCst);
             })
-            .on_track(move |_track| {
+            .on_track(move |transceiver| {
+                let receiver = transceiver.receiver();
+                let track = receiver.track();
+                let kind = match track.kind() {
+                    Ok(kind) => kind,
+                    Err(_) => return,
+                };
+                if kind != "video" {
+                    return;
+                }
                 println!("トラックを受信しました");
                 track_received_clone.fetch_add(1, Ordering::SeqCst);
             });
@@ -171,11 +180,11 @@ async fn test_sendonly_then_recvonly() {
         .expect("RecvOnly の get_stats に失敗しました");
 
     assert!(
-        verify_stats_field_positive(&sendonly_stats, "outbound-rtp", "packetsSent"),
+        verify_video_stats_field_positive(&sendonly_stats, "outbound-rtp", "packetsSent"),
         "SendOnly の outbound-rtp の packetsSent が 0 より大きくありません"
     );
     assert!(
-        verify_stats_field_positive(&recvonly_stats, "inbound-rtp", "packetsReceived"),
+        verify_video_stats_field_positive(&recvonly_stats, "inbound-rtp", "packetsReceived"),
         "RecvOnly の inbound-rtp の packetsReceived が 0 より大きくありません"
     );
 
@@ -227,7 +236,16 @@ async fn test_recvonly_then_sendonly() {
     .on_notify(move |_| {
         recvonly_connected_clone.store(true, Ordering::SeqCst);
     })
-    .on_track(move |_track| {
+    .on_track(move |transceiver| {
+        let receiver = transceiver.receiver();
+        let track = receiver.track();
+        let kind = match track.kind() {
+            Ok(kind) => kind,
+            Err(_) => return,
+        };
+        if kind != "video" {
+            return;
+        }
         println!("トラックを受信しました");
         track_received_clone.fetch_add(1, Ordering::SeqCst);
     });
@@ -351,11 +369,11 @@ async fn test_recvonly_then_sendonly() {
         .expect("RecvOnly の get_stats に失敗しました");
 
     assert!(
-        verify_stats_field_positive(&sendonly_stats, "outbound-rtp", "packetsSent"),
+        verify_video_stats_field_positive(&sendonly_stats, "outbound-rtp", "packetsSent"),
         "SendOnly の outbound-rtp の packetsSent が 0 より大きくありません"
     );
     assert!(
-        verify_stats_field_positive(&recvonly_stats, "inbound-rtp", "packetsReceived"),
+        verify_video_stats_field_positive(&recvonly_stats, "inbound-rtp", "packetsReceived"),
         "RecvOnly の inbound-rtp の packetsReceived が 0 より大きくありません"
     );
 

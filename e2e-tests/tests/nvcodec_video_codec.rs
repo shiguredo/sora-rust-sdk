@@ -9,7 +9,7 @@ use std::time::Duration;
 use e2e_tests::{
     FakeVideoCapturer, FakeVideoCapturerConfig, build_metadata_with_access_token,
     build_sender_tracks, generate_channel_id, load_env, secret_key, signaling_urls,
-    verify_stats_field_positive, verify_video_codec_mime_type,
+    verify_video_codec_mime_type, verify_video_stats_field_positive,
 };
 use serial_test::serial;
 use shiguredo_webrtc::{
@@ -312,7 +312,7 @@ async fn run_sendonly_recvonly_with_contexts(
             .get_stats()
             .await
             .map_err(|e| format!("failed to get sendonly stats: {e}"))?;
-        if !verify_stats_field_positive(&sendonly_stats, "outbound-rtp", "packetsSent") {
+        if !verify_video_stats_field_positive(&sendonly_stats, "outbound-rtp", "packetsSent") {
             return Err("sendonly must send video packets".to_string());
         }
         if !verify_video_codec_mime_type(&sendonly_stats, "outbound-rtp", expected_mime_type) {
@@ -325,7 +325,7 @@ async fn run_sendonly_recvonly_with_contexts(
             .get_stats()
             .await
             .map_err(|e| format!("failed to get recvonly stats: {e}"))?;
-        if !verify_stats_field_positive(&recvonly_stats, "inbound-rtp", "packetsReceived") {
+        if !verify_video_stats_field_positive(&recvonly_stats, "inbound-rtp", "packetsReceived") {
             return Err("recvonly must receive video packets".to_string());
         }
         if !verify_video_codec_mime_type(&recvonly_stats, "inbound-rtp", expected_mime_type) {
@@ -377,7 +377,16 @@ async fn run_sendrecv_with_codec(codec_type: VideoCodecType) {
             .on_notify(move |_| {
                 client1_connected_clone.store(true, Ordering::SeqCst);
             })
-            .on_track(move |_track| {
+            .on_track(move |transceiver| {
+                let receiver = transceiver.receiver();
+                let track = receiver.track();
+                let kind = match track.kind() {
+                    Ok(kind) => kind,
+                    Err(_) => return,
+                };
+                if kind != "video" {
+                    return;
+                }
                 client1_track_received_clone.fetch_add(1, Ordering::SeqCst);
             });
 
@@ -417,7 +426,16 @@ async fn run_sendrecv_with_codec(codec_type: VideoCodecType) {
         .on_notify(move |_| {
             client2_connected_clone.store(true, Ordering::SeqCst);
         })
-        .on_track(move |_track| {
+        .on_track(move |transceiver| {
+            let receiver = transceiver.receiver();
+            let track = receiver.track();
+            let kind = match track.kind() {
+                Ok(kind) => kind,
+                Err(_) => return,
+            };
+            if kind != "video" {
+                return;
+            }
             client2_track_received_clone.fetch_add(1, Ordering::SeqCst);
         });
 
@@ -469,6 +487,23 @@ async fn run_sendrecv_with_codec(codec_type: VideoCodecType) {
         .get_stats()
         .await
         .expect("failed to get client2 stats");
+
+    assert!(
+        verify_video_stats_field_positive(&stats1, "outbound-rtp", "packetsSent"),
+        "client1 outbound video packets must be sent"
+    );
+    assert!(
+        verify_video_stats_field_positive(&stats1, "inbound-rtp", "packetsReceived"),
+        "client1 inbound video packets must be received"
+    );
+    assert!(
+        verify_video_stats_field_positive(&stats2, "outbound-rtp", "packetsSent"),
+        "client2 outbound video packets must be sent"
+    );
+    assert!(
+        verify_video_stats_field_positive(&stats2, "inbound-rtp", "packetsReceived"),
+        "client2 inbound video packets must be received"
+    );
 
     assert!(
         verify_video_codec_mime_type(&stats1, "outbound-rtp", expected_mime_type),
