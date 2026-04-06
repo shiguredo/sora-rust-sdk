@@ -298,10 +298,11 @@ fn find_capability<'a>(
     capabilities: &'a [Box<dyn VideoCodecCapability>],
     implementation: &VideoCodecImplementation,
 ) -> Option<&'a dyn VideoCodecCapability> {
+    let implementation_name = implementation.name();
     capabilities
         .iter()
         .map(|capability| capability.as_ref())
-        .find(|capability| capability.get_implementation() == implementation.clone())
+        .find(|capability| capability.get_implementation().name() == implementation_name)
 }
 
 fn codec_capability_summary(
