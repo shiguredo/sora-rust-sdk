@@ -47,6 +47,7 @@
   - @melpon
 - [ADD] Intel VPL に対応する
   - `shiguredo_vpl` を利用した `VplVideoCodecCapability` を追加し、H264/H265/VP9/AV1 の対応可否を動的判定してエンコーダー/デコーダーを提供する
+  - capability 初期化時に VP9 エンコーダープローブを実行し、`MFXVideoENCODE_EncodeFrameAsync` 失敗時は VP9 encoder 対応から除外する
   - e2e-tests に VPL の検証を追加する
   - sumomo の `--video-codec-implementation` と `--video-codec-list` で `vpl` を指定・表示できるようにする
   - @melpon

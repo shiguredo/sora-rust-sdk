@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use shiguredo_vpl::{
     Av1EncoderConfig, CodecConfig, Decoder, DecoderCodec, DecoderConfig, EncodeOptions, Encoder,
     EncoderConfig, FrameFormat, H264EncoderConfig, HevcEncoderConfig, PictureType, RateControlMode,
-    VideoCodecType as VplCodecType, Vp9EncoderConfig, frame_type, supported_codecs,
+    VideoCodecType as VplCodecType, Vp9EncoderConfig, Vp9Profile, frame_type, supported_codecs,
 };
 use shiguredo_webrtc::{
     CodecSpecificInfo, EncodedImage, EncodedImageBuffer, EncodedImageRef, EnvironmentRef,
@@ -14,7 +14,7 @@ use shiguredo_webrtc::{
     VideoEncoderEncodedImageCallbackRef, VideoEncoderEncodedImageCallbackResultError,
     VideoEncoderEncoderInfo, VideoEncoderHandler, VideoEncoderRateControlParametersRef,
     VideoEncoderSettingsRef, VideoFrame, VideoFrameRef, VideoFrameType, VideoFrameTypeVectorRef,
-    i420_to_nv12, nv12_to_i420,
+    i420_to_nv12, nv12_to_i420, rtc_log_error, rtc_log_warning,
 };
 
 use crate::error::Result;
@@ -63,8 +63,14 @@ fn collect_codec_availability() -> Result<Vec<CodecAvailability>> {
             VplCodecType::Vp9 => VideoCodecType::Vp9,
             VplCodecType::Av1 => VideoCodecType::Av1,
         };
-        let encoder_supported = info.encoding.supported;
+        let mut encoder_supported = info.encoding.supported;
         let decoder_supported = info.decoding.supported;
+        if codec_type == VideoCodecType::Vp9 && encoder_supported && !probe_vp9_encoder_support() {
+            rtc_log_warning!(
+                "VPL VP9 encoder probe failed; disabling VP9 encoder support for this runtime"
+            );
+            encoder_supported = false;
+        }
         if encoder_supported || decoder_supported {
             codecs.push(CodecAvailability {
                 codec_type,
@@ -75,6 +81,47 @@ fn collect_codec_availability() -> Result<Vec<CodecAvailability>> {
     }
     codecs.sort_by_key(|codec| codec_sort_key(codec.codec_type));
     Ok(codecs)
+}
+
+fn probe_vp9_encoder_support() -> bool {
+    let width = 640u32;
+    let height = 360u32;
+    let mut config = EncoderConfig::new(
+        CodecConfig::Vp9(Vp9EncoderConfig {
+            profile: Some(Vp9Profile::Profile0),
+        }),
+        width,
+        height,
+        FrameFormat::Nv12,
+        30,
+        1,
+        RateControlMode::Cbr,
+    );
+    config.target_kbps = Some(500);
+
+    let mut encoder = match Encoder::new(config) {
+        Ok(encoder) => encoder,
+        Err(err) => {
+            rtc_log_warning!("VPL VP9 encoder init probe failed: {}", err);
+            return false;
+        }
+    };
+
+    let Some(frame_size) = FrameFormat::Nv12.frame_size(width as usize, height as usize) else {
+        return false;
+    };
+    let frame = vec![0u8; frame_size];
+    let options = EncodeOptions {
+        frame_type: frame_type::IDR | frame_type::I | frame_type::REF,
+    };
+
+    match encoder.encode(frame.as_slice(), &options) {
+        Ok(()) => true,
+        Err(err) => {
+            rtc_log_warning!("VPL VP9 encode probe failed: {}", err);
+            false
+        }
+    }
 }
 
 fn codec_type_from_format(format: &SdpVideoFormatRef<'_>) -> Option<VideoCodecType> {
@@ -93,7 +140,11 @@ fn supported_formats_for_codec(codec_type: VideoCodecType) -> Vec<SdpVideoFormat
             &[ScalabilityMode::L1T1],
         )],
         VideoCodecType::H265 => vec![SdpVideoFormat::new("H265")],
-        VideoCodecType::Vp9 => vec![SdpVideoFormat::new("VP9")],
+        VideoCodecType::Vp9 => vec![SdpVideoFormat::new_with_parameters(
+            "VP9",
+            &HashMap::from([(String::from("profile-id"), String::from("0"))]),
+            &[],
+        )],
         VideoCodecType::Av1 => vec![SdpVideoFormat::new("AV1")],
         _ => Vec::new(),
     }
@@ -103,7 +154,9 @@ fn encoder_codec_config(codec_type: VideoCodecType) -> Option<CodecConfig> {
     match codec_type {
         VideoCodecType::H264 => Some(CodecConfig::H264(H264EncoderConfig { profile: None })),
         VideoCodecType::H265 => Some(CodecConfig::Hevc(HevcEncoderConfig { profile: None })),
-        VideoCodecType::Vp9 => Some(CodecConfig::Vp9(Vp9EncoderConfig { profile: None })),
+        VideoCodecType::Vp9 => Some(CodecConfig::Vp9(Vp9EncoderConfig {
+            profile: Some(Vp9Profile::Profile0),
+        })),
         VideoCodecType::Av1 => Some(CodecConfig::Av1(Av1EncoderConfig { profile: None })),
         _ => None,
     }
@@ -189,7 +242,17 @@ impl VplVideoEncoder {
         );
         config.target_kbps = Some(target_kbps_from_bps(self.target_bitrate_bps));
 
-        self.encoder = Encoder::new(config).ok();
+        self.encoder = match Encoder::new(config) {
+            Ok(encoder) => Some(encoder),
+            Err(err) => {
+                rtc_log_error!(
+                    "VPL encoder initialization failed for {:?}: {}",
+                    self.codec_type,
+                    err
+                );
+                None
+            }
+        };
         self.reconfigure_needed = false;
         self.encoder.as_ref().map(|_| ()).ok_or(())
     }
@@ -283,7 +346,8 @@ impl VideoEncoderHandler for VplVideoEncoder {
         let encode_options = EncodeOptions {
             frame_type: vpl_force_frame_type(requested_frame_type(frame_types)),
         };
-        if encoder.encode(nv12.data(), &encode_options).is_err() {
+        if let Err(err) = encoder.encode(nv12.data(), &encode_options) {
+            rtc_log_error!("VPL encode failed for {:?}: {}", self.codec_type, err);
             return VideoCodecStatus::Error;
         }
 
@@ -727,6 +791,32 @@ mod tests {
             capability
                 .create_video_decoder(env.as_ref(), SdpVideoFormat::new("H264").as_ref())
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn vpl_capability_creates_vp9_encoder() {
+        let capability = VplVideoCodecCapability::new_for_test(vec![test_codec(
+            VideoCodecType::Vp9,
+            true,
+            true,
+        )]);
+        let env = Environment::new();
+        let format = SdpVideoFormat::new_with_parameters(
+            "VP9",
+            &HashMap::from([(String::from("profile-id"), String::from("0"))]),
+            &[],
+        );
+        let encoder = capability
+            .create_video_encoder(env.as_ref(), format.as_ref())
+            .expect("encoder must be created for supported VP9 format");
+        let info = encoder.get_encoder_info();
+        let implementation_name = info
+            .implementation_name()
+            .expect("implementation_name の取得に失敗");
+        assert!(
+            implementation_name.contains("SimulcastEncoderAdapter"),
+            "adapter encoder では SimulcastEncoderAdapter を含む実装名が必要: {implementation_name}",
         );
     }
 
