@@ -62,6 +62,8 @@
   - @melpon
 - [FIX] DataChannel 経由の ping で stats 付き pong を返すように修正する
   - @melpon
+- [FIX] `connect_tcp` で IPv4 優先の固定ソートを廃止し、名前解決順で接続するように修正する
+  - @melpon
 
 ### misc
 
