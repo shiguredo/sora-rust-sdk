@@ -7,18 +7,20 @@ use e2e_tests::{
     build_sender_tracks, collect_video_outbound_rid_stats, count_active_simulcast_layers,
     generate_channel_id, has_simulcast_rids, load_env, openh264_path, secret_key, signaling_urls,
 };
-#[cfg(feature = "amf")]
+#[cfg(any(feature = "amf", feature = "vpl"))]
 use serial_test::serial;
-#[cfg(feature = "amf")]
+#[cfg(any(feature = "amf", feature = "vpl"))]
 use shiguredo_webrtc::VideoCodecType;
 #[cfg(feature = "amf")]
 use sora_sdk::AmfVideoCodecCapability;
-#[cfg(feature = "amf")]
+#[cfg(any(feature = "amf", feature = "vpl"))]
 use sora_sdk::CodecDirection;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 use sora_sdk::InternalAppleVideoCodecCapability;
 #[cfg(feature = "nvcodec")]
 use sora_sdk::NvCodecVideoCodecCapability;
+#[cfg(feature = "vpl")]
+use sora_sdk::VplVideoCodecCapability;
 use sora_sdk::{
     AdmConfig, Openh264VideoCodecCapability, Role, SoraClient, SoraClientContext,
     SoraClientContextConfig, Video, VideoCodecCapability, VideoCodecPreference,
@@ -255,6 +257,67 @@ async fn test_sendonly_simulcast_outbound_layers_amf() {
             Some(video),
             &format!("simulcast-sendonly-amf-{codec_label}"),
             &["SimulcastEncoderAdapter", "AMF"],
+        )
+        .await;
+    }
+}
+
+#[cfg(feature = "vpl")]
+fn vpl_simulcast_supported_codecs() -> Option<Vec<VideoCodecType>> {
+    let capability = match VplVideoCodecCapability::new() {
+        Ok(capability) => capability,
+        Err(err) => {
+            eprintln!("VPL capability is not available, skipping simulcast test: {err}");
+            return None;
+        }
+    };
+
+    let mut codec_types = Vec::new();
+    for codec_type in [
+        VideoCodecType::H264,
+        VideoCodecType::H265,
+        VideoCodecType::Vp9,
+        VideoCodecType::Av1,
+    ] {
+        if capability.is_supported(CodecDirection::Encoder, codec_type) {
+            codec_types.push(codec_type);
+        }
+    }
+    if codec_types.is_empty() {
+        eprintln!("VPL has no encoder support, skipping simulcast test");
+        return None;
+    }
+
+    Some(codec_types)
+}
+
+#[cfg(feature = "vpl")]
+#[tokio::test]
+#[serial]
+async fn test_sendonly_simulcast_outbound_layers_vpl() {
+    load_env();
+    let Some(codec_types) = vpl_simulcast_supported_codecs() else {
+        return;
+    };
+
+    for codec_type in codec_types {
+        let (video, codec_label) = match codec_type {
+            VideoCodecType::H264 => (Video::new_h264(None, None), "h264"),
+            VideoCodecType::H265 => (Video::new_h265(None, None), "h265"),
+            VideoCodecType::Vp9 => (Video::new_vp9(None, None), "vp9"),
+            VideoCodecType::Av1 => (Video::new_av1(None, None), "av1"),
+            _ => continue,
+        };
+
+        let capability: Box<dyn VideoCodecCapability> = Box::new(
+            VplVideoCodecCapability::new().expect("VplVideoCodecCapability の作成に失敗しました"),
+        );
+        let context = create_non_builtin_context(capability).expect("コンテキスト作成失敗");
+        run_sendonly_simulcast_outbound_layers(
+            context,
+            Some(video),
+            &format!("simulcast-sendonly-vpl-{codec_label}"),
+            &["SimulcastEncoderAdapter", "VPL"],
         )
         .await;
     }

@@ -44,6 +44,7 @@ pub(crate) enum VideoCodecImplementationSelection {
     InternalApple,
     Amf,
     Nvcodec,
+    Vpl,
     Openh264,
 }
 
@@ -54,6 +55,7 @@ impl VideoCodecImplementationSelection {
             "internal-apple" => Some(Self::InternalApple),
             "amf" => Some(Self::Amf),
             "nvcodec" => Some(Self::Nvcodec),
+            "vpl" => Some(Self::Vpl),
             "openh264" => Some(Self::Openh264),
             _ => None,
         }
@@ -65,6 +67,7 @@ impl VideoCodecImplementationSelection {
             Self::InternalApple => "internal-apple",
             Self::Amf => "amf",
             Self::Nvcodec => "nvcodec",
+            Self::Vpl => "vpl",
             Self::Openh264 => "openh264",
         }
     }
@@ -96,7 +99,7 @@ impl VideoCodecImplementationSelections {
         let mut selections = Vec::new();
         for value in values {
             let selection = VideoCodecImplementationSelection::parse(value).ok_or(
-                "video-codec-implementation must be auto/internal/internal-apple/amf/nvcodec/openh264",
+                "video-codec-implementation must be auto/internal/internal-apple/amf/nvcodec/vpl/openh264",
             )?;
             if !seen.insert(selection) {
                 return Err(
@@ -138,7 +141,7 @@ pub(crate) fn parse_args() -> Result<Args> {
         // preference 計算に必要な実装優先順だけ先に解釈する。
         let video_codec_implementation: Option<VideoCodecImplementationSelections> =
             noargs::opt("video-codec-implementation")
-                .doc("映像コーデック実装 (auto または internal/internal-apple/amf/nvcodec/openh264 のカンマ区切り)")
+                .doc("映像コーデック実装 (auto または internal/internal-apple/amf/nvcodec/vpl/openh264 のカンマ区切り)")
                 .take(&mut args)
                 .present_and_then(|o| VideoCodecImplementationSelections::parse(o.value()))?;
 
@@ -269,7 +272,7 @@ pub(crate) fn parse_args() -> Result<Args> {
 
     let video_codec_implementation: Option<VideoCodecImplementationSelections> =
         noargs::opt("video-codec-implementation")
-            .doc("映像コーデック実装 (auto または internal/internal-apple/amf/nvcodec/openh264 のカンマ区切り)")
+            .doc("映像コーデック実装 (auto または internal/internal-apple/amf/nvcodec/vpl/openh264 のカンマ区切り)")
             .take(&mut args)
             .present_and_then(|o| VideoCodecImplementationSelections::parse(o.value()))?;
 
@@ -464,6 +467,17 @@ pub(crate) fn validate_args(args: &Args) -> Result<()> {
     {
         return Err(io::Error::other(
             "NVCodec is not enabled in this build. Rebuild sumomo with --features nvcodec",
+        )
+        .into());
+    }
+
+    #[cfg(not(feature = "vpl"))]
+    if args
+        .video_codec_implementation
+        .contains(VideoCodecImplementationSelection::Vpl)
+    {
+        return Err(io::Error::other(
+            "VPL is not enabled in this build. Rebuild sumomo with --features vpl",
         )
         .into());
     }

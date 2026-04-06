@@ -171,11 +171,12 @@ pub fn openh264_path() -> Option<String> {
     env::var("OPENH264_PATH").ok()
 }
 
-/// 統計情報から指定した type のエントリを検索し、指定したフィールドの値を合計して返す。
-///
-/// WebRTC 統計情報の JSON 配列をパースし、`stat_type` に一致する type を持つエントリを探して、
-/// そのエントリの `field_name` フィールドの値を合算する。
-pub fn sum_stats_field_for_type(stats_json: &JsonString, stat_type: &str, field_name: &str) -> u64 {
+fn sum_stats_field_for_type_internal(
+    stats_json: &JsonString,
+    stat_type: &str,
+    field_name: &str,
+    kind: Option<&str>,
+) -> u64 {
     use nojson::RawJson;
 
     let json_str = stats_json.to_string();
@@ -201,6 +202,20 @@ pub fn sum_stats_field_for_type(stats_json: &JsonString, stat_type: &str, field_
         };
 
         if type_str == stat_type {
+            if let Some(kind) = kind {
+                let item_kind = item
+                    .to_member("kind")
+                    .ok()
+                    .and_then(|m| m.optional())
+                    .and_then(|v| {
+                        let value: std::result::Result<String, _> = v.try_into();
+                        value.ok()
+                    });
+                if item_kind.as_deref() != Some(kind) {
+                    continue;
+                }
+            }
+
             let Ok(field_member) = item.to_member(field_name) else {
                 continue;
             };
@@ -217,6 +232,23 @@ pub fn sum_stats_field_for_type(stats_json: &JsonString, stat_type: &str, field_
     total
 }
 
+/// 統計情報から指定した type のエントリを検索し、指定したフィールドの値を合計して返す。
+///
+/// WebRTC 統計情報の JSON 配列をパースし、`stat_type` に一致する type を持つエントリを探して、
+/// そのエントリの `field_name` フィールドの値を合算する。
+pub fn sum_stats_field_for_type(stats_json: &JsonString, stat_type: &str, field_name: &str) -> u64 {
+    sum_stats_field_for_type_internal(stats_json, stat_type, field_name, None)
+}
+
+/// 統計情報から指定した type と kind=video のエントリを検索し、指定したフィールドの値を合計して返す。
+pub fn sum_video_stats_field_for_type(
+    stats_json: &JsonString,
+    stat_type: &str,
+    field_name: &str,
+) -> u64 {
+    sum_stats_field_for_type_internal(stats_json, stat_type, field_name, Some("video"))
+}
+
 /// 統計情報から指定した type のエントリを検索し、指定したフィールドの合計値が 0 より大きいか確認する。
 pub fn verify_stats_field_positive(
     stats_json: &JsonString,
@@ -224,6 +256,15 @@ pub fn verify_stats_field_positive(
     field_name: &str,
 ) -> bool {
     sum_stats_field_for_type(stats_json, stat_type, field_name) > 0
+}
+
+/// 統計情報から指定した type と kind=video のエントリを検索し、指定したフィールドの合計値が 0 より大きいか確認する。
+pub fn verify_video_stats_field_positive(
+    stats_json: &JsonString,
+    stat_type: &str,
+    field_name: &str,
+) -> bool {
+    sum_video_stats_field_for_type(stats_json, stat_type, field_name) > 0
 }
 
 /// 統計情報から video RTP の codec が期待する mimeType か確認する。

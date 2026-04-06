@@ -104,7 +104,17 @@ fn parse_video_codec_implementation_rejects_unknown_value() {
         VideoCodecImplementationSelections::parse("unknown").expect_err("unknown value must fail");
     assert_eq!(
         err,
-        "video-codec-implementation must be auto/internal/internal-apple/amf/nvcodec/openh264"
+        "video-codec-implementation must be auto/internal/internal-apple/amf/nvcodec/vpl/openh264"
+    );
+}
+
+#[test]
+fn parse_video_codec_implementation_accepts_vpl() {
+    let parsed =
+        VideoCodecImplementationSelections::parse("vpl").expect("vpl must be parsed successfully");
+    assert_eq!(
+        parsed,
+        VideoCodecImplementationSelections::Manual(vec![VideoCodecImplementationSelection::Vpl,])
     );
 }
 
@@ -159,6 +169,20 @@ fn validate_args_rejects_openh264_path_with_auto() {
     assert!(
         err.to_string()
             .contains("--openh264-path requires --video-codec-implementation to include openh264")
+    );
+}
+
+#[cfg(not(feature = "vpl"))]
+#[test]
+fn validate_args_rejects_vpl_when_feature_is_disabled() {
+    let args = test_args(
+        VideoCodecImplementationSelections::Manual(vec![VideoCodecImplementationSelection::Vpl]),
+        None,
+    );
+    let err = validate_args(&args).expect_err("vpl must fail when feature is disabled");
+    assert!(
+        err.to_string()
+            .contains("VPL is not enabled in this build. Rebuild sumomo with --features vpl")
     );
 }
 

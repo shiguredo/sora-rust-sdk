@@ -9,7 +9,7 @@ use std::time::Duration;
 use e2e_tests::{
     FakeVideoCapturer, FakeVideoCapturerConfig, build_metadata_with_access_token,
     build_sender_tracks, generate_channel_id, load_env, secret_key, signaling_urls,
-    verify_stats_field_positive, verify_video_codec_mime_type,
+    verify_video_codec_mime_type, verify_video_stats_field_positive,
 };
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 use shiguredo_webrtc::VideoCodecType;
@@ -134,7 +134,16 @@ async fn run_sendonly_recvonly_with_codec(
             .on_notify(move |_| {
                 recvonly_connected_clone.store(true, Ordering::SeqCst);
             })
-            .on_track(move |_track| {
+            .on_track(move |transceiver| {
+                let receiver = transceiver.receiver();
+                let track = receiver.track();
+                let kind = match track.kind() {
+                    Ok(kind) => kind,
+                    Err(_) => return,
+                };
+                if kind != "video" {
+                    return;
+                }
                 track_received_clone.fetch_add(1, Ordering::SeqCst);
             });
 
@@ -210,12 +219,12 @@ async fn run_sendonly_recvonly_with_codec(
     println!("{}: RecvOnly stats: {}", codec_name, recvonly_stats);
 
     assert!(
-        verify_stats_field_positive(&sendonly_stats, "outbound-rtp", "packetsSent"),
+        verify_video_stats_field_positive(&sendonly_stats, "outbound-rtp", "packetsSent"),
         "{}: SendOnly の outbound-rtp の packetsSent が 0 より大きくありません",
         codec_name
     );
     assert!(
-        verify_stats_field_positive(&recvonly_stats, "inbound-rtp", "packetsReceived"),
+        verify_video_stats_field_positive(&recvonly_stats, "inbound-rtp", "packetsReceived"),
         "{}: RecvOnly の inbound-rtp の packetsReceived が 0 より大きくありません",
         codec_name
     );
@@ -287,7 +296,16 @@ async fn run_sendrecv_with_codec(video: Video, codec_name: &str, expected_mime_t
             .on_notify(move |_| {
                 client1_connected_clone.store(true, Ordering::SeqCst);
             })
-            .on_track(move |_track| {
+            .on_track(move |transceiver| {
+                let receiver = transceiver.receiver();
+                let track = receiver.track();
+                let kind = match track.kind() {
+                    Ok(kind) => kind,
+                    Err(_) => return,
+                };
+                if kind != "video" {
+                    return;
+                }
                 client1_track_received_clone.fetch_add(1, Ordering::SeqCst);
             });
 
@@ -341,7 +359,16 @@ async fn run_sendrecv_with_codec(video: Video, codec_name: &str, expected_mime_t
         .on_notify(move |_| {
             client2_connected_clone.store(true, Ordering::SeqCst);
         })
-        .on_track(move |_track| {
+        .on_track(move |transceiver| {
+            let receiver = transceiver.receiver();
+            let track = receiver.track();
+            let kind = match track.kind() {
+                Ok(kind) => kind,
+                Err(_) => return,
+            };
+            if kind != "video" {
+                return;
+            }
             client2_track_received_clone.fetch_add(1, Ordering::SeqCst);
         });
 
@@ -417,22 +444,22 @@ async fn run_sendrecv_with_codec(video: Video, codec_name: &str, expected_mime_t
         .expect("クライアント 2 の get_stats に失敗しました");
 
     assert!(
-        verify_stats_field_positive(&stats1, "outbound-rtp", "packetsSent"),
+        verify_video_stats_field_positive(&stats1, "outbound-rtp", "packetsSent"),
         "{}: クライアント 1 の outbound-rtp の packetsSent が 0 より大きくありません",
         codec_name
     );
     assert!(
-        verify_stats_field_positive(&stats2, "outbound-rtp", "packetsSent"),
+        verify_video_stats_field_positive(&stats2, "outbound-rtp", "packetsSent"),
         "{}: クライアント 2 の outbound-rtp の packetsSent が 0 より大きくありません",
         codec_name
     );
     assert!(
-        verify_stats_field_positive(&stats1, "inbound-rtp", "packetsReceived"),
+        verify_video_stats_field_positive(&stats1, "inbound-rtp", "packetsReceived"),
         "{}: クライアント 1 の inbound-rtp の packetsReceived が 0 より大きくありません",
         codec_name
     );
     assert!(
-        verify_stats_field_positive(&stats2, "inbound-rtp", "packetsReceived"),
+        verify_video_stats_field_positive(&stats2, "inbound-rtp", "packetsReceived"),
         "{}: クライアント 2 の inbound-rtp の packetsReceived が 0 より大きくありません",
         codec_name
     );

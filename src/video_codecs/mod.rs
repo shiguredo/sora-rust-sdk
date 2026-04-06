@@ -8,3 +8,5 @@ pub mod mp4;
 pub mod nvcodec;
 #[cfg(feature = "openh264")]
 pub mod openh264;
+#[cfg(feature = "vpl")]
+pub mod vpl;
