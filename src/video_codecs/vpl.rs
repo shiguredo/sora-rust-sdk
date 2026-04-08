@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use shiguredo_vpl::{
     Av1EncoderConfig, CodecConfig, Decoder, DecoderCodec, DecoderConfig, EncodeOptions, Encoder,
     EncoderConfig, FrameFormat, H264EncoderConfig, HevcEncoderConfig, PictureType, RateControlMode,
-    VideoCodecType as VplCodecType, Vp9EncoderConfig, Vp9Profile, frame_type, supported_codecs,
+    ReconfigureParams, VideoCodecType as VplCodecType, Vp9EncoderConfig, Vp9Profile, frame_type,
+    supported_codecs,
 };
 use shiguredo_webrtc::{
     CodecSpecificInfo, EncodedImage, EncodedImageBuffer, EncodedImageRef, EnvironmentRef,
@@ -63,14 +64,8 @@ fn collect_codec_availability() -> Result<Vec<CodecAvailability>> {
             VplCodecType::Vp9 => VideoCodecType::Vp9,
             VplCodecType::Av1 => VideoCodecType::Av1,
         };
-        let mut encoder_supported = info.encoding.supported;
+        let encoder_supported = info.encoding.supported;
         let decoder_supported = info.decoding.supported;
-        if codec_type == VideoCodecType::Vp9 && encoder_supported && !probe_vp9_encoder_support() {
-            rtc_log_warning!(
-                "VPL VP9 encoder probe failed; disabling VP9 encoder support for this runtime"
-            );
-            encoder_supported = false;
-        }
         if encoder_supported || decoder_supported {
             codecs.push(CodecAvailability {
                 codec_type,
@@ -81,47 +76,6 @@ fn collect_codec_availability() -> Result<Vec<CodecAvailability>> {
     }
     codecs.sort_by_key(|codec| codec_sort_key(codec.codec_type));
     Ok(codecs)
-}
-
-fn probe_vp9_encoder_support() -> bool {
-    let width = 640u32;
-    let height = 360u32;
-    let mut config = EncoderConfig::new(
-        CodecConfig::Vp9(Vp9EncoderConfig {
-            profile: Some(Vp9Profile::Profile0),
-        }),
-        width,
-        height,
-        FrameFormat::Nv12,
-        30,
-        1,
-        RateControlMode::Cbr,
-    );
-    config.target_kbps = Some(500);
-
-    let mut encoder = match Encoder::new(config) {
-        Ok(encoder) => encoder,
-        Err(err) => {
-            rtc_log_warning!("VPL VP9 encoder init probe failed: {}", err);
-            return false;
-        }
-    };
-
-    let Some(frame_size) = FrameFormat::Nv12.frame_size(width as usize, height as usize) else {
-        return false;
-    };
-    let frame = vec![0u8; frame_size];
-    let options = EncodeOptions {
-        frame_type: frame_type::IDR | frame_type::I | frame_type::REF,
-    };
-
-    match encoder.encode(frame.as_slice(), &options) {
-        Ok(()) => true,
-        Err(err) => {
-            rtc_log_warning!("VPL VP9 encode probe failed: {}", err);
-            false
-        }
-    }
 }
 
 fn codec_type_from_format(format: &SdpVideoFormatRef<'_>) -> Option<VideoCodecType> {
@@ -178,12 +132,36 @@ fn requested_frame_type(
     frame_types.and_then(|frame_types| frame_types.get(0))
 }
 
-fn vpl_force_frame_type(requested: Option<VideoFrameType>) -> u16 {
+fn vpl_force_frame_type(codec_type: VideoCodecType, requested: Option<VideoFrameType>) -> u16 {
     if requested == Some(VideoFrameType::Key) {
-        frame_type::IDR | frame_type::I | frame_type::REF
+        if codec_type == VideoCodecType::Vp9 {
+            // VP9 は I/P を前提にしているため、key 要求時は I のみを明示する。
+            frame_type::I
+        } else {
+            frame_type::IDR | frame_type::I | frame_type::REF
+        }
     } else {
         frame_type::UNKNOWN
     }
+}
+
+fn vp9_payload_from_vpl(data: &[u8]) -> std::result::Result<&[u8], &'static str> {
+    let mut payload = data;
+    if payload.starts_with(b"DKIF") {
+        // VPL 実装によっては IVF ファイルヘッダー + フレームヘッダー付きで返るため除去する。
+        if payload.len() < 32 {
+            return Err("VP9 IVF file header is truncated");
+        }
+        payload = &payload[32..];
+    }
+    if payload.len() < 12 {
+        return Err("VP9 IVF frame header is truncated");
+    }
+    payload = &payload[12..];
+    if payload.is_empty() {
+        return Err("VP9 payload is empty after stripping IVF headers");
+    }
+    Ok(payload)
 }
 
 fn frame_type_from_vpl(picture_type: PictureType) -> VideoFrameType {
@@ -198,6 +176,15 @@ fn target_kbps_from_bps(target_bitrate_bps: u32) -> u16 {
     u16::try_from(target_kbps).unwrap_or(u16::MAX)
 }
 
+fn vpl_rate_control_mode(codec_type: VideoCodecType) -> RateControlMode {
+    if codec_type == VideoCodecType::Vp9 {
+        // VP9 は環境依存で CBR 初期化/実行失敗が出るため VBR を採用する。
+        RateControlMode::Vbr
+    } else {
+        RateControlMode::Cbr
+    }
+}
+
 struct VplVideoEncoder {
     callback: Option<VideoEncoderEncodedImageCallbackPtr>,
     encoder: Option<Encoder>,
@@ -206,6 +193,7 @@ struct VplVideoEncoder {
     height: u32,
     framerate: u32,
     target_bitrate_bps: u32,
+    rebuild_needed: bool,
     reconfigure_needed: bool,
 }
 
@@ -219,6 +207,7 @@ impl VplVideoEncoder {
             height: 0,
             framerate: 30,
             target_bitrate_bps: 500_000,
+            rebuild_needed: false,
             reconfigure_needed: false,
         }
     }
@@ -238,7 +227,7 @@ impl VplVideoEncoder {
             FrameFormat::Nv12,
             self.framerate.max(1),
             1,
-            RateControlMode::Cbr,
+            vpl_rate_control_mode(self.codec_type),
         );
         config.target_kbps = Some(target_kbps_from_bps(self.target_bitrate_bps));
 
@@ -253,8 +242,35 @@ impl VplVideoEncoder {
                 None
             }
         };
+        self.rebuild_needed = false;
         self.reconfigure_needed = false;
         self.encoder.as_ref().map(|_| ()).ok_or(())
+    }
+
+    fn reconfigure_encoder(&mut self) -> std::result::Result<(), ()> {
+        let Some(encoder) = self.encoder.as_mut() else {
+            return Err(());
+        };
+        let params = ReconfigureParams {
+            target_kbps: Some(target_kbps_from_bps(self.target_bitrate_bps)),
+            max_kbps: None,
+            framerate_num: Some(self.framerate.max(1)),
+            framerate_den: Some(1),
+        };
+        match encoder.reconfigure(params) {
+            Ok(()) => {
+                self.reconfigure_needed = false;
+                Ok(())
+            }
+            Err(err) => {
+                rtc_log_warning!(
+                    "VPL encoder reconfigure failed for {:?}: {}",
+                    self.codec_type,
+                    err
+                );
+                Err(())
+            }
+        }
     }
 }
 
@@ -296,10 +312,23 @@ impl VideoEncoderHandler for VplVideoEncoder {
         if self.width != frame_width || self.height != frame_height {
             self.width = frame_width;
             self.height = frame_height;
-            self.reconfigure_needed = true;
+            // 解像度変更は再初期化が必要なのでフラグを立てる。
+            self.rebuild_needed = true;
         }
-        if (self.reconfigure_needed || self.encoder.is_none()) && self.rebuild_encoder().is_err() {
-            return VideoCodecStatus::Error;
+        if self.encoder.is_none() {
+            self.rebuild_needed = true;
+        }
+
+        // rebuild_needed, reconfigure_needed のハンドリング
+        if self.rebuild_needed {
+            if self.rebuild_encoder().is_err() {
+                return VideoCodecStatus::Error;
+            }
+        } else if self.reconfigure_needed {
+            // ビットレート更新は再初期化ではなく reconfigure を行う
+            if self.reconfigure_encoder().is_err() {
+                return VideoCodecStatus::Error;
+            }
         }
 
         let mut frame_buffer = frame.buffer();
@@ -343,8 +372,10 @@ impl VideoEncoderHandler for VplVideoEncoder {
 
         let rtp_timestamp = frame.rtp_timestamp();
         let encoder = self.encoder.as_mut().expect("encoder should exist");
+        let requested = requested_frame_type(frame_types);
+        let force_frame_type = vpl_force_frame_type(self.codec_type, requested);
         let encode_options = EncodeOptions {
-            frame_type: vpl_force_frame_type(requested_frame_type(frame_types)),
+            frame_type: force_frame_type,
         };
         if let Err(err) = encoder.encode(nv12.data(), &encode_options) {
             rtc_log_error!("VPL encode failed for {:?}: {}", self.codec_type, err);
@@ -355,15 +386,46 @@ impl VideoEncoderHandler for VplVideoEncoder {
         while let Some(encoded_frame) = encoder.next_frame() {
             has_output = true;
             let mut encoded_image = EncodedImage::new();
-            let encoded_buffer = EncodedImageBuffer::from_bytes(encoded_frame.data());
+            let encoded_payload = if self.codec_type == VideoCodecType::Vp9 {
+                match vp9_payload_from_vpl(encoded_frame.data()) {
+                    Ok(payload) => payload,
+                    Err(err) => {
+                        rtc_log_error!("VPL VP9 payload normalization failed: {}", err);
+                        return VideoCodecStatus::Error;
+                    }
+                }
+            } else {
+                encoded_frame.data()
+            };
+            let encoded_buffer = EncodedImageBuffer::from_bytes(encoded_payload);
             encoded_image.set_encoded_data(&encoded_buffer);
             encoded_image.set_rtp_timestamp(rtp_timestamp);
             encoded_image.set_encoded_width(frame_width);
             encoded_image.set_encoded_height(frame_height);
-            encoded_image.set_frame_type(frame_type_from_vpl(encoded_frame.picture_type()));
+            let output_frame_type = frame_type_from_vpl(encoded_frame.picture_type());
+            encoded_image.set_frame_type(output_frame_type);
 
             let mut codec_specific_info = CodecSpecificInfo::new();
             codec_specific_info.set_codec_type(self.codec_type);
+            if self.codec_type == VideoCodecType::Vp9 {
+                let is_key = output_frame_type == VideoFrameType::Key;
+                // VP9 では end_of_picture を明示しないと受信側で codec 判定が外れるケースがある。
+                codec_specific_info.set_end_of_picture(true);
+                // num_spatial_layers を設定しないと first_active_layer / num_spatial_layers が不整合でエラーになる
+                codec_specific_info.set_vp9_num_spatial_layers(1);
+                codec_specific_info
+                    .set_vp9_temporal_idx(shiguredo_webrtc::no_temporal_idx().into());
+                // 実機で動作確認したところ、以下の設定は必須ではないことが分かっている。
+                // ただ他の実機や libwebrtc の仕様変更のことを考えると、
+                // 一応明示しておいた方が安定しそうなので設定しておく。
+                codec_specific_info.set_vp9_first_frame_in_picture(true);
+                codec_specific_info.set_vp9_spatial_layer_resolution_present(false);
+                codec_specific_info.set_vp9_ss_data_available(false);
+                codec_specific_info.set_vp9_temporal_up_switch(true);
+                codec_specific_info.set_vp9_inter_pic_predicted(!is_key);
+                codec_specific_info.set_vp9_flexible_mode(false);
+                codec_specific_info.set_vp9_inter_layer_predicted(false);
+            }
             if self.codec_type == VideoCodecType::H264 {
                 codec_specific_info
                     .set_h264_packetization_mode(H264PacketizationMode::NonInterleaved);
@@ -853,6 +915,53 @@ mod tests {
             requested_frame_type(Some(frame_types.as_ref())),
             Some(VideoFrameType::Empty)
         );
+    }
+
+    #[test]
+    fn vpl_force_frame_type_matches_codec_requirements() {
+        assert_eq!(
+            vpl_force_frame_type(VideoCodecType::Vp9, Some(VideoFrameType::Key)),
+            frame_type::I
+        );
+        assert_eq!(
+            vpl_force_frame_type(VideoCodecType::H264, Some(VideoFrameType::Key)),
+            frame_type::IDR | frame_type::I | frame_type::REF
+        );
+        assert_eq!(
+            vpl_force_frame_type(VideoCodecType::Vp9, Some(VideoFrameType::Delta)),
+            frame_type::UNKNOWN
+        );
+    }
+
+    #[test]
+    fn vpl_rate_control_mode_uses_vbr_for_vp9() {
+        assert_eq!(
+            vpl_rate_control_mode(VideoCodecType::Vp9),
+            RateControlMode::Vbr
+        );
+        assert_eq!(
+            vpl_rate_control_mode(VideoCodecType::H264),
+            RateControlMode::Cbr
+        );
+    }
+
+    #[test]
+    fn vp9_payload_from_vpl_strips_ivf_headers() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"DKIF");
+        data.resize(32, 0);
+        data.extend_from_slice(&[4, 0, 0, 0]);
+        data.extend_from_slice(&[0; 8]);
+        data.extend_from_slice(&[1, 2, 3, 4]);
+        let payload = vp9_payload_from_vpl(&data).expect("vp9 payload should be extracted");
+        assert_eq!(payload, &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn vp9_payload_from_vpl_rejects_truncated_frame_header() {
+        let data = vec![0u8; 11];
+        let err = vp9_payload_from_vpl(&data).expect_err("truncated frame header must fail");
+        assert_eq!(err, "VP9 IVF frame header is truncated");
     }
 
     #[test]

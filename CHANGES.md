@@ -22,7 +22,7 @@
   - `create_video_encoder` / `create_video_decoder` の戻り値を `Option<VideoEncoder>` / `Option<VideoDecoder>` に変更する
   - `SoraVideoEncoderFactory` / `SoraVideoDecoderFactory` と各 `VideoCodecCapability` 実装を新シグネチャへ追従する
   - @melpon
-- [UPDATE] `shiguredo_webrtc` を 0.147.1-canary.2 に上げる
+- [UPDATE] `shiguredo_webrtc` を 0.147.1-canary.3 に上げる
   - @sile, @melpon
 - [UPDATE] `shiguredo_nvcodec` を 2026.1.0 に上げる
   - @melpon
@@ -68,6 +68,11 @@
   - video トラック / video RTP 限定に修正し、音声のみで誤検知しないようにする
   - `on_track` の受信カウントを video のみに限定する
   - `packetsSent` / `packetsReceived` の判定を kind=video の RTP 統計に限定する
+  - @melpon
+- [FIX] VPL の VP9 エンコーダーが有効化されない問題を修正する
+  - `shiguredo_vpl` をアップデートしてエンコーダの生成でエラーになっていたのを修正する
+  - `shiguredo_webrtc` をアップデートして VP9 用パラメータを設定する
+  - VP9 出力の IVF ヘッダー除去
   - @melpon
 
 ### misc
