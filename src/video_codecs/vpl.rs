@@ -327,7 +327,23 @@ impl VideoEncoderHandler for VplVideoEncoder {
         } else if self.reconfigure_needed {
             // ビットレート更新は再初期化ではなく reconfigure を行う
             if self.reconfigure_encoder().is_err() {
-                return VideoCodecStatus::Error;
+                // reconfigure 非対応の実装では Reset が失敗することがあるため、再初期化にフォールバックする。
+                //
+                // reconfigure のエラー実際に発生する。GMKtec K9 のマシンでは H265 と AV1 で以下のエラーになった。
+                //
+                // ```
+                // MFXVideoENCODE_Reset() failed[status=-14]: Incompatible video parameters (MFX_ERR_INCOMPATIBLE_VIDEO_PARAM)
+                // ```
+                //
+                // そのためこのフォールバックは必須となる。
+                rtc_log_warning!(
+                    "VPL encoder reconfigure failed for {:?}; falling back to rebuild",
+                    self.codec_type
+                );
+                self.rebuild_needed = true;
+                if self.rebuild_encoder().is_err() {
+                    return VideoCodecStatus::Error;
+                }
             }
         }
 
