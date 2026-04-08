@@ -382,9 +382,7 @@ impl VideoEncoderHandler for VplVideoEncoder {
             return VideoCodecStatus::Error;
         }
 
-        let mut has_output = false;
         while let Some(encoded_frame) = encoder.next_frame() {
-            has_output = true;
             let mut encoded_image = EncodedImage::new();
             let encoded_payload = if self.codec_type == VideoCodecType::Vp9 {
                 match vp9_payload_from_vpl(encoded_frame.data()) {
@@ -438,15 +436,13 @@ impl VideoEncoderHandler for VplVideoEncoder {
                     .on_encoded_image(encoded_image.as_ref(), Some(codec_specific_info.as_ref()))
             };
             if result.error() != VideoEncoderEncodedImageCallbackResultError::Ok {
-                return VideoCodecStatus::Error;
+                rtc_log_warning!(
+                    "NVCODEC: on_encoded_image returned non-Ok status; continue encoding to avoid libwebrtc crash"
+                );
             }
         }
 
-        if has_output {
-            VideoCodecStatus::Ok
-        } else {
-            VideoCodecStatus::NoOutput
-        }
+        VideoCodecStatus::Ok
     }
 
     fn register_encode_complete_callback(
