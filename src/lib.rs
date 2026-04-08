@@ -19,9 +19,9 @@ pub use crate::client_context::{AdmConfig, SoraClientContext, SoraClientContextC
 pub use crate::error::{Error, Result};
 pub use crate::rpc::{RpcRequestOptions, RpcResponse};
 pub use crate::types::{
-    Audio, AudioCodecType, ConnectDataChannel, ForwardingFilter, ForwardingFilterRule, JsonString,
-    OpusParams, ProxyInfo, Role, SignalingDirection, SignalingType, Video, VideoAV1Params,
-    VideoCodecType, VideoH264Params, VideoH265Params, VideoVP9Params,
+    Audio, AudioCodecType, AudioOpusParams, ConnectDataChannel, ForwardingFilter,
+    ForwardingFilterRule, JsonString, ProxyInfo, Role, SignalingDirection, SignalingType, Video,
+    VideoAV1Params, VideoCodecType, VideoH264Params, VideoH265Params, VideoVP9Params,
 };
 pub use crate::video_codec::{
     AlignmentEncoderAdapter, SimulcastCapabilityHelper, SoraVideoDecoderFactory,

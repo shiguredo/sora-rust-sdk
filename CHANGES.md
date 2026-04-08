@@ -11,6 +11,8 @@
 
 ## develop
 
+- [CHANGE] `validate_video_codec_preference` の `capabilities` 引数を `&Vec<Box<dyn VideoCodecCapability>>` から `&[Box<dyn VideoCodecCapability>]` に変更する
+  - @melpon
 - [CHANGE] `VideoCodecCapability` の SDP format 解決 API を `SdpVideoFormatRef` ベースに再設計する
   - `resolve_sdp_format` の `codec_type` / `parameters` / `scalability_mode` を廃止し、`SdpVideoFormatRef` 引数で解決する
   - `get_supported_formats` を `Option<Vec<SdpVideoFormat>>` から `Vec<SdpVideoFormat>` に変更して必須化する
@@ -61,6 +63,8 @@
   - @melpon
 - [UPDATE] `nvcodec` / `openh264` で連続メモリ API を利用し、エンコード前の入力バッファを正規化するように修正する
   - @melpon
+- [FIX] `on_encoded_image` 実行後に非 `Ok` を受けた場合でも `VideoCodecStatus::Error` を返さず、警告を出して処理を継続する
+  - @melpon
 - [FIX] 接続失敗時でも `PeerConnection` / `SoraClientContext` の破棄順序を保証するように保持フィールド順を調整する
   - @melpon
 - [FIX] e2e-tests の映像送受信判定を修正する
@@ -68,9 +72,17 @@
   - `on_track` の受信カウントを video のみに限定する
   - `packetsSent` / `packetsReceived` の判定を kind=video の RTP 統計に限定する
   - @melpon
+- [FIX] DataChannel 経由の ping で stats 付き pong を返すように修正する
+  - @melpon
+- [FIX] `connect_tcp` で IPv4 優先の固定ソートを廃止し、名前解決順で接続するように修正する
+  - @melpon
+- [FIX] `AudioOpusParams` と `Video*Params` のフィールドを公開し、利用者がパラメータを構築して `Audio` / `Video` に反映できるように修正する
+  - @melpon
 
 ### misc
 
+- [UPDATE] `find_capability` の implementation 比較で不要な `implementation.clone()` を削除する
+  - @melpon
 - [UPDATE] sumomo の `main.rs` を分割して責務を整理する
   - @melpon
 - [UPDATE] sumomo の `run_with_raw_player` と通常経路の接続初期化を共通化し、`raw-player` 経路のオプション対応を拡張する

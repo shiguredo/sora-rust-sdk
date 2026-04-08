@@ -14,7 +14,7 @@ use shiguredo_webrtc::{
     VideoEncoderEncodedImageCallbackRef, VideoEncoderEncodedImageCallbackResultError,
     VideoEncoderEncoderInfo, VideoEncoderHandler, VideoEncoderRateControlParametersRef,
     VideoEncoderSettingsRef, VideoFrame, VideoFrameRef, VideoFrameType, VideoFrameTypeVectorRef,
-    i420_to_nv12, nv12_to_i420,
+    i420_to_nv12, nv12_to_i420, rtc_log_warning,
 };
 
 use crate::error::Result;
@@ -311,7 +311,9 @@ impl VideoEncoderHandler for AmfVideoEncoder {
                     .on_encoded_image(encoded_image.as_ref(), Some(codec_specific_info.as_ref()))
             };
             if result.error() != VideoEncoderEncodedImageCallbackResultError::Ok {
-                return VideoCodecStatus::Error;
+                rtc_log_warning!(
+                    "AMF: on_encoded_image returned non-Ok status; continue encoding to avoid libwebrtc crash"
+                );
             }
         }
 

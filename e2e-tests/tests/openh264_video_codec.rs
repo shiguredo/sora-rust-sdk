@@ -8,6 +8,7 @@ use e2e_tests::{
     build_sender_tracks, generate_channel_id, load_env, openh264_path, secret_key, signaling_urls,
     verify_video_codec_mime_type, verify_video_stats_field_positive,
 };
+use serial_test::serial;
 use sora_sdk::{
     Openh264VideoCodecCapability, Role, SoraClient, SoraClientContext, SoraClientContextConfig,
     Video, VideoCodecCapability, VideoCodecPreference,
@@ -38,6 +39,7 @@ fn create_openh264_context() -> sora_sdk::Result<Arc<SoraClientContext>> {
 
 /// OpenH264 で SendOnly → RecvOnly の接続テストを実行する。
 #[tokio::test]
+#[serial]
 async fn test_openh264_sendonly_recvonly() {
     load_env();
     if openh264_path().is_none() {
@@ -200,6 +202,7 @@ async fn test_openh264_sendonly_recvonly() {
 
 /// OpenH264 で SendRecv の双方向接続テストを実行する。
 #[tokio::test]
+#[serial]
 async fn test_openh264_sendrecv() {
     load_env();
     if openh264_path().is_none() {

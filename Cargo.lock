@@ -1449,8 +1449,6 @@ dependencies = [
 [[package]]
 name = "shiguredo_webrtc"
 version = "0.147.1-canary.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59c35d3e75f224174c81db11429f304d2b421ec373a85addf0968960582ac7d2"
 dependencies = [
  "bindgen",
  "nojson",
@@ -1516,7 +1514,7 @@ dependencies = [
 
 [[package]]
 name = "sora_sdk"
-version = "2026.1.0-canary.5"
+version = "2026.1.0-canary.6"
 dependencies = [
  "aws-lc-rs",
  "flate2",
@@ -1558,6 +1556,7 @@ dependencies = [
  "nojson",
  "raw_player",
  "rustls-pki-types",
+ "serial_test",
  "shiguredo_audio_device",
  "shiguredo_video_device",
  "shiguredo_webrtc",

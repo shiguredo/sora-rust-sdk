@@ -512,7 +512,9 @@ impl VideoEncoderHandler for Mp4PassthroughEncoder {
             callback.on_encoded_image(encoded_image.as_ref(), Some(codec_specific_info.as_ref()))
         };
         if result.error() != VideoEncoderEncodedImageCallbackResultError::Ok {
-            return VideoCodecStatus::Error;
+            rtc_log_warning!(
+                "MP4Passthrough: on_encoded_image returned non-Ok status; continue encoding to avoid libwebrtc crash"
+            );
         }
 
         VideoCodecStatus::Ok
