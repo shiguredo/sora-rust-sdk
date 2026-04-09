@@ -32,7 +32,7 @@ systemctl --user enable --now pipewire pipewire-pulse
 | `--audio` | 任意 (値: `true`/`false`) | 音声の有効/無効 |
 | `--video` | 任意 (値: `true`/`false`) | 映像の有効/無効 |
 | `--video-codec-type` | 任意 (値: `vp8`/`vp9`/`av1`/`h264`/`h265`) | 映像コーデック |
-| `--video-codec-implementation` | 任意 (値: `auto` または `internal`/`internal-apple`/`amf`/`nvcodec`/`openh264` のカンマ区切り) | 映像コーデック実装 (`auto` が既定値) |
+| `--video-codec-implementation` | 任意 (値: `auto` または `internal`/`internal-apple`/`amf`/`nvcodec`/`vpl`/`openh264` のカンマ区切り) | 映像コーデック実装 (`auto` が既定値) |
 | `--openh264-path` | 任意 (値: ライブラリパス) | OpenH264 の動的ライブラリパス (`--video-codec-implementation` に `openh264` を含む場合のみ) |
 | `--video-codec-list` | 任意 (フラグ) | 映像コーデックの capability / preference 情報を表示して終了する |
 | `--data-channel-signaling` | 任意 (値: `true`/`false`) | DataChannel 経由でシグナリングを行う |
@@ -49,7 +49,7 @@ systemctl --user enable --now pipewire pipewire-pulse
 ## 制約
 
 - `--input-mp4` と `--openh264-path` は同時に指定できません
-- `--video-codec-implementation` は `auto` 単独か、`internal`/`internal-apple`/`amf`/`nvcodec`/`openh264` のカンマ区切りで指定します
+- `--video-codec-implementation` は `auto` 単独か、`internal`/`internal-apple`/`amf`/`nvcodec`/`vpl`/`openh264` のカンマ区切りで指定します
 - `auto` と他の実装は同時に指定できません
 - `--video-codec-implementation` で同じ実装を重複指定できません
 - `--video-codec-implementation` に `openh264` を含める場合は `--openh264-path` が必須です

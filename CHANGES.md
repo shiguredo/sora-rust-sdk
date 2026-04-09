@@ -24,7 +24,7 @@
   - `create_video_encoder` / `create_video_decoder` の戻り値を `Option<VideoEncoder>` / `Option<VideoDecoder>` に変更する
   - `SoraVideoEncoderFactory` / `SoraVideoDecoderFactory` と各 `VideoCodecCapability` 実装を新シグネチャへ追従する
   - @melpon
-- [UPDATE] `shiguredo_webrtc` を 0.147.1-canary.2 に上げる
+- [UPDATE] `shiguredo_webrtc` を 0.147.1-canary.3 に上げる
   - @sile, @melpon
 - [UPDATE] `shiguredo_nvcodec` を 2026.1.0 に上げる
   - @melpon
@@ -47,6 +47,11 @@
 - [ADD] AMD AMF に対応する
   - `shiguredo_amf` を利用した `AmfVideoCodecCapability` を追加し、H264/H265/AV1 の対応可否を動的判定してエンコーダー/デコーダーを提供する
   - @melpon
+- [ADD] Intel VPL に対応する
+  - `shiguredo_vpl` を利用した `VplVideoCodecCapability` を追加し、H264/H265/VP9/AV1 の対応可否を動的判定してエンコーダー/デコーダーを提供する
+  - e2e-tests に VPL の検証を追加する
+  - sumomo の `--video-codec-implementation` と `--video-codec-list` で `vpl` を指定・表示できるようにする
+  - @melpon
 - [ADD] `nvcodec` の対応コーデックを拡張する
   - `NvCodecVideoCodecCapability` を H264/H265/AV1 エンコードと H264/H265/AV1/VP8/VP9 デコードの動的判定に対応する
   - @melpon
@@ -59,8 +64,13 @@
 - [UPDATE] `nvcodec` / `openh264` で連続メモリ API を利用し、エンコード前の入力バッファを正規化するように修正する
   - @melpon
 - [FIX] `on_encoded_image` 実行後に非 `Ok` を受けた場合でも `VideoCodecStatus::Error` を返さず、警告を出して処理を継続する
-  - @codex
+  - @melpon
 - [FIX] 接続失敗時でも `PeerConnection` / `SoraClientContext` の破棄順序を保証するように保持フィールド順を調整する
+  - @melpon
+- [FIX] e2e-tests の映像送受信判定を修正する
+  - video トラック / video RTP 限定に修正し、音声のみで誤検知しないようにする
+  - `on_track` の受信カウントを video のみに限定する
+  - `packetsSent` / `packetsReceived` の判定を kind=video の RTP 統計に限定する
   - @melpon
 - [FIX] DataChannel 経由の ping で stats 付き pong を返すように修正する
   - @melpon

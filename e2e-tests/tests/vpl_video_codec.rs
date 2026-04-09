@@ -1,4 +1,4 @@
-#![cfg(feature = "amf")]
+#![cfg(feature = "vpl")]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -12,8 +12,8 @@ use e2e_tests::{
 use serial_test::serial;
 use shiguredo_webrtc::VideoCodecType;
 use sora_sdk::{
-    AmfVideoCodecCapability, CodecDirection, Role, SoraClient, SoraClientContext,
-    SoraClientContextConfig, Video, VideoCodecCapability, VideoCodecPreference,
+    CodecDirection, Role, SoraClient, SoraClientContext, SoraClientContextConfig, Video,
+    VideoCodecCapability, VideoCodecPreference, VplVideoCodecCapability,
 };
 
 fn test_channel_id(suffix: &str) -> String {
@@ -25,6 +25,7 @@ fn codec_label(codec_type: VideoCodecType) -> &'static str {
     match codec_type {
         VideoCodecType::H264 => "h264",
         VideoCodecType::H265 => "h265",
+        VideoCodecType::Vp9 => "vp9",
         VideoCodecType::Av1 => "av1",
         _ => "unknown",
     }
@@ -34,6 +35,7 @@ fn codec_mime_type(codec_type: VideoCodecType) -> &'static str {
     match codec_type {
         VideoCodecType::H264 => "video/H264",
         VideoCodecType::H265 => "video/H265",
+        VideoCodecType::Vp9 => "video/VP9",
         VideoCodecType::Av1 => "video/AV1",
         _ => "",
     }
@@ -43,13 +45,14 @@ fn video_setting(codec_type: VideoCodecType) -> Video {
     match codec_type {
         VideoCodecType::H264 => Video::new_h264(None, None),
         VideoCodecType::H265 => Video::new_h265(None, None),
+        VideoCodecType::Vp9 => Video::new_vp9(None, None),
         VideoCodecType::Av1 => Video::new_av1(None, None),
         _ => panic!("unsupported codec type"),
     }
 }
 
-fn create_amf_context() -> sora_sdk::Result<Arc<SoraClientContext>> {
-    let capability: Box<dyn VideoCodecCapability> = Box::new(AmfVideoCodecCapability::new()?);
+fn create_vpl_context() -> sora_sdk::Result<Arc<SoraClientContext>> {
+    let capability: Box<dyn VideoCodecCapability> = Box::new(VplVideoCodecCapability::new()?);
     let preference = VideoCodecPreference::new_from_capability(capability.as_ref());
 
     let mut config = SoraClientContextConfig {
@@ -61,19 +64,23 @@ fn create_amf_context() -> sora_sdk::Result<Arc<SoraClientContext>> {
     SoraClientContext::new_with_config(config)
 }
 
-fn amf_fully_supported_codecs() -> Option<Vec<VideoCodecType>> {
-    let capability = match AmfVideoCodecCapability::new() {
-        Ok(capability) => capability,
+fn vpl_capability() -> Option<VplVideoCodecCapability> {
+    match VplVideoCodecCapability::new() {
+        Ok(capability) => Some(capability),
         Err(err) => {
-            eprintln!("AMF capability is not available, skipping test: {err}");
-            return None;
+            eprintln!("VPL capability is not available, skipping test: {err}");
+            None
         }
-    };
+    }
+}
 
+fn vpl_fully_supported_codecs() -> Option<Vec<VideoCodecType>> {
+    let capability = vpl_capability()?;
     let mut codecs = Vec::new();
     for codec_type in [
         VideoCodecType::H264,
         VideoCodecType::H265,
+        VideoCodecType::Vp9,
         VideoCodecType::Av1,
     ] {
         if capability.is_supported(CodecDirection::Encoder, codec_type)
@@ -82,21 +89,89 @@ fn amf_fully_supported_codecs() -> Option<Vec<VideoCodecType>> {
             codecs.push(codec_type);
         }
     }
+
     if codecs.is_empty() {
-        eprintln!("AMF has no codec with both encoder and decoder support, skipping test");
+        eprintln!("VPL has no codec with both encoder and decoder support, skipping test");
         return None;
     }
 
     Some(codecs)
 }
 
-async fn run_sendonly_recvonly_with_codec(codec_type: VideoCodecType) {
+fn vpl_decoder_supported_only_codecs() -> Option<Vec<VideoCodecType>> {
+    let capability = vpl_capability()?;
+    let mut codecs = Vec::new();
+    for codec_type in [
+        VideoCodecType::H264,
+        VideoCodecType::H265,
+        VideoCodecType::Vp9,
+        VideoCodecType::Av1,
+    ] {
+        if capability.is_supported(CodecDirection::Decoder, codec_type)
+            && !capability.is_supported(CodecDirection::Encoder, codec_type)
+        {
+            codecs.push(codec_type);
+        }
+    }
+
+    if codecs.is_empty() {
+        eprintln!("VPL has no decoder-only codec, skipping test");
+        return None;
+    }
+
+    Some(codecs)
+}
+
+fn vpl_encoder_supported_only_codecs() -> Option<Vec<VideoCodecType>> {
+    let capability = vpl_capability()?;
+    let mut codecs = Vec::new();
+    for codec_type in [
+        VideoCodecType::H264,
+        VideoCodecType::H265,
+        VideoCodecType::Vp9,
+        VideoCodecType::Av1,
+    ] {
+        if capability.is_supported(CodecDirection::Encoder, codec_type)
+            && !capability.is_supported(CodecDirection::Decoder, codec_type)
+        {
+            codecs.push(codec_type);
+        }
+    }
+
+    if codecs.is_empty() {
+        eprintln!("VPL has no encoder-only codec, skipping test");
+        return None;
+    }
+
+    Some(codecs)
+}
+
+fn default_context_supports_encoder(codec_type: VideoCodecType) -> bool {
+    let config = SoraClientContextConfig::default();
+    config
+        .video_codec_capabilities
+        .iter()
+        .any(|capability| capability.is_supported(CodecDirection::Encoder, codec_type))
+}
+
+fn default_context_supports_decoder(codec_type: VideoCodecType) -> bool {
+    let config = SoraClientContextConfig::default();
+    config
+        .video_codec_capabilities
+        .iter()
+        .any(|capability| capability.is_supported(CodecDirection::Decoder, codec_type))
+}
+
+async fn run_sendonly_recvonly_with_contexts(
+    sendonly_context: Arc<SoraClientContext>,
+    recvonly_context: Arc<SoraClientContext>,
+    codec_type: VideoCodecType,
+    suffix_prefix: &str,
+) -> std::result::Result<(), String> {
     let urls = signaling_urls().expect("TEST_SIGNALING_URLS is required");
-    let channel_id = test_channel_id(&format!(
-        "amf-{}-sendonly-recvonly",
-        codec_label(codec_type)
-    ));
+    let codec_label = codec_label(codec_type);
     let expected_mime_type = codec_mime_type(codec_type);
+    let channel_id = test_channel_id(&format!("{suffix_prefix}-{codec_label}-sendonly-recvonly"));
 
     let sendonly_connected = Arc::new(AtomicBool::new(false));
     let sendonly_connected_clone = sendonly_connected.clone();
@@ -106,11 +181,10 @@ async fn run_sendonly_recvonly_with_codec(codec_type: VideoCodecType) {
     let track_received = Arc::new(AtomicUsize::new(0));
     let track_received_clone = track_received.clone();
 
-    let sendonly_context = create_amf_context().expect("failed to create sendonly context");
     let mut capturer = FakeVideoCapturer::new(FakeVideoCapturerConfig::default())
-        .expect("failed to create FakeVideoCapturer");
-    let (video_track, audio_track) =
-        build_sender_tracks(&sendonly_context, &mut capturer).expect("failed to build tracks");
+        .map_err(|e| format!("failed to create FakeVideoCapturer: {e}"))?;
+    let (video_track, audio_track) = build_sender_tracks(&sendonly_context, &mut capturer)
+        .map_err(|e| format!("failed to build tracks: {e}"))?;
 
     let mut sendonly_builder = SoraClient::builder(
         sendonly_context,
@@ -132,7 +206,7 @@ async fn run_sendonly_recvonly_with_codec(codec_type: VideoCodecType) {
 
     let (sendonly_client, sendonly_handle) = sendonly_builder
         .build()
-        .expect("failed to build sendonly client");
+        .map_err(|e| format!("failed to build sendonly client: {e}"))?;
     let sendonly_task = tokio::spawn(async move {
         let _ = tokio::time::timeout(Duration::from_secs(30), sendonly_client.run()).await;
     });
@@ -146,11 +220,13 @@ async fn run_sendonly_recvonly_with_codec(codec_type: VideoCodecType) {
         }
     })
     .await;
-    assert!(sendonly_wait.is_ok(), "sendonly connection timed out");
+    if sendonly_wait.is_err() {
+        sendonly_task.abort();
+        return Err("sendonly connection timed out".to_string());
+    }
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let recvonly_context = create_amf_context().expect("failed to create recvonly context");
     let mut recvonly_builder =
         SoraClient::builder(recvonly_context, urls, channel_id, Role::RecvOnly)
             .data_channel_signaling(true)
@@ -176,81 +252,82 @@ async fn run_sendonly_recvonly_with_codec(codec_type: VideoCodecType) {
 
     let (recvonly_client, recvonly_handle) = recvonly_builder
         .build()
-        .expect("failed to build recvonly client");
+        .map_err(|e| format!("failed to build recvonly client: {e}"))?;
     let recvonly_task = tokio::spawn(async move {
         let _ = tokio::time::timeout(Duration::from_secs(30), recvonly_client.run()).await;
     });
 
-    let recvonly_wait = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if recvonly_connected.load(Ordering::SeqCst) {
-                break;
+    let result = async {
+        let recvonly_wait = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if recvonly_connected.load(Ordering::SeqCst) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+        })
+        .await;
+        if recvonly_wait.is_err() {
+            return Err("recvonly connection timed out".to_string());
         }
-    })
-    .await;
-    assert!(recvonly_wait.is_ok(), "recvonly connection timed out");
 
-    let track_wait = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if track_received.load(Ordering::SeqCst) > 0 {
-                break;
+        let track_wait = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if track_received.load(Ordering::SeqCst) > 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+        })
+        .await;
+        if track_wait.is_err() || track_received.load(Ordering::SeqCst) == 0 {
+            return Err("recvonly did not receive tracks".to_string());
         }
-    })
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        let sendonly_stats = sendonly_handle
+            .get_stats()
+            .await
+            .map_err(|e| format!("failed to get sendonly stats: {e}"))?;
+        if !verify_video_stats_field_positive(&sendonly_stats, "outbound-rtp", "packetsSent") {
+            return Err("sendonly must send video packets".to_string());
+        }
+        if !verify_video_codec_mime_type(&sendonly_stats, "outbound-rtp", expected_mime_type) {
+            return Err(format!(
+                "sendonly outbound codec must match: expected={expected_mime_type}"
+            ));
+        }
+
+        let recvonly_stats = recvonly_handle
+            .get_stats()
+            .await
+            .map_err(|e| format!("failed to get recvonly stats: {e}"))?;
+        if !verify_video_stats_field_positive(&recvonly_stats, "inbound-rtp", "packetsReceived") {
+            return Err("recvonly must receive video packets".to_string());
+        }
+        if !verify_video_codec_mime_type(&recvonly_stats, "inbound-rtp", expected_mime_type) {
+            return Err(format!(
+                "recvonly inbound codec must match: expected={expected_mime_type}"
+            ));
+        }
+
+        Ok(())
+    }
     .await;
-    assert!(
-        track_wait.is_ok() && track_received.load(Ordering::SeqCst) > 0,
-        "recvonly did not receive tracks"
-    );
 
-    tokio::time::sleep(Duration::from_secs(5)).await;
-
-    let sendonly_stats = sendonly_handle
-        .get_stats()
-        .await
-        .expect("failed to get sendonly stats");
-    assert!(
-        verify_video_stats_field_positive(&sendonly_stats, "outbound-rtp", "packetsSent"),
-        "sendonly must send video packets"
-    );
-    assert!(
-        verify_video_codec_mime_type(&sendonly_stats, "outbound-rtp", expected_mime_type),
-        "sendonly outbound codec must match"
-    );
-
-    let recvonly_stats = recvonly_handle
-        .get_stats()
-        .await
-        .expect("failed to get recvonly stats");
-    assert!(
-        verify_video_stats_field_positive(&recvonly_stats, "inbound-rtp", "packetsReceived"),
-        "recvonly must receive video packets"
-    );
-    assert!(
-        verify_video_codec_mime_type(&recvonly_stats, "inbound-rtp", expected_mime_type),
-        "recvonly inbound codec must match"
-    );
-
-    sendonly_handle
-        .disconnect()
-        .await
-        .expect("failed to disconnect sendonly");
-    recvonly_handle
-        .disconnect()
-        .await
-        .expect("failed to disconnect recvonly");
-
+    let _ = sendonly_handle.disconnect().await;
+    let _ = recvonly_handle.disconnect().await;
     sendonly_task.abort();
     recvonly_task.abort();
+    result
 }
 
 async fn run_sendrecv_with_codec(codec_type: VideoCodecType) {
     let urls = signaling_urls().expect("TEST_SIGNALING_URLS is required");
-    let channel_id = test_channel_id(&format!("amf-{}-sendrecv", codec_label(codec_type)));
+    let codec_label = codec_label(codec_type);
     let expected_mime_type = codec_mime_type(codec_type);
+    let channel_id = test_channel_id(&format!("vpl-{codec_label}-sendrecv"));
 
     let client1_connected = Arc::new(AtomicBool::new(false));
     let client1_connected_clone = client1_connected.clone();
@@ -262,7 +339,7 @@ async fn run_sendrecv_with_codec(codec_type: VideoCodecType) {
     let client2_track_received = Arc::new(AtomicUsize::new(0));
     let client2_track_received_clone = client2_track_received.clone();
 
-    let context1 = create_amf_context().expect("failed to create client1 context");
+    let context1 = create_vpl_context().expect("failed to create client1 context");
     let mut capturer1 = FakeVideoCapturer::new(FakeVideoCapturerConfig::default())
         .expect("failed to create FakeVideoCapturer for client1");
     let (video_track1, audio_track1) =
@@ -312,7 +389,7 @@ async fn run_sendrecv_with_codec(codec_type: VideoCodecType) {
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let context2 = create_amf_context().expect("failed to create client2 context");
+    let context2 = create_vpl_context().expect("failed to create client2 context");
     let mut capturer2 = FakeVideoCapturer::new(FakeVideoCapturerConfig::default())
         .expect("failed to create FakeVideoCapturer for client2");
     let (video_track2, audio_track2) =
@@ -437,26 +514,122 @@ async fn run_sendrecv_with_codec(codec_type: VideoCodecType) {
 
 #[tokio::test]
 #[serial]
-async fn test_amf_sendonly_recvonly() {
+async fn test_vpl_sendonly_recvonly() {
     load_env();
-    let Some(codec_types) = amf_fully_supported_codecs() else {
+    let Some(codec_types) = vpl_fully_supported_codecs() else {
         return;
     };
 
+    let mut failures = Vec::new();
     for codec_type in codec_types {
-        run_sendonly_recvonly_with_codec(codec_type).await;
+        let sendonly_context = create_vpl_context().expect("failed to create sendonly context");
+        let recvonly_context = create_vpl_context().expect("failed to create recvonly context");
+        match run_sendonly_recvonly_with_contexts(
+            sendonly_context,
+            recvonly_context,
+            codec_type,
+            "vpl",
+        )
+        .await
+        {
+            Ok(()) => {
+                eprintln!(
+                    "vpl sendonly/recvonly passed for {}",
+                    codec_label(codec_type)
+                );
+            }
+            Err(error) => failures.push(format!("{}: {error}", codec_label(codec_type))),
+        }
     }
+
+    assert!(
+        failures.is_empty(),
+        "vpl sendonly/recvonly failures:\n{}",
+        failures.join("\n")
+    );
 }
 
 #[tokio::test]
 #[serial]
-async fn test_amf_sendrecv() {
+async fn test_vpl_sendrecv() {
     load_env();
-    let Some(codec_types) = amf_fully_supported_codecs() else {
+    let Some(codec_types) = vpl_fully_supported_codecs() else {
         return;
     };
 
     for codec_type in codec_types {
         run_sendrecv_with_codec(codec_type).await;
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn test_vpl_decoder_only_recvonly() {
+    load_env();
+    let Some(codec_types) = vpl_decoder_supported_only_codecs() else {
+        return;
+    };
+
+    for codec_type in codec_types {
+        if !default_context_supports_encoder(codec_type) {
+            eprintln!(
+                "default context does not support encoder for {}, skipping",
+                codec_label(codec_type)
+            );
+            continue;
+        }
+
+        let sendonly_context =
+            SoraClientContext::new().expect("failed to create default sendonly context");
+        let recvonly_context = create_vpl_context().expect("failed to create recvonly context");
+        run_sendonly_recvonly_with_contexts(
+            sendonly_context,
+            recvonly_context,
+            codec_type,
+            "vpl-decoder-only",
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "vpl decoder-only recvonly failed for {}: {error}",
+                codec_label(codec_type)
+            )
+        });
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn test_vpl_encoder_only_sendonly() {
+    load_env();
+    let Some(codec_types) = vpl_encoder_supported_only_codecs() else {
+        return;
+    };
+
+    for codec_type in codec_types {
+        if !default_context_supports_decoder(codec_type) {
+            eprintln!(
+                "default context does not support decoder for {}, skipping",
+                codec_label(codec_type)
+            );
+            continue;
+        }
+
+        let sendonly_context = create_vpl_context().expect("failed to create sendonly context");
+        let recvonly_context =
+            SoraClientContext::new().expect("failed to create default recvonly context");
+        run_sendonly_recvonly_with_contexts(
+            sendonly_context,
+            recvonly_context,
+            codec_type,
+            "vpl-encoder-only",
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "vpl encoder-only sendonly failed for {}: {error}",
+                codec_label(codec_type)
+            )
+        });
     }
 }

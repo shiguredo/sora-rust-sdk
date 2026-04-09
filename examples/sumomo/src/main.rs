@@ -46,6 +46,8 @@ use sora_sdk::AmfVideoCodecCapability;
 use sora_sdk::InternalAppleVideoCodecCapability;
 #[cfg(feature = "nvcodec")]
 use sora_sdk::NvCodecVideoCodecCapability;
+#[cfg(feature = "vpl")]
+use sora_sdk::VplVideoCodecCapability;
 use sora_sdk::{
     InternalVideoCodecCapability, Mp4PassthroughVideoCodecCapability, Mp4SampleReader,
     Mp4VideoCapturer, Openh264VideoCodecCapability, SoraClient, SoraClientBuilder,
@@ -175,6 +177,21 @@ fn build_context_config(
                         {
                             return Err(io::Error::other(
                                 "NVCodec is not enabled in this build. Rebuild sumomo with --features nvcodec",
+                            )
+                            .into());
+                        }
+                    }
+                    VideoCodecImplementationSelection::Vpl => {
+                        #[cfg(feature = "vpl")]
+                        {
+                            let vpl_capability: Box<dyn VideoCodecCapability> =
+                                Box::new(VplVideoCodecCapability::new()?);
+                            add_video_codec_capability(&mut context_config, vpl_capability);
+                        }
+                        #[cfg(not(feature = "vpl"))]
+                        {
+                            return Err(io::Error::other(
+                                "VPL is not enabled in this build. Rebuild sumomo with --features vpl",
                             )
                             .into());
                         }

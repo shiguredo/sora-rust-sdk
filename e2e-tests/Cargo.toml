@@ -9,6 +9,7 @@ publish = false
 default = []
 amf = ["sora_sdk/amf"]
 nvcodec = ["sora_sdk/nvcodec", "dep:shiguredo_nvcodec"]
+vpl = ["sora_sdk/vpl"]
 
 [dependencies]
 sora_sdk = { path = ".." }
