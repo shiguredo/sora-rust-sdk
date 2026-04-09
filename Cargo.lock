@@ -1437,9 +1437,9 @@ dependencies = [
 
 [[package]]
 name = "shiguredo_vpl"
-version = "2026.1.1"
+version = "2026.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93073bd2f7c41232898245c63ff8dd5daaeacee6e274d1ed6443e4f5efb0effd"
+checksum = "83ca51cac97f13728b3fd198b539f2ad20839fee23374911bd60a7723f73c71b"
 dependencies = [
  "bindgen",
  "shiguredo_cmake",
@@ -1449,6 +1449,8 @@ dependencies = [
 [[package]]
 name = "shiguredo_webrtc"
 version = "0.147.1-canary.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59c35d3e75f224174c81db11429f304d2b421ec373a85addf0968960582ac7d2"
 dependencies = [
  "bindgen",
  "nojson",

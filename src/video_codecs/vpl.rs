@@ -8,8 +8,8 @@ use shiguredo_vpl::{
 };
 use shiguredo_webrtc::{
     CodecSpecificInfo, EncodedImage, EncodedImageBuffer, EncodedImageRef, EnvironmentRef,
-    H264PacketizationMode, I420Buffer, NV12Buffer, ScalabilityMode, SdpVideoFormat,
-    SdpVideoFormatRef, VideoCodecRef, VideoCodecStatus, VideoCodecType, VideoDecoder,
+    H264PacketizationMode, I420Buffer, ScalabilityMode, SdpVideoFormat, SdpVideoFormatRef,
+    VideoCodecRef, VideoCodecStatus, VideoCodecType, VideoDecoder,
     VideoDecoderDecodedImageCallbackPtr, VideoDecoderDecoderInfo, VideoDecoderHandler,
     VideoDecoderSettingsRef, VideoEncoder, VideoEncoderEncodedImageCallbackPtr,
     VideoEncoderEncodedImageCallbackRef, VideoEncoderEncodedImageCallbackResultError,
@@ -360,14 +360,33 @@ impl VideoEncoderHandler for VplVideoEncoder {
             Err(_) => return VideoCodecStatus::Error,
         };
 
-        let mut nv12 = NV12Buffer::new(frame_width_i32, frame_height_i32);
         let src_stride_y = i420.stride_y();
         let src_stride_u = i420.stride_u();
         let src_stride_v = i420.stride_v();
-        let dst_stride_y = nv12.stride_y();
-        let dst_stride_uv = nv12.stride_uv();
+
+        let rtp_timestamp = frame.rtp_timestamp();
+        let encoder = self.encoder.as_mut().expect("encoder should exist");
+        let (coded_width, coded_height) = encoder.coded_size();
+        let Some((coded_nv12_size, y_plane_size, dst_stride_y, dst_stride_uv)) =
+            || -> Option<(usize, usize, i32, i32)> {
+                let y_plane_size = coded_width.checked_mul(coded_height)?;
+                let coded_nv12_size = FrameFormat::Nv12.frame_size(coded_width, coded_height)?;
+                let dst_stride_y = i32::try_from(coded_width).ok()?;
+                let dst_stride_uv = dst_stride_y;
+                Some((coded_nv12_size, y_plane_size, dst_stride_y, dst_stride_uv))
+            }()
+        else {
+            rtc_log_error!(
+                "VPL coded size {}x{} is invalid for {:?}",
+                coded_width,
+                coded_height,
+                self.codec_type
+            );
+            return VideoCodecStatus::Error;
+        };
+        let mut nv12 = vec![0u8; coded_nv12_size];
         {
-            let (dst_y, dst_uv) = nv12.planes_mut();
+            let (dst_y, dst_uv) = nv12.split_at_mut(y_plane_size);
             if !i420_to_nv12(
                 i420.y_data(),
                 src_stride_y,
@@ -386,14 +405,12 @@ impl VideoEncoderHandler for VplVideoEncoder {
             }
         }
 
-        let rtp_timestamp = frame.rtp_timestamp();
-        let encoder = self.encoder.as_mut().expect("encoder should exist");
         let requested = requested_frame_type(frame_types);
         let force_frame_type = vpl_force_frame_type(self.codec_type, requested);
         let encode_options = EncodeOptions {
             frame_type: force_frame_type,
         };
-        if let Err(err) = encoder.encode(nv12.data(), &encode_options) {
+        if let Err(err) = encoder.encode(&nv12, &encode_options) {
             rtc_log_error!("VPL encode failed for {:?}: {}", self.codec_type, err);
             return VideoCodecStatus::Error;
         }
