@@ -99,8 +99,75 @@ jobs:
       - run: cargo clippy --workspace ${{ matrix.features }} -- -D warnings
       - run: cargo test --workspace ${{ matrix.features }} -- --skip test_video_capture_frame_received --skip test_video_capture_session_create
 
+  ci-cross:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - labels: [self-hosted, linux, x64]
+            target: raspberry-pi-os_armv8
+            ssh_host: "shiguredo@raspberrypi"
+            rust_target: "aarch64-unknown-linux-gnu"
+            features: ""
+    runs-on:
+      group: Self
+      labels: ${{ matrix.labels }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v6
+      - name: Remove old target
+        run: rm -rf target/
+      - name: Create SSH config
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          touch ~/.ssh/config
+          cat >> ~/.ssh/config <<'EOF'
+          Host *
+            ServerAliveInterval 60
+            TCPKeepAlive yes
+          EOF
+          chmod 600 ~/.ssh/config
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+      - name: Update PATH
+        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+      - run: cp .cargo/config.toml.ci .cargo/config.toml
+
+      # クロスコンパイルに必要なツールチェインのインストール
+      - run: rustup update stable
+      - run: rustup target add ${{ matrix.rust_target }}
+
+      # .env.remote を作成
+      - name: Create .env.remote
+        run: |
+          touch e2e-tests/.env.remote
+          ENVS=(
+            TEST_SIGNALING_URLS
+            TEST_CHANNEL_ID_PREFIX
+            TEST_CHANNEL_ID_SUFFIX
+          )
+          for name in "${ENVS[@]}"; do
+            if [[ -v "$name" ]]; then
+              printf '%s=%s\n' "$name" "${!name}" >> e2e-tests/.env.remote
+            fi
+          done
+
+      # sysroot の構築と設定
+      - run: cargo install shiguredo_sysroot
+      - run: cargo shiguredo-sysroot --config sysroot/${{ matrix.target }}.json
+
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --target ${{ matrix.rust_target }} ${{ matrix.features }} -- -D warnings
+      - name: cargo test
+        run: |
+          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER="./scripts/runner.sh ${{ matrix.ssh_host }} /tmp/sora-rust-sdk/bin"
+          cargo test --workspace --target ${{ matrix.rust_target }} ${{ matrix.features }} -- --skip test_video_capture_frame_received --skip test_video_capture_session_create
+
   slack_notify:
-    needs: [ci, ci-self-hosted]
+    needs: [ci, ci-self-hosted, ci-cross]
     runs-on: ubuntu-slim
     if: ${{ !cancelled() }}
     steps:
