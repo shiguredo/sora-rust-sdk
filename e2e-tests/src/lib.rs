@@ -14,13 +14,8 @@ use sora_sdk::{JsonString, Result, SoraClientContext};
 /// .env ファイルを読み込んで環境変数に設定する。
 ///
 /// 既存の環境変数は上書きしない。
-/// まずカレントディレクトリの .env を探して、
-/// 無ければ e2e-tests ディレクトリ内の .env を読み込む。
+/// e2e-tests ディレクトリ内の .env を読み込む。
 pub fn load_env() {
-    if Path::new(".env").exists() {
-        load_env_from(".env");
-        return;
-    }
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let env_path = format!("{}/.env", manifest_dir);
     load_env_from(env_path);
