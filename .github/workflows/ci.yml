@@ -73,19 +73,14 @@ jobs:
         include:
           - labels: [self-hosted, macOS, ARM64, Apple-M1]
             features: "--features openh264"
-            webrtc_c_target: "macos_arm64"
           - labels: [self-hosted, linux, x64, NVIDIA-Video-Codec-SDK]
             features: "--features openh264,nvcodec"
-            webrtc_c_target: "ubuntu-24.04_x86_64"
           - labels:  [self-hosted, linux, x64, AMD-AMF]
             features: "--features openh264,amf"
-            webrtc_c_target: "ubuntu-24.04_x86_64"
           - labels: [self-hosted, linux, x64, Intel-VPL]
             features: "--features openh264,vpl"
-            webrtc_c_target: "ubuntu-24.04_x86_64"
           - labels: [self-hosted, linux, arm64, Raspberry-Pi]
             features: "--features openh264"
-            webrtc_c_target: "raspberry-pi-os_armv8"
     runs-on:
       group: Self
       labels: ${{ matrix.labels }}
@@ -104,11 +99,7 @@ jobs:
       - run: cp .cargo/config.toml.ci .cargo/config.toml
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace ${{ matrix.features }} -- -D warnings
-        env:
-          WEBRTC_C_TARGET: ${{ matrix.webrtc_c_target }}
       - run: cargo test --workspace ${{ matrix.features }} -- --skip test_video_capture_frame_received --skip test_video_capture_session_create
-        env:
-          WEBRTC_C_TARGET: ${{ matrix.webrtc_c_target }}
 
   slack_notify:
     needs: [ci, ci-self-hosted]
