@@ -136,6 +136,18 @@ jobs:
         run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
       - run: cp .cargo/config.toml.ci .cargo/config.toml
 
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          # bindgen がクロスコンパイル時に aarch64 用ヘッダーを参照するために gcc-aarch64-linux-gnu が必要
+          sudo apt-get install -y \
+            debian-archive-keyring \
+            gcc-aarch64-linux-gnu
+          # cargo-shiguredo-sysroot は独自 apt 設定で sources.list のみ差し替えるため、
+          # Debian の keyring を trusted.gpg.d に配置しないと trixie の署名検証に失敗する。
+          sudo install -Dm644 /usr/share/keyrings/debian-archive-keyring.gpg \
+            /etc/apt/trusted.gpg.d/debian-archive-keyring.gpg
+
       # クロスコンパイルに必要なツールチェインのインストール
       - run: rustup update stable
       - run: rustup target add ${{ matrix.rust_target }}
