@@ -111,7 +111,7 @@ jobs:
           WEBRTC_C_TARGET: ${{ matrix.webrtc_c_target }}
 
   slack_notify:
-    needs: [ci, ci-self-hosted, ci-cross]
+    needs: [ci, ci-self-hosted]
     runs-on: ubuntu-slim
     if: ${{ !cancelled() }}
     steps:
