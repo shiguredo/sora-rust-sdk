@@ -84,7 +84,7 @@ jobs:
     runs-on:
       group: Self
       labels: ${{ matrix.labels }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - name: Checkout sources
         uses: actions/checkout@v6
