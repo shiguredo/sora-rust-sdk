@@ -335,7 +335,7 @@ where
 }
 
 fn create_video_capturer(
-    _args: &Args,
+    args: &Args,
     mp4_reader: Option<Mp4SampleReader>,
 ) -> Result<VideoCapturerHolder> {
     if let Some(reader) = mp4_reader {
@@ -343,9 +343,32 @@ fn create_video_capturer(
         return Ok(VideoCapturerHolder::Mp4(mp4_capturer));
     }
 
+    #[cfg(feature = "libcamera")]
+    {
+        if args.use_libcamera {
+            let mut builder = sora_sdk::LibcameraVideoCapturer::builder()
+                .width(640)
+                .height(480);
+            for (key, value) in &args.libcamera_controls {
+                builder = builder.control(key.clone(), value.clone());
+            }
+            return Ok(VideoCapturerHolder::Libcamera(builder.build()?));
+        }
+    }
+
+    #[cfg(not(feature = "libcamera"))]
+    {
+        if args.use_libcamera {
+            return Err(io::Error::other(
+                "libcamera is not enabled in this build. Rebuild sumomo with --features libcamera",
+            )
+            .into());
+        }
+    }
+
     #[cfg(feature = "media-device")]
     {
-        if let Some(ref device_id) = _args.video_input_device {
+        if let Some(ref device_id) = args.video_input_device {
             return Ok(VideoCapturerHolder::Device(VideoDeviceCapturer::new(
                 Some(device_id.clone()),
             )?));

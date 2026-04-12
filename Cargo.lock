@@ -1392,6 +1392,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "50203212be42844ef00003e05fe57f0b19a80b33d9d35745c48efc01e5d2fb63"
 
 [[package]]
+name = "shiguredo_libcamera"
+version = "2026.1.0-canary.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25daab38f2b2e19a9ac0f1bcd5cd49e1e320de5aa03afea956771b90ecd5a524"
+dependencies = [
+ "bindgen",
+ "cc",
+ "pkg-config",
+]
+
+[[package]]
 name = "shiguredo_mp4"
 version = "2026.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1424,6 +1435,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f501556feebae970519ffa4afc5edb078c8eb16da4a0a2fbe803d75c0e34a79b"
 
 [[package]]
+name = "shiguredo_v4l2"
+version = "2026.1.0-canary.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce0377bc309ea9611934fbead0cabf422b9b917d39335b751d91e3f4d9a235bb"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "shiguredo_video_device"
 version = "2026.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1449,6 +1469,8 @@ dependencies = [
 [[package]]
 name = "shiguredo_webrtc"
 version = "0.147.1-canary.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f8b4227cca65b0c30a7b85943082da91bc547566575e539de9f0ea0222dd909"
 dependencies = [
  "bindgen",
  "nojson",
@@ -1518,6 +1540,7 @@ version = "2026.1.0-canary.6"
 dependencies = [
  "aws-lc-rs",
  "flate2",
+ "libc",
  "nojson",
  "proptest",
  "rand",
@@ -1526,9 +1549,11 @@ dependencies = [
  "rustls-webpki",
  "shiguredo_amf",
  "shiguredo_http11",
+ "shiguredo_libcamera",
  "shiguredo_mp4",
  "shiguredo_nvcodec",
  "shiguredo_openh264",
+ "shiguredo_v4l2",
  "shiguredo_vpl",
  "shiguredo_webrtc",
  "shiguredo_websocket",

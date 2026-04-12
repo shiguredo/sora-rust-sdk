@@ -23,6 +23,8 @@ amf = ["dep:shiguredo_amf"]
 nvcodec = ["dep:shiguredo_nvcodec"]
 openh264 = ["dep:shiguredo_openh264"]
 vpl = ["dep:shiguredo_vpl"]
+libcamera = ["dep:shiguredo_libcamera", "dep:libc"]
+v4l2 = ["dep:shiguredo_v4l2"]
 
 [dependencies]
 shiguredo_webrtc = { workspace = true }
@@ -32,6 +34,9 @@ shiguredo_amf = { version = "2026.1.0", optional = true }
 shiguredo_nvcodec = { version = "2026.1.0", optional = true }
 shiguredo_openh264 = { version = "2026.1.0", optional = true }
 shiguredo_vpl = { version = "2026.1.2", optional = true }
+shiguredo_libcamera = { version = "2026.1.0-canary.1", optional = true }
+shiguredo_v4l2 = { version = "2026.1.0-canary.1", optional = true }
+libc = { version = "0.2", optional = true }
 shiguredo_mp4 = "2026.3"
 nojson = "0.3"
 rand = "0.9"

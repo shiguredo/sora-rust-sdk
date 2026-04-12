@@ -52,6 +52,11 @@
   - e2e-tests に VPL の検証を追加する
   - sumomo の `--video-codec-implementation` と `--video-codec-list` で `vpl` を指定・表示できるようにする
   - @melpon
+- [ADD] libcamera を利用した映像キャプチャを追加する
+  - `LibcameraVideoCapturer::builder()` と `LibcameraVideoCapturerBuilder` を追加し、`camera_index` / `width` / `height` / `control(s)` を指定できるようにする
+  - sumomo に `--libcamera` と繰り返し指定可能な `--libcamera-control KEY=VALUE` を追加する
+  - e2e-tests に libcamera 実機検証を追加し、Raspberry Pi の self-hosted CI で `libcamera` feature を有効化する
+  - @melpon
 - [ADD] `nvcodec` の対応コーデックを拡張する
   - `NvCodecVideoCodecCapability` を H264/H265/AV1 エンコードと H264/H265/AV1/VP8/VP9 デコードの動的判定に対応する
   - @melpon

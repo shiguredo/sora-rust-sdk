@@ -29,6 +29,8 @@ fn test_args(
         duration: None,
         turn_tls_insecure: false,
         turn_tls_ca_cert: None,
+        use_libcamera: false,
+        libcamera_controls: Vec::new(),
         #[cfg(feature = "raw-player")]
         use_raw_player: false,
         #[cfg(feature = "media-device")]
@@ -46,6 +48,10 @@ fn capability_names(config: &SoraClientContextConfig) -> Vec<String> {
         .iter()
         .map(|capability| capability.get_implementation().name().to_string())
         .collect()
+}
+
+fn make_raw_args(values: &[&str]) -> noargs::RawArgs {
+    noargs::RawArgs::new(values.iter().map(|v| v.to_string()))
 }
 
 #[test]
@@ -119,6 +125,60 @@ fn parse_video_codec_implementation_accepts_vpl() {
 }
 
 #[test]
+fn parse_args_accepts_multiple_libcamera_controls() {
+    let raw_args = make_raw_args(&[
+        "sumomo",
+        "--signaling-url",
+        "wss://example.com/signaling",
+        "--channel-id",
+        "test-channel",
+        "--role",
+        "sendonly",
+        "--libcamera",
+        "--libcamera-control",
+        "Brightness=0.2",
+        "--libcamera-control",
+        "Contrast=1.5",
+    ]);
+    let args = crate::args::parse_args_from_raw_args(raw_args)
+        .expect("multiple libcamera controls must be parsed successfully");
+    assert!(args.use_libcamera);
+    assert_eq!(
+        args.libcamera_controls,
+        vec![
+            ("Brightness".to_string(), "0.2".to_string()),
+            ("Contrast".to_string(), "1.5".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn parse_args_rejects_invalid_libcamera_control_format() {
+    let raw_args = make_raw_args(&[
+        "sumomo",
+        "--signaling-url",
+        "wss://example.com/signaling",
+        "--channel-id",
+        "test-channel",
+        "--role",
+        "sendonly",
+        "--libcamera",
+        "--libcamera-control",
+        "Brightness",
+    ]);
+    let result = crate::args::parse_args_from_raw_args(raw_args);
+    assert!(
+        result.is_err(),
+        "invalid libcamera control format must fail"
+    );
+    let err = result.err().expect("error must exist");
+    assert!(
+        err.to_string()
+            .contains("--libcamera-control must be KEY=VALUE")
+    );
+}
+
+#[test]
 fn validate_args_accepts_openh264_with_path() {
     let args = test_args(
         VideoCodecImplementationSelections::Manual(vec![
@@ -170,6 +230,41 @@ fn validate_args_rejects_openh264_path_with_auto() {
         err.to_string()
             .contains("--openh264-path requires --video-codec-implementation to include openh264")
     );
+}
+
+#[test]
+fn validate_args_rejects_libcamera_control_without_libcamera() {
+    let mut args = test_args(VideoCodecImplementationSelections::Auto, None);
+    args.libcamera_controls = vec![("Brightness".to_string(), "0.2".to_string())];
+    let err = validate_args(&args).expect_err("libcamera control without libcamera must fail");
+    assert!(
+        err.to_string()
+            .contains("--libcamera-control requires --libcamera")
+    );
+}
+
+#[cfg(feature = "media-device")]
+#[test]
+fn validate_args_rejects_libcamera_with_video_input_device() {
+    let mut args = test_args(VideoCodecImplementationSelections::Auto, None);
+    args.use_libcamera = true;
+    args.video_input_device = Some("/dev/video0".to_string());
+    let err = validate_args(&args).expect_err("libcamera with video-input-device must fail");
+    assert!(
+        err.to_string()
+            .contains("--libcamera and --video-input-device cannot be used together")
+    );
+}
+
+#[cfg(not(feature = "libcamera"))]
+#[test]
+fn validate_args_rejects_libcamera_when_feature_is_disabled() {
+    let mut args = test_args(VideoCodecImplementationSelections::Auto, None);
+    args.use_libcamera = true;
+    let err = validate_args(&args).expect_err("libcamera must fail when feature is disabled");
+    assert!(err.to_string().contains(
+        "libcamera is not enabled in this build. Rebuild sumomo with --features libcamera"
+    ));
 }
 
 #[cfg(not(feature = "vpl"))]

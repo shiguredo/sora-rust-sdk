@@ -80,7 +80,7 @@ jobs:
           - labels: [self-hosted, linux, x64, Intel-VPL]
             features: "--features openh264,vpl"
           - labels: [self-hosted, linux, arm64, Raspberry-Pi]
-            features: "--features openh264"
+            features: "--features openh264,libcamera"
     runs-on:
       group: Self
       labels: ${{ matrix.labels }}
