@@ -154,7 +154,7 @@ impl Drop for LibcameraVideoCapturer {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum FramePixelFormat {
     I420,
     NV12,
@@ -198,246 +198,197 @@ fn run_libcamera_loop(
     camera.acquire()?;
 
     let mut requests: Vec<shiguredo_libcamera::Request> = Vec::new();
-    let mut camera_started = false;
-    let result = (|| -> Result<()> {
-        let mut camera_config = camera.generate_configuration(&[StreamRole::VideoRecording])?;
+    let mut camera_config = camera.generate_configuration(&[StreamRole::VideoRecording])?;
 
+    // まず YUV420(YU12) で設定してみて、ダメなら NV12 を試す
+    {
+        let mut stream_config = camera_config.at(0)?;
+        stream_config.set_size(Size {
+            width: width as u32,
+            height: height as u32,
+        });
+        stream_config.set_pixel_format(PixelFormat::from_fourcc(YU12_FOURCC));
+    }
+
+    let mut status = camera_config.validate();
+    if status.is_err() {
         {
             let mut stream_config = camera_config.at(0)?;
-            stream_config.set_size(Size {
-                width: width as u32,
-                height: height as u32,
-            });
             stream_config.set_pixel_format(PixelFormat::from_fourcc(NV12_FOURCC));
         }
+        status = camera_config.validate();
+    }
 
-        let mut status = camera_config.validate();
-        if status.is_err() {
-            {
-                let mut stream_config = camera_config.at(0)?;
-                stream_config.set_pixel_format(PixelFormat::from_fourcc(YU12_FOURCC));
-            }
-            status = camera_config.validate();
-        }
+    let status = status?;
 
-        let status = status?;
+    camera.configure(&mut camera_config)?;
 
-        camera.configure(&mut camera_config)?;
-
-        let (width, height, stride, frame_pixel_format) = {
-            let stream_config = camera_config.at(0)?;
-            let size = stream_config.size();
-            let pixel_format = stream_config.pixel_format();
-            let frame_pixel_format = if pixel_format.fourcc == YU12_FOURCC {
-                FramePixelFormat::I420
-            } else if pixel_format.fourcc == NV12_FOURCC {
-                FramePixelFormat::NV12
-            } else {
+    let (width, height, stride, frame_pixel_format) = {
+        let stream_config = camera_config.at(0)?;
+        let size = stream_config.size();
+        let pixel_format = stream_config.pixel_format();
+        let frame_pixel_format = match pixel_format.fourcc {
+            YU12_FOURCC => FramePixelFormat::I420,
+            NV12_FOURCC => FramePixelFormat::NV12,
+            _ => {
                 return Err(Error::LibcameraMessage {
                     message: format!("unsupported pixel format: {}", pixel_format),
                 });
-            };
-            (
-                size.width as i32,
-                size.height as i32,
-                stream_config.stride() as usize,
-                frame_pixel_format,
-            )
+            }
         };
+        (
+            size.width as i32,
+            size.height as i32,
+            stream_config.stride() as usize,
+            frame_pixel_format,
+        )
+    };
 
-        if status == ConfigStatus::Adjusted {
-            rtc_log_info!(
-                "libcamera configuration adjusted: width={} height={} stride={}",
-                width,
-                height,
-                stride
-            );
-        }
-
-        let stream = {
-            let stream_config = camera_config.at(0)?;
-            stream_config
-                .stream()
-                .ok_or_else(|| Error::LibcameraMessage {
-                    message: "failed to get stream".to_string(),
-                })?
-        };
-
-        let allocator = FrameBufferAllocator::new(&camera);
-        let buffer_count = allocator.allocate(&stream)?;
-
-        let (tx, rx) = std::sync::mpsc::channel::<(u64, Option<FrameInfo>)>();
-        let stream_for_callback = stream.clone();
-        camera.on_request_completed(move |completed| {
-            if completed.status() != RequestStatus::Complete {
-                return;
-            }
-
-            let Some(buffer) = completed.find_buffer(&stream_for_callback) else {
-                return;
-            };
-            let metadata = buffer.metadata();
-
-            if metadata.status != FrameStatus::Success {
-                let _ = tx.send((completed.cookie(), None));
-                return;
-            }
-
-            let planes_count = buffer.planes_count();
-            if planes_count == 0 {
-                let _ = tx.send((completed.cookie(), None));
-                return;
-            }
-
-            let mut planes = Vec::with_capacity(planes_count);
-            for index in 0..planes_count {
-                let Some(plane) = buffer.plane(index) else {
-                    continue;
-                };
-                planes.push(FramePlaneInfo {
-                    fd: plane.fd,
-                    offset: plane.offset,
-                    length: plane.length,
-                });
-            }
-
-            if planes.is_empty() {
-                let _ = tx.send((completed.cookie(), None));
-                return;
-            }
-
-            let timestamp_us = (metadata.timestamp / 1000) as i64;
-            let _ = tx.send((completed.cookie(), Some((planes, timestamp_us))));
-        });
-
-        let parsed_controls = parse_controls(&controls);
-
-        requests.clear();
-        requests.reserve(buffer_count);
-        for index in 0..buffer_count {
-            let buffer = allocator.get_buffer(&stream, index)?;
-            let request = camera.create_request(index as u64)?;
-            request.add_buffer(&stream, &buffer)?;
-            apply_controls(&request, &parsed_controls);
-            requests.push(request);
-        }
-
-        camera.start()?;
-        camera_started = true;
-
-        for request in &requests {
-            camera.queue_request(request)?;
-        }
-
+    if status == ConfigStatus::Adjusted {
         rtc_log_info!(
-            "libcamera capture started: camera_id={} width={} height={} stride={} buffers={}",
-            camera.id(),
+            "libcamera configuration adjusted: width={} height={} stride={}",
             width,
             height,
-            stride,
-            buffer_count
+            stride
         );
+    }
 
-        let mut aligner = TimestampAligner::new();
-        let mut stopping = false;
-        let mut stopping_idle_ticks = 0u32;
+    let stream = {
+        let stream_config = camera_config.at(0)?;
+        stream_config
+            .stream()
+            .ok_or_else(|| Error::LibcameraMessage {
+                message: "failed to get stream".to_string(),
+            })?
+    };
 
-        loop {
-            if !stopping && stop.load(Ordering::Acquire) {
-                // 停止要求後は requeue を止め、完了通知の流れが落ち着くまで待機する。
-                stopping = true;
-                stopping_idle_ticks = 0;
-            }
+    let allocator = FrameBufferAllocator::new(&camera);
+    let buffer_count = allocator.allocate(&stream)?;
 
-            let recv_result = rx.recv_timeout(Duration::from_millis(100));
-            let (cookie, frame_info) = match recv_result {
-                Ok(v) => {
-                    if stopping {
-                        stopping_idle_ticks = 0;
-                    }
-                    v
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    if stopping {
-                        stopping_idle_ticks += 1;
-                        if stopping_idle_ticks >= 5 {
-                            break;
-                        }
-                    }
-                    continue;
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-            };
-
-            if stopping {
-                continue;
-            }
-
-            if let Some((planes, timestamp_us)) = frame_info {
-                match frame_pixel_format {
-                    FramePixelFormat::I420 => {
-                        let buffer_result = copy_i420_planes_to_buffer(&planes, width, height);
-                        match buffer_result {
-                            Ok(buffer) => on_frame_buffer(
-                                &mut source,
-                                &mut aligner,
-                                buffer.cast_to_video_frame_buffer(),
-                                width,
-                                height,
-                                timestamp_us,
-                            ),
-                            Err(err) => {
-                                rtc_log_warning!(
-                                    "failed to read i420 frame: width={} height={} stride={} planes={} err={}",
-                                    width,
-                                    height,
-                                    stride,
-                                    planes.len(),
-                                    err
-                                );
-                            }
-                        }
-                    }
-                    FramePixelFormat::NV12 => {
-                        let buffer_result = copy_nv12_planes_to_buffer(&planes, width, height);
-                        match buffer_result {
-                            Ok(buffer) => on_frame_buffer(
-                                &mut source,
-                                &mut aligner,
-                                buffer.cast_to_video_frame_buffer(),
-                                width,
-                                height,
-                                timestamp_us,
-                            ),
-                            Err(err) => {
-                                rtc_log_warning!(
-                                    "failed to read nv12 frame: width={} height={} stride={} planes={} err={}",
-                                    width,
-                                    height,
-                                    stride,
-                                    planes.len(),
-                                    err
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-
-            requeue_request(&camera, &requests, cookie, &parsed_controls);
+    let (tx, rx) = std::sync::mpsc::channel::<(u64, Option<FrameInfo>)>();
+    let stream_for_callback = stream.clone();
+    camera.on_request_completed(move |completed| {
+        if completed.status() != RequestStatus::Complete {
+            return;
         }
 
-        Ok(())
-    })();
+        let Some(buffer) = completed.find_buffer(&stream_for_callback) else {
+            return;
+        };
+        let metadata = buffer.metadata();
 
-    if camera_started {
-        let _ = camera.stop();
+        if metadata.status != FrameStatus::Success {
+            let _ = tx.send((completed.cookie(), None));
+            return;
+        }
+
+        let planes_count = buffer.planes_count();
+        if planes_count == 0 {
+            let _ = tx.send((completed.cookie(), None));
+            return;
+        }
+
+        let mut planes = Vec::with_capacity(planes_count);
+        for index in 0..planes_count {
+            let Some(plane) = buffer.plane(index) else {
+                continue;
+            };
+            planes.push(FramePlaneInfo {
+                fd: plane.fd,
+                offset: plane.offset,
+                length: plane.length,
+            });
+        }
+
+        if planes.is_empty() {
+            let _ = tx.send((completed.cookie(), None));
+            return;
+        }
+
+        let timestamp_us = (metadata.timestamp / 1000) as i64;
+        let _ = tx.send((completed.cookie(), Some((planes, timestamp_us))));
+    });
+
+    let parsed_controls = parse_controls(&controls);
+
+    requests.clear();
+    requests.reserve(buffer_count);
+    for index in 0..buffer_count {
+        let buffer = allocator.get_buffer(&stream, index)?;
+        let request = camera.create_request(index as u64)?;
+        request.add_buffer(&stream, &buffer)?;
+        apply_controls(&request, &parsed_controls);
+        requests.push(request);
     }
+
+    camera.start()?;
+
+    for request in &requests {
+        camera.queue_request(request)?;
+    }
+
+    rtc_log_info!(
+        "libcamera capture started: camera_id={} width={} height={} stride={} buffers={}",
+        camera.id(),
+        width,
+        height,
+        stride,
+        buffer_count
+    );
+
+    let mut aligner = TimestampAligner::new();
+
+    loop {
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
+
+        let recv_result = rx.recv_timeout(Duration::from_millis(100));
+        let (cookie, frame_info) = match recv_result {
+            Ok(v) => v,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+
+        if let Some((planes, timestamp_us)) = frame_info {
+            let buffer = match frame_pixel_format {
+                FramePixelFormat::I420 => copy_i420_planes_to_buffer(&planes, width, height)
+                    .map(|v| v.cast_to_video_frame_buffer()),
+                FramePixelFormat::NV12 => copy_nv12_planes_to_buffer(&planes, width, height)
+                    .map(|v| v.cast_to_video_frame_buffer()),
+            };
+            match buffer {
+                Ok(buffer) => on_frame_buffer(
+                    &mut source,
+                    &mut aligner,
+                    buffer,
+                    width,
+                    height,
+                    timestamp_us,
+                ),
+                Err(err) => {
+                    rtc_log_warning!(
+                        "failed to read frame: format={:?} width={} height={} stride={} planes={} err={}",
+                        frame_pixel_format,
+                        width,
+                        height,
+                        stride,
+                        planes.len(),
+                        err
+                    );
+                }
+            }
+        }
+
+        requeue_request(&camera, &requests, cookie, &parsed_controls);
+    }
+
+    let _ = camera.stop();
     let _ = camera.release();
 
     rtc_log_info!("libcamera capture stopped");
 
-    result
+    Ok(())
 }
 
 fn on_frame_buffer(
@@ -624,7 +575,7 @@ fn copy_i420_planes_to_buffer(
         height,
     ) {
         return Err(Error::LibcameraMessage {
-            message: "failed to copy i420 frame using libyuv".to_string(),
+            message: "failed to copy i420 frame".to_string(),
         });
     }
 
@@ -696,7 +647,7 @@ fn copy_nv12_planes_to_buffer(
         height,
     ) {
         return Err(Error::LibcameraMessage {
-            message: "failed to copy nv12 frame using libyuv".to_string(),
+            message: "failed to copy nv12 frame".to_string(),
         });
     }
 

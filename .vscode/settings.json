@@ -9,5 +9,4 @@
     "**/node_modules/**": true,
     "**/_build/**": true,
   },
-  "rust-analyzer.cargo.features": ["media-device"],
 }
