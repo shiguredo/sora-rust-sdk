@@ -160,14 +160,58 @@ enum FramePixelFormat {
     NV12,
 }
 
-#[derive(Clone, Copy)]
-struct FramePlaneInfo {
-    fd: i32,
-    offset: u32,
-    length: u32,
+#[derive(Debug)]
+struct MappedPlane {
+    ptr: *mut std::ffi::c_void,
+    mapped_len: usize,
+    data_offset: usize,
+    data_len: usize,
 }
 
-type FrameInfo = (Vec<FramePlaneInfo>, i64);
+impl MappedPlane {
+    fn as_slice(&self) -> &[u8] {
+        let data_ptr = unsafe { (self.ptr as *const u8).add(self.data_offset) };
+        unsafe { std::slice::from_raw_parts(data_ptr, self.data_len) }
+    }
+}
+
+impl AsRef<[u8]> for MappedPlane {
+    fn as_ref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl Drop for MappedPlane {
+    fn drop(&mut self) {
+        if self.ptr != libc::MAP_FAILED {
+            unsafe {
+                libc::munmap(self.ptr, self.mapped_len);
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct MappedFrameBuffers {
+    planes: Vec<Vec<MappedPlane>>,
+}
+
+impl MappedFrameBuffers {
+    fn new(capacity: usize) -> Self {
+        Self {
+            planes: Vec::with_capacity(capacity),
+        }
+    }
+    fn push(&mut self, mapped_planes: Vec<MappedPlane>) {
+        self.planes.push(mapped_planes);
+    }
+    fn get(&self, index: usize) -> Option<&Vec<MappedPlane>> {
+        self.planes.get(index)
+    }
+    fn len(&self) -> usize {
+        self.planes.len()
+    }
+}
 
 fn run_libcamera_loop(
     mut source: AdaptedVideoTrackSource,
@@ -265,7 +309,7 @@ fn run_libcamera_loop(
     let allocator = FrameBufferAllocator::new(&camera);
     let buffer_count = allocator.allocate(&stream)?;
 
-    let (tx, rx) = std::sync::mpsc::channel::<(u64, Option<FrameInfo>)>();
+    let (tx, rx) = std::sync::mpsc::channel::<(u64, Option<i64>)>();
     let stream_for_callback = stream.clone();
     camera.on_request_completed(move |completed| {
         if completed.status() != RequestStatus::Complete {
@@ -282,43 +326,23 @@ fn run_libcamera_loop(
             return;
         }
 
-        let planes_count = buffer.planes_count();
-        if planes_count == 0 {
-            let _ = tx.send((completed.cookie(), None));
-            return;
-        }
-
-        let mut planes = Vec::with_capacity(planes_count);
-        for index in 0..planes_count {
-            let Some(plane) = buffer.plane(index) else {
-                continue;
-            };
-            planes.push(FramePlaneInfo {
-                fd: plane.fd,
-                offset: plane.offset,
-                length: plane.length,
-            });
-        }
-
-        if planes.is_empty() {
-            let _ = tx.send((completed.cookie(), None));
-            return;
-        }
-
         let timestamp_us = (metadata.timestamp / 1000) as i64;
-        let _ = tx.send((completed.cookie(), Some((planes, timestamp_us))));
+        let _ = tx.send((completed.cookie(), Some(timestamp_us)));
     });
 
     let parsed_controls = parse_controls(&controls);
 
+    let mut mapped_frame_buffers = MappedFrameBuffers::new(buffer_count);
     requests.clear();
     requests.reserve(buffer_count);
     for index in 0..buffer_count {
         let buffer = allocator.get_buffer(&stream, index)?;
+        let mapped_planes = map_frame_buffer_readonly(&buffer)?;
         let request = camera.create_request(index as u64)?;
         request.add_buffer(&stream, &buffer)?;
         apply_controls(&request, &parsed_controls);
         requests.push(request);
+        mapped_frame_buffers.push(mapped_planes);
     }
 
     camera.start()?;
@@ -350,11 +374,21 @@ fn run_libcamera_loop(
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         };
 
-        if let Some((planes, timestamp_us)) = frame_info {
+        if let Some(timestamp_us) = frame_info {
+            let Some(mapped_planes) = mapped_frame_buffers.get(cookie as usize) else {
+                rtc_log_warning!(
+                    "mapped buffer is missing for request cookie: cookie={} buffers={}",
+                    cookie,
+                    mapped_frame_buffers.len()
+                );
+                requeue_request(&camera, &requests, cookie, &parsed_controls);
+                continue;
+            };
+
             let buffer = match frame_pixel_format {
-                FramePixelFormat::I420 => copy_i420_planes_to_buffer(&planes, width, height)
+                FramePixelFormat::I420 => copy_i420_planes_to_buffer(mapped_planes, width, height)
                     .map(|v| v.cast_to_video_frame_buffer()),
-                FramePixelFormat::NV12 => copy_nv12_planes_to_buffer(&planes, width, height)
+                FramePixelFormat::NV12 => copy_nv12_planes_to_buffer(mapped_planes, width, height)
                     .map(|v| v.cast_to_video_frame_buffer()),
             };
             match buffer {
@@ -373,7 +407,7 @@ fn run_libcamera_loop(
                         width,
                         height,
                         stride,
-                        planes.len(),
+                        mapped_planes.len(),
                         err
                     );
                 }
@@ -431,31 +465,7 @@ fn on_frame_buffer(
     source.on_frame(&video_frame);
 }
 
-struct MappedBuffer {
-    ptr: *mut std::ffi::c_void,
-    mapped_len: usize,
-    data_offset: usize,
-    data_len: usize,
-}
-
-impl MappedBuffer {
-    fn as_slice(&self) -> &[u8] {
-        let data_ptr = unsafe { (self.ptr as *const u8).add(self.data_offset) };
-        unsafe { std::slice::from_raw_parts(data_ptr, self.data_len) }
-    }
-}
-
-impl Drop for MappedBuffer {
-    fn drop(&mut self) {
-        if self.ptr != libc::MAP_FAILED {
-            unsafe {
-                libc::munmap(self.ptr, self.mapped_len);
-            }
-        }
-    }
-}
-
-fn map_dmabuf_readonly(fd: i32, offset: u32, length: u32) -> Result<MappedBuffer> {
+fn map_dmabuf_readonly(fd: i32, offset: u32, length: u32) -> Result<MappedPlane> {
     let data_len = length as usize;
     let page_size_raw = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
     if page_size_raw <= 0 {
@@ -488,12 +498,35 @@ fn map_dmabuf_readonly(fd: i32, offset: u32, length: u32) -> Result<MappedBuffer
         return Err(std::io::Error::last_os_error().into());
     }
 
-    Ok(MappedBuffer {
+    Ok(MappedPlane {
         ptr,
         mapped_len,
         data_offset,
         data_len,
     })
+}
+
+fn map_frame_buffer_readonly(
+    buffer: &shiguredo_libcamera::FrameBuffer,
+) -> Result<Vec<MappedPlane>> {
+    let planes_count = buffer.planes_count();
+    if planes_count == 0 {
+        return Err(Error::LibcameraMessage {
+            message: "frame buffer has no planes".to_string(),
+        });
+    }
+
+    let mut mapped_planes = Vec::with_capacity(planes_count);
+    for index in 0..planes_count {
+        let plane = buffer.plane(index).ok_or_else(|| Error::LibcameraMessage {
+            message: format!(
+                "failed to get frame plane: index={} total={}",
+                index, planes_count
+            ),
+        })?;
+        mapped_planes.push(map_dmabuf_readonly(plane.fd, plane.offset, plane.length)?);
+    }
+    Ok(mapped_planes)
 }
 
 fn plane_stride_from_len(plane_len: usize, rows: usize) -> Option<i32> {
@@ -503,11 +536,10 @@ fn plane_stride_from_len(plane_len: usize, rows: usize) -> Option<i32> {
     i32::try_from(plane_len / rows).ok()
 }
 
-fn copy_i420_planes_to_buffer(
-    planes: &[FramePlaneInfo],
-    width: i32,
-    height: i32,
-) -> Result<I420Buffer> {
+fn copy_i420_planes_to_buffer<P>(planes: &[P], width: i32, height: i32) -> Result<I420Buffer>
+where
+    P: AsRef<[u8]>,
+{
     if width <= 0 || height <= 0 || planes.len() < 3 {
         return Err(Error::LibcameraMessage {
             message: format!(
@@ -519,15 +551,11 @@ fn copy_i420_planes_to_buffer(
         });
     }
 
-    let y_plane = map_dmabuf_readonly(planes[0].fd, planes[0].offset, planes[0].length)?;
-    let u_plane = map_dmabuf_readonly(planes[1].fd, planes[1].offset, planes[1].length)?;
-    let v_plane = map_dmabuf_readonly(planes[2].fd, planes[2].offset, planes[2].length)?;
-
     let height_rows = height as usize;
     let chroma_rows = ((height + 1) / 2) as usize;
-    let src_y = y_plane.as_slice();
-    let src_u = u_plane.as_slice();
-    let src_v = v_plane.as_slice();
+    let src_y = planes[0].as_ref();
+    let src_u = planes[1].as_ref();
+    let src_v = planes[2].as_ref();
     let src_stride_y =
         plane_stride_from_len(src_y.len(), height_rows).ok_or_else(|| Error::LibcameraMessage {
             message: format!(
@@ -582,11 +610,10 @@ fn copy_i420_planes_to_buffer(
     Ok(buffer)
 }
 
-fn copy_nv12_planes_to_buffer(
-    planes: &[FramePlaneInfo],
-    width: i32,
-    height: i32,
-) -> Result<NV12Buffer> {
+fn copy_nv12_planes_to_buffer<P>(planes: &[P], width: i32, height: i32) -> Result<NV12Buffer>
+where
+    P: AsRef<[u8]>,
+{
     if width <= 0 || height <= 0 || planes.len() < 2 {
         return Err(Error::LibcameraMessage {
             message: format!(
@@ -598,37 +625,27 @@ fn copy_nv12_planes_to_buffer(
         });
     }
 
-    let y_plane = map_dmabuf_readonly(planes[0].fd, planes[0].offset, planes[0].length)?;
-    let uv_plane = map_dmabuf_readonly(planes[1].fd, planes[1].offset, planes[1].length)?;
-
     let height_rows = height as usize;
     let chroma_rows = ((height + 1) / 2) as usize;
-    let src_y = y_plane.as_slice();
-    let src_uv = uv_plane.as_slice();
-    let src_stride_y = match plane_stride_from_len(src_y.len(), height_rows) {
-        Some(value) => value,
-        None => {
-            return Err(Error::LibcameraMessage {
-                message: format!(
-                    "invalid nv12 y stride: bytes={} rows={}",
-                    src_y.len(),
-                    height_rows
-                ),
-            });
+    let src_y = planes[0].as_ref();
+    let src_uv = planes[1].as_ref();
+    let src_stride_y =
+        plane_stride_from_len(src_y.len(), height_rows).ok_or_else(|| Error::LibcameraMessage {
+            message: format!(
+                "invalid nv12 y stride: bytes={} rows={}",
+                src_y.len(),
+                height_rows
+            ),
+        })?;
+    let src_stride_uv = plane_stride_from_len(src_uv.len(), chroma_rows).ok_or_else(|| {
+        Error::LibcameraMessage {
+            message: format!(
+                "invalid nv12 uv stride: bytes={} rows={}",
+                src_uv.len(),
+                chroma_rows
+            ),
         }
-    };
-    let src_stride_uv = match plane_stride_from_len(src_uv.len(), chroma_rows) {
-        Some(value) => value,
-        None => {
-            return Err(Error::LibcameraMessage {
-                message: format!(
-                    "invalid nv12 uv stride: bytes={} rows={}",
-                    src_uv.len(),
-                    chroma_rows
-                ),
-            });
-        }
-    };
+    })?;
 
     let mut buffer = NV12Buffer::new(width, height);
     let dst_stride_y = buffer.stride_y();
@@ -1006,5 +1023,67 @@ fn apply_controls(request: &shiguredo_libcamera::Request, controls: &[ParsedCont
             ControlValue::Rect(value) => control_list.set_rectangle(control.id, *value),
             ControlValue::RectArray(value) => control_list.set_rectangle_array(control.id, value),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copy_i420_planes_to_buffer_reads_pre_mapped_planes() {
+        let planes = vec![
+            vec![0_u8, 1, 2, 3, 4, 5, 6, 7],
+            vec![10_u8, 11],
+            vec![20_u8, 21],
+        ];
+
+        let buffer = copy_i420_planes_to_buffer(&planes, 4, 2)
+            .expect("copy_i420_planes_to_buffer should succeed");
+
+        assert_eq!(&buffer.y_data()[..8], &[0_u8, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(&buffer.u_data()[..2], &[10_u8, 11]);
+        assert_eq!(&buffer.v_data()[..2], &[20_u8, 21]);
+    }
+
+    #[test]
+    fn copy_nv12_planes_to_buffer_reads_pre_mapped_planes() {
+        let planes = vec![vec![0_u8, 1, 2, 3, 4, 5, 6, 7], vec![10_u8, 11, 12, 13]];
+
+        let buffer = copy_nv12_planes_to_buffer(&planes, 4, 2)
+            .expect("copy_nv12_planes_to_buffer should succeed");
+
+        assert_eq!(&buffer.y_data()[..8], &[0_u8, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(&buffer.uv_data()[..4], &[10_u8, 11, 12, 13]);
+    }
+
+    #[test]
+    fn copy_i420_planes_to_buffer_rejects_insufficient_planes() {
+        let planes = vec![vec![0_u8; 8], vec![0_u8; 2]];
+        let err = match copy_i420_planes_to_buffer(&planes, 4, 2) {
+            Ok(_) => panic!("copy_i420_planes_to_buffer should fail"),
+            Err(err) => err,
+        };
+        assert!(format!("{err}").contains("invalid i420 frame metadata"));
+    }
+
+    #[test]
+    fn copy_i420_planes_to_buffer_rejects_invalid_stride() {
+        let planes = vec![vec![0_u8; 7], vec![0_u8; 2], vec![0_u8; 2]];
+        let err = match copy_i420_planes_to_buffer(&planes, 4, 2) {
+            Ok(_) => panic!("copy_i420_planes_to_buffer should fail"),
+            Err(err) => err,
+        };
+        assert!(format!("{err}").contains("invalid i420 y stride"));
+    }
+
+    #[test]
+    fn copy_nv12_planes_to_buffer_rejects_invalid_stride() {
+        let planes = vec![vec![0_u8; 8], vec![0_u8; 3]];
+        let err = match copy_nv12_planes_to_buffer(&planes, 4, 4) {
+            Ok(_) => panic!("copy_nv12_planes_to_buffer should fail"),
+            Err(err) => err,
+        };
+        assert!(format!("{err}").contains("invalid nv12 uv stride"));
     }
 }
