@@ -546,7 +546,7 @@ fn map_dmabuf_readonly(fd: i32, offset: u32, length: u32) -> Result<MappedBuffer
 }
 
 fn plane_stride_from_len(plane_len: usize, rows: usize) -> Option<i32> {
-    if rows == 0 || plane_len == 0 || plane_len % rows != 0 {
+    if rows == 0 || plane_len == 0 || !plane_len.is_multiple_of(rows) {
         return None;
     }
     i32::try_from(plane_len / rows).ok()
