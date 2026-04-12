@@ -79,6 +79,8 @@ jobs:
             features: "--features openh264,amf"
           - labels: [self-hosted, linux, x64, Intel-VPL]
             features: "--features openh264,vpl"
+          - labels: [self-hosted, linux, arm64, Raspberry-Pi]
+            features: "--features openh264"
     runs-on:
       group: Self
       labels: ${{ matrix.labels }}
