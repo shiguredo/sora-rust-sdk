@@ -121,11 +121,7 @@ impl VideoCodecImplementationSelections {
     }
 }
 
-pub(crate) fn parse_args() -> Result<Args> {
-    parse_args_from_raw_args(noargs::raw_args())
-}
-
-pub(crate) fn parse_args_from_raw_args(mut args: noargs::RawArgs) -> Result<Args> {
+pub(crate) fn parse_args(mut args: noargs::RawArgs) -> Result<Args> {
     args.metadata_mut().app_name = env!("CARGO_PKG_NAME");
     args.metadata_mut().app_description = "Sora WebSocket シグナリングの最小サンプル";
 

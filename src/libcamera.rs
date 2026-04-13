@@ -1,3 +1,4 @@
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -66,22 +67,18 @@ impl LibcameraVideoCapturerBuilder {
     }
 
     pub fn build(self) -> Result<LibcameraVideoCapturer> {
-        if self.width <= 0 {
+        if self.width <= 0 || self.height <= 0 {
             return Err(Error::LibcameraMessage {
-                message: format!("width must be greater than 0: {}", self.width),
-            });
-        }
-        if self.height <= 0 {
-            return Err(Error::LibcameraMessage {
-                message: format!("height must be greater than 0: {}", self.height),
+                message: format!(
+                    "width and height must be greater than 0: {}x{}",
+                    self.width, self.height
+                ),
             });
         }
 
         let source = AdaptedVideoTrackSource::new();
-        let video_source = source.cast_to_video_track_source();
         Ok(LibcameraVideoCapturer {
             source,
-            video_source,
             camera_index: self.camera_index,
             width: self.width,
             height: self.height,
@@ -94,7 +91,6 @@ impl LibcameraVideoCapturerBuilder {
 
 pub struct LibcameraVideoCapturer {
     source: AdaptedVideoTrackSource,
-    video_source: VideoTrackSource,
     camera_index: u32,
     width: i32,
     height: i32,
@@ -144,7 +140,7 @@ impl LibcameraVideoCapturer {
     }
 
     pub fn video_source(&self) -> VideoTrackSource {
-        self.video_source.clone()
+        self.source.cast_to_video_track_source()
     }
 }
 
@@ -160,17 +156,17 @@ enum FramePixelFormat {
     NV12,
 }
 
+/// MappedPlane は I420 や NV12 の各平面（Y/U/V, Y/UV）を表す
 #[derive(Debug)]
 struct MappedPlane {
-    ptr: *mut std::ffi::c_void,
-    mapped_len: usize,
+    mapping: Rc<MappedDmabuf>,
     data_offset: usize,
     data_len: usize,
 }
 
 impl MappedPlane {
     fn as_slice(&self) -> &[u8] {
-        let data_ptr = unsafe { (self.ptr as *const u8).add(self.data_offset) };
+        let data_ptr = unsafe { (self.mapping.ptr as *const u8).add(self.data_offset) };
         unsafe { std::slice::from_raw_parts(data_ptr, self.data_len) }
     }
 }
@@ -181,7 +177,13 @@ impl AsRef<[u8]> for MappedPlane {
     }
 }
 
-impl Drop for MappedPlane {
+#[derive(Debug)]
+struct MappedDmabuf {
+    ptr: *mut std::ffi::c_void,
+    mapped_len: usize,
+}
+
+impl Drop for MappedDmabuf {
     fn drop(&mut self) {
         if self.ptr != libc::MAP_FAILED {
             unsafe {
@@ -465,24 +467,7 @@ fn on_frame_buffer(
     source.on_frame(&video_frame);
 }
 
-fn map_dmabuf_readonly(fd: i32, offset: u32, length: u32) -> Result<MappedPlane> {
-    let data_len = length as usize;
-    let page_size_raw = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-    if page_size_raw <= 0 {
-        return Err(Error::LibcameraMessage {
-            message: "failed to get system page size".to_string(),
-        });
-    }
-    let page_size = page_size_raw as usize;
-    let offset_usize = offset as usize;
-    let aligned_offset = offset_usize / page_size * page_size;
-    let data_offset = offset_usize - aligned_offset;
-    let mapped_len = data_len
-        .checked_add(data_offset)
-        .ok_or_else(|| Error::LibcameraMessage {
-            message: "mapped length overflow".to_string(),
-        })?;
-
+fn map_dmabuf_readonly(fd: i32, mapped_len: usize) -> Result<MappedDmabuf> {
     let ptr = unsafe {
         libc::mmap(
             std::ptr::null_mut(),
@@ -490,7 +475,7 @@ fn map_dmabuf_readonly(fd: i32, offset: u32, length: u32) -> Result<MappedPlane>
             libc::PROT_READ,
             libc::MAP_SHARED,
             fd,
-            aligned_offset as libc::off_t,
+            0,
         )
     };
 
@@ -498,12 +483,7 @@ fn map_dmabuf_readonly(fd: i32, offset: u32, length: u32) -> Result<MappedPlane>
         return Err(std::io::Error::last_os_error().into());
     }
 
-    Ok(MappedPlane {
-        ptr,
-        mapped_len,
-        data_offset,
-        data_len,
-    })
+    Ok(MappedDmabuf { ptr, mapped_len })
 }
 
 fn map_frame_buffer_readonly(
@@ -516,17 +496,41 @@ fn map_frame_buffer_readonly(
         });
     }
 
-    let mut mapped_planes = Vec::with_capacity(planes_count);
-    for index in 0..planes_count {
-        let plane = buffer.plane(index).ok_or_else(|| Error::LibcameraMessage {
-            message: format!(
-                "failed to get frame plane: index={} total={}",
-                index, planes_count
-            ),
-        })?;
-        mapped_planes.push(map_dmabuf_readonly(plane.fd, plane.offset, plane.length)?);
+    let planes = (0..planes_count)
+        .map(|index| {
+            buffer.plane(index).ok_or_else(|| Error::LibcameraMessage {
+                message: format!("failed to get plane {} from frame buffer", index),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    // 全 plane の fd が一致していることを確認する
+    let mut fds = planes.iter().map(|plane| plane.fd);
+    let first_fd = fds.next().ok_or_else(|| Error::LibcameraMessage {
+        message: "frame buffer has no planes".to_string(),
+    })?;
+    if !fds.all(|fd| fd == first_fd) {
+        return Err(Error::LibcameraMessage {
+            message: "all frame planes must share the same fd".to_string(),
+        });
     }
-    Ok(mapped_planes)
+
+    // 全 plane をカバーするのに十分な長さのメモリをマッピングする
+    let mapped_len = planes
+        .iter()
+        .map(|plane| plane.offset as usize + plane.length as usize)
+        .max()
+        .unwrap_or(0);
+    let mapping = Rc::new(map_dmabuf_readonly(first_fd, mapped_len)?);
+
+    Ok(planes
+        .iter()
+        .map(|plane| MappedPlane {
+            mapping: mapping.clone(),
+            data_offset: plane.offset as usize,
+            data_len: plane.length as usize,
+        })
+        .collect::<Vec<_>>())
 }
 
 fn plane_stride_from_len(plane_len: usize, rows: usize) -> Option<i32> {

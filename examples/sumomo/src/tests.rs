@@ -140,7 +140,7 @@ fn parse_args_accepts_multiple_libcamera_controls() {
         "--libcamera-control",
         "Contrast=1.5",
     ]);
-    let args = crate::args::parse_args_from_raw_args(raw_args)
+    let args = crate::args::parse_args(raw_args)
         .expect("multiple libcamera controls must be parsed successfully");
     assert!(args.use_libcamera);
     assert_eq!(
@@ -166,7 +166,7 @@ fn parse_args_rejects_invalid_libcamera_control_format() {
         "--libcamera-control",
         "Brightness",
     ]);
-    let result = crate::args::parse_args_from_raw_args(raw_args);
+    let result = crate::args::parse_args(raw_args);
     assert!(
         result.is_err(),
         "invalid libcamera control format must fail"

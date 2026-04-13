@@ -621,7 +621,7 @@ fn run_with_raw_player(args: Args) -> Result<()> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    let args = parse_args()?;
+    let args = parse_args(noargs::raw_args())?;
 
     // codec list モードは接続処理を行わず早期終了する。
     if args.video_codec_list {
