@@ -130,12 +130,16 @@ impl AmfVideoEncoder {
         }
     }
 
-    fn rebuild_encoder(&mut self) -> std::result::Result<(), ()> {
+    fn rebuild_encoder(&mut self) -> Result<()> {
         if self.width == 0 || self.height == 0 {
-            return Err(());
+            return Err(crate::Error::AmfMessage {
+                reason: "AMF encoder requires non-zero width and height".to_string(),
+            });
         }
         let Some(codec_config) = encoder_codec_config(self.codec_type) else {
-            return Err(());
+            return Err(crate::Error::AmfMessage {
+                reason: "AMF encoder codec type is not supported".to_string(),
+            });
         };
 
         let mut config = EncoderConfig::new(
@@ -149,9 +153,10 @@ impl AmfVideoEncoder {
         );
         config.target_kbps = Some(target_kbps_from_bps(self.target_bitrate_bps));
 
-        self.encoder = Encoder::new(config).ok();
+        let encoder = Encoder::new(config)?;
+        self.encoder = Some(encoder);
         self.reconfigure_needed = false;
-        self.encoder.as_ref().map(|_| ()).ok_or(())
+        Ok(())
     }
 }
 
@@ -344,14 +349,17 @@ impl AmfVideoDecoder {
         }
     }
 
-    fn ensure_decoder(&mut self) -> std::result::Result<(), ()> {
+    fn ensure_decoder(&mut self) -> Result<()> {
         if self.decoder.is_none() {
             let Some(codec) = decoder_codec(self.codec_type) else {
-                return Err(());
+                return Err(crate::Error::AmfMessage {
+                    reason: "AMF decoder codec type is not supported".to_string(),
+                });
             };
-            self.decoder = Decoder::new(DecoderConfig { codec }).ok();
+            let decoder = Decoder::new(DecoderConfig { codec })?;
+            self.decoder = Some(decoder);
         }
-        self.decoder.as_ref().map(|_| ()).ok_or(())
+        Ok(())
     }
 }
 
@@ -487,16 +495,13 @@ impl AmfVideoCodecCapability {
                 reason: "AMF does not support any encoder or decoder codec".to_string(),
             });
         }
-        Ok(Self::new_with_formats(
-            encoder_supported_formats,
-            decoder_supported_formats,
-        ))
+        Self::new_with_formats(encoder_supported_formats, decoder_supported_formats)
     }
 
     fn new_with_formats(
         encoder_supported_formats: Vec<SdpVideoFormat>,
         decoder_supported_formats: Vec<SdpVideoFormat>,
-    ) -> Self {
+    ) -> Result<Self> {
         let encoder_supported_formats_for_factory = encoder_supported_formats.clone();
 
         let simulcast_capability_helper = SimulcastCapabilityHelper::new_with_builder(
@@ -532,11 +537,11 @@ impl AmfVideoCodecCapability {
             },
         );
 
-        Self {
+        Ok(Self {
             encoder_supported_formats,
             decoder_supported_formats,
             simulcast_capability_helper,
-        }
+        })
     }
 }
 
@@ -578,7 +583,7 @@ impl AmfVideoCodecCapability {
     fn new_for_test(
         encoder_supported_formats: Vec<SdpVideoFormat>,
         decoder_supported_formats: Vec<SdpVideoFormat>,
-    ) -> Self {
+    ) -> Result<Self> {
         Self::new_with_formats(encoder_supported_formats, decoder_supported_formats)
     }
 }
@@ -601,7 +606,8 @@ mod tests {
         let capability = AmfVideoCodecCapability::new_for_test(
             test_supported_formats(&[VideoCodecType::H264]),
             test_supported_formats(&[VideoCodecType::H264]),
-        );
+        )
+        .expect("Failed to create AmfVideoCodecCapability for test");
         assert_eq!(capability.get_implementation().name(), "amf");
     }
 
@@ -610,7 +616,8 @@ mod tests {
         let capability = AmfVideoCodecCapability::new_for_test(
             test_supported_formats(&[VideoCodecType::H264, VideoCodecType::Av1]),
             test_supported_formats(&[VideoCodecType::H264, VideoCodecType::H265]),
-        );
+        )
+        .expect("Failed to create AmfVideoCodecCapability for test");
 
         assert!(capability.is_supported(CodecDirection::Encoder, VideoCodecType::H264));
         assert!(capability.is_supported(CodecDirection::Decoder, VideoCodecType::H264));
@@ -659,7 +666,8 @@ mod tests {
         let capability = AmfVideoCodecCapability::new_for_test(
             test_supported_formats(&[VideoCodecType::H264]),
             test_supported_formats(&[VideoCodecType::H264]),
-        );
+        )
+        .expect("Failed to create AmfVideoCodecCapability for test");
 
         let env = Environment::new();
         let format = SdpVideoFormat::new("H264");

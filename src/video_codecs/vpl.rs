@@ -25,10 +25,7 @@ use crate::video_codec_capability::{
 };
 
 fn collect_supported_formats() -> Result<(Vec<SdpVideoFormat>, Vec<SdpVideoFormat>)> {
-    let codec_infos =
-        supported_codecs().map_err(|err| crate::Error::InvalidVideoCodecCapability {
-            reason: format!("failed to query VPL supported codecs: {err}"),
-        })?;
+    let codec_infos = supported_codecs()?;
 
     let mut encoder_supported_formats = Vec::new();
     let mut decoder_supported_formats = Vec::new();
@@ -178,12 +175,16 @@ impl VplVideoEncoder {
         }
     }
 
-    fn rebuild_encoder(&mut self) -> std::result::Result<(), ()> {
+    fn rebuild_encoder(&mut self) -> Result<()> {
         if self.width == 0 || self.height == 0 {
-            return Err(());
+            return Err(crate::Error::VplMessage {
+                reason: "VPL encoder requires non-zero width and height".to_string(),
+            });
         }
         let Some(codec_config) = encoder_codec_config(self.codec_type) else {
-            return Err(());
+            return Err(crate::Error::VplMessage {
+                reason: "VPL encoder codec type is not supported".to_string(),
+            });
         };
 
         let mut config = EncoderConfig::new(
@@ -197,25 +198,27 @@ impl VplVideoEncoder {
         );
         config.target_kbps = Some(target_kbps_from_bps(self.target_bitrate_bps));
 
-        self.encoder = match Encoder::new(config) {
-            Ok(encoder) => Some(encoder),
+        self.encoder = Some(match Encoder::new(config) {
+            Ok(encoder) => encoder,
             Err(err) => {
                 rtc_log_error!(
                     "VPL encoder initialization failed for {:?}: {}",
                     self.codec_type,
                     err
                 );
-                None
+                return Err(err.into());
             }
-        };
+        });
         self.rebuild_needed = false;
         self.reconfigure_needed = false;
-        self.encoder.as_ref().map(|_| ()).ok_or(())
+        Ok(())
     }
 
-    fn reconfigure_encoder(&mut self) -> std::result::Result<(), ()> {
+    fn reconfigure_encoder(&mut self) -> Result<()> {
         let Some(encoder) = self.encoder.as_mut() else {
-            return Err(());
+            return Err(crate::Error::VplMessage {
+                reason: "VPL encoder instance is not initialized".to_string(),
+            });
         };
         let params = ReconfigureParams {
             target_kbps: Some(target_kbps_from_bps(self.target_bitrate_bps)),
@@ -234,7 +237,7 @@ impl VplVideoEncoder {
                     self.codec_type,
                     err
                 );
-                Err(())
+                Err(err.into())
             }
         }
     }
@@ -491,14 +494,16 @@ impl VplVideoDecoder {
         }
     }
 
-    fn ensure_decoder(&mut self) -> std::result::Result<(), ()> {
+    fn ensure_decoder(&mut self) -> Result<()> {
         if self.decoder.is_none() {
             let Some(codec) = decoder_codec(self.codec_type) else {
-                return Err(());
+                return Err(crate::Error::VplMessage {
+                    reason: "VPL decoder codec type is not supported".to_string(),
+                });
             };
-            self.decoder = Decoder::new(DecoderConfig { codec }).ok();
+            self.decoder = Some(Decoder::new(DecoderConfig { codec })?);
         }
-        self.decoder.as_ref().map(|_| ()).ok_or(())
+        Ok(())
     }
 }
 
@@ -630,20 +635,17 @@ impl VplVideoCodecCapability {
     pub fn new() -> Result<Self> {
         let (encoder_supported_formats, decoder_supported_formats) = collect_supported_formats()?;
         if encoder_supported_formats.is_empty() && decoder_supported_formats.is_empty() {
-            return Err(crate::Error::InvalidVideoCodecCapability {
+            return Err(crate::Error::VplMessage {
                 reason: "VPL does not support any encoder or decoder codec".to_string(),
             });
         }
-        Ok(Self::new_with_formats(
-            encoder_supported_formats,
-            decoder_supported_formats,
-        ))
+        Self::new_with_formats(encoder_supported_formats, decoder_supported_formats)
     }
 
     fn new_with_formats(
         encoder_supported_formats: Vec<SdpVideoFormat>,
         decoder_supported_formats: Vec<SdpVideoFormat>,
-    ) -> Self {
+    ) -> Result<Self> {
         let encoder_supported_formats_for_factory = encoder_supported_formats.clone();
 
         let simulcast_capability_helper = SimulcastCapabilityHelper::new_with_builder(
@@ -658,11 +660,11 @@ impl VplVideoCodecCapability {
             },
         );
 
-        Self {
+        Ok(Self {
             encoder_supported_formats,
             decoder_supported_formats,
             simulcast_capability_helper,
-        }
+        })
     }
 }
 
@@ -704,7 +706,7 @@ impl VplVideoCodecCapability {
     fn new_for_test(
         encoder_supported_formats: Vec<SdpVideoFormat>,
         decoder_supported_formats: Vec<SdpVideoFormat>,
-    ) -> Self {
+    ) -> Result<Self> {
         Self::new_with_formats(encoder_supported_formats, decoder_supported_formats)
     }
 }
@@ -727,7 +729,8 @@ mod tests {
         let capability = VplVideoCodecCapability::new_for_test(
             test_supported_formats(&[VideoCodecType::H264]),
             test_supported_formats(&[VideoCodecType::H264]),
-        );
+        )
+        .expect("Failed to create VplVideoCodecCapability for test");
         assert_eq!(capability.get_implementation().name(), "vpl");
     }
 
@@ -744,7 +747,8 @@ mod tests {
                 VideoCodecType::Vp9,
                 VideoCodecType::Av1,
             ]),
-        );
+        )
+        .expect("Failed to create VplVideoCodecCapability for test");
 
         assert!(capability.is_supported(CodecDirection::Encoder, VideoCodecType::H264));
         assert!(capability.is_supported(CodecDirection::Decoder, VideoCodecType::H264));
@@ -795,7 +799,8 @@ mod tests {
         let capability = VplVideoCodecCapability::new_for_test(
             test_supported_formats(&[VideoCodecType::Vp9]),
             test_supported_formats(&[VideoCodecType::Vp9]),
-        );
+        )
+        .expect("Failed to create VplVideoCodecCapability for test");
         let env = Environment::new();
         let format = SdpVideoFormat::new_with_parameters(
             "VP9",
@@ -820,7 +825,8 @@ mod tests {
         let capability = VplVideoCodecCapability::new_for_test(
             test_supported_formats(&[VideoCodecType::H264]),
             test_supported_formats(&[VideoCodecType::H264]),
-        );
+        )
+        .expect("Failed to create VplVideoCodecCapability for test");
         let env = Environment::new();
         let format = SdpVideoFormat::new("H264");
         let encoder = capability

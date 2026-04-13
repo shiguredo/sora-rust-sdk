@@ -205,20 +205,22 @@ fn probe_amf(args: &Args) -> VideoCodecCapabilityProbe {
 
 fn probe_nvcodec(args: &Args) -> VideoCodecCapabilityProbe {
     #[cfg(feature = "nvcodec")]
-    let (capability, unavailable_reason) = {
-        let capability: Box<dyn VideoCodecCapability> =
-            Box::new(NvCodecVideoCodecCapability::new());
-        if has_any_codec_support(capability.as_ref()) {
-            (Some(capability), None)
-        } else {
-            (
-                None,
-                Some(
-                    "NVCodec does not support any encoder or decoder codec on this device"
-                        .to_string(),
-                ),
-            )
+    let (capability, unavailable_reason) = match NvCodecVideoCodecCapability::new() {
+        Ok(capability) => {
+            let capability: Box<dyn VideoCodecCapability> = Box::new(capability);
+            if has_any_codec_support(capability.as_ref()) {
+                (Some(capability), None)
+            } else {
+                (
+                    None,
+                    Some(
+                        "NVCodec does not support any encoder or decoder codec on this device"
+                            .to_string(),
+                    ),
+                )
+            }
         }
+        Err(err) => (None, Some(err.to_string())),
     };
     #[cfg(not(feature = "nvcodec"))]
     let (capability, unavailable_reason) = (
