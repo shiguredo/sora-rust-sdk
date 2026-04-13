@@ -23,33 +23,6 @@ use crate::video_codec_capability::{
     CodecDirection, VideoCodecCapability, VideoCodecImplementation,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct CodecAvailability {
-    codec_type: VideoCodecType,
-    encoder_supported: bool,
-    decoder_supported: bool,
-}
-
-impl CodecAvailability {
-    fn is_supported(&self, direction: CodecDirection) -> bool {
-        match direction {
-            CodecDirection::Encoder => self.encoder_supported,
-            CodecDirection::Decoder => self.decoder_supported,
-        }
-    }
-}
-
-fn codec_sort_key(codec_type: VideoCodecType) -> u8 {
-    match codec_type {
-        VideoCodecType::H264 => 0,
-        VideoCodecType::H265 => 1,
-        VideoCodecType::Av1 => 2,
-        VideoCodecType::Vp8 => 3,
-        VideoCodecType::Vp9 => 4,
-        _ => u8::MAX,
-    }
-}
-
 fn codec_type_from_format(format: &SdpVideoFormatRef<'_>) -> Option<VideoCodecType> {
     let format_name = format.name().ok()?;
     VideoCodecType::try_from(format_name.as_str()).ok()
@@ -102,12 +75,13 @@ fn decoder_codec(codec_type: VideoCodecType) -> Option<DecoderCodec> {
     }
 }
 
-fn collect_codec_availability(device_id: i32) -> Vec<CodecAvailability> {
+fn collect_supported_formats(device_id: i32) -> (Vec<SdpVideoFormat>, Vec<SdpVideoFormat>) {
     let Ok(codec_infos) = supported_codecs(device_id) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
 
-    let mut codecs = Vec::new();
+    let mut encoder_supported_formats = Vec::new();
+    let mut decoder_supported_formats = Vec::new();
     for info in codec_infos {
         let codec_type = match info.codec {
             NvCodecType::H264 => VideoCodecType::H264,
@@ -119,16 +93,24 @@ fn collect_codec_availability(device_id: i32) -> Vec<CodecAvailability> {
         };
         let encoder_supported = info.encoding.supported;
         let decoder_supported = info.decoding.supported;
-        if encoder_supported || decoder_supported {
-            codecs.push(CodecAvailability {
-                codec_type,
-                encoder_supported,
-                decoder_supported,
-            });
+
+        if (encoder_supported) {
+            encoder_supported_formats.extend(supported_formats_for_codec(codec_type));
+        }
+        if (decoder_supported) {
+            decoder_supported_formats.extend(supported_formats_for_codec(codec_type));
         }
     }
-    codecs.sort_by_key(|codec| codec_sort_key(codec.codec_type));
-    codecs
+    (encoder_supported_formats, decoder_supported_formats)
+}
+
+fn supported_formats_contains_codec_type(
+    supported_formats: &[SdpVideoFormat],
+    codec_type: VideoCodecType,
+) -> bool {
+    supported_formats
+        .iter()
+        .any(|format| codec_type_from_format(&format.as_ref()) == Some(codec_type))
 }
 
 struct NvCodecVideoEncoder {
@@ -497,48 +479,44 @@ impl VideoDecoderHandler for NvCodecVideoDecoder {
 
 pub struct NvCodecVideoCodecCapability {
     device_id: i32,
-    codecs: Vec<CodecAvailability>,
+    encoder_supported_formats: Vec<SdpVideoFormat>,
+    decoder_supported_formats: Vec<SdpVideoFormat>,
     simulcast_capability_helper: SimulcastCapabilityHelper,
 }
 
 impl NvCodecVideoCodecCapability {
     pub fn new() -> Self {
-        Self::new_with_device_id(0)
+        let (encoder_supported_formats, decoder_supported_formats) = collect_supported_formats(0);
+        Self::new_with_formats_and_device_id(
+            encoder_supported_formats,
+            decoder_supported_formats,
+            0,
+        )
     }
 
     pub fn new_with_device_id(device_id: i32) -> Self {
-        Self::new_with_codecs_and_device_id(collect_codec_availability(device_id), device_id)
+        let (encoder_supported_formats, decoder_supported_formats) =
+            collect_supported_formats(device_id);
+        Self::new_with_formats_and_device_id(
+            encoder_supported_formats,
+            decoder_supported_formats,
+            device_id,
+        )
     }
 
-    fn new_with_codecs_and_device_id(codecs: Vec<CodecAvailability>, device_id: i32) -> Self {
-        let mut codecs = codecs;
-        codecs.sort_by_key(|codec| codec_sort_key(codec.codec_type));
-
-        let mut encoder_codec_types = codecs
-            .iter()
-            .filter(|codec| codec.encoder_supported)
-            .map(|codec| codec.codec_type)
-            .collect::<Vec<_>>();
-        encoder_codec_types.sort_by_key(|codec_type| codec_sort_key(*codec_type));
+    fn new_with_formats_and_device_id(
+        encoder_supported_formats: Vec<SdpVideoFormat>,
+        decoder_supported_formats: Vec<SdpVideoFormat>,
+        device_id: i32,
+    ) -> Self {
+        let encoder_supported_formats_for_factory = encoder_supported_formats.clone();
+        let encoder_supported_formats_for_create = encoder_supported_formats.clone();
 
         let simulcast_capability_helper = SimulcastCapabilityHelper::new_with_builder(
+            move || encoder_supported_formats_for_factory.clone(),
             {
-                let encoder_codec_types = encoder_codec_types.clone();
-                move || {
-                    let mut formats = Vec::new();
-                    for codec_type in &encoder_codec_types {
-                        formats.extend(supported_formats_for_codec(*codec_type));
-                    }
-                    formats
-                }
-            },
-            {
-                let encoder_codec_types = encoder_codec_types.clone();
                 move |_env, format| {
                     let codec_type = codec_type_from_format(&format)?;
-                    if !encoder_codec_types.contains(&codec_type) {
-                        return None;
-                    }
                     Some(VideoEncoder::new_with_handler(Box::new(
                         NvCodecVideoEncoder::new(codec_type, device_id),
                     )))
@@ -548,15 +526,10 @@ impl NvCodecVideoCodecCapability {
 
         Self {
             device_id,
-            codecs,
+            encoder_supported_formats,
+            decoder_supported_formats,
             simulcast_capability_helper,
         }
-    }
-
-    fn is_codec_supported(&self, direction: CodecDirection, codec_type: VideoCodecType) -> bool {
-        self.codecs
-            .iter()
-            .any(|codec| codec.codec_type == codec_type && codec.is_supported(direction))
     }
 }
 
@@ -572,14 +545,10 @@ impl VideoCodecCapability for NvCodecVideoCodecCapability {
     }
 
     fn get_supported_formats(&self, direction: CodecDirection) -> Vec<SdpVideoFormat> {
-        let mut formats = Vec::new();
-        for codec in &self.codecs {
-            if !codec.is_supported(direction) {
-                continue;
-            }
-            formats.extend(supported_formats_for_codec(codec.codec_type));
+        match direction {
+            CodecDirection::Encoder => self.encoder_supported_formats.clone(),
+            CodecDirection::Decoder => self.decoder_supported_formats.clone(),
         }
-        formats
     }
 
     fn create_video_encoder(
@@ -587,10 +556,6 @@ impl VideoCodecCapability for NvCodecVideoCodecCapability {
         env: EnvironmentRef<'_>,
         format: SdpVideoFormatRef<'_>,
     ) -> Option<VideoEncoder> {
-        let codec_type = codec_type_from_format(&format)?;
-        if !self.is_codec_supported(CodecDirection::Encoder, codec_type) {
-            return None;
-        }
         self.simulcast_capability_helper
             .create_video_encoder(env, format)
     }
@@ -601,9 +566,6 @@ impl VideoCodecCapability for NvCodecVideoCodecCapability {
         format: SdpVideoFormatRef<'_>,
     ) -> Option<VideoDecoder> {
         let codec_type = codec_type_from_format(&format)?;
-        if !self.is_codec_supported(CodecDirection::Decoder, codec_type) {
-            return None;
-        }
         Some(VideoDecoder::new_with_handler(Box::new(
             NvCodecVideoDecoder::new(codec_type, self.device_id),
         )))
@@ -612,8 +574,15 @@ impl VideoCodecCapability for NvCodecVideoCodecCapability {
 
 #[cfg(test)]
 impl NvCodecVideoCodecCapability {
-    fn new_for_test(codecs: Vec<CodecAvailability>) -> Self {
-        Self::new_with_codecs_and_device_id(codecs, 0)
+    fn new_for_test(
+        encoder_supported_formats: Vec<SdpVideoFormat>,
+        decoder_supported_formats: Vec<SdpVideoFormat>,
+    ) -> Self {
+        Self::new_with_formats_and_device_id(
+            encoder_supported_formats,
+            decoder_supported_formats,
+            0,
+        )
     }
 }
 
@@ -622,32 +591,28 @@ mod tests {
     use super::*;
     use shiguredo_webrtc::{Environment, SdpVideoFormat};
 
-    fn test_codec(
-        codec_type: VideoCodecType,
-        encoder_supported: bool,
-        decoder_supported: bool,
-    ) -> CodecAvailability {
-        CodecAvailability {
-            codec_type,
-            encoder_supported,
-            decoder_supported,
+    fn test_supported_formats(codec_types: &[VideoCodecType]) -> Vec<SdpVideoFormat> {
+        let mut supported_formats = Vec::new();
+        for codec_type in codec_types {
+            supported_formats.extend(supported_formats_for_codec(*codec_type));
         }
+        supported_formats
     }
 
     #[test]
     fn nvcodec_capability_has_expected_implementation_name() {
-        let capability = NvCodecVideoCodecCapability::new_for_test(vec![test_codec(
-            VideoCodecType::H264,
-            true,
-            true,
-        )]);
+        let capability = NvCodecVideoCodecCapability::new_for_test(
+            test_supported_formats(&[VideoCodecType::H264]),
+            test_supported_formats(&[VideoCodecType::H264]),
+        );
         assert_eq!(capability.get_implementation().name(), "nvcodec");
     }
 
     #[test]
     fn nvcodec_capability_accepts_device_id_configuration() {
-        let capability = NvCodecVideoCodecCapability::new_with_codecs_and_device_id(
-            vec![test_codec(VideoCodecType::H264, true, true)],
+        let capability = NvCodecVideoCodecCapability::new_with_formats_and_device_id(
+            test_supported_formats(&[VideoCodecType::H264]),
+            test_supported_formats(&[VideoCodecType::H264]),
             7,
         );
         assert_eq!(capability.device_id, 7);
@@ -655,13 +620,20 @@ mod tests {
 
     #[test]
     fn nvcodec_capability_supports_formats_per_direction() {
-        let capability = NvCodecVideoCodecCapability::new_for_test(vec![
-            test_codec(VideoCodecType::H264, true, true),
-            test_codec(VideoCodecType::H265, true, true),
-            test_codec(VideoCodecType::Av1, true, true),
-            test_codec(VideoCodecType::Vp8, false, true),
-            test_codec(VideoCodecType::Vp9, false, true),
-        ]);
+        let capability = NvCodecVideoCodecCapability::new_for_test(
+            test_supported_formats(&[
+                VideoCodecType::H264,
+                VideoCodecType::H265,
+                VideoCodecType::Av1,
+            ]),
+            test_supported_formats(&[
+                VideoCodecType::H264,
+                VideoCodecType::H265,
+                VideoCodecType::Av1,
+                VideoCodecType::Vp8,
+                VideoCodecType::Vp9,
+            ]),
+        );
 
         assert!(capability.is_supported(CodecDirection::Encoder, VideoCodecType::H264));
         assert!(capability.is_supported(CodecDirection::Encoder, VideoCodecType::H265));
@@ -723,11 +695,10 @@ mod tests {
 
     #[test]
     fn nvcodec_capability_rejects_unsupported_encoder_creation() {
-        let capability = NvCodecVideoCodecCapability::new_for_test(vec![test_codec(
-            VideoCodecType::Vp8,
-            false,
-            true,
-        )]);
+        let capability = NvCodecVideoCodecCapability::new_for_test(
+            Vec::new(),
+            test_supported_formats(&[VideoCodecType::Vp8]),
+        );
 
         let env = Environment::new();
         assert!(
@@ -739,11 +710,10 @@ mod tests {
 
     #[test]
     fn nvcodec_capability_rejects_unsupported_decoder_creation() {
-        let capability = NvCodecVideoCodecCapability::new_for_test(vec![test_codec(
-            VideoCodecType::H264,
-            true,
-            false,
-        )]);
+        let capability = NvCodecVideoCodecCapability::new_for_test(
+            test_supported_formats(&[VideoCodecType::H264]),
+            Vec::new(),
+        );
 
         let env = Environment::new();
         assert!(
@@ -755,11 +725,10 @@ mod tests {
 
     #[test]
     fn nvcodec_simulcast_adapter_encoder_info_contains_adapter_name() {
-        let capability = NvCodecVideoCodecCapability::new_for_test(vec![test_codec(
-            VideoCodecType::H264,
-            true,
-            true,
-        )]);
+        let capability = NvCodecVideoCodecCapability::new_for_test(
+            test_supported_formats(&[VideoCodecType::H264]),
+            test_supported_formats(&[VideoCodecType::H264]),
+        );
         let env = Environment::new();
         let format = SdpVideoFormat::new("H264");
         let encoder = capability

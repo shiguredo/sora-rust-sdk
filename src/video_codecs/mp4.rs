@@ -613,15 +613,6 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
             Mp4PassthroughEncoder { callback: None },
         )))
     }
-
-    /// デコーダーは提供しない (パススルーは送信専用)。
-    fn create_video_decoder(
-        &self,
-        _env: shiguredo_webrtc::EnvironmentRef<'_>,
-        _format: SdpVideoFormatRef<'_>,
-    ) -> Option<VideoDecoder> {
-        None
-    }
 }
 
 /// MP4 ファイルからビデオフレームを送信するキャプチャラー。
