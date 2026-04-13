@@ -21,7 +21,7 @@ use std::thread;
 use shiguredo_webrtc::{
     AdaptFrameResult, AdaptedVideoTrackSource, CodecSpecificInfo, EncodedImage, EncodedImageBuffer,
     H264PacketizationMode, I420Buffer, SdpVideoFormat, SdpVideoFormatRef, TimestampAligner,
-    VideoCodecRef, VideoCodecStatus, VideoCodecType, VideoDecoder, VideoEncoder,
+    VideoCodecRef, VideoCodecStatus, VideoCodecType, VideoEncoder,
     VideoEncoderEncodedImageCallbackPtr, VideoEncoderEncodedImageCallbackRef,
     VideoEncoderEncodedImageCallbackResultError, VideoEncoderEncoderInfo, VideoEncoderHandler,
     VideoEncoderRateControlParametersRef, VideoEncoderSettingsRef, VideoFrame, VideoFrameBuffer,
