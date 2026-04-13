@@ -19,44 +19,19 @@ use shiguredo_webrtc::{
 };
 
 use crate::error::Result;
-use crate::video_codec::SimulcastCapabilityHelper;
+use crate::video_codec::{SimulcastCapabilityHelper, codec_type_from_format};
 use crate::video_codec_capability::{
     CodecDirection, VideoCodecCapability, VideoCodecImplementation,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct CodecAvailability {
-    codec_type: VideoCodecType,
-    encoder_supported: bool,
-    decoder_supported: bool,
-}
-
-impl CodecAvailability {
-    fn is_supported(&self, direction: CodecDirection) -> bool {
-        match direction {
-            CodecDirection::Encoder => self.encoder_supported,
-            CodecDirection::Decoder => self.decoder_supported,
-        }
-    }
-}
-
-fn codec_sort_key(codec_type: VideoCodecType) -> u8 {
-    match codec_type {
-        VideoCodecType::H264 => 0,
-        VideoCodecType::H265 => 1,
-        VideoCodecType::Vp9 => 2,
-        VideoCodecType::Av1 => 3,
-        _ => u8::MAX,
-    }
-}
-
-fn collect_codec_availability() -> Result<Vec<CodecAvailability>> {
+fn collect_supported_formats() -> Result<(Vec<SdpVideoFormat>, Vec<SdpVideoFormat>)> {
     let codec_infos =
         supported_codecs().map_err(|err| crate::Error::InvalidVideoCodecCapability {
             reason: format!("failed to query VPL supported codecs: {err}"),
         })?;
 
-    let mut codecs = Vec::new();
+    let mut encoder_supported_formats = Vec::new();
+    let mut decoder_supported_formats = Vec::new();
     for info in codec_infos {
         let codec_type = match info.codec {
             VplCodecType::H264 => VideoCodecType::H264,
@@ -64,23 +39,14 @@ fn collect_codec_availability() -> Result<Vec<CodecAvailability>> {
             VplCodecType::Vp9 => VideoCodecType::Vp9,
             VplCodecType::Av1 => VideoCodecType::Av1,
         };
-        let encoder_supported = info.encoding.supported;
-        let decoder_supported = info.decoding.supported;
-        if encoder_supported || decoder_supported {
-            codecs.push(CodecAvailability {
-                codec_type,
-                encoder_supported,
-                decoder_supported,
-            });
+        if info.encoding.supported {
+            encoder_supported_formats.extend(supported_formats_for_codec(codec_type));
+        }
+        if info.decoding.supported {
+            decoder_supported_formats.extend(supported_formats_for_codec(codec_type));
         }
     }
-    codecs.sort_by_key(|codec| codec_sort_key(codec.codec_type));
-    Ok(codecs)
-}
-
-fn codec_type_from_format(format: &SdpVideoFormatRef<'_>) -> Option<VideoCodecType> {
-    let format_name = format.name().ok()?;
-    VideoCodecType::try_from(format_name.as_str()).ok()
+    Ok((encoder_supported_formats, decoder_supported_formats))
 }
 
 fn supported_formats_for_codec(codec_type: VideoCodecType) -> Vec<SdpVideoFormat> {
@@ -655,53 +621,36 @@ impl VideoDecoderHandler for VplVideoDecoder {
 }
 
 pub struct VplVideoCodecCapability {
-    codecs: Vec<CodecAvailability>,
+    encoder_supported_formats: Vec<SdpVideoFormat>,
+    decoder_supported_formats: Vec<SdpVideoFormat>,
     simulcast_capability_helper: SimulcastCapabilityHelper,
 }
 
 impl VplVideoCodecCapability {
     pub fn new() -> Result<Self> {
-        let codecs = collect_codec_availability()?;
-        if !codecs
-            .iter()
-            .any(|codec| codec.encoder_supported || codec.decoder_supported)
-        {
+        let (encoder_supported_formats, decoder_supported_formats) = collect_supported_formats()?;
+        if encoder_supported_formats.is_empty() && decoder_supported_formats.is_empty() {
             return Err(crate::Error::InvalidVideoCodecCapability {
                 reason: "VPL does not support any encoder or decoder codec".to_string(),
             });
         }
-        Ok(Self::new_with_codecs(codecs))
+        Ok(Self::new_with_formats(
+            encoder_supported_formats,
+            decoder_supported_formats,
+        ))
     }
 
-    fn new_with_codecs(codecs: Vec<CodecAvailability>) -> Self {
-        let mut codecs = codecs;
-        codecs.sort_by_key(|codec| codec_sort_key(codec.codec_type));
-
-        let mut encoder_codec_types = codecs
-            .iter()
-            .filter(|codec| codec.encoder_supported)
-            .map(|codec| codec.codec_type)
-            .collect::<Vec<_>>();
-        encoder_codec_types.sort_by_key(|codec_type| codec_sort_key(*codec_type));
+    fn new_with_formats(
+        encoder_supported_formats: Vec<SdpVideoFormat>,
+        decoder_supported_formats: Vec<SdpVideoFormat>,
+    ) -> Self {
+        let encoder_supported_formats_for_factory = encoder_supported_formats.clone();
 
         let simulcast_capability_helper = SimulcastCapabilityHelper::new_with_builder(
+            move || encoder_supported_formats_for_factory.clone(),
             {
-                let encoder_codec_types = encoder_codec_types.clone();
-                move || {
-                    let mut formats = Vec::new();
-                    for codec_type in &encoder_codec_types {
-                        formats.extend(supported_formats_for_codec(*codec_type));
-                    }
-                    formats
-                }
-            },
-            {
-                let encoder_codec_types = encoder_codec_types.clone();
                 move |_env, format| {
                     let codec_type = codec_type_from_format(&format)?;
-                    if !encoder_codec_types.contains(&codec_type) {
-                        return None;
-                    }
                     Some(VideoEncoder::new_with_handler(Box::new(
                         VplVideoEncoder::new(codec_type),
                     )))
@@ -710,15 +659,10 @@ impl VplVideoCodecCapability {
         );
 
         Self {
-            codecs,
+            encoder_supported_formats,
+            decoder_supported_formats,
             simulcast_capability_helper,
         }
-    }
-
-    fn is_codec_supported(&self, direction: CodecDirection, codec_type: VideoCodecType) -> bool {
-        self.codecs
-            .iter()
-            .any(|codec| codec.codec_type == codec_type && codec.is_supported(direction))
     }
 }
 
@@ -728,14 +672,10 @@ impl VideoCodecCapability for VplVideoCodecCapability {
     }
 
     fn get_supported_formats(&self, direction: CodecDirection) -> Vec<SdpVideoFormat> {
-        let mut formats = Vec::new();
-        for codec in &self.codecs {
-            if !codec.is_supported(direction) {
-                continue;
-            }
-            formats.extend(supported_formats_for_codec(codec.codec_type));
+        match direction {
+            CodecDirection::Encoder => self.encoder_supported_formats.clone(),
+            CodecDirection::Decoder => self.decoder_supported_formats.clone(),
         }
-        formats
     }
 
     fn create_video_encoder(
@@ -743,10 +683,6 @@ impl VideoCodecCapability for VplVideoCodecCapability {
         env: EnvironmentRef<'_>,
         format: SdpVideoFormatRef<'_>,
     ) -> Option<VideoEncoder> {
-        let codec_type = codec_type_from_format(&format)?;
-        if !self.is_codec_supported(CodecDirection::Encoder, codec_type) {
-            return None;
-        }
         self.simulcast_capability_helper
             .create_video_encoder(env, format)
     }
@@ -757,9 +693,6 @@ impl VideoCodecCapability for VplVideoCodecCapability {
         format: SdpVideoFormatRef<'_>,
     ) -> Option<VideoDecoder> {
         let codec_type = codec_type_from_format(&format)?;
-        if !self.is_codec_supported(CodecDirection::Decoder, codec_type) {
-            return None;
-        }
         Some(VideoDecoder::new_with_handler(Box::new(
             VplVideoDecoder::new(codec_type),
         )))
@@ -768,8 +701,11 @@ impl VideoCodecCapability for VplVideoCodecCapability {
 
 #[cfg(test)]
 impl VplVideoCodecCapability {
-    fn new_for_test(codecs: Vec<CodecAvailability>) -> Self {
-        Self::new_with_codecs(codecs)
+    fn new_for_test(
+        encoder_supported_formats: Vec<SdpVideoFormat>,
+        decoder_supported_formats: Vec<SdpVideoFormat>,
+    ) -> Self {
+        Self::new_with_formats(encoder_supported_formats, decoder_supported_formats)
     }
 }
 
@@ -778,36 +714,37 @@ mod tests {
     use super::*;
     use shiguredo_webrtc::{Environment, SdpVideoFormat, VideoFrameType, VideoFrameTypeVector};
 
-    fn test_codec(
-        codec_type: VideoCodecType,
-        encoder_supported: bool,
-        decoder_supported: bool,
-    ) -> CodecAvailability {
-        CodecAvailability {
-            codec_type,
-            encoder_supported,
-            decoder_supported,
+    fn test_supported_formats(codec_types: &[VideoCodecType]) -> Vec<SdpVideoFormat> {
+        let mut supported_formats = Vec::new();
+        for codec_type in codec_types {
+            supported_formats.extend(supported_formats_for_codec(*codec_type));
         }
+        supported_formats
     }
 
     #[test]
     fn vpl_capability_has_expected_implementation_name() {
-        let capability = VplVideoCodecCapability::new_for_test(vec![test_codec(
-            VideoCodecType::H264,
-            true,
-            true,
-        )]);
+        let capability = VplVideoCodecCapability::new_for_test(
+            test_supported_formats(&[VideoCodecType::H264]),
+            test_supported_formats(&[VideoCodecType::H264]),
+        );
         assert_eq!(capability.get_implementation().name(), "vpl");
     }
 
     #[test]
     fn vpl_capability_supports_formats_per_direction() {
-        let capability = VplVideoCodecCapability::new_for_test(vec![
-            test_codec(VideoCodecType::H264, true, true),
-            test_codec(VideoCodecType::H265, true, false),
-            test_codec(VideoCodecType::Vp9, false, true),
-            test_codec(VideoCodecType::Av1, true, true),
-        ]);
+        let capability = VplVideoCodecCapability::new_for_test(
+            test_supported_formats(&[
+                VideoCodecType::H264,
+                VideoCodecType::H265,
+                VideoCodecType::Av1,
+            ]),
+            test_supported_formats(&[
+                VideoCodecType::H264,
+                VideoCodecType::Vp9,
+                VideoCodecType::Av1,
+            ]),
+        );
 
         assert!(capability.is_supported(CodecDirection::Encoder, VideoCodecType::H264));
         assert!(capability.is_supported(CodecDirection::Decoder, VideoCodecType::H264));
@@ -854,44 +791,11 @@ mod tests {
     }
 
     #[test]
-    fn vpl_capability_rejects_unsupported_encoder_creation() {
-        let capability = VplVideoCodecCapability::new_for_test(vec![test_codec(
-            VideoCodecType::Vp9,
-            false,
-            true,
-        )]);
-
-        let env = Environment::new();
-        assert!(
-            capability
-                .create_video_encoder(env.as_ref(), SdpVideoFormat::new("VP9").as_ref())
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn vpl_capability_rejects_unsupported_decoder_creation() {
-        let capability = VplVideoCodecCapability::new_for_test(vec![test_codec(
-            VideoCodecType::H264,
-            true,
-            false,
-        )]);
-
-        let env = Environment::new();
-        assert!(
-            capability
-                .create_video_decoder(env.as_ref(), SdpVideoFormat::new("H264").as_ref())
-                .is_none()
-        );
-    }
-
-    #[test]
     fn vpl_capability_creates_vp9_encoder() {
-        let capability = VplVideoCodecCapability::new_for_test(vec![test_codec(
-            VideoCodecType::Vp9,
-            true,
-            true,
-        )]);
+        let capability = VplVideoCodecCapability::new_for_test(
+            test_supported_formats(&[VideoCodecType::Vp9]),
+            test_supported_formats(&[VideoCodecType::Vp9]),
+        );
         let env = Environment::new();
         let format = SdpVideoFormat::new_with_parameters(
             "VP9",
@@ -913,11 +817,10 @@ mod tests {
 
     #[test]
     fn vpl_simulcast_adapter_encoder_info_contains_adapter_name() {
-        let capability = VplVideoCodecCapability::new_for_test(vec![test_codec(
-            VideoCodecType::H264,
-            true,
-            true,
-        )]);
+        let capability = VplVideoCodecCapability::new_for_test(
+            test_supported_formats(&[VideoCodecType::H264]),
+            test_supported_formats(&[VideoCodecType::H264]),
+        );
         let env = Environment::new();
         let format = SdpVideoFormat::new("H264");
         let encoder = capability
