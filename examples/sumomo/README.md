@@ -16,6 +16,12 @@ sudo apt install libssl-dev pkg-config
 sudo apt install pipewire-pulse libpulse-dev
 ```
 
+`libcamera` feature を使用する場合は、追加で以下のパッケージが必要です。
+
+```bash
+sudo apt install libcamera-dev
+```
+
 `pipewire-pulse` が起動していない場合は、事前に起動してください。
 
 ```bash
@@ -43,6 +49,8 @@ systemctl --user enable --now pipewire pipewire-pulse
 | `--list-devices` | 任意 (フラグ、`media-device` feature 有効時のみ) | 利用可能なデバイス一覧を表示して終了する |
 | `--video-input-device` | 任意 (値: デバイス ID、`media-device` feature 有効時のみ) | 使用するビデオ入力デバイスの ID |
 | `--audio-input-device` | 任意 (値: デバイス名または ID、`media-device` feature 有効時のみ) | 使用するオーディオ入力デバイスの名前または ID |
+| `--libcamera` | 任意 (フラグ、`libcamera` feature 有効時のみ) | libcamera で映像キャプチャを行う |
+| `--libcamera-control` | 任意 (値: `KEY=VALUE`、`libcamera` feature 有効時のみ、複数指定可) | libcamera control を設定する |
 | `--help` | フラグ | ヘルプ表示 |
 | `--version` | フラグ | バージョン表示 |
 
@@ -54,6 +62,8 @@ systemctl --user enable --now pipewire pipewire-pulse
 - `--video-codec-implementation` で同じ実装を重複指定できません
 - `--video-codec-implementation` に `openh264` を含める場合は `--openh264-path` が必須です
 - `--openh264-path` は `--video-codec-implementation` に `openh264` を含めた場合のみ指定できます
+- `--libcamera-control` は `--libcamera` 指定時のみ指定できます
+- `--libcamera` と `--video-input-device` は同時に指定できません
 
 ## 実行例
 
@@ -157,6 +167,21 @@ cargo run -p sumomo --features media-device -- \
   --channel-id your-channel-id \
   --role sendonly \
   --video-input-device /dev/video0
+```
+
+### libcamera で sendonly で接続する
+
+`libcamera` feature を有効にして `--libcamera` を指定すると libcamera キャプチャを利用します。
+`--libcamera-control` は複数回指定できます。
+
+```bash
+cargo run -p sumomo --features libcamera -- \
+  --signaling-url wss://sora-test.shiguredo.co.jp/signaling \
+  --channel-id your-channel-id \
+  --role sendonly \
+  --libcamera \
+  --libcamera-control Brightness=0.2 \
+  --libcamera-control Contrast=1.5
 ```
 
 ### オーディオ入力デバイスを指定して sendonly で接続する

@@ -28,6 +28,7 @@ default = []
 amf = ["sora_sdk/amf"]
 nvcodec = ["sora_sdk/nvcodec"]
 vpl = ["sora_sdk/vpl"]
+libcamera = ["sora_sdk/libcamera"]
 raw-player = ["dep:raw_player"]
 # Linux では追加で pipewire-pulse と libpulse-dev が必要:
 #   sudo apt install pipewire-pulse libpulse-dev

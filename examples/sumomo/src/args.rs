@@ -28,6 +28,8 @@ pub(crate) struct Args {
     pub(crate) duration: Option<u64>,
     pub(crate) turn_tls_insecure: bool,
     pub(crate) turn_tls_ca_cert: Option<String>,
+    pub(crate) use_libcamera: bool,
+    pub(crate) libcamera_controls: Vec<(String, String)>,
     #[cfg(feature = "raw-player")]
     pub(crate) use_raw_player: bool,
     #[cfg(feature = "media-device")]
@@ -119,8 +121,7 @@ impl VideoCodecImplementationSelections {
     }
 }
 
-pub(crate) fn parse_args() -> Result<Args> {
-    let mut args = noargs::raw_args();
+pub(crate) fn parse_args(mut args: noargs::RawArgs) -> Result<Args> {
     args.metadata_mut().app_name = env!("CARGO_PKG_NAME");
     args.metadata_mut().app_description = "Sora WebSocket シグナリングの最小サンプル";
 
@@ -174,6 +175,8 @@ pub(crate) fn parse_args() -> Result<Args> {
             duration: None,
             turn_tls_insecure: false,
             turn_tls_ca_cert: None,
+            use_libcamera: false,
+            libcamera_controls: Vec::new(),
             #[cfg(feature = "raw-player")]
             use_raw_player: false,
             #[cfg(feature = "media-device")]
@@ -218,6 +221,8 @@ pub(crate) fn parse_args() -> Result<Args> {
             input_mp4: None,
             openh264_path: None,
             video_codec_list: false,
+            use_libcamera: false,
+            libcamera_controls: Vec::new(),
             #[cfg(feature = "raw-player")]
             use_raw_player: false,
             video_input_device: None,
@@ -366,6 +371,36 @@ pub(crate) fn parse_args() -> Result<Args> {
         .take(&mut args)
         .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
 
+    let use_libcamera = noargs::flag("libcamera")
+        .doc("Use libcamera video capturer")
+        .take(&mut args)
+        .is_present();
+
+    // --libcamera-control KEY=VALUE (複数回指定可能)
+    let mut libcamera_controls = Vec::new();
+    loop {
+        let opt = noargs::opt("libcamera-control")
+            .ty("KEY=VALUE")
+            .doc("Set libcamera control (repeatable)")
+            .take(&mut args);
+        if !opt.is_present() {
+            break;
+        }
+        let raw = opt.value().to_string();
+        match raw.split_once('=') {
+            Some((key, value)) => {
+                libcamera_controls.push((key.to_string(), value.to_string()));
+            }
+            None => {
+                return Err(noargs::Error::other(
+                    &args,
+                    format!("--libcamera-control must be KEY=VALUE: {raw}"),
+                )
+                .into());
+            }
+        }
+    }
+
     #[cfg(feature = "raw-player")]
     let use_raw_player = noargs::flag("raw-player")
         .doc("raw-player でビデオを表示する")
@@ -413,6 +448,8 @@ pub(crate) fn parse_args() -> Result<Args> {
         duration,
         turn_tls_insecure,
         turn_tls_ca_cert,
+        use_libcamera,
+        libcamera_controls,
         #[cfg(feature = "raw-player")]
         use_raw_player,
         #[cfg(feature = "media-device")]
@@ -445,6 +482,26 @@ pub(crate) fn validate_args(args: &Args) -> Result<()> {
     if !openh264_selected && args.openh264_path.is_some() {
         return Err(io::Error::other(
             "--openh264-path requires --video-codec-implementation to include openh264",
+        )
+        .into());
+    }
+
+    if !args.use_libcamera && !args.libcamera_controls.is_empty() {
+        return Err(io::Error::other("--libcamera-control requires --libcamera").into());
+    }
+
+    #[cfg(not(feature = "libcamera"))]
+    if args.use_libcamera {
+        return Err(io::Error::other(
+            "libcamera is not enabled in this build. Rebuild sumomo with --features libcamera",
+        )
+        .into());
+    }
+
+    #[cfg(feature = "media-device")]
+    if args.use_libcamera && args.video_input_device.is_some() {
+        return Err(io::Error::other(
+            "--libcamera and --video-input-device cannot be used together",
         )
         .into());
     }

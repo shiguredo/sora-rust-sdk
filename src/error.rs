@@ -112,6 +112,12 @@ pub enum Error {
     InvalidVideoCodecPreference {
         reason: String,
     },
+    #[cfg(feature = "libcamera")]
+    LibcameraMessage {
+        message: String,
+    },
+    #[cfg(feature = "libcamera")]
+    Libcamera(shiguredo_libcamera::Error),
     #[cfg(feature = "openh264")]
     Openh264(shiguredo_openh264::Error),
     RpcTimeout,
@@ -257,6 +263,10 @@ impl std::fmt::Display for Error {
             Error::InvalidVideoCodecPreference { reason } => {
                 write!(f, "VideoCodecPreference が不正です: {reason}")
             }
+            #[cfg(feature = "libcamera")]
+            Error::LibcameraMessage { message } => write!(f, "libcamera error: {message}"),
+            #[cfg(feature = "libcamera")]
+            Error::Libcamera(err) => write!(f, "libcamera error: {err}"),
             #[cfg(feature = "openh264")]
             Error::Openh264(err) => write!(f, "OpenH264 error: {err}"),
             Error::RpcTimeout => f.write_str("RPC レスポンスがタイムアウトしました"),
@@ -296,6 +306,8 @@ impl std::error::Error for Error {
             Error::Io(err) => Some(err),
             Error::JsonParse(err) => Some(err),
             Error::Webrtc(err) => Some(err),
+            #[cfg(feature = "libcamera")]
+            Error::Libcamera(err) => Some(err),
             #[cfg(feature = "openh264")]
             Error::Openh264(err) => Some(err),
             Error::SimulcastSetParametersFailed { source } => Some(source),
@@ -358,6 +370,13 @@ impl From<JsonParseError> for Error {
 impl From<shiguredo_webrtc::Error> for Error {
     fn from(err: shiguredo_webrtc::Error) -> Self {
         Error::Webrtc(err)
+    }
+}
+
+#[cfg(feature = "libcamera")]
+impl From<shiguredo_libcamera::Error> for Error {
+    fn from(err: shiguredo_libcamera::Error) -> Self {
+        Error::Libcamera(err)
     }
 }
 

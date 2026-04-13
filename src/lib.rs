@@ -2,6 +2,8 @@
 mod client;
 mod client_context;
 mod error;
+#[cfg(feature = "libcamera")]
+mod libcamera;
 mod rpc;
 mod signaling_types;
 mod types;
@@ -17,6 +19,8 @@ pub use crate::client::{
 };
 pub use crate::client_context::{AdmConfig, SoraClientContext, SoraClientContextConfig};
 pub use crate::error::{Error, Result};
+#[cfg(feature = "libcamera")]
+pub use crate::libcamera::{LibcameraVideoCapturer, LibcameraVideoCapturerBuilder};
 pub use crate::rpc::{RpcRequestOptions, RpcResponse};
 pub use crate::types::{
     Audio, AudioCodecType, AudioOpusParams, ConnectDataChannel, ForwardingFilter,

@@ -1,4 +1,6 @@
 use shiguredo_webrtc::VideoTrackSource;
+#[cfg(feature = "libcamera")]
+use sora_sdk::LibcameraVideoCapturer;
 use sora_sdk::Mp4VideoCapturer;
 
 use crate::error::Result;
@@ -199,6 +201,8 @@ impl VideoDeviceCapturer {
 pub(crate) enum VideoCapturerHolder {
     Mp4(Mp4VideoCapturer),
     Fake(FakeVideoCapturer),
+    #[cfg(feature = "libcamera")]
+    Libcamera(LibcameraVideoCapturer),
     #[cfg(feature = "media-device")]
     Device(VideoDeviceCapturer),
 }
@@ -210,6 +214,8 @@ impl VideoCapturerHolder {
                 // Mp4VideoCapturer はコンストラクタでスレッドを開始済み
             }
             VideoCapturerHolder::Fake(capturer) => capturer.start()?,
+            #[cfg(feature = "libcamera")]
+            VideoCapturerHolder::Libcamera(capturer) => capturer.start()?,
             #[cfg(feature = "media-device")]
             VideoCapturerHolder::Device(capturer) => capturer.start()?,
         }
@@ -220,6 +226,8 @@ impl VideoCapturerHolder {
         match self {
             VideoCapturerHolder::Mp4(capturer) => capturer.video_source(),
             VideoCapturerHolder::Fake(capturer) => capturer.video_source(),
+            #[cfg(feature = "libcamera")]
+            VideoCapturerHolder::Libcamera(capturer) => capturer.video_source(),
             #[cfg(feature = "media-device")]
             VideoCapturerHolder::Device(capturer) => capturer.video_source(),
         }
