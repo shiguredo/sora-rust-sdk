@@ -153,9 +153,8 @@ impl AmfVideoEncoder {
         );
         config.target_kbps = Some(target_kbps_from_bps(self.target_bitrate_bps));
 
-        let encoder = Encoder::new(config)?;
-        self.encoder = Some(encoder);
         self.reconfigure_needed = false;
+        self.encoder = Some(Encoder::new(config)?);
         Ok(())
     }
 }

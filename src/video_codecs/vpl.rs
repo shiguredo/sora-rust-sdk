@@ -198,19 +198,9 @@ impl VplVideoEncoder {
         );
         config.target_kbps = Some(target_kbps_from_bps(self.target_bitrate_bps));
 
-        self.encoder = Some(match Encoder::new(config) {
-            Ok(encoder) => encoder,
-            Err(err) => {
-                rtc_log_error!(
-                    "VPL encoder initialization failed for {:?}: {}",
-                    self.codec_type,
-                    err
-                );
-                return Err(err.into());
-            }
-        });
         self.rebuild_needed = false;
         self.reconfigure_needed = false;
+        self.encoder = Some(Encoder::new(config)?);
         Ok(())
     }
 
@@ -296,7 +286,7 @@ impl VideoEncoderHandler for VplVideoEncoder {
         } else if self.reconfigure_needed {
             // ビットレート更新は再初期化ではなく reconfigure を行う
             if self.reconfigure_encoder().is_err() {
-                // reconfigure 非対応の実装では Reset が失敗することがあるため、再初期化にフォールバックする。
+                // reconfigure が失敗することがあるため、再初期化にフォールバックする。
                 //
                 // reconfigure のエラー実際に発生する。GMKtec K9 のマシンでは H265 と AV1 で以下のエラーになった。
                 //

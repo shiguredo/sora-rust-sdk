@@ -153,8 +153,8 @@ impl NvCodecVideoEncoder {
             buffer_format: BufferFormat::Nv12,
             device_id: self.device_id,
         };
-        self.encoder = Some(Encoder::new(config)?);
         self.reconfigure_needed = false;
+        self.encoder = Some(Encoder::new(config)?);
         Ok(())
     }
 }
