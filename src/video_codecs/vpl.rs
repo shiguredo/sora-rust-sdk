@@ -586,11 +586,7 @@ impl VideoDecoderHandler for VplVideoDecoder {
             }
         }
 
-        if !decoded_images.is_empty() {
-            VideoCodecStatus::Ok
-        } else {
-            VideoCodecStatus::NoOutput
-        }
+        VideoCodecStatus::Ok
     }
 
     fn register_decode_complete_callback(

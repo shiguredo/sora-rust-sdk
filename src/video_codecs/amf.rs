@@ -294,11 +294,7 @@ impl VideoEncoderHandler for AmfVideoEncoder {
             }
         }
 
-        if has_output {
-            VideoCodecStatus::Ok
-        } else {
-            VideoCodecStatus::NoOutput
-        }
+        VideoCodecStatus::Ok
     }
 
     fn register_encode_complete_callback(
@@ -451,11 +447,7 @@ impl VideoDecoderHandler for AmfVideoDecoder {
             }
         }
 
-        if !decoded_images.is_empty() {
-            VideoCodecStatus::Ok
-        } else {
-            VideoCodecStatus::NoOutput
-        }
+        VideoCodecStatus::Ok
     }
 
     fn register_decode_complete_callback(

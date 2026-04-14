@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use shiguredo_nvcodec::{
     Av1EncoderConfig, BufferFormat, CodecConfig, Decoder, DecoderCodec, DecoderConfig,
     EncodeOptions, Encoder, EncoderConfig, H264EncoderConfig, HevcEncoderConfig, PictureType,
-    Preset, RateControlMode, SurfaceFormat, TuningInfo, supported_codecs,
+    Preset, RateControlMode, ReconfigureParams, SurfaceFormat, TuningInfo, supported_codecs,
 };
 use shiguredo_webrtc::{
     CodecSpecificInfo, EncodedImage, EncodedImageBuffer, EncodedImageRef, EnvironmentRef,
@@ -95,6 +95,23 @@ fn collect_supported_formats(device_id: i32) -> Result<(Vec<SdpVideoFormat>, Vec
     Ok((encoder_supported_formats, decoder_supported_formats))
 }
 
+fn nvcodec_reconfigure_params(target_bitrate_bps: u32, framerate: u32) -> ReconfigureParams {
+    ReconfigureParams {
+        width: None,
+        height: None,
+        framerate_num: Some(framerate.max(1)),
+        framerate_den: Some(1),
+        average_bitrate: Some(target_bitrate_bps.max(1)),
+        max_bitrate: None,
+    }
+}
+
+fn requested_frame_type(
+    frame_types: Option<VideoFrameTypeVectorRef<'_>>,
+) -> Option<VideoFrameType> {
+    frame_types.and_then(|frame_types| frame_types.get(0))
+}
+
 struct NvCodecVideoEncoder {
     callback: Option<VideoEncoderEncodedImageCallbackPtr>,
     encoder: Option<Encoder>,
@@ -104,6 +121,7 @@ struct NvCodecVideoEncoder {
     height: u32,
     framerate: u32,
     target_bitrate_bps: u32,
+    rebuild_needed: bool,
     reconfigure_needed: bool,
 }
 
@@ -118,6 +136,7 @@ impl NvCodecVideoEncoder {
             height: 0,
             framerate: 30,
             target_bitrate_bps: 500_000,
+            rebuild_needed: false,
             reconfigure_needed: false,
         }
     }
@@ -153,8 +172,23 @@ impl NvCodecVideoEncoder {
             buffer_format: BufferFormat::Nv12,
             device_id: self.device_id,
         };
+        self.rebuild_needed = false;
         self.reconfigure_needed = false;
         self.encoder = Some(Encoder::new(config)?);
+        Ok(())
+    }
+
+    fn reconfigure_encoder(&mut self) -> Result<()> {
+        let Some(encoder) = self.encoder.as_mut() else {
+            return Err(Error::NvCodecMessage {
+                reason: "encoder must be initialized before reconfigure".to_string(),
+            });
+        };
+        encoder.reconfigure(nvcodec_reconfigure_params(
+            self.target_bitrate_bps,
+            self.framerate,
+        ))?;
+        self.reconfigure_needed = false;
         Ok(())
     }
 }
@@ -179,7 +213,6 @@ impl VideoEncoderHandler for NvCodecVideoEncoder {
         VideoCodecStatus::Ok
     }
 
-    #[expect(unused_variables)]
     fn encode(
         &mut self,
         frame: VideoFrameRef<'_>,
@@ -195,13 +228,35 @@ impl VideoEncoderHandler for NvCodecVideoEncoder {
         if frame_width == 0 || frame_height == 0 {
             return VideoCodecStatus::ErrParameter;
         }
+        let requested_frame_type = requested_frame_type(frame_types);
+        if matches!(requested_frame_type, Some(VideoFrameType::Empty)) {
+            return VideoCodecStatus::NoOutput;
+        }
         if self.width != frame_width || self.height != frame_height {
             self.width = frame_width;
             self.height = frame_height;
-            self.reconfigure_needed = true;
+            // 解像度変更は NVENC を再初期化する
+            self.rebuild_needed = true;
         }
-        if (self.reconfigure_needed || self.encoder.is_none()) && self.rebuild_encoder().is_err() {
-            return VideoCodecStatus::Error;
+        if self.encoder.is_none() {
+            self.rebuild_needed = true;
+        }
+
+        if self.rebuild_needed {
+            if self.rebuild_encoder().is_err() {
+                return VideoCodecStatus::Error;
+            }
+        } else if self.reconfigure_needed {
+            if self.reconfigure_encoder().is_err() {
+                rtc_log_warning!(
+                    "NVCODEC reconfigure failed for {:?}; falling back to rebuild",
+                    self.codec_type
+                );
+                self.rebuild_needed = true;
+                if self.rebuild_encoder().is_err() {
+                    return VideoCodecStatus::Error;
+                }
+            }
         }
 
         let mut frame_buffer = frame.buffer();
@@ -244,10 +299,11 @@ impl VideoEncoderHandler for NvCodecVideoEncoder {
 
         let rtp_timestamp = frame.rtp_timestamp();
         let encoder = self.encoder.as_mut().expect("encoder should exist");
+        let force_key_frame = matches!(requested_frame_type, Some(VideoFrameType::Key));
         let encode_options = EncodeOptions {
             force_intra: false,
-            force_idr: false,
-            output_spspps: false,
+            force_idr: force_key_frame,
+            output_spspps: force_key_frame,
         };
         if encoder.encode(nv12.data(), &encode_options).is_err() {
             return VideoCodecStatus::Error;
@@ -437,11 +493,7 @@ impl VideoDecoderHandler for NvCodecVideoDecoder {
             }
         }
 
-        if !decoded_images.is_empty() {
-            VideoCodecStatus::Ok
-        } else {
-            VideoCodecStatus::NoOutput
-        }
+        VideoCodecStatus::Ok
     }
 
     fn register_decode_complete_callback(
@@ -571,7 +623,7 @@ impl NvCodecVideoCodecCapability {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shiguredo_webrtc::{Environment, SdpVideoFormat};
+    use shiguredo_webrtc::{Environment, SdpVideoFormat, VideoFrameTypeVector};
 
     fn test_supported_formats(codec_types: &[VideoCodecType]) -> Vec<SdpVideoFormat> {
         let mut supported_formats = Vec::new();
@@ -589,6 +641,38 @@ mod tests {
         )
         .expect("Failed to create NvCodecVideoCodecCapability for test");
         assert_eq!(capability.get_implementation().name(), "nvcodec");
+    }
+
+    #[test]
+    fn nvcodec_reconfigure_params_uses_rate_values() {
+        let params = nvcodec_reconfigure_params(1_234_567, 24);
+        assert_eq!(params.width, None);
+        assert_eq!(params.height, None);
+        assert_eq!(params.framerate_num, Some(24));
+        assert_eq!(params.framerate_den, Some(1));
+        assert_eq!(params.average_bitrate, Some(1_234_567));
+        assert_eq!(params.max_bitrate, None);
+    }
+
+    #[test]
+    fn nvcodec_reconfigure_params_clamps_zero_to_one() {
+        let params = nvcodec_reconfigure_params(0, 0);
+        assert_eq!(params.framerate_num, Some(1));
+        assert_eq!(params.framerate_den, Some(1));
+        assert_eq!(params.average_bitrate, Some(1));
+    }
+
+    #[test]
+    fn nvcodec_requested_frame_type_uses_first_entry() {
+        assert_eq!(requested_frame_type(None), None);
+
+        let mut frame_types = VideoFrameTypeVector::new(2);
+        frame_types.push(VideoFrameType::Empty);
+        frame_types.push(VideoFrameType::Key);
+        assert_eq!(
+            requested_frame_type(Some(frame_types.as_ref())),
+            Some(VideoFrameType::Empty)
+        );
     }
 
     #[test]
