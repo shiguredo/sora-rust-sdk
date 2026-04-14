@@ -247,6 +247,7 @@ impl VideoEncoderHandler for NvCodecVideoEncoder {
                 return VideoCodecStatus::Error;
             }
         } else if self.reconfigure_needed {
+            // ビットレート更新は再初期化ではなく reconfigure を行う
             if self.reconfigure_encoder().is_err() {
                 rtc_log_warning!(
                     "NVCODEC reconfigure failed for {:?}; falling back to rebuild",

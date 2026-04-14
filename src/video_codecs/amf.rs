@@ -262,10 +262,7 @@ impl VideoEncoderHandler for AmfVideoEncoder {
             return VideoCodecStatus::Error;
         }
 
-        let mut has_output = false;
         while let Some(encoded_frame) = encoder.next_frame() {
-            has_output = true;
-
             let mut encoded_image = EncodedImage::new();
             let encoded_buffer = EncodedImageBuffer::from_bytes(encoded_frame.data());
             encoded_image.set_encoded_data(&encoded_buffer);
