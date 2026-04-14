@@ -97,12 +97,10 @@ fn collect_supported_formats(device_id: i32) -> Result<(Vec<SdpVideoFormat>, Vec
 
 fn nvcodec_reconfigure_params(target_bitrate_bps: u32, framerate: u32) -> ReconfigureParams {
     ReconfigureParams {
-        width: None,
-        height: None,
         framerate_num: Some(framerate.max(1)),
         framerate_den: Some(1),
         average_bitrate: Some(target_bitrate_bps.max(1)),
-        max_bitrate: None,
+        ..ReconfigureParams::default()
     }
 }
 
@@ -306,7 +304,8 @@ impl VideoEncoderHandler for NvCodecVideoEncoder {
             force_idr: force_key_frame,
             output_spspps: force_key_frame,
         };
-        if encoder.encode(nv12.data(), &encode_options).is_err() {
+        if let Err(err) = encoder.encode(nv12.data(), &encode_options) {
+            rtc_log_error!("NVCODEC encode failed for {:?}: {}", self.codec_type, err);
             return VideoCodecStatus::Error;
         }
 

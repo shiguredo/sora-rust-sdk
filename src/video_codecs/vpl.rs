@@ -212,9 +212,9 @@ impl VplVideoEncoder {
         };
         let params = ReconfigureParams {
             target_kbps: Some(target_kbps_from_bps(self.target_bitrate_bps)),
-            max_kbps: None,
             framerate_num: Some(self.framerate.max(1)),
             framerate_den: Some(1),
+            ..ReconfigureParams::default()
         };
         match encoder.reconfigure(params) {
             Ok(()) => {
@@ -284,11 +284,11 @@ impl VideoEncoderHandler for VplVideoEncoder {
                 return VideoCodecStatus::Error;
             }
         } else if self.reconfigure_needed {
-            // ビットレート更新は再初期化ではなく reconfigure を行う
+            // ビットレートやフレームレートの更新は再初期化ではなく reconfigure を行う
             if self.reconfigure_encoder().is_err() {
                 // reconfigure が失敗することがあるため、再初期化にフォールバックする。
                 //
-                // reconfigure のエラー実際に発生する。GMKtec K9 のマシンでは H265 と AV1 で以下のエラーになった。
+                // reconfigure のエラーは実際に発生する。GMKtec K9 のマシンでは H265 と AV1 で以下のエラーになった。
                 //
                 // ```
                 // MFXVideoENCODE_Reset() failed[status=-14]: Incompatible video parameters (MFX_ERR_INCOMPATIBLE_VIDEO_PARAM)

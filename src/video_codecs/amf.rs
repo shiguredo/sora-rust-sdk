@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use shiguredo_amf::{
     Av1EncoderConfig, CodecConfig, Decoder, DecoderCodec, DecoderConfig, EncodeOptions, Encoder,
     EncoderConfig, FrameFormat, H264EncoderConfig, HevcEncoderConfig, PictureType, RateControlMode,
-    VideoCodecType as AmfCodecType, frame_type, supported_codecs,
+    ReconfigureParams, VideoCodecType as AmfCodecType, frame_type, supported_codecs,
 };
 use shiguredo_webrtc::{
     CodecSpecificInfo, EncodedImage, EncodedImageBuffer, EncodedImageRef, EnvironmentRef,
@@ -14,7 +14,7 @@ use shiguredo_webrtc::{
     VideoEncoderEncodedImageCallbackRef, VideoEncoderEncodedImageCallbackResultError,
     VideoEncoderEncoderInfo, VideoEncoderHandler, VideoEncoderRateControlParametersRef,
     VideoEncoderSettingsRef, VideoFrame, VideoFrameRef, VideoFrameType, VideoFrameTypeVectorRef,
-    i420_to_nv12, nv12_to_i420, rtc_log_warning,
+    i420_to_nv12, nv12_to_i420, rtc_log_error, rtc_log_warning,
 };
 
 use crate::error::Result;
@@ -105,6 +105,15 @@ fn target_kbps_from_bps(target_bitrate_bps: u32) -> u32 {
     (target_bitrate_bps.max(1) as u64).div_ceil(1000) as u32
 }
 
+fn amf_reconfigure_params(target_bitrate_bps: u32, framerate: u32) -> ReconfigureParams {
+    ReconfigureParams {
+        framerate_num: Some(framerate.max(1)),
+        framerate_den: Some(1),
+        target_kbps: Some(target_kbps_from_bps(target_bitrate_bps)),
+        ..ReconfigureParams::default()
+    }
+}
+
 struct AmfVideoEncoder {
     callback: Option<VideoEncoderEncodedImageCallbackPtr>,
     encoder: Option<Encoder>,
@@ -113,6 +122,7 @@ struct AmfVideoEncoder {
     height: u32,
     framerate: u32,
     target_bitrate_bps: u32,
+    rebuild_needed: bool,
     reconfigure_needed: bool,
 }
 
@@ -126,6 +136,7 @@ impl AmfVideoEncoder {
             height: 0,
             framerate: 30,
             target_bitrate_bps: 500_000,
+            rebuild_needed: false,
             reconfigure_needed: false,
         }
     }
@@ -153,9 +164,35 @@ impl AmfVideoEncoder {
         );
         config.target_kbps = Some(target_kbps_from_bps(self.target_bitrate_bps));
 
+        self.rebuild_needed = false;
         self.reconfigure_needed = false;
         self.encoder = Some(Encoder::new(config)?);
         Ok(())
+    }
+
+    fn reconfigure_encoder(&mut self) -> Result<()> {
+        let Some(encoder) = self.encoder.as_mut() else {
+            return Err(crate::Error::AmfMessage {
+                reason: "AMF encoder instance is not initialized".to_string(),
+            });
+        };
+        match encoder.reconfigure(amf_reconfigure_params(
+            self.target_bitrate_bps,
+            self.framerate,
+        )) {
+            Ok(()) => {
+                self.reconfigure_needed = false;
+                Ok(())
+            }
+            Err(err) => {
+                rtc_log_warning!(
+                    "AMF encoder reconfigure failed for {:?}: {}",
+                    self.codec_type,
+                    err
+                );
+                Err(err.into())
+            }
+        }
     }
 }
 
@@ -206,11 +243,29 @@ impl VideoEncoderHandler for AmfVideoEncoder {
         if self.width != frame_width || self.height != frame_height {
             self.width = frame_width;
             self.height = frame_height;
-            self.reconfigure_needed = true;
+            // 解像度変更は再初期化する
+            self.rebuild_needed = true;
+        }
+        if self.encoder.is_none() {
+            self.rebuild_needed = true;
         }
 
-        if (self.reconfigure_needed || self.encoder.is_none()) && self.rebuild_encoder().is_err() {
-            return VideoCodecStatus::Error;
+        if self.rebuild_needed {
+            if self.rebuild_encoder().is_err() {
+                return VideoCodecStatus::Error;
+            }
+        } else if self.reconfigure_needed {
+            // ビットレート/フレームレート更新は再初期化ではなく reconfigure を行う
+            if self.reconfigure_encoder().is_err() {
+                rtc_log_warning!(
+                    "AMF encoder reconfigure failed for {:?}; falling back to rebuild",
+                    self.codec_type
+                );
+                self.rebuild_needed = true;
+                if self.rebuild_encoder().is_err() {
+                    return VideoCodecStatus::Error;
+                }
+            }
         }
 
         let mut frame_buffer = frame.buffer();
@@ -257,8 +312,8 @@ impl VideoEncoderHandler for AmfVideoEncoder {
             frame_type: amf_force_frame_type(requested_frame_type),
         };
         let encoder = self.encoder.as_mut().expect("encoder should exist");
-        if encoder.encode(nv12.data(), &options).is_err() {
-            self.reconfigure_needed = true;
+        if let Err(err) = encoder.encode(nv12.data(), &options) {
+            rtc_log_error!("AMF encode failed for {:?}: {}", self.codec_type, err);
             return VideoCodecStatus::Error;
         }
 
@@ -306,6 +361,8 @@ impl VideoEncoderHandler for AmfVideoEncoder {
     fn release(&mut self) -> VideoCodecStatus {
         self.encoder = None;
         self.callback = None;
+        self.rebuild_needed = false;
+        self.reconfigure_needed = false;
         VideoCodecStatus::Ok
     }
 
@@ -683,6 +740,27 @@ mod tests {
             requested_frame_type(Some(frame_types.as_ref())),
             Some(VideoFrameType::Empty)
         );
+    }
+
+    #[test]
+    fn amf_reconfigure_params_uses_rate_values() {
+        let params = amf_reconfigure_params(1_234_567, 24);
+        assert_eq!(params.framerate_num, Some(24));
+        assert_eq!(params.framerate_den, Some(1));
+        assert_eq!(params.target_kbps, Some(1235));
+        assert_eq!(params.max_kbps, None);
+        assert_eq!(params.qpi, None);
+        assert_eq!(params.qpp, None);
+        assert_eq!(params.qpb, None);
+        assert_eq!(params.gop_pic_size, None);
+    }
+
+    #[test]
+    fn amf_reconfigure_params_clamps_zero_to_one() {
+        let params = amf_reconfigure_params(0, 0);
+        assert_eq!(params.framerate_num, Some(1));
+        assert_eq!(params.framerate_den, Some(1));
+        assert_eq!(params.target_kbps, Some(1));
     }
 
     #[test]
