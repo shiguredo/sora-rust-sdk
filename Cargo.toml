@@ -9,7 +9,6 @@ name = "sora_sdk"
 version = "2026.1.0-canary.6"
 edition = "2024"
 rust-version = "1.88"
-authors = ["Shiguredo Inc."]
 license = "Apache-2.0"
 description = "Sora Rust SDK"
 homepage = "https://github.com/shiguredo/sora-rust-sdk"
