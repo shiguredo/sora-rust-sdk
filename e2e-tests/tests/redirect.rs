@@ -157,7 +157,10 @@ async fn test_redirect() {
     .await;
 
     // 切断
-    let _ = second_handle.disconnect().await;
+    second_handle
+        .disconnect()
+        .await
+        .expect("2 つ目の disconnect に失敗しました");
     e2e_tests::wait_task_finished(second_task, "second_task").await;
 
     first_handle

@@ -229,7 +229,7 @@ struct ProxyHarness {
     connect_log: Arc<Mutex<Vec<ConnectTarget>>>,
     traffic_stats: Arc<ProxyTrafficStats>,
     active_connection_count: Arc<AtomicUsize>,
-    _accept_task: JoinHandle<()>,
+    accept_task: JoinHandle<()>,
 }
 
 impl ProxyHarness {
@@ -276,7 +276,7 @@ impl ProxyHarness {
             connect_log,
             traffic_stats,
             active_connection_count,
-            _accept_task: accept_task,
+            accept_task,
         })
     }
 
@@ -310,6 +310,12 @@ impl ProxyHarness {
         })
         .await
         .is_ok()
+    }
+}
+
+impl Drop for ProxyHarness {
+    fn drop(&mut self) {
+        self.accept_task.abort();
     }
 }
 
