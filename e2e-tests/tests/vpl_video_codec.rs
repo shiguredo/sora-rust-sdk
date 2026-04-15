@@ -12,8 +12,8 @@ use e2e_tests::{
 use serial_test::serial;
 use shiguredo_webrtc::VideoCodecType;
 use sora_sdk::{
-    CodecDirection, Role, SoraClient, SoraClientContext, SoraClientContextConfig, Video,
-    VideoCodecCapability, VideoCodecPreference, VplVideoCodecCapability,
+    CodecDirection, Role, SoraConnection, SoraConnectionContext, SoraConnectionContextConfig,
+    Video, VideoCodecCapability, VideoCodecPreference, VplVideoCodecCapability,
 };
 
 fn test_channel_id(suffix: &str) -> String {
@@ -51,17 +51,17 @@ fn video_setting(codec_type: VideoCodecType) -> Video {
     }
 }
 
-fn create_vpl_context() -> sora_sdk::Result<Arc<SoraClientContext>> {
+fn create_vpl_context() -> sora_sdk::Result<Arc<SoraConnectionContext>> {
     let capability: Box<dyn VideoCodecCapability> = Box::new(VplVideoCodecCapability::new()?);
     let preference = VideoCodecPreference::new_from_capability(capability.as_ref());
 
-    let mut config = SoraClientContextConfig {
+    let mut config = SoraConnectionContextConfig {
         video_codec_preference: preference,
         ..Default::default()
     };
     config.video_codec_capabilities.push(capability);
 
-    SoraClientContext::new_with_config(config)
+    SoraConnectionContext::new_with_config(config)
 }
 
 fn vpl_capability() -> Option<VplVideoCodecCapability> {
@@ -147,7 +147,7 @@ fn vpl_encoder_supported_only_codecs() -> Option<Vec<VideoCodecType>> {
 }
 
 fn default_context_supports_encoder(codec_type: VideoCodecType) -> bool {
-    let config = SoraClientContextConfig::default();
+    let config = SoraConnectionContextConfig::default();
     config
         .video_codec_capabilities
         .iter()
@@ -155,7 +155,7 @@ fn default_context_supports_encoder(codec_type: VideoCodecType) -> bool {
 }
 
 fn default_context_supports_decoder(codec_type: VideoCodecType) -> bool {
-    let config = SoraClientContextConfig::default();
+    let config = SoraConnectionContextConfig::default();
     config
         .video_codec_capabilities
         .iter()
@@ -163,8 +163,8 @@ fn default_context_supports_decoder(codec_type: VideoCodecType) -> bool {
 }
 
 async fn run_sendonly_recvonly_with_contexts(
-    sendonly_context: Arc<SoraClientContext>,
-    recvonly_context: Arc<SoraClientContext>,
+    sendonly_context: Arc<SoraConnectionContext>,
+    recvonly_context: Arc<SoraConnectionContext>,
     codec_type: VideoCodecType,
     suffix_prefix: &str,
 ) -> std::result::Result<(), String> {
@@ -186,7 +186,7 @@ async fn run_sendonly_recvonly_with_contexts(
     let (video_track, audio_track) = build_sender_tracks(&sendonly_context, &mut capturer)
         .map_err(|e| format!("failed to build tracks: {e}"))?;
 
-    let mut sendonly_builder = SoraClient::builder(
+    let mut sendonly_builder = SoraConnection::builder(
         sendonly_context,
         urls.clone(),
         channel_id.clone(),
@@ -228,7 +228,7 @@ async fn run_sendonly_recvonly_with_contexts(
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     let mut recvonly_builder =
-        SoraClient::builder(recvonly_context, urls, channel_id, Role::RecvOnly)
+        SoraConnection::builder(recvonly_context, urls, channel_id, Role::RecvOnly)
             .data_channel_signaling(true)
             .on_notify(move |_| {
                 recvonly_connected_clone.store(true, Ordering::SeqCst);
@@ -346,7 +346,7 @@ async fn run_sendrecv_with_codec(codec_type: VideoCodecType) {
         build_sender_tracks(&context1, &mut capturer1).expect("failed to build client1 tracks");
 
     let mut builder1 =
-        SoraClient::builder(context1, urls.clone(), channel_id.clone(), Role::SendRecv)
+        SoraConnection::builder(context1, urls.clone(), channel_id.clone(), Role::SendRecv)
             .sender_video_track(video_track1)
             .sender_audio_track(audio_track1)
             .video(video_setting(codec_type))
@@ -395,7 +395,7 @@ async fn run_sendrecv_with_codec(codec_type: VideoCodecType) {
     let (video_track2, audio_track2) =
         build_sender_tracks(&context2, &mut capturer2).expect("failed to build client2 tracks");
 
-    let mut builder2 = SoraClient::builder(context2, urls, channel_id, Role::SendRecv)
+    let mut builder2 = SoraConnection::builder(context2, urls, channel_id, Role::SendRecv)
         .sender_video_track(video_track2)
         .sender_audio_track(audio_track2)
         .video(video_setting(codec_type))
@@ -580,7 +580,7 @@ async fn test_vpl_decoder_only_recvonly() {
         }
 
         let sendonly_context =
-            SoraClientContext::new().expect("failed to create default sendonly context");
+            SoraConnectionContext::new().expect("failed to create default sendonly context");
         let recvonly_context = create_vpl_context().expect("failed to create recvonly context");
         run_sendonly_recvonly_with_contexts(
             sendonly_context,
@@ -617,7 +617,7 @@ async fn test_vpl_encoder_only_sendonly() {
 
         let sendonly_context = create_vpl_context().expect("failed to create sendonly context");
         let recvonly_context =
-            SoraClientContext::new().expect("failed to create default recvonly context");
+            SoraConnectionContext::new().expect("failed to create default recvonly context");
         run_sendonly_recvonly_with_contexts(
             sendonly_context,
             recvonly_context,

@@ -7,7 +7,7 @@ use e2e_tests::{
     build_metadata_with_access_token, generate_channel_id, load_env, secret_key, signaling_urls,
     verify_data_channel_label,
 };
-use sora_sdk::{Role, SoraClient, SoraClientContext};
+use sora_sdk::{Role, SoraConnection, SoraConnectionContext};
 
 #[tokio::test]
 async fn test_recvonly_data_channel_signaling() {
@@ -15,12 +15,12 @@ async fn test_recvonly_data_channel_signaling() {
 
     let urls = signaling_urls().expect("TEST_SIGNALING_URLS が必要");
     let channel_id = generate_channel_id();
-    let context = SoraClientContext::new().expect("コンテキスト作成失敗");
+    let context = SoraConnectionContext::new().expect("コンテキスト作成失敗");
 
     let switched_received = Arc::new(AtomicBool::new(false));
     let switched_received_clone = switched_received.clone();
 
-    let mut builder = SoraClient::builder(context, urls, channel_id, Role::RecvOnly)
+    let mut builder = SoraConnection::builder(context, urls, channel_id, Role::RecvOnly)
         .data_channel_signaling(true)
         .on_switched(move || {
             println!("switched 通知を受信しました");
@@ -31,11 +31,13 @@ async fn test_recvonly_data_channel_signaling() {
         builder = builder.metadata(build_metadata_with_access_token(&token));
     }
 
-    let (client, handle) = builder.build().expect("SoraClient の作成に失敗しました");
+    let (connection, handle) = builder
+        .build()
+        .expect("SoraConnection の作成に失敗しました");
 
     // クライアントを起動
-    let client_task = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(30), client.run()).await;
+    let connection_task = tokio::spawn(async move {
+        let _ = tokio::time::timeout(Duration::from_secs(30), connection.run()).await;
     });
 
     // switched 通知を待つ (最大 15 秒)
@@ -85,7 +87,7 @@ async fn test_recvonly_data_channel_signaling() {
         .expect("disconnect に失敗しました");
 
     // タスクをキャンセル
-    client_task.abort();
+    connection_task.abort();
 
     println!("テスト成功: DataChannel シグナリングの統計情報を確認しました");
 }
@@ -96,7 +98,7 @@ async fn test_data_channel_callbacks() {
 
     let urls = signaling_urls().expect("TEST_SIGNALING_URLS が必要");
     let channel_id = generate_channel_id();
-    let context = SoraClientContext::new().expect("コンテキスト作成失敗");
+    let context = SoraConnectionContext::new().expect("コンテキスト作成失敗");
 
     let expected_labels: HashSet<String> = ["signaling", "stats", "notify", "push", "rpc"]
         .iter()
@@ -113,7 +115,7 @@ async fn test_data_channel_callbacks() {
     let closed_labels_clone = closed_labels.clone();
     let switched_received_clone = switched_received.clone();
 
-    let mut builder = SoraClient::builder(context, urls, channel_id, Role::RecvOnly)
+    let mut builder = SoraConnection::builder(context, urls, channel_id, Role::RecvOnly)
         .data_channel_signaling(true)
         .on_data_channel(move |label| {
             println!("on_data_channel: {}", label);
@@ -144,10 +146,12 @@ async fn test_data_channel_callbacks() {
         builder = builder.metadata(build_metadata_with_access_token(&token));
     }
 
-    let (client, handle) = builder.build().expect("SoraClient の作成に失敗しました");
+    let (connection, handle) = builder
+        .build()
+        .expect("SoraConnection の作成に失敗しました");
 
-    let client_task = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(30), client.run()).await;
+    let connection_task = tokio::spawn(async move {
+        let _ = tokio::time::timeout(Duration::from_secs(30), connection.run()).await;
     });
 
     // switched 通知を待つ (最大 15 秒)
@@ -198,7 +202,7 @@ async fn test_data_channel_callbacks() {
         .expect("disconnect に失敗しました");
 
     // クライアントタスクの終了を待つ
-    let _ = tokio::time::timeout(Duration::from_secs(5), client_task).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), connection_task).await;
 
     // on_data_channel_close で全ラベルが閉じたことを確認
     let closed = closed_labels.lock().unwrap().clone();

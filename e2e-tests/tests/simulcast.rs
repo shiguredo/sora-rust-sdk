@@ -21,8 +21,8 @@ use sora_sdk::NvCodecVideoCodecCapability;
 #[cfg(feature = "vpl")]
 use sora_sdk::VplVideoCodecCapability;
 use sora_sdk::{
-    AdmConfig, Openh264VideoCodecCapability, Role, SoraClient, SoraClientContext,
-    SoraClientContextConfig, Video, VideoCodecCapability, VideoCodecPreference,
+    AdmConfig, Openh264VideoCodecCapability, Role, SoraConnection, SoraConnectionContext,
+    SoraConnectionContextConfig, Video, VideoCodecCapability, VideoCodecPreference,
 };
 
 fn test_channel_id(suffix: &str) -> String {
@@ -53,18 +53,18 @@ async fn wait_for_connected(flag: &Arc<AtomicBool>, timeout_secs: u64) {
 
 fn create_non_builtin_context(
     capability: Box<dyn VideoCodecCapability>,
-) -> sora_sdk::Result<Arc<SoraClientContext>> {
+) -> sora_sdk::Result<Arc<SoraConnectionContext>> {
     let preference = VideoCodecPreference::new_from_capability(capability.as_ref());
-    let config = SoraClientContextConfig {
+    let config = SoraConnectionContextConfig {
         adm_config: AdmConfig::default(),
         video_codec_preference: preference,
         video_codec_capabilities: vec![capability],
     };
-    SoraClientContext::new_with_config(config)
+    SoraConnectionContext::new_with_config(config)
 }
 
 async fn run_sendonly_simulcast_outbound_layers(
-    context: Arc<SoraClientContext>,
+    context: Arc<SoraConnectionContext>,
     video: Option<Video>,
     channel_suffix: &str,
     expected_encoder_impl_substrings: &[&str],
@@ -80,7 +80,7 @@ async fn run_sendonly_simulcast_outbound_layers(
     let connected = Arc::new(AtomicBool::new(false));
     let connected_clone = connected.clone();
 
-    let mut builder = SoraClient::builder(context, urls, channel_id, Role::SendOnly)
+    let mut builder = SoraConnection::builder(context, urls, channel_id, Role::SendOnly)
         .sender_video_track(video_track)
         .sender_audio_track(audio_track)
         .simulcast(true)
@@ -95,10 +95,12 @@ async fn run_sendonly_simulcast_outbound_layers(
         builder = builder.metadata(build_metadata_with_access_token(&token));
     }
 
-    let (client, handle) = builder.build().expect("SoraClient の作成に失敗しました");
+    let (connection, handle) = builder
+        .build()
+        .expect("SoraConnection の作成に失敗しました");
 
     let run_task = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(40), client.run()).await;
+        let _ = tokio::time::timeout(Duration::from_secs(40), connection.run()).await;
     });
 
     wait_for_connected(&connected, 10).await;
@@ -154,7 +156,7 @@ async fn run_sendonly_simulcast_outbound_layers(
 #[tokio::test]
 async fn test_sendonly_simulcast_outbound_layers() {
     load_env();
-    let context = SoraClientContext::new().expect("コンテキスト作成失敗");
+    let context = SoraConnectionContext::new().expect("コンテキスト作成失敗");
     run_sendonly_simulcast_outbound_layers(
         context,
         Some(Video::new_vp8(None)),
@@ -351,7 +353,7 @@ async fn test_sendrecv_simulcast_persists_after_reoffer() {
     let channel_id = test_channel_id("simulcast-reoffer");
 
     // クライアント A: SendOnly + simulcast true
-    let context_a = SoraClientContext::new().expect("クライアント A のコンテキスト作成失敗");
+    let context_a = SoraConnectionContext::new().expect("クライアント A のコンテキスト作成失敗");
     let mut capturer_a = FakeVideoCapturer::new(simulcast_video_capturer_config())
         .expect("FakeVideoCapturer A 作成失敗");
     let (video_track_a, audio_track_a) =
@@ -361,7 +363,7 @@ async fn test_sendrecv_simulcast_persists_after_reoffer() {
     let connected_a_clone = connected_a.clone();
 
     let mut builder_a =
-        SoraClient::builder(context_a, urls.clone(), channel_id.clone(), Role::SendOnly)
+        SoraConnection::builder(context_a, urls.clone(), channel_id.clone(), Role::SendOnly)
             .sender_video_track(video_track_a)
             .sender_audio_track(audio_track_a)
             .simulcast(true)
@@ -375,7 +377,7 @@ async fn test_sendrecv_simulcast_persists_after_reoffer() {
 
     let (client_a, handle_a) = builder_a
         .build()
-        .expect("SoraClient A の作成に失敗しました");
+        .expect("SoraConnection A の作成に失敗しました");
     let run_task_a = tokio::spawn(async move {
         let _ = tokio::time::timeout(Duration::from_secs(50), client_a.run()).await;
     });
@@ -397,13 +399,13 @@ async fn test_sendrecv_simulcast_persists_after_reoffer() {
     );
 
     // クライアント B: RecvOnly (後から参加)
-    let context_b = SoraClientContext::new().expect("クライアント B のコンテキスト作成失敗");
+    let context_b = SoraConnectionContext::new().expect("クライアント B のコンテキスト作成失敗");
     let connected_b = Arc::new(AtomicBool::new(false));
     let connected_b_clone = connected_b.clone();
     let track_received_b = Arc::new(AtomicUsize::new(0));
     let track_received_b_clone = track_received_b.clone();
 
-    let mut builder_b = SoraClient::builder(context_b, urls, channel_id, Role::RecvOnly)
+    let mut builder_b = SoraConnection::builder(context_b, urls, channel_id, Role::RecvOnly)
         .on_notify(move |_| {
             connected_b_clone.store(true, Ordering::SeqCst);
         })
@@ -426,7 +428,7 @@ async fn test_sendrecv_simulcast_persists_after_reoffer() {
 
     let (client_b, handle_b) = builder_b
         .build()
-        .expect("SoraClient B の作成に失敗しました");
+        .expect("SoraConnection B の作成に失敗しました");
     let run_task_b = tokio::spawn(async move {
         let _ = tokio::time::timeout(Duration::from_secs(50), client_b.run()).await;
     });

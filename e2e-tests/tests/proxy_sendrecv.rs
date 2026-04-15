@@ -11,7 +11,7 @@ use e2e_tests::{
     sum_video_stats_field_for_type, verify_video_stats_field_positive,
 };
 use shiguredo_http11::{RequestDecoder, Response, host::Host, uri::Uri};
-use sora_sdk::{ProxyInfo, Role, SoraClient, SoraClientContext};
+use sora_sdk::{ProxyInfo, Role, SoraConnection, SoraConnectionContext};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::task::JoinHandle;
@@ -422,14 +422,14 @@ async fn test_sendrecv_bidirectional_via_proxy() {
     let client2_track_received = Arc::new(AtomicUsize::new(0));
     let client2_track_received_clone = client2_track_received.clone();
 
-    let context1 = SoraClientContext::new().expect("クライアント 1 コンテキスト作成失敗");
+    let context1 = SoraConnectionContext::new().expect("クライアント 1 コンテキスト作成失敗");
     let mut capturer1 = FakeVideoCapturer::new(FakeVideoCapturerConfig::default())
         .expect("FakeVideoCapturer 1 作成失敗");
     let (video_track1, audio_track1) =
         build_sender_tracks(&context1, &mut capturer1).expect("送信用トラック作成失敗");
 
     let mut builder1 =
-        SoraClient::builder(context1, urls.clone(), channel_id.clone(), Role::SendRecv)
+        SoraConnection::builder(context1, urls.clone(), channel_id.clone(), Role::SendRecv)
             .sender_video_track(video_track1)
             .sender_audio_track(audio_track1)
             .proxy(proxy_info.clone())
@@ -454,7 +454,9 @@ async fn test_sendrecv_bidirectional_via_proxy() {
         builder1 = builder1.metadata(build_metadata_with_access_token(&token));
     }
 
-    let (client1, handle1) = builder1.build().expect("SoraClient 1 の作成に失敗しました");
+    let (client1, handle1) = builder1
+        .build()
+        .expect("SoraConnection 1 の作成に失敗しました");
     let client1_task = tokio::spawn(async move {
         let _ = tokio::time::timeout(Duration::from_secs(30), client1.run()).await;
     });
@@ -476,13 +478,13 @@ async fn test_sendrecv_bidirectional_via_proxy() {
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let context2 = SoraClientContext::new().expect("クライアント 2 コンテキスト作成失敗");
+    let context2 = SoraConnectionContext::new().expect("クライアント 2 コンテキスト作成失敗");
     let mut capturer2 = FakeVideoCapturer::new(FakeVideoCapturerConfig::default())
         .expect("FakeVideoCapturer 2 作成失敗");
     let (video_track2, audio_track2) =
         build_sender_tracks(&context2, &mut capturer2).expect("送信用トラック作成失敗");
 
-    let mut builder2 = SoraClient::builder(context2, urls.clone(), channel_id, Role::SendRecv)
+    let mut builder2 = SoraConnection::builder(context2, urls.clone(), channel_id, Role::SendRecv)
         .sender_video_track(video_track2)
         .sender_audio_track(audio_track2)
         .proxy(proxy_info)
@@ -515,7 +517,9 @@ async fn test_sendrecv_bidirectional_via_proxy() {
         builder2 = builder2.metadata(build_metadata_with_access_token(&token));
     }
 
-    let (client2, handle2) = builder2.build().expect("SoraClient 2 の作成に失敗しました");
+    let (client2, handle2) = builder2
+        .build()
+        .expect("SoraConnection 2 の作成に失敗しました");
     let client2_task = tokio::spawn(async move {
         let _ = tokio::time::timeout(Duration::from_secs(30), client2.run()).await;
     });

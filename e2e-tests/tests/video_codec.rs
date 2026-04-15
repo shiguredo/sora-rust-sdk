@@ -14,7 +14,7 @@ use e2e_tests::{
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 use shiguredo_webrtc::VideoCodecType;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-use sora_sdk::{Role, SoraClient, SoraClientContext, Video};
+use sora_sdk::{Role, SoraConnection, SoraConnectionContext, Video};
 
 /// テスト用のチャンネル ID を生成する (suffix 付き)
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -26,7 +26,7 @@ fn test_channel_id(suffix: &str) -> String {
 /// 指定 codec の Encoder / Decoder が両方対応しているか確認する。
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 fn is_codec_fully_supported(codec_type: VideoCodecType) -> bool {
-    let config = sora_sdk::SoraClientContextConfig::default();
+    let config = sora_sdk::SoraConnectionContextConfig::default();
     let has_encoder = config
         .video_codec_capabilities
         .iter()
@@ -71,13 +71,13 @@ async fn run_sendonly_recvonly_with_codec(
     let track_received_clone = track_received.clone();
 
     // SendOnly クライアントを作成・起動
-    let sendonly_context = SoraClientContext::new().expect("SendOnly コンテキスト作成失敗");
+    let sendonly_context = SoraConnectionContext::new().expect("SendOnly コンテキスト作成失敗");
     let mut capturer = FakeVideoCapturer::new(FakeVideoCapturerConfig::default())
         .expect("FakeVideoCapturer 作成失敗");
     let (video_track, audio_track) =
         build_sender_tracks(&sendonly_context, &mut capturer).expect("送信用トラック作成失敗");
 
-    let mut sendonly_builder = SoraClient::builder(
+    let mut sendonly_builder = SoraConnection::builder(
         sendonly_context,
         urls.clone(),
         channel_id.clone(),
@@ -97,7 +97,7 @@ async fn run_sendonly_recvonly_with_codec(
 
     let (sendonly_client, sendonly_handle) = sendonly_builder
         .build()
-        .expect("SoraClient の作成に失敗しました");
+        .expect("SoraConnection の作成に失敗しました");
 
     let sendonly_task = tokio::spawn(async move {
         let _ = tokio::time::timeout(Duration::from_secs(30), sendonly_client.run()).await;
@@ -126,10 +126,10 @@ async fn run_sendonly_recvonly_with_codec(
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     // RecvOnly クライアントを作成・起動
-    let recvonly_context = SoraClientContext::new().expect("RecvOnly コンテキスト作成失敗");
+    let recvonly_context = SoraConnectionContext::new().expect("RecvOnly コンテキスト作成失敗");
 
     let mut recvonly_builder =
-        SoraClient::builder(recvonly_context, urls, channel_id, Role::RecvOnly)
+        SoraConnection::builder(recvonly_context, urls, channel_id, Role::RecvOnly)
             .data_channel_signaling(true)
             .on_notify(move |_| {
                 recvonly_connected_clone.store(true, Ordering::SeqCst);
@@ -153,7 +153,7 @@ async fn run_sendonly_recvonly_with_codec(
 
     let (recvonly_client, recvonly_handle) = recvonly_builder
         .build()
-        .expect("SoraClient の作成に失敗しました");
+        .expect("SoraConnection の作成に失敗しました");
 
     let recvonly_task = tokio::spawn(async move {
         let _ = tokio::time::timeout(Duration::from_secs(30), recvonly_client.run()).await;
@@ -281,14 +281,14 @@ async fn run_sendrecv_with_codec(video: Video, codec_name: &str, expected_mime_t
     let client2_track_received_clone = client2_track_received.clone();
 
     // クライアント 1 を作成・起動
-    let context1 = SoraClientContext::new().expect("クライアント 1 コンテキスト作成失敗");
+    let context1 = SoraConnectionContext::new().expect("クライアント 1 コンテキスト作成失敗");
     let mut capturer1 = FakeVideoCapturer::new(FakeVideoCapturerConfig::default())
         .expect("FakeVideoCapturer 1 作成失敗");
     let (video_track1, audio_track1) =
         build_sender_tracks(&context1, &mut capturer1).expect("送信用トラック作成失敗");
 
     let mut builder1 =
-        SoraClient::builder(context1, urls.clone(), channel_id.clone(), Role::SendRecv)
+        SoraConnection::builder(context1, urls.clone(), channel_id.clone(), Role::SendRecv)
             .sender_video_track(video_track1)
             .sender_audio_track(audio_track1)
             .video(video.clone())
@@ -313,7 +313,9 @@ async fn run_sendrecv_with_codec(video: Video, codec_name: &str, expected_mime_t
         builder1 = builder1.metadata(build_metadata_with_access_token(&token));
     }
 
-    let (client1, handle1) = builder1.build().expect("SoraClient の作成に失敗しました");
+    let (client1, handle1) = builder1
+        .build()
+        .expect("SoraConnection の作成に失敗しました");
 
     let client1_task = tokio::spawn(async move {
         let _ = tokio::time::timeout(Duration::from_secs(30), client1.run()).await;
@@ -345,13 +347,13 @@ async fn run_sendrecv_with_codec(video: Video, codec_name: &str, expected_mime_t
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     // クライアント 2 を作成・起動
-    let context2 = SoraClientContext::new().expect("クライアント 2 コンテキスト作成失敗");
+    let context2 = SoraConnectionContext::new().expect("クライアント 2 コンテキスト作成失敗");
     let mut capturer2 = FakeVideoCapturer::new(FakeVideoCapturerConfig::default())
         .expect("FakeVideoCapturer 2 作成失敗");
     let (video_track2, audio_track2) =
         build_sender_tracks(&context2, &mut capturer2).expect("送信用トラック作成失敗");
 
-    let mut builder2 = SoraClient::builder(context2, urls, channel_id, Role::SendRecv)
+    let mut builder2 = SoraConnection::builder(context2, urls, channel_id, Role::SendRecv)
         .sender_video_track(video_track2)
         .sender_audio_track(audio_track2)
         .video(video)
@@ -376,7 +378,9 @@ async fn run_sendrecv_with_codec(video: Video, codec_name: &str, expected_mime_t
         builder2 = builder2.metadata(build_metadata_with_access_token(&token));
     }
 
-    let (client2, handle2) = builder2.build().expect("SoraClient の作成に失敗しました");
+    let (client2, handle2) = builder2
+        .build()
+        .expect("SoraConnection の作成に失敗しました");
 
     let client2_task = tokio::spawn(async move {
         let _ = tokio::time::timeout(Duration::from_secs(30), client2.run()).await;

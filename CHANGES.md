@@ -24,6 +24,11 @@
   - `create_video_encoder` / `create_video_decoder` の戻り値を `Option<VideoEncoder>` / `Option<VideoDecoder>` に変更する
   - `SoraVideoEncoderFactory` / `SoraVideoDecoderFactory` と各 `VideoCodecCapability` 実装を新シグネチャへ追従する
   - @melpon
+- [CHANGE] `SoraClient` 系の型とファイル名を `SoraConnection` 系にリネームする
+  - `SoraClient` / `SoraClientBuilder` / `SoraClientHandle` / `SoraClientCommand` / `SoraClientContext` / `SoraClientContextConfig` をそれぞれ `SoraConnection` / `SoraConnectionBuilder` / `SoraConnectionHandle` / `SoraConnectionCommand` / `SoraConnectionContext` / `SoraConnectionContextConfig` に改名する
+  - `src/client.rs` / `src/client_context.rs` を `src/connection.rs` / `src/connection_context.rs` にリネームする
+  - Sora シグナリング仕様の `client_id` / TLS 用語の `client_cert` / `client_key` / `version::get_sora_client_name()` は据え置く
+  - @voluntas
 - [UPDATE] `shiguredo_webrtc` を 0.147.1-canary.4 に上げる
   - @sile, @melpon
 - [UPDATE] `shiguredo_nvcodec` を 2026.1.0 に上げる
@@ -32,7 +37,7 @@
   - @melpon
 - [ADD] Windows に対応する
   - @melpon
-- [ADD] `SoraClientBuilder::ice_server_url_configurer` を追加する
+- [ADD] `SoraConnectionBuilder::ice_server_url_configurer` を追加する
   - @melpon
 - [ADD] MP4 ファイルからエンコード済み映像をパススルー送信する機能を追加
   - @voluntas, @melpon
@@ -70,7 +75,7 @@
   - @melpon
 - [FIX] `on_encoded_image` 実行後に非 `Ok` を受けた場合でも `VideoCodecStatus::Error` を返さず、警告を出して処理を継続する
   - @melpon
-- [FIX] 接続失敗時でも `PeerConnection` / `SoraClientContext` の破棄順序を保証するように保持フィールド順を調整する
+- [FIX] 接続失敗時でも `PeerConnection` / `SoraConnectionContext` の破棄順序を保証するように保持フィールド順を調整する
   - @melpon
 - [FIX] e2e-tests の映像送受信判定を修正する
   - video トラック / video RTP 限定に修正し、音声のみで誤検知しないようにする

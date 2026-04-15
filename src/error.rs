@@ -5,7 +5,7 @@ use nojson::JsonParseError;
 use shiguredo_http11::{auth::AuthError, uri::UriError};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::client::SoraClientCommand;
+use crate::connection::SoraConnectionCommand;
 
 #[derive(Debug)]
 pub enum Error {
@@ -99,7 +99,7 @@ pub enum Error {
         message_type: String,
     },
     CommandSendFailed {
-        source: mpsc::error::SendError<SoraClientCommand>,
+        source: mpsc::error::SendError<SoraConnectionCommand>,
         command: &'static str,
     },
     CommandResponseMissing {

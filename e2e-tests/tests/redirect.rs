@@ -6,7 +6,7 @@ use e2e_tests::{
     build_metadata_with_access_token, generate_access_token, generate_channel_id, load_env,
     secret_key, signaling_urls,
 };
-use sora_sdk::{Role, SignalingDirection, SignalingType, SoraClient, SoraClientContext};
+use sora_sdk::{Role, SignalingDirection, SignalingType, SoraConnection, SoraConnectionContext};
 
 /// redirect メッセージを受信して再接続できることを確認する。
 ///
@@ -33,7 +33,7 @@ async fn test_redirect() {
     let channel_id = generate_channel_id();
 
     // --- 1 つ目の recvonly クライアント ---
-    let first_context = SoraClientContext::new().expect("コンテキスト作成失敗");
+    let first_context = SoraConnectionContext::new().expect("コンテキスト作成失敗");
     let first_connected = Arc::new(AtomicBool::new(false));
     let first_connected_clone = first_connected.clone();
 
@@ -41,7 +41,7 @@ async fn test_redirect() {
         f.member("cluster_affinity", false)
     });
 
-    let first_builder = SoraClient::builder(
+    let first_builder = SoraConnection::builder(
         first_context,
         vec![urls[0].clone()],
         channel_id.clone(),
@@ -54,7 +54,7 @@ async fn test_redirect() {
 
     let (first_client, first_handle) = first_builder
         .build()
-        .expect("1 つ目の SoraClient の作成に失敗しました");
+        .expect("1 つ目の SoraConnection の作成に失敗しました");
 
     let first_task = tokio::spawn(async move {
         let _ = tokio::time::timeout(Duration::from_secs(30), first_client.run()).await;
@@ -78,7 +78,7 @@ async fn test_redirect() {
     );
 
     // --- 2 つ目の recvonly クライアント (redirect を受ける側) ---
-    let second_context = SoraClientContext::new().expect("コンテキスト作成失敗");
+    let second_context = SoraConnectionContext::new().expect("コンテキスト作成失敗");
 
     let redirect_received = Arc::new(AtomicBool::new(false));
     let redirect_connect_sent = Arc::new(AtomicBool::new(false));
@@ -91,7 +91,7 @@ async fn test_redirect() {
     let second_access_token =
         generate_access_token(&channel_id, &secret, |f| f.member("cluster_affinity", true));
 
-    let second_builder = SoraClient::builder(
+    let second_builder = SoraConnection::builder(
         second_context,
         vec![urls[1].clone()],
         channel_id.clone(),
@@ -133,7 +133,7 @@ async fn test_redirect() {
 
     let (second_client, second_handle) = second_builder
         .build()
-        .expect("2 つ目の SoraClient の作成に失敗しました");
+        .expect("2 つ目の SoraConnection の作成に失敗しました");
 
     let second_task = tokio::spawn(async move {
         let _ = tokio::time::timeout(Duration::from_secs(15), second_client.run()).await;

@@ -70,7 +70,7 @@ C++ SDK の複数シグナリング URL に準拠した設計。
 
 ### 動作
 
-- `SoraClient::builder()` の第 2 引数に `Vec<String>` で複数の URL を指定する
+- `SoraConnection::builder()` の第 2 引数に `Vec<String>` で複数の URL を指定する
 - 接続時に URL リストをランダムにシャッフルして負荷分散する
 - `tokio::task::JoinSet` で全 URL に同時に TCP/TLS 接続を試みる
 - 最初に接続が成功した URL を採用し、残りの接続試行はキャンセルする
@@ -81,14 +81,14 @@ C++ SDK の複数シグナリング URL に準拠した設計。
 
 | メソッド | 説明 |
 |---|---|
-| `SoraClientHandle::selected_signaling_url()` | 最初に接続が成功した URL を返す |
-| `SoraClientHandle::connected_signaling_url()` | 現在接続中の URL を返す (リダイレクト後はリダイレクト先) |
+| `SoraConnectionHandle::selected_signaling_url()` | 最初に接続が成功した URL を返す |
+| `SoraConnectionHandle::connected_signaling_url()` | 現在接続中の URL を返す (リダイレクト後はリダイレクト先) |
 
 ### C++ SDK との比較
 
 | 項目 | C++ SDK | Rust SDK |
 |---|---|---|
-| URL 指定 | `config.signaling_urls` (`vector<string>`) | `SoraClient::builder()` の第 2 引数 (`Vec<String>`) |
+| URL 指定 | `config.signaling_urls` (`vector<string>`) | `SoraConnection::builder()` の第 2 引数 (`Vec<String>`) |
 | ランダム化 | デフォルト有効 / `disable_signaling_url_randomization` で無効化可能 | デフォルト有効 |
 | 並列接続 | Boost.Asio の非同期接続 | `tokio::task::JoinSet` |
 | 残接続のキャンセル | `ws->Close()` で明示的にクローズ | `JoinSet::abort_all()` でタスクキャンセル |

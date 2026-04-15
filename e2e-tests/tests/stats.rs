@@ -7,7 +7,7 @@ use e2e_tests::{
     build_sender_tracks, generate_channel_id, load_env, secret_key, signaling_urls,
     verify_stats_field_positive,
 };
-use sora_sdk::{JsonString, Role, SoraClient, SoraClientContext};
+use sora_sdk::{JsonString, Role, SoraConnection, SoraConnectionContext};
 
 #[tokio::test]
 async fn test_get_stats() {
@@ -15,7 +15,7 @@ async fn test_get_stats() {
 
     let urls = signaling_urls().expect("TEST_SIGNALING_URLS が必要");
     let channel_id = generate_channel_id();
-    let context = SoraClientContext::new().expect("コンテキスト作成失敗");
+    let context = SoraConnectionContext::new().expect("コンテキスト作成失敗");
 
     let mut capturer = FakeVideoCapturer::new(FakeVideoCapturerConfig::default())
         .expect("FakeVideoCapturer 作成失敗");
@@ -25,7 +25,7 @@ async fn test_get_stats() {
     let connected = Arc::new(AtomicBool::new(false));
     let connected_clone = connected.clone();
 
-    let mut builder = SoraClient::builder(context, urls, channel_id, Role::SendOnly)
+    let mut builder = SoraConnection::builder(context, urls, channel_id, Role::SendOnly)
         .sender_video_track(video_track)
         .sender_audio_track(audio_track)
         .on_notify(move |_| {
@@ -36,14 +36,16 @@ async fn test_get_stats() {
         builder = builder.metadata(build_metadata_with_access_token(&token));
     }
 
-    let (client, handle) = builder.build().expect("SoraClient の作成に失敗しました");
+    let (connection, handle) = builder
+        .build()
+        .expect("SoraConnection の作成に失敗しました");
 
     // run() と統計取得を並行して実行
     let stats_result = Arc::new(std::sync::Mutex::new(Option::<JsonString>::None));
     let stats_result_clone = stats_result.clone();
 
     tokio::select! {
-        _ = client.run() => {
+        _ = connection.run() => {
             // run が終了した（通常はここに来ない）
         }
         _ = async {

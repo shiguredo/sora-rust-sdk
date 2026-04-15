@@ -7,7 +7,7 @@ use e2e_tests::{
     build_sender_tracks, generate_channel_id, load_env, secret_key, signaling_urls,
     verify_video_stats_field_positive,
 };
-use sora_sdk::{Role, SoraClient, SoraClientContext};
+use sora_sdk::{Role, SoraConnection, SoraConnectionContext};
 
 /// テスト用のチャンネル ID を生成する (suffix 付き)
 fn test_channel_id(suffix: &str) -> String {
@@ -34,13 +34,13 @@ async fn test_sendonly_then_recvonly() {
     let track_received_clone = track_received.clone();
 
     // SendOnly クライアントを作成・起動
-    let sendonly_context = SoraClientContext::new().expect("SendOnly コンテキスト作成失敗");
+    let sendonly_context = SoraConnectionContext::new().expect("SendOnly コンテキスト作成失敗");
     let mut capturer = FakeVideoCapturer::new(FakeVideoCapturerConfig::default())
         .expect("FakeVideoCapturer 作成失敗");
     let (video_track, audio_track) =
         build_sender_tracks(&sendonly_context, &mut capturer).expect("送信用トラック作成失敗");
 
-    let mut sendonly_builder = SoraClient::builder(
+    let mut sendonly_builder = SoraConnection::builder(
         sendonly_context,
         urls.clone(),
         channel_id.clone(),
@@ -59,7 +59,7 @@ async fn test_sendonly_then_recvonly() {
 
     let (sendonly_client, sendonly_handle) = sendonly_builder
         .build()
-        .expect("SoraClient の作成に失敗しました");
+        .expect("SoraConnection の作成に失敗しました");
 
     // SendOnly を起動
     let sendonly_task = tokio::spawn(async move {
@@ -90,10 +90,10 @@ async fn test_sendonly_then_recvonly() {
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
     // RecvOnly クライアントを作成・起動
-    let recvonly_context = SoraClientContext::new().expect("RecvOnly コンテキスト作成失敗");
+    let recvonly_context = SoraConnectionContext::new().expect("RecvOnly コンテキスト作成失敗");
 
     let mut recvonly_builder =
-        SoraClient::builder(recvonly_context, urls, channel_id, Role::RecvOnly)
+        SoraConnection::builder(recvonly_context, urls, channel_id, Role::RecvOnly)
             .data_channel_signaling(true)
             .on_notify(move |_| {
                 recvonly_connected_clone.store(true, Ordering::SeqCst);
@@ -118,7 +118,7 @@ async fn test_sendonly_then_recvonly() {
 
     let (recvonly_client, recvonly_handle) = recvonly_builder
         .build()
-        .expect("SoraClient の作成に失敗しました");
+        .expect("SoraConnection の作成に失敗しました");
 
     let recvonly_task = tokio::spawn(async move {
         let _ =
@@ -224,9 +224,9 @@ async fn test_recvonly_then_sendonly() {
     let track_received_clone = track_received.clone();
 
     // RecvOnly クライアントを作成・起動 (先に起動)
-    let recvonly_context = SoraClientContext::new().expect("RecvOnly コンテキスト作成失敗");
+    let recvonly_context = SoraConnectionContext::new().expect("RecvOnly コンテキスト作成失敗");
 
-    let mut recvonly_builder = SoraClient::builder(
+    let mut recvonly_builder = SoraConnection::builder(
         recvonly_context,
         urls.clone(),
         channel_id.clone(),
@@ -256,7 +256,7 @@ async fn test_recvonly_then_sendonly() {
 
     let (recvonly_client, recvonly_handle) = recvonly_builder
         .build()
-        .expect("SoraClient の作成に失敗しました");
+        .expect("SoraConnection の作成に失敗しました");
 
     let recvonly_task = tokio::spawn(async move {
         let _ =
@@ -286,14 +286,14 @@ async fn test_recvonly_then_sendonly() {
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
     // SendOnly クライアントを作成・起動
-    let sendonly_context = SoraClientContext::new().expect("SendOnly コンテキスト作成失敗");
+    let sendonly_context = SoraConnectionContext::new().expect("SendOnly コンテキスト作成失敗");
     let mut capturer = FakeVideoCapturer::new(FakeVideoCapturerConfig::default())
         .expect("FakeVideoCapturer 作成失敗");
     let (video_track, audio_track) =
         build_sender_tracks(&sendonly_context, &mut capturer).expect("送信用トラック作成失敗");
 
     let mut sendonly_builder =
-        SoraClient::builder(sendonly_context, urls, channel_id, Role::SendOnly)
+        SoraConnection::builder(sendonly_context, urls, channel_id, Role::SendOnly)
             .sender_video_track(video_track)
             .sender_audio_track(audio_track)
             .data_channel_signaling(true)
@@ -307,7 +307,7 @@ async fn test_recvonly_then_sendonly() {
 
     let (sendonly_client, sendonly_handle) = sendonly_builder
         .build()
-        .expect("SoraClient の作成に失敗しました");
+        .expect("SoraConnection の作成に失敗しました");
 
     let sendonly_task = tokio::spawn(async move {
         let _ =
