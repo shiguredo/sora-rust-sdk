@@ -120,6 +120,22 @@ pub enum Error {
     Libcamera(shiguredo_libcamera::Error),
     #[cfg(feature = "openh264")]
     Openh264(shiguredo_openh264::Error),
+    #[cfg(feature = "amf")]
+    Amf {
+        source: shiguredo_amf::Error,
+    },
+    #[cfg(feature = "amf")]
+    AmfMessage {
+        reason: String,
+    },
+    #[cfg(feature = "vpl")]
+    Vpl {
+        source: shiguredo_vpl::Error,
+    },
+    #[cfg(feature = "vpl")]
+    VplMessage {
+        reason: String,
+    },
     RpcTimeout,
     SignalingUrlsEmpty,
     AllSignalingUrlsFailed {
@@ -132,6 +148,14 @@ pub enum Error {
     ClientKeyParse,
     CaCertParse,
     ClientCertKeyIncomplete,
+    #[cfg(feature = "nvcodec")]
+    NvCodec {
+        source: shiguredo_nvcodec::Error,
+    },
+    #[cfg(feature = "nvcodec")]
+    NvCodecMessage {
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for Error {
@@ -269,6 +293,14 @@ impl std::fmt::Display for Error {
             Error::Libcamera(err) => write!(f, "libcamera error: {err}"),
             #[cfg(feature = "openh264")]
             Error::Openh264(err) => write!(f, "OpenH264 error: {err}"),
+            #[cfg(feature = "amf")]
+            Error::Amf { source } => write!(f, "AMF error: {source}"),
+            #[cfg(feature = "amf")]
+            Error::AmfMessage { reason } => write!(f, "AMF error: {reason}"),
+            #[cfg(feature = "vpl")]
+            Error::Vpl { source } => write!(f, "VPL error: {source}"),
+            #[cfg(feature = "vpl")]
+            Error::VplMessage { reason } => write!(f, "VPL error: {reason}"),
             Error::RpcTimeout => f.write_str("RPC レスポンスがタイムアウトしました"),
             Error::SignalingUrlsEmpty => f.write_str("シグナリング URL が指定されていません"),
             Error::AllSignalingUrlsFailed { errors } => {
@@ -287,6 +319,10 @@ impl std::fmt::Display for Error {
             Error::ClientCertKeyIncomplete => {
                 f.write_str("client_cert と client_key は両方を指定する必要があります")
             }
+            #[cfg(feature = "nvcodec")]
+            Error::NvCodec { source } => write!(f, "NVCodec error: {source}"),
+            #[cfg(feature = "nvcodec")]
+            Error::NvCodecMessage { reason } => write!(f, "NVCodec error: {reason}"),
         }
     }
 }
@@ -310,6 +346,10 @@ impl std::error::Error for Error {
             Error::Libcamera(err) => Some(err),
             #[cfg(feature = "openh264")]
             Error::Openh264(err) => Some(err),
+            #[cfg(feature = "amf")]
+            Error::Amf { source } => Some(source),
+            #[cfg(feature = "vpl")]
+            Error::Vpl { source } => Some(source),
             Error::SimulcastSetParametersFailed { source } => Some(source),
             Error::Utf8DecodeFailed(err) => Some(err),
             Error::CommandSendFailed { source, .. } => Some(source),
@@ -387,9 +427,30 @@ impl From<shiguredo_openh264::Error> for Error {
     }
 }
 
+#[cfg(feature = "amf")]
+impl From<shiguredo_amf::Error> for Error {
+    fn from(err: shiguredo_amf::Error) -> Self {
+        Error::Amf { source: err }
+    }
+}
+
+#[cfg(feature = "vpl")]
+impl From<shiguredo_vpl::Error> for Error {
+    fn from(err: shiguredo_vpl::Error) -> Self {
+        Error::Vpl { source: err }
+    }
+}
+
 impl From<shiguredo_websocket::Error> for Error {
     fn from(err: shiguredo_websocket::Error) -> Self {
         Error::Websocket(err)
+    }
+}
+
+#[cfg(feature = "nvcodec")]
+impl From<shiguredo_nvcodec::Error> for Error {
+    fn from(err: shiguredo_nvcodec::Error) -> Self {
+        Error::NvCodec { source: err }
     }
 }
 

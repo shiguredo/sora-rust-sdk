@@ -394,6 +394,11 @@ impl SimulcastCapabilityHelper {
     }
 }
 
+pub fn codec_type_from_format(format: &SdpVideoFormatRef<'_>) -> Option<VideoCodecType> {
+    let format_name = format.name().ok()?;
+    VideoCodecType::try_from(format_name.as_str()).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;

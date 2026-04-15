@@ -31,7 +31,7 @@ pub use crate::types::{
 };
 pub use crate::video_codec::{
     AlignmentEncoderAdapter, SimulcastCapabilityHelper, SoraVideoDecoderFactory,
-    SoraVideoEncoderFactory,
+    SoraVideoEncoderFactory, codec_type_from_format,
 };
 pub use crate::video_codec_capability::{
     CodecDirection, VideoCodecCapability, VideoCodecImplementation,

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use shiguredo_amf::{
     Av1EncoderConfig, CodecConfig, Decoder, DecoderCodec, DecoderConfig, EncodeOptions, Encoder,
     EncoderConfig, FrameFormat, H264EncoderConfig, HevcEncoderConfig, PictureType, RateControlMode,
-    VideoCodecType as AmfCodecType, frame_type, supported_codecs,
+    ReconfigureParams, VideoCodecType as AmfCodecType, frame_type, supported_codecs,
 };
 use shiguredo_webrtc::{
     CodecSpecificInfo, EncodedImage, EncodedImageBuffer, EncodedImageRef, EnvironmentRef,
@@ -14,61 +14,34 @@ use shiguredo_webrtc::{
     VideoEncoderEncodedImageCallbackRef, VideoEncoderEncodedImageCallbackResultError,
     VideoEncoderEncoderInfo, VideoEncoderHandler, VideoEncoderRateControlParametersRef,
     VideoEncoderSettingsRef, VideoFrame, VideoFrameRef, VideoFrameType, VideoFrameTypeVectorRef,
-    i420_to_nv12, nv12_to_i420, rtc_log_warning,
+    i420_to_nv12, nv12_to_i420, rtc_log_error, rtc_log_warning,
 };
 
 use crate::error::Result;
-use crate::video_codec::{AlignmentEncoderAdapter, SimulcastCapabilityHelper};
+use crate::video_codec::{
+    AlignmentEncoderAdapter, SimulcastCapabilityHelper, codec_type_from_format,
+};
 use crate::video_codec_capability::{
     CodecDirection, VideoCodecCapability, VideoCodecImplementation,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct CodecAvailability {
-    codec_type: VideoCodecType,
-    encoder_supported: bool,
-    decoder_supported: bool,
-}
-
-impl CodecAvailability {
-    fn is_supported(&self, direction: CodecDirection) -> bool {
-        match direction {
-            CodecDirection::Encoder => self.encoder_supported,
-            CodecDirection::Decoder => self.decoder_supported,
-        }
-    }
-}
-
-fn codec_sort_key(codec_type: VideoCodecType) -> u8 {
-    match codec_type {
-        VideoCodecType::H264 => 0,
-        VideoCodecType::H265 => 1,
-        VideoCodecType::Av1 => 2,
-        _ => u8::MAX,
-    }
-}
-
-fn collect_codec_availability() -> Vec<CodecAvailability> {
-    let mut codecs = Vec::new();
+fn collect_supported_formats() -> (Vec<SdpVideoFormat>, Vec<SdpVideoFormat>) {
+    let mut encoder_supported_formats = Vec::new();
+    let mut decoder_supported_formats = Vec::new();
     for info in supported_codecs() {
         let codec_type = match info.codec {
             AmfCodecType::H264 => VideoCodecType::H264,
             AmfCodecType::Hevc => VideoCodecType::H265,
             AmfCodecType::Av1 => VideoCodecType::Av1,
         };
-        codecs.push(CodecAvailability {
-            codec_type,
-            encoder_supported: info.encoding.supported,
-            decoder_supported: info.decoding.supported,
-        });
+        if info.encoding.supported {
+            encoder_supported_formats.extend(supported_formats_for_codec(codec_type));
+        }
+        if info.decoding.supported {
+            decoder_supported_formats.extend(supported_formats_for_codec(codec_type));
+        }
     }
-    codecs.sort_by_key(|codec| codec_sort_key(codec.codec_type));
-    codecs
-}
-
-fn codec_type_from_format(format: &SdpVideoFormatRef<'_>) -> Option<VideoCodecType> {
-    let format_name = format.name().ok()?;
-    VideoCodecType::try_from(format_name.as_str()).ok()
+    (encoder_supported_formats, decoder_supported_formats)
 }
 
 fn supported_formats_for_codec(codec_type: VideoCodecType) -> Vec<SdpVideoFormat> {
@@ -132,6 +105,15 @@ fn target_kbps_from_bps(target_bitrate_bps: u32) -> u32 {
     (target_bitrate_bps.max(1) as u64).div_ceil(1000) as u32
 }
 
+fn amf_reconfigure_params(target_bitrate_bps: u32, framerate: u32) -> ReconfigureParams {
+    ReconfigureParams {
+        framerate_num: Some(framerate.max(1)),
+        framerate_den: Some(1),
+        target_kbps: Some(target_kbps_from_bps(target_bitrate_bps)),
+        ..ReconfigureParams::default()
+    }
+}
+
 struct AmfVideoEncoder {
     callback: Option<VideoEncoderEncodedImageCallbackPtr>,
     encoder: Option<Encoder>,
@@ -140,6 +122,7 @@ struct AmfVideoEncoder {
     height: u32,
     framerate: u32,
     target_bitrate_bps: u32,
+    rebuild_needed: bool,
     reconfigure_needed: bool,
 }
 
@@ -153,16 +136,21 @@ impl AmfVideoEncoder {
             height: 0,
             framerate: 30,
             target_bitrate_bps: 500_000,
+            rebuild_needed: false,
             reconfigure_needed: false,
         }
     }
 
-    fn rebuild_encoder(&mut self) -> std::result::Result<(), ()> {
+    fn rebuild_encoder(&mut self) -> Result<()> {
         if self.width == 0 || self.height == 0 {
-            return Err(());
+            return Err(crate::Error::AmfMessage {
+                reason: "AMF encoder requires non-zero width and height".to_string(),
+            });
         }
         let Some(codec_config) = encoder_codec_config(self.codec_type) else {
-            return Err(());
+            return Err(crate::Error::AmfMessage {
+                reason: "AMF encoder codec type is not supported".to_string(),
+            });
         };
 
         let mut config = EncoderConfig::new(
@@ -176,9 +164,35 @@ impl AmfVideoEncoder {
         );
         config.target_kbps = Some(target_kbps_from_bps(self.target_bitrate_bps));
 
-        self.encoder = Encoder::new(config).ok();
+        self.rebuild_needed = false;
         self.reconfigure_needed = false;
-        self.encoder.as_ref().map(|_| ()).ok_or(())
+        self.encoder = Some(Encoder::new(config)?);
+        Ok(())
+    }
+
+    fn reconfigure_encoder(&mut self) -> Result<()> {
+        let Some(encoder) = self.encoder.as_mut() else {
+            return Err(crate::Error::AmfMessage {
+                reason: "AMF encoder instance is not initialized".to_string(),
+            });
+        };
+        match encoder.reconfigure(amf_reconfigure_params(
+            self.target_bitrate_bps,
+            self.framerate,
+        )) {
+            Ok(()) => {
+                self.reconfigure_needed = false;
+                Ok(())
+            }
+            Err(err) => {
+                rtc_log_warning!(
+                    "AMF encoder reconfigure failed for {:?}: {}",
+                    self.codec_type,
+                    err
+                );
+                Err(err.into())
+            }
+        }
     }
 }
 
@@ -229,11 +243,29 @@ impl VideoEncoderHandler for AmfVideoEncoder {
         if self.width != frame_width || self.height != frame_height {
             self.width = frame_width;
             self.height = frame_height;
-            self.reconfigure_needed = true;
+            // 解像度変更は再初期化する
+            self.rebuild_needed = true;
+        }
+        if self.encoder.is_none() {
+            self.rebuild_needed = true;
         }
 
-        if (self.reconfigure_needed || self.encoder.is_none()) && self.rebuild_encoder().is_err() {
-            return VideoCodecStatus::Error;
+        if self.rebuild_needed {
+            if self.rebuild_encoder().is_err() {
+                return VideoCodecStatus::Error;
+            }
+        } else if self.reconfigure_needed {
+            // ビットレート/フレームレート更新は再初期化ではなく reconfigure を行う
+            if self.reconfigure_encoder().is_err() {
+                rtc_log_warning!(
+                    "AMF encoder reconfigure failed for {:?}; falling back to rebuild",
+                    self.codec_type
+                );
+                self.rebuild_needed = true;
+                if self.rebuild_encoder().is_err() {
+                    return VideoCodecStatus::Error;
+                }
+            }
         }
 
         let mut frame_buffer = frame.buffer();
@@ -280,15 +312,12 @@ impl VideoEncoderHandler for AmfVideoEncoder {
             frame_type: amf_force_frame_type(requested_frame_type),
         };
         let encoder = self.encoder.as_mut().expect("encoder should exist");
-        if encoder.encode(nv12.data(), &options).is_err() {
-            self.reconfigure_needed = true;
+        if let Err(err) = encoder.encode(nv12.data(), &options) {
+            rtc_log_error!("AMF encode failed for {:?}: {}", self.codec_type, err);
             return VideoCodecStatus::Error;
         }
 
-        let mut has_output = false;
         while let Some(encoded_frame) = encoder.next_frame() {
-            has_output = true;
-
             let mut encoded_image = EncodedImage::new();
             let encoded_buffer = EncodedImageBuffer::from_bytes(encoded_frame.data());
             encoded_image.set_encoded_data(&encoded_buffer);
@@ -317,11 +346,7 @@ impl VideoEncoderHandler for AmfVideoEncoder {
             }
         }
 
-        if has_output {
-            VideoCodecStatus::Ok
-        } else {
-            VideoCodecStatus::NoOutput
-        }
+        VideoCodecStatus::Ok
     }
 
     fn register_encode_complete_callback(
@@ -336,6 +361,8 @@ impl VideoEncoderHandler for AmfVideoEncoder {
     fn release(&mut self) -> VideoCodecStatus {
         self.encoder = None;
         self.callback = None;
+        self.rebuild_needed = false;
+        self.reconfigure_needed = false;
         VideoCodecStatus::Ok
     }
 
@@ -371,14 +398,17 @@ impl AmfVideoDecoder {
         }
     }
 
-    fn ensure_decoder(&mut self) -> std::result::Result<(), ()> {
+    fn ensure_decoder(&mut self) -> Result<()> {
         if self.decoder.is_none() {
             let Some(codec) = decoder_codec(self.codec_type) else {
-                return Err(());
+                return Err(crate::Error::AmfMessage {
+                    reason: "AMF decoder codec type is not supported".to_string(),
+                });
             };
-            self.decoder = Decoder::new(DecoderConfig { codec }).ok();
+            let decoder = Decoder::new(DecoderConfig { codec })?;
+            self.decoder = Some(decoder);
         }
-        self.decoder.as_ref().map(|_| ()).ok_or(())
+        Ok(())
     }
 }
 
@@ -471,11 +501,7 @@ impl VideoDecoderHandler for AmfVideoDecoder {
             }
         }
 
-        if !decoded_images.is_empty() {
-            VideoCodecStatus::Ok
-        } else {
-            VideoCodecStatus::NoOutput
-        }
+        VideoCodecStatus::Ok
     }
 
     fn register_decode_complete_callback(
@@ -501,53 +527,33 @@ impl VideoDecoderHandler for AmfVideoDecoder {
 }
 
 pub struct AmfVideoCodecCapability {
-    codecs: Vec<CodecAvailability>,
+    encoder_supported_formats: Vec<SdpVideoFormat>,
+    decoder_supported_formats: Vec<SdpVideoFormat>,
     simulcast_capability_helper: SimulcastCapabilityHelper,
 }
 
 impl AmfVideoCodecCapability {
     pub fn new() -> Result<Self> {
-        let codecs = collect_codec_availability();
-        if !codecs
-            .iter()
-            .any(|codec| codec.encoder_supported || codec.decoder_supported)
-        {
+        let (encoder_supported_formats, decoder_supported_formats) = collect_supported_formats();
+        if encoder_supported_formats.is_empty() && decoder_supported_formats.is_empty() {
             return Err(crate::Error::InvalidVideoCodecCapability {
                 reason: "AMF does not support any encoder or decoder codec".to_string(),
             });
         }
-        Ok(Self::new_with_codecs(codecs))
+        Self::new_with_formats(encoder_supported_formats, decoder_supported_formats)
     }
 
-    fn new_with_codecs(codecs: Vec<CodecAvailability>) -> Self {
-        let mut codecs = codecs;
-        codecs.sort_by_key(|codec| codec_sort_key(codec.codec_type));
-
-        let mut encoder_codec_types = codecs
-            .iter()
-            .filter(|codec| codec.encoder_supported)
-            .map(|codec| codec.codec_type)
-            .collect::<Vec<_>>();
-        encoder_codec_types.sort_by_key(|codec_type| codec_sort_key(*codec_type));
+    fn new_with_formats(
+        encoder_supported_formats: Vec<SdpVideoFormat>,
+        decoder_supported_formats: Vec<SdpVideoFormat>,
+    ) -> Result<Self> {
+        let encoder_supported_formats_for_factory = encoder_supported_formats.clone();
 
         let simulcast_capability_helper = SimulcastCapabilityHelper::new_with_builder(
+            move || encoder_supported_formats_for_factory.clone(),
             {
-                let encoder_codec_types = encoder_codec_types.clone();
-                move || {
-                    let mut formats = Vec::new();
-                    for codec_type in &encoder_codec_types {
-                        formats.extend(supported_formats_for_codec(*codec_type));
-                    }
-                    formats
-                }
-            },
-            {
-                let encoder_codec_types = encoder_codec_types.clone();
                 move |_env, format| {
                     let codec_type = codec_type_from_format(&format)?;
-                    if !encoder_codec_types.contains(&codec_type) {
-                        return None;
-                    }
                     let encoder =
                         VideoEncoder::new_with_handler(Box::new(AmfVideoEncoder::new(codec_type)));
                     if codec_type == VideoCodecType::Av1 {
@@ -576,16 +582,11 @@ impl AmfVideoCodecCapability {
             },
         );
 
-        Self {
-            codecs,
+        Ok(Self {
+            encoder_supported_formats,
+            decoder_supported_formats,
             simulcast_capability_helper,
-        }
-    }
-
-    fn is_codec_supported(&self, direction: CodecDirection, codec_type: VideoCodecType) -> bool {
-        self.codecs
-            .iter()
-            .any(|codec| codec.codec_type == codec_type && codec.is_supported(direction))
+        })
     }
 }
 
@@ -595,14 +596,10 @@ impl VideoCodecCapability for AmfVideoCodecCapability {
     }
 
     fn get_supported_formats(&self, direction: CodecDirection) -> Vec<SdpVideoFormat> {
-        let mut formats = Vec::new();
-        for codec in &self.codecs {
-            if !codec.is_supported(direction) {
-                continue;
-            }
-            formats.extend(supported_formats_for_codec(codec.codec_type));
+        match direction {
+            CodecDirection::Encoder => self.encoder_supported_formats.clone(),
+            CodecDirection::Decoder => self.decoder_supported_formats.clone(),
         }
-        formats
     }
 
     fn create_video_encoder(
@@ -610,10 +607,6 @@ impl VideoCodecCapability for AmfVideoCodecCapability {
         env: EnvironmentRef<'_>,
         format: SdpVideoFormatRef<'_>,
     ) -> Option<VideoEncoder> {
-        let codec_type = codec_type_from_format(&format)?;
-        if !self.is_codec_supported(CodecDirection::Encoder, codec_type) {
-            return None;
-        }
         self.simulcast_capability_helper
             .create_video_encoder(env, format)
     }
@@ -624,9 +617,6 @@ impl VideoCodecCapability for AmfVideoCodecCapability {
         format: SdpVideoFormatRef<'_>,
     ) -> Option<VideoDecoder> {
         let codec_type = codec_type_from_format(&format)?;
-        if !self.is_codec_supported(CodecDirection::Decoder, codec_type) {
-            return None;
-        }
         Some(VideoDecoder::new_with_handler(Box::new(
             AmfVideoDecoder::new(codec_type),
         )))
@@ -635,8 +625,11 @@ impl VideoCodecCapability for AmfVideoCodecCapability {
 
 #[cfg(test)]
 impl AmfVideoCodecCapability {
-    fn new_for_test(codecs: Vec<CodecAvailability>) -> Self {
-        Self::new_with_codecs(codecs)
+    fn new_for_test(
+        encoder_supported_formats: Vec<SdpVideoFormat>,
+        decoder_supported_formats: Vec<SdpVideoFormat>,
+    ) -> Result<Self> {
+        Self::new_with_formats(encoder_supported_formats, decoder_supported_formats)
     }
 }
 
@@ -645,35 +638,31 @@ mod tests {
     use super::*;
     use shiguredo_webrtc::{Environment, SdpVideoFormat, VideoFrameType, VideoFrameTypeVector};
 
-    fn test_codec(
-        codec_type: VideoCodecType,
-        encoder_supported: bool,
-        decoder_supported: bool,
-    ) -> CodecAvailability {
-        CodecAvailability {
-            codec_type,
-            encoder_supported,
-            decoder_supported,
+    fn test_supported_formats(codec_types: &[VideoCodecType]) -> Vec<SdpVideoFormat> {
+        let mut supported_formats = Vec::new();
+        for codec_type in codec_types {
+            supported_formats.extend(supported_formats_for_codec(*codec_type));
         }
+        supported_formats
     }
 
     #[test]
     fn amf_capability_has_expected_implementation_name() {
-        let capability = AmfVideoCodecCapability::new_for_test(vec![test_codec(
-            VideoCodecType::H264,
-            true,
-            true,
-        )]);
+        let capability = AmfVideoCodecCapability::new_for_test(
+            test_supported_formats(&[VideoCodecType::H264]),
+            test_supported_formats(&[VideoCodecType::H264]),
+        )
+        .expect("Failed to create AmfVideoCodecCapability for test");
         assert_eq!(capability.get_implementation().name(), "amf");
     }
 
     #[test]
     fn amf_capability_supports_formats_per_direction() {
-        let capability = AmfVideoCodecCapability::new_for_test(vec![
-            test_codec(VideoCodecType::H264, true, true),
-            test_codec(VideoCodecType::H265, false, true),
-            test_codec(VideoCodecType::Av1, true, false),
-        ]);
+        let capability = AmfVideoCodecCapability::new_for_test(
+            test_supported_formats(&[VideoCodecType::H264, VideoCodecType::Av1]),
+            test_supported_formats(&[VideoCodecType::H264, VideoCodecType::H265]),
+        )
+        .expect("Failed to create AmfVideoCodecCapability for test");
 
         assert!(capability.is_supported(CodecDirection::Encoder, VideoCodecType::H264));
         assert!(capability.is_supported(CodecDirection::Decoder, VideoCodecType::H264));
@@ -718,28 +707,12 @@ mod tests {
     }
 
     #[test]
-    fn amf_capability_rejects_unsupported_decoder_creation() {
-        let capability = AmfVideoCodecCapability::new_for_test(vec![test_codec(
-            VideoCodecType::H264,
-            true,
-            false,
-        )]);
-
-        let env = Environment::new();
-        assert!(
-            capability
-                .create_video_decoder(env.as_ref(), SdpVideoFormat::new("H264").as_ref())
-                .is_none()
-        );
-    }
-
-    #[test]
     fn amf_capability_create_video_encoder_uses_simulcast_adapter() {
-        let capability = AmfVideoCodecCapability::new_for_test(vec![test_codec(
-            VideoCodecType::H264,
-            true,
-            true,
-        )]);
+        let capability = AmfVideoCodecCapability::new_for_test(
+            test_supported_formats(&[VideoCodecType::H264]),
+            test_supported_formats(&[VideoCodecType::H264]),
+        )
+        .expect("Failed to create AmfVideoCodecCapability for test");
 
         let env = Environment::new();
         let format = SdpVideoFormat::new("H264");
@@ -767,6 +740,27 @@ mod tests {
             requested_frame_type(Some(frame_types.as_ref())),
             Some(VideoFrameType::Empty)
         );
+    }
+
+    #[test]
+    fn amf_reconfigure_params_uses_rate_values() {
+        let params = amf_reconfigure_params(1_234_567, 24);
+        assert_eq!(params.framerate_num, Some(24));
+        assert_eq!(params.framerate_den, Some(1));
+        assert_eq!(params.target_kbps, Some(1235));
+        assert_eq!(params.max_kbps, None);
+        assert_eq!(params.qpi, None);
+        assert_eq!(params.qpp, None);
+        assert_eq!(params.qpb, None);
+        assert_eq!(params.gop_pic_size, None);
+    }
+
+    #[test]
+    fn amf_reconfigure_params_clamps_zero_to_one() {
+        let params = amf_reconfigure_params(0, 0);
+        assert_eq!(params.framerate_num, Some(1));
+        assert_eq!(params.framerate_den, Some(1));
+        assert_eq!(params.target_kbps, Some(1));
     }
 
     #[test]

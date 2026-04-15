@@ -170,7 +170,7 @@ fn build_context_config(
                         #[cfg(feature = "nvcodec")]
                         {
                             let nvcodec_capability: Box<dyn VideoCodecCapability> =
-                                Box::new(NvCodecVideoCodecCapability::new());
+                                Box::new(NvCodecVideoCodecCapability::new()?);
                             add_video_codec_capability(&mut context_config, nvcodec_capability);
                         }
                         #[cfg(not(feature = "nvcodec"))]

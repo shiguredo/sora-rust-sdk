@@ -79,7 +79,7 @@ fn video_setting(codec_type: VideoCodecType) -> Video {
 }
 
 fn create_nvcodec_context() -> sora_sdk::Result<Arc<SoraConnectionContext>> {
-    let capability: Box<dyn VideoCodecCapability> = Box::new(NvCodecVideoCodecCapability::new());
+    let capability: Box<dyn VideoCodecCapability> = Box::new(NvCodecVideoCodecCapability::new()?);
     let preference = VideoCodecPreference::new_from_capability(capability.as_ref());
 
     let mut config = SoraConnectionContextConfig {
@@ -92,7 +92,8 @@ fn create_nvcodec_context() -> sora_sdk::Result<Arc<SoraConnectionContext>> {
 }
 
 fn nvcodec_fully_supported_codecs() -> Option<Vec<VideoCodecType>> {
-    let capability = NvCodecVideoCodecCapability::new();
+    let capability =
+        NvCodecVideoCodecCapability::new().expect("Failed to create NvCodecVideoCodecCapability");
     let mut codecs = Vec::new();
 
     for codec_type in [
@@ -116,7 +117,8 @@ fn nvcodec_fully_supported_codecs() -> Option<Vec<VideoCodecType>> {
 }
 
 fn nvcodec_decoder_supported_only_codecs() -> Option<Vec<VideoCodecType>> {
-    let capability = NvCodecVideoCodecCapability::new();
+    let capability =
+        NvCodecVideoCodecCapability::new().expect("Failed to create NvCodecVideoCodecCapability");
     let mut codecs = Vec::new();
 
     for codec_type in [VideoCodecType::Vp8, VideoCodecType::Vp9] {

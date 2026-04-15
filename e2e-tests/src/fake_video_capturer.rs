@@ -114,7 +114,7 @@ impl FakeVideoCapturer {
                         frame_counter,
                     );
                     let sleep_ms = (1000 / fps).saturating_sub(2).max(1);
-                    shiguredo_webrtc::thread_sleep_ms(sleep_ms);
+                    shiguredo_webrtc::Thread::sleep_ms(sleep_ms);
                     frame_counter = frame_counter.wrapping_add(1);
                 }
             });
