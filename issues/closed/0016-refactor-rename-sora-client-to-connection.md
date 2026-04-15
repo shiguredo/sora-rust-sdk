@@ -1,6 +1,7 @@
 # SoraClient を SoraConnection にリネームする
 
 Created: 2026-04-15
+Completed: 2026-04-15
 Model: Opus 4.6
 
 ## 概要
@@ -56,3 +57,26 @@ Model: Opus 4.6
 
 公開 API の型名が変わるため、このクレートを依存している外部コードは import 修正が必要。
 `CHANGES.md` に `[CHANGE]` として明記する。
+
+## 解決方法
+
+以下をまとめてリネームした。
+
+- `src/client.rs` → `src/connection.rs`（`git mv`）
+- `src/client_context.rs` → `src/connection_context.rs`（`git mv`）
+- 公開型 `SoraClient` / `SoraClientBuilder` / `SoraClientHandle` / `SoraClientCommand` /
+  `SoraClientContext` / `SoraClientContextConfig` をそれぞれ `SoraConnection...` に改名
+- `src/lib.rs` の `mod` と `pub use`、`src/error.rs` の `SoraClientCommand` 参照を追従
+- `examples/sumomo` と `e2e-tests` の import・型参照・変数名・関数名（`build_client_builder`
+  → `build_connection_builder`、変数名 `client` → `connection`、`client_task` →
+  `connection_task` など）を追従
+- `README.md`・`docs/SORA_CPP_SDK.md` のコード例と説明文を追従
+- `CHANGES.md` に `[CHANGE]` エントリを追加し、既存の `SoraClientBuilder` / `SoraClientContext`
+  の記述も新名に更新
+
+Sora シグナリング仕様の `client_id`、TLS 用語の `client_cert` / `client_key`、
+`Error::ClientCertParse` / `ClientKeyParse` / `ClientCertKeyIncomplete`、
+`version::get_sora_client_name()` は据え置いた。
+
+検証は `cargo fmt --check` / `cargo clippy --workspace --all-targets -- -D warnings` /
+`cargo test --workspace --lib --tests` をパスすることを確認した。
