@@ -193,7 +193,9 @@ async fn test_sendonly_simulcast_outbound_layers_openh264() {
 #[serial]
 async fn test_sendonly_simulcast_outbound_layers_nvcodec() {
     load_env();
-    let capability: Box<dyn VideoCodecCapability> = Box::new(NvCodecVideoCodecCapability::new());
+    let capability =
+        NvCodecVideoCodecCapability::new().expect("Failed to create NvCodecVideoCodecCapability");
+    let capability: Box<dyn VideoCodecCapability> = Box::new(capability);
     let context = create_non_builtin_context(capability).expect("コンテキスト作成失敗");
     run_sendonly_simulcast_outbound_layers(
         context,

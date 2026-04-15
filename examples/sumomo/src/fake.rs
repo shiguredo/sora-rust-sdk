@@ -107,7 +107,7 @@ impl FakeVideoCapturer {
                         fps,
                     );
                     let sleep_ms = (1000 / fps).saturating_sub(2).max(1);
-                    shiguredo_webrtc::thread_sleep_ms(sleep_ms);
+                    shiguredo_webrtc::Thread::sleep_ms(sleep_ms);
                 }
             })?;
         self.handle = Some(handle);

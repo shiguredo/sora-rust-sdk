@@ -21,7 +21,7 @@ use std::thread;
 use shiguredo_webrtc::{
     AdaptFrameResult, AdaptedVideoTrackSource, CodecSpecificInfo, EncodedImage, EncodedImageBuffer,
     H264PacketizationMode, I420Buffer, SdpVideoFormat, SdpVideoFormatRef, TimestampAligner,
-    VideoCodecRef, VideoCodecStatus, VideoCodecType, VideoDecoder, VideoEncoder,
+    VideoCodecRef, VideoCodecStatus, VideoCodecType, VideoEncoder,
     VideoEncoderEncodedImageCallbackPtr, VideoEncoderEncodedImageCallbackRef,
     VideoEncoderEncodedImageCallbackResultError, VideoEncoderEncoderInfo, VideoEncoderHandler,
     VideoEncoderRateControlParametersRef, VideoEncoderSettingsRef, VideoFrame, VideoFrameBuffer,
@@ -612,15 +612,6 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
         Some(VideoEncoder::new_with_handler(Box::new(
             Mp4PassthroughEncoder { callback: None },
         )))
-    }
-
-    /// デコーダーは提供しない (パススルーは送信専用)。
-    fn create_video_decoder(
-        &self,
-        _env: shiguredo_webrtc::EnvironmentRef<'_>,
-        _format: SdpVideoFormatRef<'_>,
-    ) -> Option<VideoDecoder> {
-        None
     }
 }
 
