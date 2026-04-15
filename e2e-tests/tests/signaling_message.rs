@@ -6,7 +6,7 @@ use e2e_tests::{
     FakeVideoCapturer, FakeVideoCapturerConfig, build_metadata_with_access_token,
     build_sender_tracks, generate_channel_id, load_env, secret_key, signaling_urls,
 };
-use sora_sdk::{Role, SignalingDirection, SignalingType, SoraClient, SoraClientContext};
+use sora_sdk::{Role, SignalingDirection, SignalingType, SoraConnection, SoraConnectionContext};
 
 /// WebSocket 経由で on_signaling_message コールバックが Sent / Received 両方呼ばれることを確認する。
 #[tokio::test]
@@ -15,14 +15,14 @@ async fn test_on_signaling_message_websocket() {
 
     let urls = signaling_urls().expect("TEST_SIGNALING_URLS が必要");
     let channel_id = generate_channel_id();
-    let context = SoraClientContext::new().expect("コンテキスト作成失敗");
+    let context = SoraConnectionContext::new().expect("コンテキスト作成失敗");
 
     let sent_received = Arc::new(AtomicBool::new(false));
     let recv_received = Arc::new(AtomicBool::new(false));
     let sent_clone = sent_received.clone();
     let recv_clone = recv_received.clone();
 
-    let mut builder = SoraClient::builder(context, urls, channel_id, Role::RecvOnly)
+    let mut builder = SoraConnection::builder(context, urls, channel_id, Role::RecvOnly)
         .data_channel_signaling(false)
         .on_signaling_message(move |signaling_type, direction, text| {
             println!(
@@ -46,9 +46,11 @@ async fn test_on_signaling_message_websocket() {
         builder = builder.metadata(build_metadata_with_access_token(&token));
     }
 
-    let (client, _handle) = builder.build().expect("SoraClient の作成に失敗しました");
+    let (connection, _handle) = builder
+        .build()
+        .expect("SoraConnection の作成に失敗しました");
 
-    let _ = tokio::time::timeout(Duration::from_secs(10), client.run()).await;
+    let _ = tokio::time::timeout(Duration::from_secs(10), connection.run()).await;
 
     assert!(
         sent_received.load(Ordering::SeqCst),
@@ -74,7 +76,7 @@ async fn test_on_signaling_message_datachannel() {
     let channel_id = generate_channel_id();
 
     // --- recvonly クライアント ---
-    let recv_context = SoraClientContext::new().expect("コンテキスト作成失敗");
+    let recv_context = SoraConnectionContext::new().expect("コンテキスト作成失敗");
 
     let dc_received = Arc::new(AtomicBool::new(false));
     let dc_sent = Arc::new(AtomicBool::new(false));
@@ -84,7 +86,7 @@ async fn test_on_signaling_message_datachannel() {
     let dc_sent_clone = dc_sent.clone();
     let switched_received_clone = switched_received.clone();
 
-    let mut recv_builder = SoraClient::builder(
+    let mut recv_builder = SoraConnection::builder(
         recv_context,
         urls.clone(),
         channel_id.clone(),
@@ -141,13 +143,13 @@ async fn test_on_signaling_message_datachannel() {
     );
 
     // --- sendonly クライアントを接続して re-offer を発火させる ---
-    let send_context = SoraClientContext::new().expect("コンテキスト作成失敗");
+    let send_context = SoraConnectionContext::new().expect("コンテキスト作成失敗");
     let mut capturer = FakeVideoCapturer::new(FakeVideoCapturerConfig::default())
         .expect("FakeVideoCapturer 作成失敗");
     let (video_track, audio_track) =
         build_sender_tracks(&send_context, &mut capturer).expect("送信用トラック作成失敗");
 
-    let mut send_builder = SoraClient::builder(
+    let mut send_builder = SoraConnection::builder(
         send_context,
         urls.clone(),
         channel_id.clone(),

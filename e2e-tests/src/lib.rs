@@ -9,7 +9,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use nojson::JsonObjectFormatter;
 use shiguredo_webrtc::{AudioTrack, VideoTrack};
-use sora_sdk::{JsonString, Result, SoraClientContext};
+use sora_sdk::{JsonString, Result, SoraConnectionContext};
 
 /// .env ファイルを読み込んで環境変数に設定する。
 ///
@@ -149,7 +149,7 @@ pub fn build_metadata_with_access_token(access_token: &str) -> JsonString {
 
 /// FakeVideoCapturer を使って送信用のトラックを作成する。
 pub fn build_sender_tracks(
-    context: &SoraClientContext,
+    context: &SoraConnectionContext,
     capturer: &mut FakeVideoCapturer,
 ) -> Result<(VideoTrack, AudioTrack)> {
     if !capturer.start() {

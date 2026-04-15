@@ -50,8 +50,8 @@ use sora_sdk::NvCodecVideoCodecCapability;
 use sora_sdk::VplVideoCodecCapability;
 use sora_sdk::{
     InternalVideoCodecCapability, Mp4PassthroughVideoCodecCapability, Mp4SampleReader,
-    Mp4VideoCapturer, Openh264VideoCodecCapability, SoraClient, SoraClientBuilder,
-    SoraClientContext, SoraClientContextConfig, VideoCodecCapability, VideoCodecPreference,
+    Mp4VideoCapturer, Openh264VideoCodecCapability, SoraConnection, SoraConnectionBuilder,
+    SoraConnectionContext, SoraConnectionContextConfig, VideoCodecCapability, VideoCodecPreference,
 };
 use tokio::sync::mpsc;
 use video_codec_list::run_video_codec_list;
@@ -89,7 +89,7 @@ impl AppEventSender for std::sync::mpsc::Sender<AppEvent> {
 }
 
 fn add_video_codec_capability(
-    context_config: &mut SoraClientContextConfig,
+    context_config: &mut SoraConnectionContextConfig,
     capability: Box<dyn VideoCodecCapability>,
 ) {
     let preference = VideoCodecPreference::new_from_capability(capability.as_ref());
@@ -102,13 +102,13 @@ fn build_context_config(
     mp4_codec_type: Option<VideoCodecType>,
     openh264_path: Option<&str>,
     video_codec_implementation: VideoCodecImplementationSelections,
-) -> Result<SoraClientContextConfig> {
+) -> Result<SoraConnectionContextConfig> {
     let mut context_config = match video_codec_implementation {
-        VideoCodecImplementationSelections::Auto => SoraClientContextConfig {
+        VideoCodecImplementationSelections::Auto => SoraConnectionContextConfig {
             adm_config,
             ..Default::default()
         },
-        VideoCodecImplementationSelections::Manual(_) => SoraClientContextConfig {
+        VideoCodecImplementationSelections::Manual(_) => SoraConnectionContextConfig {
             adm_config,
             video_codec_preference: VideoCodecPreference::default(),
             video_codec_capabilities: Vec::new(),
@@ -228,7 +228,7 @@ fn prepare_mp4_state(args: &Args) -> Result<Option<(Mp4SampleReader, VideoCodecT
     }
 }
 
-fn apply_video_options(mut builder: SoraClientBuilder, args: &Args) -> SoraClientBuilder {
+fn apply_video_options(mut builder: SoraConnectionBuilder, args: &Args) -> SoraConnectionBuilder {
     let video_bit_rate = args.video_bit_rate;
     if let Some(video) = args.video {
         if video {
@@ -260,9 +260,9 @@ fn apply_video_options(mut builder: SoraClientBuilder, args: &Args) -> SoraClien
 }
 
 fn apply_common_builder_options(
-    mut builder: SoraClientBuilder,
+    mut builder: SoraConnectionBuilder,
     args: &Args,
-) -> Result<SoraClientBuilder> {
+) -> Result<SoraConnectionBuilder> {
     if let Some(audio) = args.audio {
         builder = builder.audio(sora_sdk::Audio::new_bool(audio));
     }
@@ -294,15 +294,15 @@ fn apply_common_builder_options(
     Ok(builder)
 }
 
-fn build_client_builder<T>(
-    context: Arc<SoraClientContext>,
+fn build_connection_builder<T>(
+    context: Arc<SoraConnectionContext>,
     args: &Args,
     event_tx: T,
-) -> Result<SoraClientBuilder>
+) -> Result<SoraConnectionBuilder>
 where
     T: AppEventSender,
 {
-    let builder = SoraClient::builder(
+    let builder = SoraConnection::builder(
         context,
         args.signaling_urls.clone(),
         args.channel_id.clone(),
@@ -380,11 +380,11 @@ fn create_video_capturer(
 }
 
 fn attach_sender_tracks(
-    mut builder: SoraClientBuilder,
-    context: &Arc<SoraClientContext>,
+    mut builder: SoraConnectionBuilder,
+    context: &Arc<SoraConnectionContext>,
     args: &Args,
     mp4_reader: Option<Mp4SampleReader>,
-) -> Result<(SoraClientBuilder, Option<VideoCapturerHolder>)> {
+) -> Result<(SoraConnectionBuilder, Option<VideoCapturerHolder>)> {
     let video_enabled = args.video.unwrap_or(true);
     let mut video_capturer = None;
     if args.role.wants_send() && video_enabled {
@@ -516,7 +516,7 @@ fn run_with_raw_player(args: Args) -> Result<()> {
                 args.openh264_path.as_deref(),
                 args.video_codec_implementation.clone(),
             )?;
-            let context = SoraClientContext::new_with_config(context_config)?;
+            let context = SoraConnectionContext::new_with_config(context_config)?;
 
             #[cfg(feature = "media-device")]
             let mut _audio_capturer = if let Some(ref device_id) = args.audio_input_device {
@@ -532,13 +532,13 @@ fn run_with_raw_player(args: Args) -> Result<()> {
                 None
             };
 
-            let builder = build_client_builder(context.clone(), &args, event_tx.clone())?;
+            let builder = build_connection_builder(context.clone(), &args, event_tx.clone())?;
             let (builder, mut _video_capturer) =
                 attach_sender_tracks(builder, &context, &args, mp4_state.map(|(reader, _)| reader))?;
 
-            let (client, _handle) = builder.build()?;
+            let (connection, _handle) = builder.build()?;
             let mut tracks: HashMap<String, TrackEntry> = HashMap::new();
-            let mut run = Box::pin(client.run());
+            let mut run = Box::pin(connection.run());
             let duration_sleep = args.duration.map(|secs| {
                 rtc_log_info!("{} 秒後に切断します", secs);
                 tokio::time::sleep(std::time::Duration::from_secs(secs))
@@ -673,7 +673,7 @@ async fn main() -> Result<()> {
         args.openh264_path.as_deref(),
         args.video_codec_implementation.clone(),
     )?;
-    let context = SoraClientContext::new_with_config(context_config)?;
+    let context = SoraConnectionContext::new_with_config(context_config)?;
 
     // --audio-input-device が指定された場合は AudioDeviceCapturer を使用する
     #[cfg(feature = "media-device")]
@@ -690,7 +690,7 @@ async fn main() -> Result<()> {
         None
     };
 
-    let builder = build_client_builder(context.clone(), &args, event_tx.clone())?;
+    let builder = build_connection_builder(context.clone(), &args, event_tx.clone())?;
     let (builder, mut _video_capturer) = attach_sender_tracks(
         builder,
         &context,
@@ -698,10 +698,10 @@ async fn main() -> Result<()> {
         mp4_state.map(|(reader, _)| reader),
     )?;
 
-    let (client, _handle) = builder.build()?;
+    let (connection, _handle) = builder.build()?;
     let renderer_for_events = renderer.clone();
     let mut tracks: HashMap<String, TrackEntry> = HashMap::new();
-    let mut run = Box::pin(client.run());
+    let mut run = Box::pin(connection.run());
 
     // duration が指定されている場合はタイマーを設定
     let duration_sleep = args.duration.map(|secs| {

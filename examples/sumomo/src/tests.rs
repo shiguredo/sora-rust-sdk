@@ -42,7 +42,7 @@ fn test_args(
     }
 }
 
-fn capability_names(config: &SoraClientContextConfig) -> Vec<String> {
+fn capability_names(config: &SoraConnectionContextConfig) -> Vec<String> {
     config
         .video_codec_capabilities
         .iter()
@@ -292,7 +292,7 @@ fn build_context_config_auto_uses_default_capabilities() {
     )
     .expect("auto config must be built");
 
-    let default_config = SoraClientContextConfig::default();
+    let default_config = SoraConnectionContextConfig::default();
     assert_eq!(capability_names(&config), capability_names(&default_config));
     assert_eq!(
         config.video_codec_preference,

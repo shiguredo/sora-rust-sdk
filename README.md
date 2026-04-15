@@ -63,14 +63,14 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 映像・音声を送受信する例です。
 
 ```rust
-use sora_sdk::{Role, SoraClient, SoraClientContext};
+use sora_sdk::{Role, SoraConnection, SoraConnectionContext};
 
 #[tokio::main]
 async fn main() -> Result<(), sora_sdk::Error> {
-    // 1. SoraClientContext を作成する
+    // 1. SoraConnectionContext を作成する
     //    PeerConnectionFactory や WebRTC 関連スレッドを管理します。
-    //    複数の SoraClient で共有できます。
-    let context = SoraClientContext::new()?;
+    //    複数の SoraConnection で共有できます。
+    let context = SoraConnectionContext::new()?;
 
     // 2. AudioTrack を作成する
     let audio_source = context.create_audio_source()?;
@@ -79,8 +79,8 @@ async fn main() -> Result<(), sora_sdk::Error> {
     // VideoTrackSource は shiguredo_webrtc クレートから作成する
     // (FakeVideoCapturer や AdaptedVideoTrackSource など)
 
-    // 3. SoraClient::builder() で接続設定を組み立てる
-    let (client, _handle) = SoraClient::builder(
+    // 3. SoraConnection::builder() で接続設定を組み立てる
+    let (connection, _handle) = SoraConnection::builder(
         context,
         vec!["wss://sora.example.com/signaling".to_string()],
         "your-channel-id".to_string(),
@@ -96,10 +96,10 @@ async fn main() -> Result<(), sora_sdk::Error> {
     })
     .build()?;
 
-    // 4. client.run() で Sora に接続する
+    // 4. connection.run() で Sora に接続する
     //    接続が終了するまでブロックします。
     //    handle.disconnect() で切断できます。
-    client.run().await?;
+    connection.run().await?;
 
     Ok(())
 }
@@ -110,11 +110,11 @@ async fn main() -> Result<(), sora_sdk::Error> {
 映像・音声を送信する例です。
 
 ```rust
-use sora_sdk::{Role, SoraClient, SoraClientContext};
+use sora_sdk::{Role, SoraConnection, SoraConnectionContext};
 
 #[tokio::main]
 async fn main() -> Result<(), sora_sdk::Error> {
-    let context = SoraClientContext::new()?;
+    let context = SoraConnectionContext::new()?;
 
     // AudioTrack を作成する
     let audio_source = context.create_audio_source()?;
@@ -123,7 +123,7 @@ async fn main() -> Result<(), sora_sdk::Error> {
     // VideoTrackSource は shiguredo_webrtc クレートから作成する
     // (FakeVideoCapturer や AdaptedVideoTrackSource など)
 
-    let (client, _handle) = SoraClient::builder(
+    let (connection, _handle) = SoraConnection::builder(
         context,
         vec!["wss://sora.example.com/signaling".to_string()],
         "your-channel-id".to_string(),
@@ -133,7 +133,7 @@ async fn main() -> Result<(), sora_sdk::Error> {
     // .sender_video_track(video_track)
     .build()?;
 
-    client.run().await?;
+    connection.run().await?;
 
     Ok(())
 }
@@ -144,13 +144,13 @@ async fn main() -> Result<(), sora_sdk::Error> {
 映像・音声を受信する例です。
 
 ```rust
-use sora_sdk::{Role, SoraClient, SoraClientContext};
+use sora_sdk::{Role, SoraConnection, SoraConnectionContext};
 
 #[tokio::main]
 async fn main() -> Result<(), sora_sdk::Error> {
-    let context = SoraClientContext::new()?;
+    let context = SoraConnectionContext::new()?;
 
-    let (client, _handle) = SoraClient::builder(
+    let (connection, _handle) = SoraConnection::builder(
         context,
         vec!["wss://sora.example.com/signaling".to_string()],
         "your-channel-id".to_string(),
@@ -161,18 +161,18 @@ async fn main() -> Result<(), sora_sdk::Error> {
     })
     .build()?;
 
-    client.run().await?;
+    connection.run().await?;
 
     Ok(())
 }
 ```
 
-### SoraClient::builder() の設定
+### SoraConnection::builder() の設定
 
-`SoraClient::builder()` では以下の設定が可能です。
+`SoraConnection::builder()` では以下の設定が可能です。
 
 ```rust
-let (client, handle) = SoraClient::builder(context, signaling_urls, channel_id, role)
+let (connection, handle) = SoraConnection::builder(context, signaling_urls, channel_id, role)
     // コールバック
     .on_signaling_message(|type_, direction, text| { /* シグナリングメッセージ送受信時 */ })
     .on_notify(|text| { /* notify メッセージ受信時 */ })
@@ -227,7 +227,7 @@ let (client, handle) = SoraClient::builder(context, signaling_urls, channel_id, 
 
 ### 切断と統計情報の取得
 
-`SoraClient::builder().build()` が返す `SoraClientHandle` を使って、別タスクから切断や統計情報の取得ができます。
+`SoraConnection::builder().build()` が返す `SoraConnectionHandle` を使って、別タスクから切断や統計情報の取得ができます。
 
 ```rust
 // 別タスクから切断する
@@ -243,7 +243,7 @@ let stats = handle.get_stats().await?;
 
 ### メッセージ受信
 
-`SoraClient::builder()` の `on_message` コールバックで `#` プレフィックス付きラベルのユーザー定義 DataChannel からメッセージを受信できます。
+`SoraConnection::builder()` の `on_message` コールバックで `#` プレフィックス付きラベルのユーザー定義 DataChannel からメッセージを受信できます。
 
 ```rust
 .on_message(|label, data| {
@@ -253,7 +253,7 @@ let stats = handle.get_stats().await?;
 
 ### メッセージ送信
 
-`SoraClientHandle` を使って `#` プレフィックス付きラベルのユーザー定義 DataChannel にバイナリデータを送信できます。
+`SoraConnectionHandle` を使って `#` プレフィックス付きラベルのユーザー定義 DataChannel にバイナリデータを送信できます。
 
 ```rust
 handle.send_message("#my-channel", b"hello").await?;
@@ -261,7 +261,7 @@ handle.send_message("#my-channel", b"hello").await?;
 
 ### RPC
 
-`SoraClientHandle` を使って JSON-RPC 2.0 over DataChannel でリクエストを送信できます。
+`SoraConnectionHandle` を使って JSON-RPC 2.0 over DataChannel でリクエストを送信できます。
 SDK が JSON-RPC 2.0 メッセージの組み立てと id 採番を行います。
 
 ```rust
@@ -311,16 +311,16 @@ let response = handle.send_rpc_request(
 
 ### 複数クライアントの同時実行
 
-`SoraClientContext` は `Send + Sync` を実装しているため、複数の `SoraClient` で共有できます。
+`SoraConnectionContext` は `Send + Sync` を実装しているため、複数の `SoraConnection` で共有できます。
 
 ```rust
-let context = SoraClientContext::new()?;
+let context = SoraConnectionContext::new()?;
 
 for i in 0..5 {
     let ctx = context.clone();
     let channel_id = format!("channel-{i}");
     tokio::spawn(async move {
-        let (client, _handle) = SoraClient::builder(
+        let (connection, _handle) = SoraConnection::builder(
             ctx,
             vec!["wss://sora.example.com/signaling".to_string()],
             channel_id,
@@ -328,7 +328,7 @@ for i in 0..5 {
         )
         .build()
         .unwrap();
-        let _ = client.run().await;
+        let _ = connection.run().await;
     });
 }
 ```

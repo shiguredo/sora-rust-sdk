@@ -1,4 +1,4 @@
-//! SoraClientContext と関連リソースの管理。
+//! SoraConnectionContext と関連リソースの管理。
 use std::sync::{Arc, Mutex};
 
 use shiguredo_webrtc::{
@@ -27,14 +27,14 @@ pub enum AdmConfig {
     UseExternal(shiguredo_webrtc::AudioDeviceModule),
 }
 
-/// SoraClientContext の設定。
-pub struct SoraClientContextConfig {
+/// SoraConnectionContext の設定。
+pub struct SoraConnectionContextConfig {
     pub adm_config: AdmConfig,
     pub video_codec_preference: VideoCodecPreference,
     pub video_codec_capabilities: Vec<Box<dyn VideoCodecCapability>>,
 }
 
-impl Default for SoraClientContextConfig {
+impl Default for SoraConnectionContextConfig {
     fn default() -> Self {
         let mut video_codec_preference = VideoCodecPreference::default();
         let mut video_codec_capabilities = Vec::new();
@@ -65,7 +65,7 @@ impl Default for SoraClientContextConfig {
 }
 
 /// PeerConnectionFactory と関連リソースをまとめて管理する。
-pub struct SoraClientContext {
+pub struct SoraConnectionContext {
     factory: PeerConnectionFactory,
     connection_context: ConnectionContext,
     _network: Thread,
@@ -73,14 +73,14 @@ pub struct SoraClientContext {
     _signaling: Thread,
 }
 
-impl SoraClientContext {
+impl SoraConnectionContext {
     pub fn new() -> Result<Arc<Self>> {
-        Self::new_with_config(SoraClientContextConfig::default())
+        Self::new_with_config(SoraConnectionContextConfig::default())
     }
 
     /// 指定した設定でコンテキストを生成する。
-    pub fn new_with_config(config: SoraClientContextConfig) -> Result<Arc<Self>> {
-        let SoraClientContextConfig {
+    pub fn new_with_config(config: SoraConnectionContextConfig) -> Result<Arc<Self>> {
+        let SoraConnectionContextConfig {
             adm_config,
             video_codec_preference,
             video_codec_capabilities,
@@ -173,11 +173,11 @@ impl SoraClientContext {
     }
 }
 
-unsafe impl Send for SoraClientContext {}
+unsafe impl Send for SoraConnectionContext {}
 // SAFETY: PeerConnectionFactoryInterface の実体はシーケンシャルにする Proxy 経由で
 // アクセスするためスレッドセーフに使用できる。
 // ref: https://source.chromium.org/chromium/chromium/src/+/main:third_party/webrtc/pc/peer_connection_factory_proxy.h;l=32-59;drc=ef55be496e45889ace33ace4b05094ca19cb499b
-unsafe impl Sync for SoraClientContext {}
+unsafe impl Sync for SoraConnectionContext {}
 
 #[cfg(all(test, any(target_os = "macos", target_os = "ios")))]
 mod tests {
@@ -188,7 +188,7 @@ mod tests {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     #[test]
     fn default_config_prefers_internal_apple_for_supported_codecs() {
-        let config = SoraClientContextConfig::default();
+        let config = SoraConnectionContextConfig::default();
         let Some(internal_apple_capability) = config
             .video_codec_capabilities
             .iter()

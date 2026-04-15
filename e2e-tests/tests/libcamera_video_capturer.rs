@@ -9,7 +9,7 @@ use e2e_tests::{
     verify_video_stats_field_positive,
 };
 use serial_test::serial;
-use sora_sdk::{LibcameraVideoCapturer, Role, SoraClient, SoraClientContext};
+use sora_sdk::{LibcameraVideoCapturer, Role, SoraConnection, SoraConnectionContext};
 
 fn test_channel_id(suffix: &str) -> String {
     let base = generate_channel_id();
@@ -32,7 +32,7 @@ async fn test_sendonly_recvonly_with_libcamera() {
     let track_received = Arc::new(AtomicUsize::new(0));
     let track_received_clone = track_received.clone();
 
-    let sendonly_context = SoraClientContext::new().expect("SendOnly コンテキスト作成失敗");
+    let sendonly_context = SoraConnectionContext::new().expect("SendOnly コンテキスト作成失敗");
     let mut capturer = LibcameraVideoCapturer::builder()
         .width(640)
         .height(480)
@@ -50,7 +50,7 @@ async fn test_sendonly_recvonly_with_libcamera() {
         .create_audio_track(&audio_source)
         .expect("音声トラック作成失敗");
 
-    let mut sendonly_builder = SoraClient::builder(
+    let mut sendonly_builder = SoraConnection::builder(
         sendonly_context,
         urls.clone(),
         channel_id.clone(),
@@ -75,10 +75,10 @@ async fn test_sendonly_recvonly_with_libcamera() {
         let _ = tokio::time::timeout(Duration::from_secs(30), sendonly_client.run()).await;
     });
 
-    let recvonly_context = SoraClientContext::new().expect("RecvOnly コンテキスト作成失敗");
+    let recvonly_context = SoraConnectionContext::new().expect("RecvOnly コンテキスト作成失敗");
 
     let mut recvonly_builder =
-        SoraClient::builder(recvonly_context, urls, channel_id, Role::RecvOnly)
+        SoraConnection::builder(recvonly_context, urls, channel_id, Role::RecvOnly)
             .data_channel_signaling(true)
             .on_notify(move |_| {
                 recvonly_connected_clone.store(true, Ordering::SeqCst);

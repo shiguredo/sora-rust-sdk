@@ -1,6 +1,6 @@
 //! 公開 API の入口。
-mod client;
-mod client_context;
+mod connection;
+mod connection_context;
 mod error;
 #[cfg(feature = "libcamera")]
 mod libcamera;
@@ -14,10 +14,12 @@ mod video_codec_preference;
 mod video_codecs;
 mod zlib;
 
-pub use crate::client::{
-    SoraClient, SoraClientBuilder, SoraClientCommand, SoraClientHandle, TlsConfig,
+pub use crate::connection::{
+    SoraConnection, SoraConnectionBuilder, SoraConnectionCommand, SoraConnectionHandle, TlsConfig,
 };
-pub use crate::client_context::{AdmConfig, SoraClientContext, SoraClientContextConfig};
+pub use crate::connection_context::{
+    AdmConfig, SoraConnectionContext, SoraConnectionContextConfig,
+};
 pub use crate::error::{Error, Result};
 #[cfg(feature = "libcamera")]
 pub use crate::libcamera::{LibcameraVideoCapturer, LibcameraVideoCapturerBuilder};

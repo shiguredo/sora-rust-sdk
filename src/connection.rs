@@ -1,4 +1,4 @@
-//! SoraClient 本体と接続制御の実装。
+//! SoraConnection 本体と接続制御の実装。
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::Arc;
@@ -35,7 +35,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_rustls::{TlsConnector, client::TlsStream};
 
-use crate::client_context::SoraClientContext;
+use crate::connection_context::SoraConnectionContext;
 use crate::error::{Error, Result};
 use crate::rpc::{self, RpcRequestOptions, RpcResponse};
 use crate::signaling_types::{
@@ -51,7 +51,7 @@ use shiguredo_webrtc::{rtc_log_error, rtc_log_info, rtc_log_warning};
 
 /// WebSocket (シグナリング接続) の TLS 設定。
 ///
-/// TURN-TLS の TLS 設定は `SoraClientBuilder::turn_tls_insecure()` / `turn_tls_ca_cert()` で行う。
+/// TURN-TLS の TLS 設定は `SoraConnectionBuilder::turn_tls_insecure()` / `turn_tls_ca_cert()` で行う。
 #[derive(Debug, Clone, Default)]
 pub struct TlsConfig {
     /// サーバー証明書の検証をスキップする。
@@ -66,7 +66,7 @@ pub struct TlsConfig {
 
 type IceServerUrlConfigurer = dyn Fn(&mut IceServer, &[String]) + Send + Sync;
 
-pub struct SoraClientBuilder {
+pub struct SoraConnectionBuilder {
     signaling_urls: Vec<String>,
     channel_id: String,
     role: Role,
@@ -120,12 +120,12 @@ pub struct SoraClientBuilder {
     tls_config: TlsConfig,
     user_agent: Option<String>,
     // 他の保持オブジェクトより最後に破棄する必要がある。
-    context: Arc<SoraClientContext>,
+    context: Arc<SoraConnectionContext>,
 }
 
-impl SoraClientBuilder {
+impl SoraConnectionBuilder {
     fn new(
-        context: Arc<SoraClientContext>,
+        context: Arc<SoraConnectionContext>,
         signaling_urls: Vec<String>,
         channel_id: String,
         role: Role,
@@ -423,21 +423,21 @@ impl SoraClientBuilder {
         self
     }
 
-    pub fn build(self) -> Result<(SoraClient, SoraClientHandle)> {
-        SoraClient::new(self)
+    pub fn build(self) -> Result<(SoraConnection, SoraConnectionHandle)> {
+        SoraConnection::new(self)
     }
 }
 
-/// 外部から SoraClient を制御するためのハンドル。
+/// 外部から SoraConnection を制御するためのハンドル。
 ///
-/// `SoraClient::run()` を別タスクで実行中に、このハンドルを使って
+/// `SoraConnection::run()` を別タスクで実行中に、このハンドルを使って
 /// 接続の切断や統計情報の取得を行うことができる。
 #[derive(Clone)]
-pub struct SoraClientHandle {
-    command_tx: mpsc::UnboundedSender<SoraClientCommand>,
+pub struct SoraConnectionHandle {
+    command_tx: mpsc::UnboundedSender<SoraConnectionCommand>,
 }
 
-impl SoraClientHandle {
+impl SoraConnectionHandle {
     /// 最初に WebSocket 接続が成功したシグナリング URL を返す。
     ///
     /// `run()` で接続が確立される前は `None` を返す。
@@ -445,7 +445,7 @@ impl SoraClientHandle {
     pub async fn selected_signaling_url(&self) -> Result<Option<String>> {
         self.send_command(
             "selected_signaling_url",
-            SoraClientCommand::GetSelectedSignalingUrl,
+            SoraConnectionCommand::GetSelectedSignalingUrl,
         )
         .await
     }
@@ -458,7 +458,7 @@ impl SoraClientHandle {
     pub async fn connected_signaling_url(&self) -> Result<Option<String>> {
         self.send_command(
             "connected_signaling_url",
-            SoraClientCommand::GetConnectedSignalingUrl,
+            SoraConnectionCommand::GetConnectedSignalingUrl,
         )
         .await
     }
@@ -467,7 +467,7 @@ impl SoraClientHandle {
     ///
     /// `run()` が切断要求を受け付けたことを確認してから戻る。
     pub async fn disconnect(&self) -> Result<()> {
-        self.send_command("disconnect", SoraClientCommand::Disconnect)
+        self.send_command("disconnect", SoraConnectionCommand::Disconnect)
             .await
     }
 
@@ -482,12 +482,14 @@ impl SoraClientHandle {
         params: Option<JsonString>,
         options: RpcRequestOptions,
     ) -> Result<Option<RpcResponse>> {
-        self.send_command("send_rpc_request", |tx| SoraClientCommand::SendRpcRequest {
-            method: method.to_string(),
-            params,
-            notification: options.notification,
-            timeout: options.timeout,
-            response_tx: tx,
+        self.send_command("send_rpc_request", |tx| {
+            SoraConnectionCommand::SendRpcRequest {
+                method: method.to_string(),
+                params,
+                notification: options.notification,
+                timeout: options.timeout,
+                response_tx: tx,
+            }
         })
         .await?
     }
@@ -496,7 +498,7 @@ impl SoraClientHandle {
     ///
     /// `#` プレフィックス付きラベルのユーザー定義 DataChannel にバイナリデータを送信する。
     pub async fn send_message(&self, label: &str, data: &[u8]) -> Result<()> {
-        self.send_command("send_message", |tx| SoraClientCommand::SendMessage {
+        self.send_command("send_message", |tx| SoraConnectionCommand::SendMessage {
             label: label.to_string(),
             data: data.to_vec(),
             response_tx: tx,
@@ -508,14 +510,14 @@ impl SoraClientHandle {
     ///
     /// PeerConnection の統計情報を JSON 形式で取得する。
     pub async fn get_stats(&self) -> Result<JsonString> {
-        self.send_command("get_stats", SoraClientCommand::GetStats)
+        self.send_command("get_stats", SoraConnectionCommand::GetStats)
             .await?
     }
 
     async fn send_command<R>(
         &self,
         command: &'static str,
-        build: impl FnOnce(oneshot::Sender<R>) -> SoraClientCommand,
+        build: impl FnOnce(oneshot::Sender<R>) -> SoraConnectionCommand,
     ) -> Result<R> {
         let (tx, rx) = oneshot::channel();
         self.command_tx
@@ -526,13 +528,13 @@ impl SoraClientHandle {
     }
 }
 
-pub struct SoraClient {
+pub struct SoraConnection {
     data_channels: HashMap<String, ManagedDataChannel>,
     data_channel_configs: Vec<DataChannelConfig>,
     offer_simulcast: bool,
     simulcast_encodings: Vec<SimulcastEncodingConfig>,
     video_sender: Option<RtpSender>,
-    command_rx: mpsc::UnboundedReceiver<SoraClientCommand>,
+    command_rx: mpsc::UnboundedReceiver<SoraConnectionCommand>,
     event_tx: mpsc::UnboundedSender<SoraEvent>,
     event_rx: mpsc::UnboundedReceiver<SoraEvent>,
     pending_rpc_responses: HashMap<u64, PendingRpcRequest>,
@@ -547,7 +549,7 @@ pub struct SoraClient {
     #[allow(dead_code)]
     pc_observer: PeerConnectionObserver,
     // context を最後に破棄するため、config は最後に保持する。
-    config: SoraClientBuilder,
+    config: SoraConnectionBuilder,
 }
 
 struct PendingRpcRequest {
@@ -563,7 +565,7 @@ enum SoraEvent {
     RpcTimeout { id: u64 },
 }
 
-pub enum SoraClientCommand {
+pub enum SoraConnectionCommand {
     Disconnect(oneshot::Sender<()>),
     GetStats(oneshot::Sender<Result<JsonString>>),
     GetSelectedSignalingUrl(oneshot::Sender<Option<String>>),
@@ -622,19 +624,19 @@ impl SSLCertificateVerifierHandler for TurnTlsCaCertVerifier {
     }
 }
 
-impl SoraClient {
+impl SoraConnection {
     pub fn builder(
-        context: Arc<SoraClientContext>,
+        context: Arc<SoraConnectionContext>,
         signaling_urls: Vec<String>,
         channel_id: String,
         role: Role,
-    ) -> SoraClientBuilder {
-        SoraClientBuilder::new(context, signaling_urls, channel_id, role)
+    ) -> SoraConnectionBuilder {
+        SoraConnectionBuilder::new(context, signaling_urls, channel_id, role)
     }
 
-    fn new(config: SoraClientBuilder) -> Result<(Self, SoraClientHandle)> {
-        let (command_tx, command_rx) = mpsc::unbounded_channel::<SoraClientCommand>();
-        let handle = SoraClientHandle { command_tx };
+    fn new(config: SoraConnectionBuilder) -> Result<(Self, SoraConnectionHandle)> {
+        let (command_tx, command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
+        let handle = SoraConnectionHandle { command_tx };
 
         let (event_tx, event_rx) = mpsc::unbounded_channel::<SoraEvent>();
         let pc_factory = config.context.factory();
@@ -910,7 +912,7 @@ impl SoraClient {
                 // ハンドル経由での切断要求
                 Some(command) = self.command_rx.recv() => {
                     match command {
-                        SoraClientCommand::Disconnect(ack_tx) => {
+                        SoraConnectionCommand::Disconnect(ack_tx) => {
                             rtc_log_info!("切断要求を受信しました");
                             let _ = ack_tx.send(());
                             // オープン中の DataChannel に対して close コールバックを呼ぶ
@@ -920,17 +922,17 @@ impl SoraClient {
                             }
                             break;
                         }
-                        SoraClientCommand::GetStats(stats_response_tx) => {
+                        SoraConnectionCommand::GetStats(stats_response_tx) => {
                             let stats = self.get_stats().await;
                             let _ = stats_response_tx.send(stats);
                         }
-                        SoraClientCommand::GetSelectedSignalingUrl(response_tx) => {
+                        SoraConnectionCommand::GetSelectedSignalingUrl(response_tx) => {
                             let _ = response_tx.send(self.selected_signaling_url.clone());
                         }
-                        SoraClientCommand::GetConnectedSignalingUrl(response_tx) => {
+                        SoraConnectionCommand::GetConnectedSignalingUrl(response_tx) => {
                             let _ = response_tx.send(self.connected_signaling_url.clone());
                         }
-                        SoraClientCommand::SendRpcRequest { method, params, notification, timeout, response_tx } => {
+                        SoraConnectionCommand::SendRpcRequest { method, params, notification, timeout, response_tx } => {
                             let (message, rpc_id) = rpc::build_rpc_message(&mut self.rpc_id_counter, &method, params.as_ref(), notification);
                             let result = self.send_datachannel_message("rpc", &message);
                             match result {
@@ -955,7 +957,7 @@ impl SoraClient {
                                 }
                             }
                         }
-                        SoraClientCommand::SendMessage { label, data, response_tx } => {
+                        SoraConnectionCommand::SendMessage { label, data, response_tx } => {
                             let result = self.send_data_channel_message(&label, &data);
                             let _ = response_tx.send(result);
                         }
@@ -2488,7 +2490,7 @@ mod tests {
             "turn:turn.example.com:3478?transport=udp".to_string(),
             "turns:turn.example.com:443?transport=tcp".to_string(),
         ];
-        SoraClient::configure_ice_server_urls(&mut server_entry, &urls, None);
+        SoraConnection::configure_ice_server_urls(&mut server_entry, &urls, None);
 
         assert_eq!(server_entry.urls_len(), urls.len());
     }
@@ -2510,7 +2512,7 @@ mod tests {
                 }
             }
         });
-        SoraClient::configure_ice_server_urls(&mut server_entry, &urls, Some(&configurer));
+        SoraConnection::configure_ice_server_urls(&mut server_entry, &urls, Some(&configurer));
         assert_eq!(server_entry.urls_len(), 3);
     }
 
@@ -2522,7 +2524,7 @@ mod tests {
             "stuns:stun.example.com:5349".to_string(),
         ];
         let configurer: Arc<IceServerUrlConfigurer> = Arc::new(|_, _| {});
-        SoraClient::configure_ice_server_urls(&mut server_entry, &urls, Some(&configurer));
+        SoraConnection::configure_ice_server_urls(&mut server_entry, &urls, Some(&configurer));
         assert_eq!(server_entry.urls_len(), 0);
     }
 
@@ -2533,18 +2535,18 @@ mod tests {
             connected in "[ -~]{1,64}"
         ) {
             block_on_test(async move {
-                let (command_tx, mut command_rx) = mpsc::unbounded_channel::<SoraClientCommand>();
-                let handle = SoraClientHandle { command_tx };
+                let (command_tx, mut command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
+                let handle = SoraConnectionHandle { command_tx };
 
                 let selected_value = selected.clone();
                 let connected_value = connected.clone();
                 let worker = tokio::spawn(async move {
                     while let Some(command) = command_rx.recv().await {
                         match command {
-                            SoraClientCommand::GetSelectedSignalingUrl(response_tx) => {
+                            SoraConnectionCommand::GetSelectedSignalingUrl(response_tx) => {
                                 let _ = response_tx.send(Some(selected_value.clone()));
                             }
-                            SoraClientCommand::GetConnectedSignalingUrl(response_tx) => {
+                            SoraConnectionCommand::GetConnectedSignalingUrl(response_tx) => {
                                 let _ = response_tx.send(Some(connected_value.clone()));
                             }
                             _ => {}
@@ -2686,9 +2688,9 @@ mod tests {
 
     #[tokio::test]
     async fn url_getters_return_send_error_after_run_loop_stops() {
-        let (command_tx, command_rx) = mpsc::unbounded_channel::<SoraClientCommand>();
+        let (command_tx, command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
         drop(command_rx);
-        let handle = SoraClientHandle { command_tx };
+        let handle = SoraConnectionHandle { command_tx };
 
         let selected_error = handle
             .selected_signaling_url()

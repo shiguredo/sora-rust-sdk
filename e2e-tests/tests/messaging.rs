@@ -6,7 +6,7 @@ use e2e_tests::{
     FakeVideoCapturer, FakeVideoCapturerConfig, build_metadata_with_access_token,
     build_sender_tracks, generate_channel_id, load_env, secret_key, signaling_urls,
 };
-use sora_sdk::{ConnectDataChannel, Role, SoraClient, SoraClientContext};
+use sora_sdk::{ConnectDataChannel, Role, SoraConnection, SoraConnectionContext};
 
 /// data_channels に #messaging を指定して、2 クライアント間でメッセージを送受信するテスト
 #[tokio::test]
@@ -34,14 +34,14 @@ async fn test_messaging_sendrecv() {
     let client1_received = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let client1_received_clone = client1_received.clone();
 
-    let context1 = SoraClientContext::new().expect("クライアント 1 コンテキスト作成失敗");
+    let context1 = SoraConnectionContext::new().expect("クライアント 1 コンテキスト作成失敗");
     let mut capturer1 = FakeVideoCapturer::new(FakeVideoCapturerConfig::default())
         .expect("FakeVideoCapturer 1 作成失敗");
     let (video_track1, audio_track1) =
         build_sender_tracks(&context1, &mut capturer1).expect("送信用トラック 1 作成失敗");
 
     let mut builder1 =
-        SoraClient::builder(context1, urls.clone(), channel_id.clone(), Role::SendRecv)
+        SoraConnection::builder(context1, urls.clone(), channel_id.clone(), Role::SendRecv)
             .sender_video_track(video_track1)
             .sender_audio_track(audio_track1)
             .data_channel_signaling(true)
@@ -60,7 +60,9 @@ async fn test_messaging_sendrecv() {
         builder1 = builder1.metadata(build_metadata_with_access_token(&token));
     }
 
-    let (client1, handle1) = builder1.build().expect("SoraClient 1 の作成に失敗しました");
+    let (client1, handle1) = builder1
+        .build()
+        .expect("SoraConnection 1 の作成に失敗しました");
 
     let client1_task = tokio::spawn(async move {
         let _ = tokio::time::timeout(Duration::from_secs(30), client1.run()).await;
@@ -91,13 +93,13 @@ async fn test_messaging_sendrecv() {
     let client2_received = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let client2_received_clone = client2_received.clone();
 
-    let context2 = SoraClientContext::new().expect("クライアント 2 コンテキスト作成失敗");
+    let context2 = SoraConnectionContext::new().expect("クライアント 2 コンテキスト作成失敗");
     let mut capturer2 = FakeVideoCapturer::new(FakeVideoCapturerConfig::default())
         .expect("FakeVideoCapturer 2 作成失敗");
     let (video_track2, audio_track2) =
         build_sender_tracks(&context2, &mut capturer2).expect("送信用トラック 2 作成失敗");
 
-    let mut builder2 = SoraClient::builder(context2, urls, channel_id, Role::SendRecv)
+    let mut builder2 = SoraConnection::builder(context2, urls, channel_id, Role::SendRecv)
         .sender_video_track(video_track2)
         .sender_audio_track(audio_track2)
         .data_channel_signaling(true)
@@ -116,7 +118,9 @@ async fn test_messaging_sendrecv() {
         builder2 = builder2.metadata(build_metadata_with_access_token(&token));
     }
 
-    let (client2, handle2) = builder2.build().expect("SoraClient 2 の作成に失敗しました");
+    let (client2, handle2) = builder2
+        .build()
+        .expect("SoraConnection 2 の作成に失敗しました");
 
     let client2_task = tokio::spawn(async move {
         let _ = tokio::time::timeout(Duration::from_secs(30), client2.run()).await;
