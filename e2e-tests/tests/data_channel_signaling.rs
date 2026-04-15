@@ -37,7 +37,7 @@ async fn test_recvonly_data_channel_signaling() {
 
     // クライアントを起動
     let connection_task = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(30), connection.run()).await;
+        connection.run().await.expect("connection run failed");
     });
 
     // switched 通知を待つ (最大 15 秒)
@@ -86,8 +86,7 @@ async fn test_recvonly_data_channel_signaling() {
         .await
         .expect("disconnect に失敗しました");
 
-    // タスクをキャンセル
-    connection_task.abort();
+    e2e_tests::wait_task_finished(connection_task, "connection_task").await;
 
     println!("テスト成功: DataChannel シグナリングの統計情報を確認しました");
 }
@@ -151,7 +150,7 @@ async fn test_data_channel_callbacks() {
         .expect("SoraConnection の作成に失敗しました");
 
     let connection_task = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(30), connection.run()).await;
+        connection.run().await.expect("connection run failed");
     });
 
     // switched 通知を待つ (最大 15 秒)
@@ -201,8 +200,7 @@ async fn test_data_channel_callbacks() {
         .await
         .expect("disconnect に失敗しました");
 
-    // クライアントタスクの終了を待つ
-    let _ = tokio::time::timeout(Duration::from_secs(5), connection_task).await;
+    e2e_tests::wait_task_finished(connection_task, "connection_task").await;
 
     // on_data_channel_close で全ラベルが閉じたことを確認
     let closed = closed_labels.lock().unwrap().clone();

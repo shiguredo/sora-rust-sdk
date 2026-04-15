@@ -26,16 +26,26 @@ async fn test_recvonly_connect() {
         builder = builder.metadata(build_metadata_with_access_token(&token));
     }
 
-    let (connection, _handle) = builder
+    let (connection, handle) = builder
         .build()
         .expect("SoraConnection の作成に失敗しました");
 
-    // タイムアウト付きで接続テスト
-    let result = tokio::time::timeout(std::time::Duration::from_secs(10), connection.run()).await;
+    let run_task = tokio::spawn(async move {
+        connection.run().await.expect("connection run failed");
+    });
 
-    // 接続成功を確認（タイムアウトでも notify を受信していれば OK）
-    assert!(
-        connected.load(Ordering::SeqCst) || result.is_ok(),
-        "接続に失敗しました"
-    );
+    let connected_wait = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if connected.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+
+    assert!(connected_wait.is_ok(), "接続に失敗しました");
+
+    handle.disconnect().await.expect("disconnect failed");
+    e2e_tests::wait_task_finished(run_task, "run_task").await;
 }

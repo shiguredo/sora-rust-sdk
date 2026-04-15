@@ -12,7 +12,6 @@ use sora_sdk::{Role, SignalingDirection, SignalingType, SoraConnection, SoraConn
 #[tokio::test]
 async fn test_on_signaling_message_websocket() {
     load_env();
-
     let urls = signaling_urls().expect("TEST_SIGNALING_URLS が必要");
     let channel_id = generate_channel_id();
     let context = SoraConnectionContext::new().expect("コンテキスト作成失敗");
@@ -46,11 +45,33 @@ async fn test_on_signaling_message_websocket() {
         builder = builder.metadata(build_metadata_with_access_token(&token));
     }
 
-    let (connection, _handle) = builder
+    let (connection, handle) = builder
         .build()
         .expect("SoraConnection の作成に失敗しました");
 
-    let _ = tokio::time::timeout(Duration::from_secs(10), connection.run()).await;
+    let run_task = tokio::spawn(async move {
+        connection.run().await.expect("connection run failed");
+    });
+    let sent_for_wait = sent_received.clone();
+    let recv_for_wait = recv_received.clone();
+    let wait = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if sent_for_wait.load(Ordering::SeqCst) && recv_for_wait.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    assert!(
+        wait.is_ok(),
+        "WebSocket 経由の on_signaling_message がタイムアウトしました"
+    );
+    handle
+        .disconnect()
+        .await
+        .expect("websocket の disconnect に失敗しました");
+    e2e_tests::wait_task_finished(run_task, "run_task").await;
 
     assert!(
         sent_received.load(Ordering::SeqCst),
@@ -71,7 +92,6 @@ async fn test_on_signaling_message_websocket() {
 #[tokio::test]
 async fn test_on_signaling_message_datachannel() {
     load_env();
-
     let urls = signaling_urls().expect("TEST_SIGNALING_URLS が必要");
     let channel_id = generate_channel_id();
 
@@ -122,7 +142,7 @@ async fn test_on_signaling_message_datachannel() {
     let (recv_client, recv_handle) = recv_builder.build().expect("recvonly の作成に失敗しました");
 
     let recv_task = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(30), recv_client.run()).await;
+        recv_client.run().await.expect("recv_client run failed");
     });
 
     // recvonly の switched を待つ
@@ -165,7 +185,7 @@ async fn test_on_signaling_message_datachannel() {
     let (send_client, send_handle) = send_builder.build().expect("sendonly の作成に失敗しました");
 
     let send_task = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(15), send_client.run()).await;
+        send_client.run().await.expect("send_client run failed");
     });
 
     // recvonly 側で DataChannel 経由の re-offer (Received) と re-answer (Sent) を待つ
@@ -200,8 +220,8 @@ async fn test_on_signaling_message_datachannel() {
         .await
         .expect("sendonly の disconnect に失敗しました");
 
-    recv_task.abort();
-    send_task.abort();
+    e2e_tests::wait_task_finished(recv_task, "recv_task").await;
+    e2e_tests::wait_task_finished(send_task, "send_task").await;
 
     println!(
         "テスト成功: DataChannel 経由で re-offer (Received) と re-answer (Sent) が呼ばれました"

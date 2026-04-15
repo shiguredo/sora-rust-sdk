@@ -229,7 +229,7 @@ struct ProxyHarness {
     connect_log: Arc<Mutex<Vec<ConnectTarget>>>,
     traffic_stats: Arc<ProxyTrafficStats>,
     active_connection_count: Arc<AtomicUsize>,
-    accept_task: JoinHandle<()>,
+    _accept_task: JoinHandle<()>,
 }
 
 impl ProxyHarness {
@@ -276,7 +276,7 @@ impl ProxyHarness {
             connect_log,
             traffic_stats,
             active_connection_count,
-            accept_task,
+            _accept_task: accept_task,
         })
     }
 
@@ -387,12 +387,6 @@ async fn detect_proxy_host(signaling_urls: &[String]) -> String {
     "127.0.0.1".to_string()
 }
 
-impl Drop for ProxyHarness {
-    fn drop(&mut self) {
-        self.accept_task.abort();
-    }
-}
-
 #[tokio::test]
 async fn test_sendrecv_bidirectional_via_proxy() {
     load_env();
@@ -458,7 +452,7 @@ async fn test_sendrecv_bidirectional_via_proxy() {
         .build()
         .expect("SoraConnection 1 の作成に失敗しました");
     let client1_task = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(30), client1.run()).await;
+        client1.run().await.expect("client1 run failed");
     });
 
     let client1_connected_for_wait = client1_connected.clone();
@@ -521,7 +515,7 @@ async fn test_sendrecv_bidirectional_via_proxy() {
         .build()
         .expect("SoraConnection 2 の作成に失敗しました");
     let client2_task = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(30), client2.run()).await;
+        client2.run().await.expect("client2 run failed");
     });
 
     let client2_connected_for_wait = client2_connected.clone();
@@ -639,8 +633,8 @@ async fn test_sendrecv_bidirectional_via_proxy() {
         .disconnect()
         .await
         .expect("クライアント 2 の disconnect に失敗しました");
-    client1_task.abort();
-    client2_task.abort();
+    e2e_tests::wait_task_finished(client1_task, "client1_task").await;
+    e2e_tests::wait_task_finished(client2_task, "client2_task").await;
     assert!(
         proxy
             .wait_for_all_connections_closed(Duration::from_secs(5))

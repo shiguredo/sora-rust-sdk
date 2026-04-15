@@ -63,8 +63,10 @@ async fn test_sendonly_then_recvonly() {
 
     // SendOnly を起動
     let sendonly_task = tokio::spawn(async move {
-        let _ =
-            tokio::time::timeout(std::time::Duration::from_secs(30), sendonly_client.run()).await;
+        sendonly_client
+            .run()
+            .await
+            .expect("sendonly_client run failed");
     });
 
     // SendOnly が接続するまで待機 (最大 10 秒)
@@ -121,8 +123,10 @@ async fn test_sendonly_then_recvonly() {
         .expect("SoraConnection の作成に失敗しました");
 
     let recvonly_task = tokio::spawn(async move {
-        let _ =
-            tokio::time::timeout(std::time::Duration::from_secs(30), recvonly_client.run()).await;
+        recvonly_client
+            .run()
+            .await
+            .expect("recvonly_client run failed");
     });
 
     // RecvOnly が接続するまで待機 (最大 10 秒)
@@ -198,9 +202,8 @@ async fn test_sendonly_then_recvonly() {
         .await
         .expect("RecvOnly の disconnect に失敗しました");
 
-    // タスクをキャンセル
-    sendonly_task.abort();
-    recvonly_task.abort();
+    e2e_tests::wait_task_finished(sendonly_task, "sendonly_task").await;
+    e2e_tests::wait_task_finished(recvonly_task, "recvonly_task").await;
 
     println!("テスト成功: {} トラックを受信、統計情報検証完了", tracks);
 }
@@ -259,8 +262,10 @@ async fn test_recvonly_then_sendonly() {
         .expect("SoraConnection の作成に失敗しました");
 
     let recvonly_task = tokio::spawn(async move {
-        let _ =
-            tokio::time::timeout(std::time::Duration::from_secs(30), recvonly_client.run()).await;
+        recvonly_client
+            .run()
+            .await
+            .expect("recvonly_client run failed");
     });
 
     // RecvOnly が接続するまで待機 (最大 10 秒)
@@ -310,8 +315,10 @@ async fn test_recvonly_then_sendonly() {
         .expect("SoraConnection の作成に失敗しました");
 
     let sendonly_task = tokio::spawn(async move {
-        let _ =
-            tokio::time::timeout(std::time::Duration::from_secs(30), sendonly_client.run()).await;
+        sendonly_client
+            .run()
+            .await
+            .expect("sendonly_client run failed");
     });
 
     // SendOnly が接続するまで待機 (最大 10 秒)
@@ -387,9 +394,8 @@ async fn test_recvonly_then_sendonly() {
         .await
         .expect("RecvOnly の disconnect に失敗しました");
 
-    // タスクをキャンセル
-    sendonly_task.abort();
-    recvonly_task.abort();
+    e2e_tests::wait_task_finished(sendonly_task, "sendonly_task").await;
+    e2e_tests::wait_task_finished(recvonly_task, "recvonly_task").await;
 
     println!(
         "テスト成功: re-offer 経由で {} トラックを受信、統計情報検証完了",

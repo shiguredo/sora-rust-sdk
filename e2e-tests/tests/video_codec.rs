@@ -100,7 +100,10 @@ async fn run_sendonly_recvonly_with_codec(
         .expect("SoraConnection の作成に失敗しました");
 
     let sendonly_task = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(30), sendonly_client.run()).await;
+        sendonly_client
+            .run()
+            .await
+            .expect("sendonly_client run failed");
     });
 
     // SendOnly が接続するまで待機
@@ -156,7 +159,10 @@ async fn run_sendonly_recvonly_with_codec(
         .expect("SoraConnection の作成に失敗しました");
 
     let recvonly_task = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(30), recvonly_client.run()).await;
+        recvonly_client
+            .run()
+            .await
+            .expect("recvonly_client run failed");
     });
 
     // RecvOnly が接続するまで待機
@@ -251,8 +257,8 @@ async fn run_sendonly_recvonly_with_codec(
         .await
         .expect("RecvOnly の disconnect に失敗しました");
 
-    sendonly_task.abort();
-    recvonly_task.abort();
+    e2e_tests::wait_task_finished(sendonly_task, "sendonly_task").await;
+    e2e_tests::wait_task_finished(recvonly_task, "recvonly_task").await;
 
     println!(
         "{}: テスト成功: {} トラックを受信、統計情報検証完了",
@@ -318,7 +324,7 @@ async fn run_sendrecv_with_codec(video: Video, codec_name: &str, expected_mime_t
         .expect("SoraConnection の作成に失敗しました");
 
     let client1_task = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(30), client1.run()).await;
+        client1.run().await.expect("client1 run failed");
     });
 
     // クライアント 1 が接続するまで待機
@@ -383,7 +389,7 @@ async fn run_sendrecv_with_codec(video: Video, codec_name: &str, expected_mime_t
         .expect("SoraConnection の作成に失敗しました");
 
     let client2_task = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(30), client2.run()).await;
+        client2.run().await.expect("client2 run failed");
     });
 
     // クライアント 2 が接続するまで待機
@@ -502,8 +508,8 @@ async fn run_sendrecv_with_codec(video: Video, codec_name: &str, expected_mime_t
         .await
         .expect("クライアント 2 の disconnect に失敗しました");
 
-    client1_task.abort();
-    client2_task.abort();
+    e2e_tests::wait_task_finished(client1_task, "client1_task").await;
+    e2e_tests::wait_task_finished(client2_task, "client2_task").await;
 
     println!("{}: テスト成功: 双方向通信、統計情報検証完了", codec_name);
 }

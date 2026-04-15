@@ -208,7 +208,10 @@ async fn run_sendonly_recvonly_with_contexts(
         .build()
         .map_err(|e| format!("failed to build sendonly client: {e}"))?;
     let sendonly_task = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(30), sendonly_client.run()).await;
+        sendonly_client
+            .run()
+            .await
+            .expect("sendonly_client run failed");
     });
 
     let sendonly_wait = tokio::time::timeout(Duration::from_secs(10), async {
@@ -221,7 +224,8 @@ async fn run_sendonly_recvonly_with_contexts(
     })
     .await;
     if sendonly_wait.is_err() {
-        sendonly_task.abort();
+        let _ = sendonly_handle.disconnect().await;
+        e2e_tests::wait_task_finished(sendonly_task, "sendonly_task").await;
         return Err("sendonly connection timed out".to_string());
     }
 
@@ -254,7 +258,10 @@ async fn run_sendonly_recvonly_with_contexts(
         .build()
         .map_err(|e| format!("failed to build recvonly client: {e}"))?;
     let recvonly_task = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(30), recvonly_client.run()).await;
+        recvonly_client
+            .run()
+            .await
+            .expect("recvonly_client run failed");
     });
 
     let result = async {
@@ -318,8 +325,8 @@ async fn run_sendonly_recvonly_with_contexts(
 
     let _ = sendonly_handle.disconnect().await;
     let _ = recvonly_handle.disconnect().await;
-    sendonly_task.abort();
-    recvonly_task.abort();
+    e2e_tests::wait_task_finished(sendonly_task, "sendonly_task").await;
+    e2e_tests::wait_task_finished(recvonly_task, "recvonly_task").await;
     result
 }
 
@@ -373,7 +380,7 @@ async fn run_sendrecv_with_codec(codec_type: VideoCodecType) {
 
     let (client1, handle1) = builder1.build().expect("failed to build client1");
     let client1_task = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(30), client1.run()).await;
+        client1.run().await.expect("client1 run failed");
     });
 
     let client1_wait = tokio::time::timeout(Duration::from_secs(10), async {
@@ -422,7 +429,7 @@ async fn run_sendrecv_with_codec(codec_type: VideoCodecType) {
 
     let (client2, handle2) = builder2.build().expect("failed to build client2");
     let client2_task = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(30), client2.run()).await;
+        client2.run().await.expect("client2 run failed");
     });
 
     let client2_wait = tokio::time::timeout(Duration::from_secs(10), async {
@@ -508,8 +515,8 @@ async fn run_sendrecv_with_codec(codec_type: VideoCodecType) {
         .await
         .expect("failed to disconnect client2");
 
-    client1_task.abort();
-    client2_task.abort();
+    e2e_tests::wait_task_finished(client1_task, "client1_task").await;
+    e2e_tests::wait_task_finished(client2_task, "client2_task").await;
 }
 
 #[tokio::test]
