@@ -369,10 +369,10 @@ pub fn verify_video_codec_mime_type(
 
     for stat in &stats {
         match stat {
-            WebRtcStat::Codec(codec) => {
-                if codec.mime_type.eq_ignore_ascii_case(expected_mime_type) {
-                    expected_codec_ids.insert(codec.id());
-                }
+            WebRtcStat::Codec(codec)
+                if codec.mime_type.eq_ignore_ascii_case(expected_mime_type) =>
+            {
+                expected_codec_ids.insert(codec.id());
             }
             WebRtcStat::InboundRtp(inbound) if stat_type == "inbound-rtp" => {
                 if inbound.kind() == "video"
