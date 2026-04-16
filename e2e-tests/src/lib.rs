@@ -457,4 +457,6 @@ pub fn has_simulcast_rids(stats_json: &JsonString, expected: &[&str]) -> bool {
 
 pub mod fake_video_capturer;
 pub mod stats;
+pub mod test_connection;
 pub use fake_video_capturer::{FakeVideoCapturer, FakeVideoCapturerConfig};
+pub use test_connection::{SoraTestConnection, SoraTestConnectionBuilder, SoraTestEvent};

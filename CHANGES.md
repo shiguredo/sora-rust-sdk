@@ -91,6 +91,8 @@
 
 ### misc
 
+- [UPDATE] e2e-tests に `SoraTestConnection` を追加し、`sendrecv` テストを callback ログ + predicate 待機ベースへ置き換える
+  - @melpon
 - [UPDATE] e2e-tests の WebRTC stats 検証を文字列探索から型付きパースベースへ置き換える
   - `RtcStatsTrait` と RTP 継承チェーン trait を追加し、継承先の全構造体から共通的に値を取得できるようにする
   - @melpon
