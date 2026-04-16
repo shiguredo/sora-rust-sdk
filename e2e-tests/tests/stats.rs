@@ -1,13 +1,11 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use e2e_tests::{
-    FakeVideoCapturer, FakeVideoCapturerConfig, build_metadata_with_access_token,
-    build_sender_tracks, generate_channel_id, load_env, secret_key, signaling_urls,
-    verify_stats_field_positive,
+    FakeVideoCapturer, FakeVideoCapturerConfig, SoraTestConnection,
+    build_metadata_with_access_token, build_sender_tracks, generate_channel_id, load_env,
+    secret_key, signaling_urls, verify_stats_field_positive,
 };
-use sora_sdk::{JsonString, Role, SoraConnection, SoraConnectionContext};
+use sora_sdk::{Role, SoraConnectionContext};
 
 #[tokio::test]
 async fn test_get_stats() {
@@ -22,60 +20,32 @@ async fn test_get_stats() {
     let (video_track, audio_track) =
         build_sender_tracks(&context, &mut capturer).expect("送信用トラック作成失敗");
 
-    let connected = Arc::new(AtomicBool::new(false));
-    let connected_clone = connected.clone();
-
-    let mut builder = SoraConnection::builder(context, urls, channel_id, Role::SendOnly)
+    let mut builder = SoraTestConnection::builder(context, urls, channel_id, Role::SendOnly)
         .sender_video_track(video_track)
-        .sender_audio_track(audio_track)
-        .on_notify(move |_| {
-            connected_clone.store(true, Ordering::SeqCst);
-        });
+        .sender_audio_track(audio_track);
 
     if let Some(token) = secret_key() {
         builder = builder.metadata(build_metadata_with_access_token(&token));
     }
 
-    let (connection, handle) = builder
-        .build()
-        .expect("SoraConnection の作成に失敗しました");
+    let mut connection = builder
+        .connect()
+        .expect("SoraTestConnection の作成に失敗しました");
+    connection
+        .wait_for_connect(Duration::from_secs(10))
+        .await
+        .expect("接続に失敗しました");
 
-    // run() と統計取得を並行して実行
-    let stats_result = Arc::new(std::sync::Mutex::new(Option::<JsonString>::None));
-    let stats_result_clone = stats_result.clone();
+    connection
+        .wait_stats(
+            |stats| verify_stats_field_positive(stats, "outbound-rtp", "packetsSent"),
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("outbound-rtp の packetsSent が 0 より大きくなりませんでした");
 
-    tokio::select! {
-        _ = connection.run() => {
-            // run が終了した（通常はここに来ない）
-        }
-        _ = async {
-            // 接続成功を待機
-            tokio::time::sleep(Duration::from_secs(5)).await;
-
-            // 接続成功を確認
-            assert!(connected.load(Ordering::SeqCst), "接続に失敗しました");
-
-            // 統計情報を取得
-            let stats = handle
-                .get_stats()
-                .await
-                .expect("get_stats の取得に失敗しました");
-            *stats_result_clone.lock().unwrap() = Some(stats);
-
-            // 切断
-            handle
-                .disconnect()
-                .await
-                .expect("disconnect の実行に失敗しました");
-        } => {}
-    }
-
-    // 統計情報の検証
-    let stats = stats_result.lock().unwrap().clone().unwrap();
-
-    // outbound-rtp の packetsSent が 0 より大きいことを確認
-    assert!(
-        verify_stats_field_positive(&stats, "outbound-rtp", "packetsSent"),
-        "outbound-rtp の packetsSent が 0 より大きくありません"
-    );
+    connection
+        .disconnect_and_wait(Duration::from_secs(10))
+        .await
+        .expect("disconnect に失敗しました");
 }

@@ -91,6 +91,11 @@
 
 ### misc
 
+- [UPDATE] e2e-tests に `SoraTestConnection` を追加し、`SoraConnection` 直利用テストを callback ログ + predicate 待機ベースへ置き換える
+  - @melpon
+- [UPDATE] e2e-tests の WebRTC stats 検証を文字列探索から型付きパースベースへ置き換える
+  - `RtcStatsTrait` と RTP 継承チェーン trait を追加し、継承先の全構造体から共通的に値を取得できるようにする
+  - @melpon
 - [UPDATE] `find_capability` の implementation 比較で不要な `implementation.clone()` を削除する
   - @melpon
 - [UPDATE] sumomo の `main.rs` を分割して責務を整理する

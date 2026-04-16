@@ -914,12 +914,13 @@ impl SoraConnection {
                     match command {
                         SoraConnectionCommand::Disconnect(ack_tx) => {
                             rtc_log_info!("切断要求を受信しました");
-                            let _ = ack_tx.send(());
                             // オープン中の DataChannel に対して close コールバックを呼ぶ
                             for label in &opened_datachannels {
                                 rtc_log_info!("DataChannel '{}' がクローズしました", label);
                                 on_data_channel_close(label);
                             }
+                            opened_datachannels.clear();
+                            let _ = ack_tx.send(());
                             break;
                         }
                         SoraConnectionCommand::GetStats(stats_response_tx) => {

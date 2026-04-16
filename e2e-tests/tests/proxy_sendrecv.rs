@@ -2,16 +2,16 @@ use std::collections::HashSet;
 use std::io;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use e2e_tests::{
-    FakeVideoCapturer, FakeVideoCapturerConfig, build_metadata_with_access_token,
-    build_sender_tracks, generate_channel_id, load_env, secret_key, signaling_urls,
-    sum_video_stats_field_for_type, verify_video_stats_field_positive,
+    FakeVideoCapturer, FakeVideoCapturerConfig, SoraTestConnection,
+    build_metadata_with_access_token, build_sender_tracks, generate_channel_id, load_env,
+    secret_key, signaling_urls, sum_video_stats_field_for_type, verify_video_stats_field_positive,
 };
 use shiguredo_http11::{RequestDecoder, Response, host::Host, uri::Uri};
-use sora_sdk::{ProxyInfo, Role, SoraConnection, SoraConnectionContext};
+use sora_sdk::{ProxyInfo, Role, SoraConnectionContext};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::task::JoinHandle;
@@ -412,16 +412,6 @@ async fn test_sendrecv_bidirectional_via_proxy() {
     let proxy_info = proxy.proxy_info();
     let channel_id = test_channel_id("sendrecv-via-proxy");
 
-    let client1_connected = Arc::new(AtomicBool::new(false));
-    let client1_connected_clone = client1_connected.clone();
-    let client1_track_received = Arc::new(AtomicUsize::new(0));
-    let client1_track_received_clone = client1_track_received.clone();
-
-    let client2_connected = Arc::new(AtomicBool::new(false));
-    let client2_connected_clone = client2_connected.clone();
-    let client2_track_received = Arc::new(AtomicUsize::new(0));
-    let client2_track_received_clone = client2_track_received.clone();
-
     let context1 = SoraConnectionContext::new().expect("クライアント 1 コンテキスト作成失敗");
     let mut capturer1 = FakeVideoCapturer::new(FakeVideoCapturerConfig::default())
         .expect("FakeVideoCapturer 1 作成失敗");
@@ -429,54 +419,24 @@ async fn test_sendrecv_bidirectional_via_proxy() {
         build_sender_tracks(&context1, &mut capturer1).expect("送信用トラック作成失敗");
 
     let mut builder1 =
-        SoraConnection::builder(context1, urls.clone(), channel_id.clone(), Role::SendRecv)
+        SoraTestConnection::builder(context1, urls.clone(), channel_id.clone(), Role::SendRecv)
             .sender_video_track(video_track1)
             .sender_audio_track(audio_track1)
             .proxy(proxy_info.clone())
             .data_channel_signaling(true)
-            .on_notify(move |_| {
-                client1_connected_clone.store(true, Ordering::SeqCst);
-            })
-            .on_track(move |transceiver| {
-                let receiver = transceiver.receiver();
-                let track = receiver.track();
-                let kind = match track.kind() {
-                    Ok(kind) => kind,
-                    Err(_) => return,
-                };
-                if kind != "video" {
-                    return;
-                }
-                client1_track_received_clone.fetch_add(1, Ordering::SeqCst);
-            });
+            .disconnect_wait_timeout(Duration::from_secs(1));
 
     if let Some(token) = secret_key() {
         builder1 = builder1.metadata(build_metadata_with_access_token(&token));
     }
 
-    let (client1, handle1) = builder1
-        .build()
-        .expect("SoraConnection 1 の作成に失敗しました");
-    let client1_task = tokio::spawn(async move {
-        client1.run().await.expect("client1 run failed");
-    });
-
-    let client1_connected_for_wait = client1_connected.clone();
-    let client1_wait = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if client1_connected_for_wait.load(Ordering::SeqCst) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await;
-    assert!(
-        client1_wait.is_ok(),
-        "クライアント 1 の接続がタイムアウトしました"
-    );
-
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    let mut client1 = builder1
+        .connect()
+        .expect("SoraTestConnection 1 の作成に失敗しました");
+    client1
+        .wait_for_connect(Duration::from_secs(10))
+        .await
+        .expect("クライアント 1 の接続がタイムアウトしました");
 
     let context2 = SoraConnectionContext::new().expect("クライアント 2 コンテキスト作成失敗");
     let mut capturer2 = FakeVideoCapturer::new(FakeVideoCapturerConfig::default())
@@ -484,163 +444,96 @@ async fn test_sendrecv_bidirectional_via_proxy() {
     let (video_track2, audio_track2) =
         build_sender_tracks(&context2, &mut capturer2).expect("送信用トラック作成失敗");
 
-    let mut builder2 = SoraConnection::builder(context2, urls.clone(), channel_id, Role::SendRecv)
-        .sender_video_track(video_track2)
-        .sender_audio_track(audio_track2)
-        .proxy(proxy_info)
-        .data_channel_signaling(true)
-        .on_notify(move |_| {
-            client2_connected_clone.store(true, Ordering::SeqCst);
-        })
-        .on_track(move |transceiver| {
-            let receiver = transceiver.receiver();
-            let track = receiver.track();
-            let kind = match track.kind() {
-                Ok(kind) => kind,
-                Err(_) => return,
-            };
-            if kind != "video" {
-                return;
-            }
-            client2_track_received_clone.fetch_add(1, Ordering::SeqCst);
-        })
-        .ice_server_url_configurer(|server, urls| {
-            for url in urls {
-                // 必ず TURN-TCP または TURN-TLS に接続してほしいので、transport=tcp を含む URL のみ追加する
-                if url.contains("transport=tcp") {
-                    server.add_url(url);
+    let mut builder2 =
+        SoraTestConnection::builder(context2, urls.clone(), channel_id, Role::SendRecv)
+            .sender_video_track(video_track2)
+            .sender_audio_track(audio_track2)
+            .proxy(proxy_info)
+            .data_channel_signaling(true)
+            .disconnect_wait_timeout(Duration::from_secs(1))
+            .ice_server_url_configurer(|server, urls| {
+                for url in urls {
+                    // 必ず TURN-TCP または TURN-TLS に接続してほしいので、transport=tcp を含む URL のみ追加する
+                    if url.contains("transport=tcp") {
+                        server.add_url(url);
+                    }
                 }
-            }
-        });
+            });
 
     if let Some(token) = secret_key() {
         builder2 = builder2.metadata(build_metadata_with_access_token(&token));
     }
 
-    let (client2, handle2) = builder2
-        .build()
-        .expect("SoraConnection 2 の作成に失敗しました");
-    let client2_task = tokio::spawn(async move {
-        client2.run().await.expect("client2 run failed");
-    });
-
-    let client2_connected_for_wait = client2_connected.clone();
-    let client2_wait = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if client2_connected_for_wait.load(Ordering::SeqCst) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await;
-    assert!(
-        client2_wait.is_ok(),
-        "クライアント 2 の接続がタイムアウトしました"
-    );
-
-    let client1_track_for_wait = client1_track_received.clone();
-    let client2_track_for_wait = client2_track_received.clone();
-    let track_wait = tokio::time::timeout(Duration::from_secs(15), async {
-        loop {
-            let tracks1 = client1_track_for_wait.load(Ordering::SeqCst);
-            let tracks2 = client2_track_for_wait.load(Ordering::SeqCst);
-            if tracks1 > 0 && tracks2 > 0 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await;
-
-    let tracks1 = client1_track_received.load(Ordering::SeqCst);
-    let tracks2 = client2_track_received.load(Ordering::SeqCst);
-    assert!(
-        track_wait.is_ok() && tracks1 > 0 && tracks2 > 0,
-        "相互のトラック受信に失敗しました (client1={}, client2={}, timeout={})",
-        tracks1,
-        tracks2,
-        track_wait.is_err()
-    );
-
-    tokio::time::sleep(Duration::from_secs(3)).await;
-
-    let stats1 = handle1
-        .get_stats()
+    let mut client2 = builder2
+        .connect()
+        .expect("SoraTestConnection 2 の作成に失敗しました");
+    client2
+        .wait_for_connect(Duration::from_secs(10))
         .await
-        .expect("クライアント 1 の get_stats に失敗しました");
-    let stats2 = handle2
-        .get_stats()
+        .expect("クライアント 2 の接続がタイムアウトしました");
+    client1
+        .wait_for_video_track(Duration::from_secs(15))
         .await
-        .expect("クライアント 2 の get_stats に失敗しました");
+        .expect("クライアント 1 の on_track 受信待機がタイムアウトしました");
+    client2
+        .wait_for_video_track(Duration::from_secs(15))
+        .await
+        .expect("クライアント 2 の on_track 受信待機がタイムアウトしました");
 
-    assert!(
-        verify_video_stats_field_positive(&stats1, "outbound-rtp", "packetsSent"),
-        "クライアント 1 の outbound-rtp packetsSent が 0 より大きくありません"
-    );
-    assert!(
-        verify_video_stats_field_positive(&stats2, "outbound-rtp", "packetsSent"),
-        "クライアント 2 の outbound-rtp packetsSent が 0 より大きくありません"
-    );
-    assert!(
-        verify_video_stats_field_positive(&stats1, "inbound-rtp", "packetsReceived"),
-        "クライアント 1 の inbound-rtp packetsReceived が 0 より大きくありません"
-    );
-    assert!(
-        verify_video_stats_field_positive(&stats2, "inbound-rtp", "packetsReceived"),
-        "クライアント 2 の inbound-rtp packetsReceived が 0 より大きくありません"
-    );
-    let client1_outbound_rtp_bytes =
-        sum_video_stats_field_for_type(&stats1, "outbound-rtp", "bytesSent");
-    let client2_outbound_rtp_bytes =
-        sum_video_stats_field_for_type(&stats2, "outbound-rtp", "bytesSent");
-    let client1_inbound_rtp_bytes =
-        sum_video_stats_field_for_type(&stats1, "inbound-rtp", "bytesReceived");
-    let client2_inbound_rtp_bytes =
-        sum_video_stats_field_for_type(&stats2, "inbound-rtp", "bytesReceived");
-    assert!(
-        client1_outbound_rtp_bytes >= MIN_RTP_BYTES_PER_CLIENT,
-        "クライアント 1 の outbound-rtp bytesSent が不足しています: bytes={}, min={}",
-        client1_outbound_rtp_bytes,
-        MIN_RTP_BYTES_PER_CLIENT
-    );
-    assert!(
-        client2_outbound_rtp_bytes >= MIN_RTP_BYTES_PER_CLIENT,
-        "クライアント 2 の outbound-rtp bytesSent が不足しています: bytes={}, min={}",
-        client2_outbound_rtp_bytes,
-        MIN_RTP_BYTES_PER_CLIENT
-    );
-    assert!(
-        client1_inbound_rtp_bytes >= MIN_RTP_BYTES_PER_CLIENT,
-        "クライアント 1 の inbound-rtp bytesReceived が不足しています: bytes={}, min={}",
-        client1_inbound_rtp_bytes,
-        MIN_RTP_BYTES_PER_CLIENT
-    );
-    assert!(
-        client2_inbound_rtp_bytes >= MIN_RTP_BYTES_PER_CLIENT,
-        "クライアント 2 の inbound-rtp bytesReceived が不足しています: bytes={}, min={}",
-        client2_inbound_rtp_bytes,
-        MIN_RTP_BYTES_PER_CLIENT
-    );
-    println!(
-        "クライアント 1: outbound-rtp bytesSent={}, inbound-rtp bytesReceived={}",
-        client1_outbound_rtp_bytes, client1_inbound_rtp_bytes
-    );
-    println!(
-        "クライアント 2: outbound-rtp bytesSent={}, inbound-rtp bytesReceived={}",
-        client2_outbound_rtp_bytes, client2_inbound_rtp_bytes
-    );
+    client1
+        .wait_video_outbound_packets_sent(Duration::from_secs(10))
+        .await
+        .expect("クライアント 1 の outbound-rtp packetsSent が 0 より大きくなりませんでした");
+    client2
+        .wait_video_outbound_packets_sent(Duration::from_secs(10))
+        .await
+        .expect("クライアント 2 の outbound-rtp packetsSent が 0 より大きくなりませんでした");
+    client1
+        .wait_video_inbound_packets_received(Duration::from_secs(10))
+        .await
+        .expect("クライアント 1 の inbound-rtp packetsReceived が 0 より大きくなりませんでした");
+    client2
+        .wait_video_inbound_packets_received(Duration::from_secs(10))
+        .await
+        .expect("クライアント 2 の inbound-rtp packetsReceived が 0 より大きくなりませんでした");
 
-    handle1
-        .disconnect()
+    client1
+        .wait_stats(
+            |stats| {
+                verify_video_stats_field_positive(stats, "outbound-rtp", "packetsSent")
+                    && verify_video_stats_field_positive(stats, "inbound-rtp", "packetsReceived")
+                    && sum_video_stats_field_for_type(stats, "outbound-rtp", "bytesSent")
+                        >= MIN_RTP_BYTES_PER_CLIENT
+                    && sum_video_stats_field_for_type(stats, "inbound-rtp", "bytesReceived")
+                        >= MIN_RTP_BYTES_PER_CLIENT
+            },
+            Duration::from_secs(15),
+        )
+        .await
+        .expect("クライアント 1 の stats が期待値に到達しませんでした");
+    client2
+        .wait_stats(
+            |stats| {
+                verify_video_stats_field_positive(stats, "outbound-rtp", "packetsSent")
+                    && verify_video_stats_field_positive(stats, "inbound-rtp", "packetsReceived")
+                    && sum_video_stats_field_for_type(stats, "outbound-rtp", "bytesSent")
+                        >= MIN_RTP_BYTES_PER_CLIENT
+                    && sum_video_stats_field_for_type(stats, "inbound-rtp", "bytesReceived")
+                        >= MIN_RTP_BYTES_PER_CLIENT
+            },
+            Duration::from_secs(15),
+        )
+        .await
+        .expect("クライアント 2 の stats が期待値に到達しませんでした");
+
+    client1
+        .disconnect_and_wait(Duration::from_secs(10))
         .await
         .expect("クライアント 1 の disconnect に失敗しました");
-    handle2
-        .disconnect()
+    client2
+        .disconnect_and_wait(Duration::from_secs(10))
         .await
         .expect("クライアント 2 の disconnect に失敗しました");
-    e2e_tests::wait_task_finished(client1_task, "client1_task").await;
-    e2e_tests::wait_task_finished(client2_task, "client2_task").await;
     assert!(
         proxy
             .wait_for_all_connections_closed(Duration::from_secs(5))

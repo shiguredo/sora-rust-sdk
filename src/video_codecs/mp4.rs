@@ -188,11 +188,7 @@ impl Mp4SampleReader {
         let mut track_info: Option<Mp4VideoTrackInfo> = None;
         let mut samples = Vec::new();
 
-        loop {
-            let Some(sample) = demuxer.next_sample()? else {
-                break;
-            };
-
+        while let Some(sample) = demuxer.next_sample()? {
             // 音声など他トラックのサンプルはスキップする。
             if sample.track.track_id != video_track_id {
                 continue;

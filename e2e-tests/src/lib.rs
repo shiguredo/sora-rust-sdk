@@ -11,6 +11,11 @@ use nojson::JsonObjectFormatter;
 use shiguredo_webrtc::{AudioTrack, VideoTrack};
 use sora_sdk::{JsonString, Result, SoraConnectionContext};
 
+use crate::stats::{
+    RtcOutboundRtpStreamStats, RtcReceivedRtpStreamStatsTrait, RtcRtpStreamStatsTrait,
+    RtcSentRtpStreamStatsTrait, RtcStatsTrait, WebRtcStat, WebRtcStatsReport,
+};
+
 /// .env ファイルを読み込んで環境変数に設定する。
 ///
 /// 既存の環境変数は上書きしない。
@@ -178,65 +183,141 @@ pub async fn wait_task_finished(task: tokio::task::JoinHandle<()>, name: &str) {
     joined.unwrap_or_else(|err| panic!("{name} panicked: {err}"));
 }
 
+fn parse_stats_lossy(stats_json: &JsonString) -> Vec<WebRtcStat> {
+    use nojson::RawJson;
+
+    if let Ok(report) = WebRtcStatsReport::parse(stats_json) {
+        return report.stats;
+    }
+
+    let json_str = stats_json.to_string();
+    let Ok(json) = RawJson::parse(&json_str) else {
+        return Vec::new();
+    };
+    let Ok(array) = json.value().to_array() else {
+        return Vec::new();
+    };
+    array
+        .filter_map(|item| WebRtcStat::try_from(item).ok())
+        .collect()
+}
+
+fn has_stat_type<T: RtcStatsTrait>(stat: &T, expected: &str) -> bool {
+    stat.stats_type().as_str() == expected
+}
+
+fn stat_kind(stat: &WebRtcStat) -> Option<String> {
+    match stat {
+        WebRtcStat::InboundRtp(v) => Some(v.kind()),
+        WebRtcStat::OutboundRtp(v) => Some(v.kind()),
+        WebRtcStat::RemoteInboundRtp(v) => Some(v.kind()),
+        WebRtcStat::RemoteOutboundRtp(v) => Some(v.kind()),
+        _ => None,
+    }
+}
+
+fn numeric_field_from_received<T: RtcReceivedRtpStreamStatsTrait>(
+    stat: &T,
+    field_name: &str,
+) -> Option<u64> {
+    match field_name {
+        "packetsReceived" => stat.packets_received(),
+        "packetsLost" => stat
+            .packets_lost()
+            .and_then(|value| u64::try_from(value).ok()),
+        _ => None,
+    }
+}
+
+fn numeric_field_from_sent<T: RtcSentRtpStreamStatsTrait>(
+    stat: &T,
+    field_name: &str,
+) -> Option<u64> {
+    match field_name {
+        "packetsSent" => stat.packets_sent(),
+        "bytesSent" => stat.bytes_sent(),
+        _ => None,
+    }
+}
+
+fn numeric_field_value(stat: &WebRtcStat, field_name: &str) -> Option<u64> {
+    match stat {
+        WebRtcStat::InboundRtp(inbound) => {
+            numeric_field_from_received(inbound, field_name).or(match field_name {
+                "bytesReceived" => inbound.bytes_received,
+                _ => None,
+            })
+        }
+        WebRtcStat::OutboundRtp(outbound) => {
+            numeric_field_from_sent(outbound, field_name).or(match field_name {
+                "headerBytesSent" => outbound.header_bytes_sent,
+                "retransmittedPacketsSent" => outbound.retransmitted_packets_sent,
+                "retransmittedBytesSent" => outbound.retransmitted_bytes_sent,
+                _ => None,
+            })
+        }
+        WebRtcStat::RemoteInboundRtp(remote_inbound) => {
+            numeric_field_from_received(remote_inbound, field_name).or(match field_name {
+                "roundTripTimeMeasurements" => remote_inbound.round_trip_time_measurements,
+                _ => None,
+            })
+        }
+        WebRtcStat::RemoteOutboundRtp(remote_outbound) => {
+            numeric_field_from_sent(remote_outbound, field_name).or(match field_name {
+                "reportsSent" => remote_outbound.reports_sent,
+                "roundTripTimeMeasurements" => remote_outbound.round_trip_time_measurements,
+                _ => None,
+            })
+        }
+        WebRtcStat::DataChannel(data_channel) => match field_name {
+            "messagesSent" => data_channel.messages_sent,
+            "bytesSent" => data_channel.bytes_sent,
+            "messagesReceived" => data_channel.messages_received,
+            "bytesReceived" => data_channel.bytes_received,
+            _ => None,
+        },
+        WebRtcStat::Transport(transport) => match field_name {
+            "packetsSent" => transport.packets_sent,
+            "packetsReceived" => transport.packets_received,
+            "bytesSent" => transport.bytes_sent,
+            "bytesReceived" => transport.bytes_received,
+            _ => None,
+        },
+        WebRtcStat::CandidatePair(candidate_pair) => match field_name {
+            "packetsSent" => candidate_pair.packets_sent,
+            "packetsReceived" => candidate_pair.packets_received,
+            "bytesSent" => candidate_pair.bytes_sent,
+            "bytesReceived" => candidate_pair.bytes_received,
+            _ => None,
+        },
+        WebRtcStat::PeerConnection(peer_connection) => match field_name {
+            "dataChannelsOpened" => peer_connection.data_channels_opened,
+            "dataChannelsClosed" => peer_connection.data_channels_closed,
+            _ => None,
+        },
+        WebRtcStat::Codec(_)
+        | WebRtcStat::LocalCandidate(_)
+        | WebRtcStat::RemoteCandidate(_)
+        | WebRtcStat::Certificate(_)
+        | WebRtcStat::Other(_) => None,
+    }
+}
+
 fn sum_stats_field_for_type_internal(
     stats_json: &JsonString,
     stat_type: &str,
     field_name: &str,
     kind: Option<&str>,
 ) -> u64 {
-    use nojson::RawJson;
-
-    let json_str = stats_json.to_string();
-    let Ok(json) = RawJson::parse(&json_str) else {
-        return 0;
-    };
-    let value = json.value();
-    let Ok(array) = value.to_array() else {
-        return 0;
-    };
-
-    let mut total = 0;
-    for item in array {
-        let Ok(type_member) = item.to_member("type") else {
-            continue;
-        };
-        let Some(type_value) = type_member.optional() else {
-            continue;
-        };
-        let type_str: std::result::Result<String, _> = type_value.try_into();
-        let Ok(type_str) = type_str else {
-            continue;
-        };
-
-        if type_str == stat_type {
-            if let Some(kind) = kind {
-                let item_kind = item
-                    .to_member("kind")
-                    .ok()
-                    .and_then(|m| m.optional())
-                    .and_then(|v| {
-                        let value: std::result::Result<String, _> = v.try_into();
-                        value.ok()
-                    });
-                if item_kind.as_deref() != Some(kind) {
-                    continue;
-                }
-            }
-
-            let Ok(field_member) = item.to_member(field_name) else {
-                continue;
-            };
-            let Some(field_value) = field_member.optional() else {
-                continue;
-            };
-            let value: std::result::Result<u64, _> = field_value.try_into();
-            let Ok(value) = value else {
-                continue;
-            };
-            total += value;
-        }
-    }
-    total
+    parse_stats_lossy(stats_json)
+        .into_iter()
+        .filter(|stat| has_stat_type(stat, stat_type))
+        .filter(|stat| {
+            kind.map(|expected| stat_kind(stat).as_deref() == Some(expected))
+                .unwrap_or(true)
+        })
+        .filter_map(|stat| numeric_field_value(&stat, field_name))
+        .sum()
 }
 
 /// 統計情報から指定した type のエントリを検索し、指定したフィールドの値を合計して返す。
@@ -280,88 +361,34 @@ pub fn verify_video_codec_mime_type(
     stat_type: &str,
     expected_mime_type: &str,
 ) -> bool {
-    use nojson::RawJson;
     use std::collections::HashSet;
 
-    let json_str = stats_json.to_string();
-    let Ok(json) = RawJson::parse(&json_str) else {
-        return false;
-    };
-    let value = json.value();
-    let Ok(array) = value.to_array() else {
-        return false;
-    };
-
+    let stats = parse_stats_lossy(stats_json);
     let mut expected_codec_ids = HashSet::new();
     let mut video_codec_ids = Vec::new();
 
-    for item in array {
-        let Ok(type_member) = item.to_member("type") else {
-            continue;
-        };
-        let Some(type_value) = type_member.optional() else {
-            continue;
-        };
-        let type_str: std::result::Result<String, _> = type_value.try_into();
-        let Ok(type_str) = type_str else {
-            continue;
-        };
-
-        if type_str == "codec" {
-            let mime_type = item
-                .to_member("mimeType")
-                .ok()
-                .and_then(|m| m.optional())
-                .and_then(|v| {
-                    let value: std::result::Result<String, _> = v.try_into();
-                    value.ok()
-                });
-            let Some(mime_type) = mime_type else {
-                continue;
-            };
-            if !mime_type.eq_ignore_ascii_case(expected_mime_type) {
-                continue;
+    for stat in &stats {
+        match stat {
+            WebRtcStat::Codec(codec)
+                if codec.mime_type.eq_ignore_ascii_case(expected_mime_type) =>
+            {
+                expected_codec_ids.insert(codec.id());
             }
-            let codec_id = item
-                .to_member("id")
-                .ok()
-                .and_then(|m| m.optional())
-                .and_then(|v| {
-                    let value: std::result::Result<String, _> = v.try_into();
-                    value.ok()
-                });
-            if let Some(codec_id) = codec_id {
-                expected_codec_ids.insert(codec_id);
+            WebRtcStat::InboundRtp(inbound) if stat_type == "inbound-rtp" => {
+                if inbound.kind() == "video"
+                    && let Some(codec_id) = inbound.codec_id()
+                {
+                    video_codec_ids.push(codec_id);
+                }
             }
-            continue;
-        }
-
-        if type_str != stat_type {
-            continue;
-        }
-
-        let kind = item
-            .to_member("kind")
-            .ok()
-            .and_then(|m| m.optional())
-            .and_then(|v| {
-                let value: std::result::Result<String, _> = v.try_into();
-                value.ok()
-            });
-        if kind.as_deref() != Some("video") {
-            continue;
-        }
-
-        let codec_id = item
-            .to_member("codecId")
-            .ok()
-            .and_then(|m| m.optional())
-            .and_then(|v| {
-                let value: std::result::Result<String, _> = v.try_into();
-                value.ok()
-            });
-        if let Some(codec_id) = codec_id {
-            video_codec_ids.push(codec_id);
+            WebRtcStat::OutboundRtp(outbound) if stat_type == "outbound-rtp" => {
+                if outbound.kind() == "video"
+                    && let Some(codec_id) = outbound.codec_id()
+                {
+                    video_codec_ids.push(codec_id);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -378,147 +405,28 @@ pub fn verify_video_codec_mime_type(
 /// WebRTC 統計情報の JSON 配列をパースし、`data-channel` タイプを持つエントリを探して、
 /// そのエントリの `label` フィールドが `expected_label` と一致するかを確認する。
 pub fn verify_data_channel_label(stats_json: &JsonString, expected_label: &str) -> bool {
-    use nojson::RawJson;
-
-    let json_str = stats_json.to_string();
-    let Ok(json) = RawJson::parse(&json_str) else {
-        return false;
-    };
-    let value = json.value();
-    let Ok(array) = value.to_array() else {
-        return false;
-    };
-
-    for item in array {
-        let Ok(type_member) = item.to_member("type") else {
-            continue;
-        };
-        let Some(type_value) = type_member.optional() else {
-            continue;
-        };
-        let type_str: std::result::Result<String, _> = type_value.try_into();
-        let Ok(type_str) = type_str else {
-            continue;
-        };
-
-        if type_str == "data-channel" {
-            let Ok(label_member) = item.to_member("label") else {
-                continue;
-            };
-            let Some(label_value) = label_member.optional() else {
-                continue;
-            };
-            let label_str: std::result::Result<String, _> = label_value.try_into();
-            let Ok(label_str) = label_str else {
-                continue;
-            };
-            if label_str == expected_label {
-                return true;
-            }
+    parse_stats_lossy(stats_json).iter().any(|stat| {
+        if let WebRtcStat::DataChannel(data_channel) = stat {
+            return data_channel.label.as_deref() == Some(expected_label);
         }
-    }
-    false
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VideoOutboundRidStat {
-    pub rid: String,
-    pub bytes_sent: u64,
-    pub packets_sent: u64,
-    pub encoder_implementation: Option<String>,
+        false
+    })
 }
 
 /// 統計情報から video outbound-rtp の rid ごとの送信情報を抽出する。
-pub fn collect_video_outbound_rid_stats(stats_json: &JsonString) -> Vec<VideoOutboundRidStat> {
-    use nojson::RawJson;
-
-    let json_str = stats_json.to_string();
-    let Ok(json) = RawJson::parse(&json_str) else {
-        return Vec::new();
-    };
-    let value = json.value();
-    let Ok(array) = value.to_array() else {
-        return Vec::new();
-    };
-
-    let mut out = Vec::new();
-    for item in array {
-        let Ok(type_member) = item.to_member("type") else {
-            continue;
-        };
-        let Some(type_value) = type_member.optional() else {
-            continue;
-        };
-        let stat_type: std::result::Result<String, _> = type_value.try_into();
-        let Ok(stat_type) = stat_type else {
-            continue;
-        };
-        if stat_type != "outbound-rtp" {
-            continue;
-        }
-
-        let Ok(kind_member) = item.to_member("kind") else {
-            continue;
-        };
-        let Some(kind_value) = kind_member.optional() else {
-            continue;
-        };
-        let kind: std::result::Result<String, _> = kind_value.try_into();
-        let Ok(kind) = kind else {
-            continue;
-        };
-        if kind != "video" {
-            continue;
-        }
-
-        let Ok(rid_member) = item.to_member("rid") else {
-            continue;
-        };
-        let Some(rid_value) = rid_member.optional() else {
-            continue;
-        };
-        let rid: std::result::Result<String, _> = rid_value.try_into();
-        let Ok(rid) = rid else {
-            continue;
-        };
-
-        let bytes_sent = item
-            .to_member("bytesSent")
-            .ok()
-            .and_then(|m| m.optional())
-            .and_then(|v| {
-                let n: std::result::Result<u64, _> = v.try_into();
-                n.ok()
-            })
-            .unwrap_or(0);
-
-        let packets_sent = item
-            .to_member("packetsSent")
-            .ok()
-            .and_then(|m| m.optional())
-            .and_then(|v| {
-                let n: std::result::Result<u64, _> = v.try_into();
-                n.ok()
-            })
-            .unwrap_or(0);
-
-        let encoder_implementation = item
-            .to_member("encoderImplementation")
-            .ok()
-            .and_then(|m| m.optional())
-            .and_then(|v| {
-                let value: std::result::Result<String, _> = v.try_into();
-                value.ok()
-            });
-
-        out.push(VideoOutboundRidStat {
-            rid,
-            bytes_sent,
-            packets_sent,
-            encoder_implementation,
-        });
-    }
-    out
+pub fn collect_video_outbound_rid_stats(stats_json: &JsonString) -> Vec<RtcOutboundRtpStreamStats> {
+    parse_stats_lossy(stats_json)
+        .into_iter()
+        .filter_map(|stat| {
+            let WebRtcStat::OutboundRtp(outbound) = stat else {
+                return None;
+            };
+            if outbound.kind() != "video" || outbound.rid.is_none() {
+                return None;
+            }
+            Some(outbound)
+        })
+        .collect()
 }
 
 /// しきい値を超える simulcast layer 数を返す。
@@ -529,7 +437,9 @@ pub fn count_active_simulcast_layers(
 ) -> usize {
     collect_video_outbound_rid_stats(stats_json)
         .into_iter()
-        .filter(|s| s.bytes_sent > min_bytes && s.packets_sent > min_packets)
+        .filter(|s| {
+            s.bytes_sent().unwrap_or(0) > min_bytes && s.packets_sent().unwrap_or(0) > min_packets
+        })
         .count()
 }
 
@@ -539,11 +449,14 @@ pub fn has_simulcast_rids(stats_json: &JsonString, expected: &[&str]) -> bool {
 
     let actual: BTreeSet<String> = collect_video_outbound_rid_stats(stats_json)
         .into_iter()
-        .map(|s| s.rid)
+        .filter_map(|s| s.rid)
         .collect();
     let expected: BTreeSet<String> = expected.iter().map(|rid| (*rid).to_string()).collect();
     expected.is_subset(&actual)
 }
 
 pub mod fake_video_capturer;
+pub mod stats;
+pub mod test_connection;
 pub use fake_video_capturer::{FakeVideoCapturer, FakeVideoCapturerConfig};
+pub use test_connection::{SoraTestConnection, SoraTestConnectionBuilder, SoraTestEvent};
