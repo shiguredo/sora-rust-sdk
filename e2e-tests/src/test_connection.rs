@@ -2,7 +2,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use shiguredo_webrtc::{AudioTrack, VideoTrack};
+use shiguredo_webrtc::{AudioTrack, IceServer, VideoTrack};
 use sora_sdk::{
     Audio, ConnectDataChannel, ForwardingFilter, JsonString, ProxyInfo, Result, Role,
     RpcRequestOptions, RpcResponse, SignalingDirection, SignalingType, SoraConnection,
@@ -167,6 +167,14 @@ impl SoraTestConnectionBuilder {
 
     pub fn proxy(mut self, proxy: ProxyInfo) -> Self {
         self.inner = self.inner.proxy(proxy);
+        self
+    }
+
+    pub fn ice_server_url_configurer<F>(mut self, configurer: F) -> Self
+    where
+        F: Fn(&mut IceServer, &[String]) + Send + Sync + 'static,
+    {
+        self.inner = self.inner.ice_server_url_configurer(configurer);
         self
     }
 
@@ -468,8 +476,50 @@ impl SoraTestConnection {
         .await
     }
 
+    pub async fn wait_for_switched(&mut self, timeout: Duration) -> Result<()> {
+        self.wait_for_event(|event| matches!(event, SoraTestEvent::Switched), timeout)
+            .await
+    }
+
     pub async fn wait_for_connect(&mut self, timeout: Duration) -> Result<()> {
         self.wait_for_notify(|_| true, timeout).await
+    }
+
+    pub async fn wait_for_signaling_message<P>(
+        &mut self,
+        predicate: P,
+        timeout: Duration,
+    ) -> Result<()>
+    where
+        P: Fn(SignalingType, SignalingDirection, &str) -> bool,
+    {
+        self.wait_for_event(
+            |event| match event {
+                SoraTestEvent::SignalingMessage {
+                    signaling_type,
+                    direction,
+                    text,
+                } => predicate(*signaling_type, *direction, text),
+                _ => false,
+            },
+            timeout,
+        )
+        .await
+    }
+
+    pub async fn count_signaling_message<P>(&mut self, predicate: P) -> usize
+    where
+        P: Fn(SignalingType, SignalingDirection, &str) -> bool,
+    {
+        self.count_events(|event| match event {
+            SoraTestEvent::SignalingMessage {
+                signaling_type,
+                direction,
+                text,
+            } => predicate(*signaling_type, *direction, text),
+            _ => false,
+        })
+        .await
     }
 
     pub async fn wait_for_track_kind(
@@ -484,6 +534,107 @@ impl SoraTestConnection {
             },
             timeout,
         )
+        .await
+    }
+
+    pub async fn wait_for_video_track(&mut self, timeout: Duration) -> Result<()> {
+        self.wait_for_track_kind("video", timeout).await
+    }
+
+    pub async fn wait_for_message<P>(&mut self, predicate: P, timeout: Duration) -> Result<()>
+    where
+        P: Fn(&str, &[u8]) -> bool,
+    {
+        self.wait_for_event(
+            |event| match event {
+                SoraTestEvent::Message { label, data } => predicate(label, data),
+                _ => false,
+            },
+            timeout,
+        )
+        .await
+    }
+
+    pub async fn count_message<P>(&mut self, predicate: P) -> usize
+    where
+        P: Fn(&str, &[u8]) -> bool,
+    {
+        self.count_events(|event| match event {
+            SoraTestEvent::Message { label, data } => predicate(label, data),
+            _ => false,
+        })
+        .await
+    }
+
+    pub async fn wait_for_data_channel<P>(&mut self, predicate: P, timeout: Duration) -> Result<()>
+    where
+        P: Fn(&str) -> bool,
+    {
+        self.wait_for_event(
+            |event| match event {
+                SoraTestEvent::DataChannel { label } => predicate(label),
+                _ => false,
+            },
+            timeout,
+        )
+        .await
+    }
+
+    pub async fn wait_for_data_channel_open<P>(
+        &mut self,
+        predicate: P,
+        timeout: Duration,
+    ) -> Result<()>
+    where
+        P: Fn(&str) -> bool,
+    {
+        self.wait_for_event(
+            |event| match event {
+                SoraTestEvent::DataChannelOpen { label } => predicate(label),
+                _ => false,
+            },
+            timeout,
+        )
+        .await
+    }
+
+    pub async fn wait_for_data_channel_close<P>(
+        &mut self,
+        predicate: P,
+        timeout: Duration,
+    ) -> Result<()>
+    where
+        P: Fn(&str) -> bool,
+    {
+        self.wait_for_event(
+            |event| match event {
+                SoraTestEvent::DataChannelClose { label } => predicate(label),
+                _ => false,
+            },
+            timeout,
+        )
+        .await
+    }
+
+    pub async fn count_data_channel_open<P>(&mut self, predicate: P) -> usize
+    where
+        P: Fn(&str) -> bool,
+    {
+        self.count_events(|event| match event {
+            SoraTestEvent::DataChannelOpen { label } => predicate(label),
+            _ => false,
+        })
+        .await
+    }
+
+    pub async fn count_data_channel_close<P>(&mut self, predicate: P) -> usize
+    where
+        P: Fn(&str) -> bool,
+    {
+        self.count_events(|event| match event {
+            SoraTestEvent::DataChannelClose { label } => predicate(label),
+            _ => false,
+        })
         .await
     }
 
@@ -508,6 +659,24 @@ impl SoraTestConnection {
 
             tokio::time::sleep(STATS_POLL_INTERVAL.min(remaining)).await;
         }
+    }
+
+    pub async fn wait_video_outbound_packets_sent(&self, timeout: Duration) -> Result<()> {
+        self.wait_stats(
+            |stats| crate::verify_video_stats_field_positive(stats, "outbound-rtp", "packetsSent"),
+            timeout,
+        )
+        .await
+    }
+
+    pub async fn wait_video_inbound_packets_received(&self, timeout: Duration) -> Result<()> {
+        self.wait_stats(
+            |stats| {
+                crate::verify_video_stats_field_positive(stats, "inbound-rtp", "packetsReceived")
+            },
+            timeout,
+        )
+        .await
     }
 
     /// channel に溜まったイベントをログへ取り込む。

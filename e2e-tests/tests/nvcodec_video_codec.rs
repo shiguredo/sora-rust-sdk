@@ -1,44 +1,19 @@
 #![cfg(feature = "nvcodec")]
 
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use e2e_tests::{
-    FakeVideoCapturer, FakeVideoCapturerConfig, build_metadata_with_access_token,
-    build_sender_tracks, generate_channel_id, load_env, secret_key, signaling_urls,
-    verify_video_codec_mime_type, verify_video_stats_field_positive,
+    FakeVideoCapturer, FakeVideoCapturerConfig, SoraTestConnection,
+    build_metadata_with_access_token, build_sender_tracks, generate_channel_id, load_env,
+    secret_key, signaling_urls, verify_video_codec_mime_type, verify_video_stats_field_positive,
 };
 use serial_test::serial;
-use shiguredo_webrtc::{
-    VideoCodecType, VideoFrameRef, VideoSink, VideoSinkHandler, VideoSinkWants,
-};
+use shiguredo_webrtc::VideoCodecType;
 use sora_sdk::{
-    CodecDirection, NvCodecVideoCodecCapability, Role, SoraConnection, SoraConnectionContext,
+    CodecDirection, NvCodecVideoCodecCapability, Role, SoraConnectionContext,
     SoraConnectionContextConfig, Video, VideoCodecCapability, VideoCodecPreference,
 };
-
-const MIN_DECODED_VIDEO_FRAMES: usize = 3;
-
-struct DecodeCountVideoSinkHandler {
-    decoded_video_frames: Arc<AtomicUsize>,
-}
-
-impl DecodeCountVideoSinkHandler {
-    fn new(decoded_video_frames: Arc<AtomicUsize>) -> Self {
-        Self {
-            decoded_video_frames,
-        }
-    }
-}
-
-impl VideoSinkHandler for DecodeCountVideoSinkHandler {
-    fn on_frame(&mut self, _frame: VideoFrameRef<'_>) {
-        self.decoded_video_frames.fetch_add(1, Ordering::SeqCst);
-    }
-}
 
 fn test_channel_id(suffix: &str) -> String {
     let base = generate_channel_id();
@@ -156,25 +131,12 @@ async fn run_sendonly_recvonly_with_contexts(
     let expected_mime_type = codec_mime_type(codec_type);
     let channel_id = test_channel_id(&format!("{suffix_prefix}-{codec_label}-sendonly-recvonly"));
 
-    let sendonly_connected = Arc::new(AtomicBool::new(false));
-    let sendonly_connected_clone = sendonly_connected.clone();
-
-    let recvonly_connected = Arc::new(AtomicBool::new(false));
-    let recvonly_connected_clone = recvonly_connected.clone();
-    let video_track_received = Arc::new(AtomicUsize::new(0));
-    let video_track_received_clone = video_track_received.clone();
-    let decoded_video_frames = Arc::new(AtomicUsize::new(0));
-    let decoded_video_frames_clone = decoded_video_frames.clone();
-    let recvonly_video_sinks: Arc<Mutex<HashMap<String, VideoSink>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-    let recvonly_video_sinks_clone = recvonly_video_sinks.clone();
-
     let mut capturer = FakeVideoCapturer::new(FakeVideoCapturerConfig::default())
         .map_err(|e| format!("failed to create FakeVideoCapturer: {e}"))?;
     let (video_track, audio_track) = build_sender_tracks(&sendonly_context, &mut capturer)
         .map_err(|e| format!("failed to build tracks: {e}"))?;
 
-    let mut sendonly_builder = SoraConnection::builder(
+    let mut sendonly_builder = SoraTestConnection::builder(
         sendonly_context,
         urls.clone(),
         channel_id.clone(),
@@ -183,175 +145,81 @@ async fn run_sendonly_recvonly_with_contexts(
     .sender_video_track(video_track)
     .sender_audio_track(audio_track)
     .video(video_setting(codec_type))
-    .data_channel_signaling(true)
-    .on_notify(move |_| {
-        sendonly_connected_clone.store(true, Ordering::SeqCst);
-    });
+    .data_channel_signaling(true);
 
     if let Some(token) = secret_key() {
         sendonly_builder = sendonly_builder.metadata(build_metadata_with_access_token(&token));
     }
 
-    let (sendonly_client, sendonly_handle) = sendonly_builder
-        .build()
+    let mut sendonly = sendonly_builder
+        .connect()
         .map_err(|e| format!("failed to build sendonly client: {e}"))?;
-    let sendonly_task = tokio::spawn(async move {
-        sendonly_client
-            .run()
-            .await
-            .expect("sendonly_client run failed");
-    });
 
-    let sendonly_wait = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if sendonly_connected.load(Ordering::SeqCst) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await;
-    if sendonly_wait.is_err() {
-        let _ = sendonly_handle.disconnect().await;
-        e2e_tests::wait_task_finished(sendonly_task, "sendonly_task").await;
+    if sendonly
+        .wait_for_connect(Duration::from_secs(10))
+        .await
+        .is_err()
+    {
+        let _ = sendonly.disconnect_and_wait(Duration::from_secs(10)).await;
         return Err("sendonly connection timed out".to_string());
     }
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
-
     let mut recvonly_builder =
-        SoraConnection::builder(recvonly_context, urls, channel_id, Role::RecvOnly)
-            .data_channel_signaling(true)
-            .on_notify(move |_| {
-                recvonly_connected_clone.store(true, Ordering::SeqCst);
-            })
-            .on_track(move |transceiver| {
-                let receiver = transceiver.receiver();
-                let track = receiver.track();
-                let kind = match track.kind() {
-                    Ok(kind) => kind,
-                    Err(_) => return,
-                };
-                if kind != "video" {
-                    return;
-                }
-
-                let track_id = match track.id() {
-                    Ok(id) => id,
-                    Err(_) => return,
-                };
-                let mut video_track = track.cast_to_video_track();
-                let mut sinks = match recvonly_video_sinks_clone.lock() {
-                    Ok(sinks) => sinks,
-                    Err(_) => return,
-                };
-                if sinks.contains_key(&track_id) {
-                    return;
-                }
-
-                let sink = VideoSink::new_with_handler(Box::new(DecodeCountVideoSinkHandler::new(
-                    decoded_video_frames_clone.clone(),
-                )));
-                let wants = VideoSinkWants::new();
-                video_track.add_or_update_sink(&sink, &wants);
-                sinks.insert(track_id, sink);
-                video_track_received_clone.fetch_add(1, Ordering::SeqCst);
-            });
+        SoraTestConnection::builder(recvonly_context, urls, channel_id, Role::RecvOnly)
+            .data_channel_signaling(true);
 
     if let Some(token) = secret_key() {
         recvonly_builder = recvonly_builder.metadata(build_metadata_with_access_token(&token));
     }
 
-    let (recvonly_client, recvonly_handle) = recvonly_builder
-        .build()
+    let mut recvonly = recvonly_builder
+        .connect()
         .map_err(|e| format!("failed to build recvonly client: {e}"))?;
-    let recvonly_task = tokio::spawn(async move {
-        recvonly_client
-            .run()
-            .await
-            .expect("recvonly_client run failed");
-    });
 
     let result = async {
-        let recvonly_wait = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                if recvonly_connected.load(Ordering::SeqCst) {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        })
-        .await;
-        if recvonly_wait.is_err() {
+        if recvonly
+            .wait_for_connect(Duration::from_secs(10))
+            .await
+            .is_err()
+        {
             return Err("recvonly connection timed out".to_string());
         }
 
-        let video_track_wait = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                if video_track_received.load(Ordering::SeqCst) > 0 {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        })
-        .await;
-        if video_track_wait.is_err() || video_track_received.load(Ordering::SeqCst) == 0 {
+        if recvonly
+            .wait_for_video_track(Duration::from_secs(10))
+            .await
+            .is_err()
+        {
             return Err("recvonly did not receive video tracks".to_string());
         }
 
-        let decoded_wait = tokio::time::timeout(Duration::from_secs(15), async {
-            loop {
-                if decoded_video_frames.load(Ordering::SeqCst) >= MIN_DECODED_VIDEO_FRAMES {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        })
-        .await;
-        if decoded_wait.is_err() || decoded_video_frames.load(Ordering::SeqCst) < MIN_DECODED_VIDEO_FRAMES {
-            return Err(format!(
-                "recvonly did not decode enough video frames: decoded={}, required={MIN_DECODED_VIDEO_FRAMES}",
-                decoded_video_frames.load(Ordering::SeqCst)
-            ));
-        }
-
-        tokio::time::sleep(Duration::from_secs(5)).await;
-
-        let sendonly_stats = sendonly_handle
-            .get_stats()
+        sendonly
+            .wait_stats(
+                |stats| {
+                    verify_video_stats_field_positive(stats, "outbound-rtp", "packetsSent")
+                        && verify_video_codec_mime_type(stats, "outbound-rtp", expected_mime_type)
+                },
+                Duration::from_secs(15),
+            )
             .await
-            .map_err(|e| format!("failed to get sendonly stats: {e}"))?;
-        if !verify_video_stats_field_positive(&sendonly_stats, "outbound-rtp", "packetsSent") {
-            return Err("sendonly must send video packets".to_string());
-        }
-        if !verify_video_codec_mime_type(&sendonly_stats, "outbound-rtp", expected_mime_type) {
-            return Err(format!(
-                "sendonly outbound codec must match: expected={expected_mime_type}"
-            ));
-        }
-
-        let recvonly_stats = recvonly_handle
-            .get_stats()
+            .map_err(|_| "sendonly stats did not reach expected values".to_string())?;
+        recvonly
+            .wait_stats(
+                |stats| {
+                    verify_video_stats_field_positive(stats, "inbound-rtp", "packetsReceived")
+                        && verify_video_codec_mime_type(stats, "inbound-rtp", expected_mime_type)
+                },
+                Duration::from_secs(15),
+            )
             .await
-            .map_err(|e| format!("failed to get recvonly stats: {e}"))?;
-        if !verify_video_stats_field_positive(&recvonly_stats, "inbound-rtp", "packetsReceived") {
-            return Err("recvonly must receive video packets".to_string());
-        }
-        if !verify_video_codec_mime_type(&recvonly_stats, "inbound-rtp", expected_mime_type) {
-            return Err(format!(
-                "recvonly inbound codec must match: expected={expected_mime_type}"
-            ));
-        }
+            .map_err(|_| "recvonly stats did not reach expected values".to_string())?;
 
         Ok(())
     }
     .await;
 
-    let _ = sendonly_handle.disconnect().await;
-    let _ = recvonly_handle.disconnect().await;
-
-    e2e_tests::wait_task_finished(sendonly_task, "sendonly_task").await;
-    e2e_tests::wait_task_finished(recvonly_task, "recvonly_task").await;
+    let _ = sendonly.disconnect_and_wait(Duration::from_secs(10)).await;
+    let _ = recvonly.disconnect_and_wait(Duration::from_secs(10)).await;
     result
 }
 
@@ -361,16 +229,6 @@ async fn run_sendrecv_with_codec(codec_type: VideoCodecType) {
     let expected_mime_type = codec_mime_type(codec_type);
     let channel_id = test_channel_id(&format!("nvcodec-{codec_label}-sendrecv"));
 
-    let client1_connected = Arc::new(AtomicBool::new(false));
-    let client1_connected_clone = client1_connected.clone();
-    let client1_track_received = Arc::new(AtomicUsize::new(0));
-    let client1_track_received_clone = client1_track_received.clone();
-
-    let client2_connected = Arc::new(AtomicBool::new(false));
-    let client2_connected_clone = client2_connected.clone();
-    let client2_track_received = Arc::new(AtomicUsize::new(0));
-    let client2_track_received_clone = client2_track_received.clone();
-
     let context1 = create_nvcodec_context().expect("failed to create client1 context");
     let mut capturer1 = FakeVideoCapturer::new(FakeVideoCapturerConfig::default())
         .expect("failed to create FakeVideoCapturer for client1");
@@ -378,48 +236,22 @@ async fn run_sendrecv_with_codec(codec_type: VideoCodecType) {
         build_sender_tracks(&context1, &mut capturer1).expect("failed to build client1 tracks");
 
     let mut builder1 =
-        SoraConnection::builder(context1, urls.clone(), channel_id.clone(), Role::SendRecv)
+        SoraTestConnection::builder(context1, urls.clone(), channel_id.clone(), Role::SendRecv)
             .sender_video_track(video_track1)
             .sender_audio_track(audio_track1)
             .video(video_setting(codec_type))
-            .data_channel_signaling(true)
-            .on_notify(move |_| {
-                client1_connected_clone.store(true, Ordering::SeqCst);
-            })
-            .on_track(move |transceiver| {
-                let receiver = transceiver.receiver();
-                let track = receiver.track();
-                let kind = match track.kind() {
-                    Ok(kind) => kind,
-                    Err(_) => return,
-                };
-                if kind != "video" {
-                    return;
-                }
-                client1_track_received_clone.fetch_add(1, Ordering::SeqCst);
-            });
+            .data_channel_signaling(true);
 
     if let Some(token) = secret_key() {
         builder1 = builder1.metadata(build_metadata_with_access_token(&token));
     }
 
-    let (client1, handle1) = builder1.build().expect("failed to build client1");
-    let client1_task = tokio::spawn(async move {
-        client1.run().await.expect("client1 run failed");
-    });
+    let mut client1 = builder1.connect().expect("failed to build client1");
 
-    let client1_wait = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if client1_connected.load(Ordering::SeqCst) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await;
-    assert!(client1_wait.is_ok(), "client1 connection timed out");
-
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    client1
+        .wait_for_connect(Duration::from_secs(10))
+        .await
+        .expect("client1 connection timed out");
 
     let context2 = create_nvcodec_context().expect("failed to create client2 context");
     let mut capturer2 = FakeVideoCapturer::new(FakeVideoCapturerConfig::default())
@@ -427,121 +259,64 @@ async fn run_sendrecv_with_codec(codec_type: VideoCodecType) {
     let (video_track2, audio_track2) =
         build_sender_tracks(&context2, &mut capturer2).expect("failed to build client2 tracks");
 
-    let mut builder2 = SoraConnection::builder(context2, urls, channel_id, Role::SendRecv)
+    let mut builder2 = SoraTestConnection::builder(context2, urls, channel_id, Role::SendRecv)
         .sender_video_track(video_track2)
         .sender_audio_track(audio_track2)
         .video(video_setting(codec_type))
-        .data_channel_signaling(true)
-        .on_notify(move |_| {
-            client2_connected_clone.store(true, Ordering::SeqCst);
-        })
-        .on_track(move |transceiver| {
-            let receiver = transceiver.receiver();
-            let track = receiver.track();
-            let kind = match track.kind() {
-                Ok(kind) => kind,
-                Err(_) => return,
-            };
-            if kind != "video" {
-                return;
-            }
-            client2_track_received_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        .data_channel_signaling(true);
 
     if let Some(token) = secret_key() {
         builder2 = builder2.metadata(build_metadata_with_access_token(&token));
     }
 
-    let (client2, handle2) = builder2.build().expect("failed to build client2");
-    let client2_task = tokio::spawn(async move {
-        client2.run().await.expect("client2 run failed");
-    });
+    let mut client2 = builder2.connect().expect("failed to build client2");
 
-    let client2_wait = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if client2_connected.load(Ordering::SeqCst) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await;
-    assert!(client2_wait.is_ok(), "client2 connection timed out");
-
-    let track_wait = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if client1_track_received.load(Ordering::SeqCst) > 0
-                && client2_track_received.load(Ordering::SeqCst) > 0
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await;
-    assert!(
-        track_wait.is_ok()
-            && client1_track_received.load(Ordering::SeqCst) > 0
-            && client2_track_received.load(Ordering::SeqCst) > 0,
-        "both clients must receive tracks"
-    );
-
-    tokio::time::sleep(Duration::from_secs(5)).await;
-
-    let stats1 = handle1
-        .get_stats()
+    client2
+        .wait_for_connect(Duration::from_secs(10))
         .await
-        .expect("failed to get client1 stats");
-    let stats2 = handle2
-        .get_stats()
+        .expect("client2 connection timed out");
+    client1
+        .wait_for_video_track(Duration::from_secs(10))
         .await
-        .expect("failed to get client2 stats");
+        .expect("client1 did not receive tracks");
+    client2
+        .wait_for_video_track(Duration::from_secs(10))
+        .await
+        .expect("client2 did not receive tracks");
 
-    assert!(
-        verify_video_stats_field_positive(&stats1, "outbound-rtp", "packetsSent"),
-        "client1 outbound video packets must be sent"
-    );
-    assert!(
-        verify_video_stats_field_positive(&stats1, "inbound-rtp", "packetsReceived"),
-        "client1 inbound video packets must be received"
-    );
-    assert!(
-        verify_video_stats_field_positive(&stats2, "outbound-rtp", "packetsSent"),
-        "client2 outbound video packets must be sent"
-    );
-    assert!(
-        verify_video_stats_field_positive(&stats2, "inbound-rtp", "packetsReceived"),
-        "client2 inbound video packets must be received"
-    );
+    client1
+        .wait_stats(
+            |stats| {
+                verify_video_stats_field_positive(stats, "outbound-rtp", "packetsSent")
+                    && verify_video_stats_field_positive(stats, "inbound-rtp", "packetsReceived")
+                    && verify_video_codec_mime_type(stats, "outbound-rtp", expected_mime_type)
+                    && verify_video_codec_mime_type(stats, "inbound-rtp", expected_mime_type)
+            },
+            Duration::from_secs(15),
+        )
+        .await
+        .expect("client1 stats did not reach expected values");
+    client2
+        .wait_stats(
+            |stats| {
+                verify_video_stats_field_positive(stats, "outbound-rtp", "packetsSent")
+                    && verify_video_stats_field_positive(stats, "inbound-rtp", "packetsReceived")
+                    && verify_video_codec_mime_type(stats, "outbound-rtp", expected_mime_type)
+                    && verify_video_codec_mime_type(stats, "inbound-rtp", expected_mime_type)
+            },
+            Duration::from_secs(15),
+        )
+        .await
+        .expect("client2 stats did not reach expected values");
 
-    assert!(
-        verify_video_codec_mime_type(&stats1, "outbound-rtp", expected_mime_type),
-        "client1 outbound codec must match"
-    );
-    assert!(
-        verify_video_codec_mime_type(&stats1, "inbound-rtp", expected_mime_type),
-        "client1 inbound codec must match"
-    );
-    assert!(
-        verify_video_codec_mime_type(&stats2, "outbound-rtp", expected_mime_type),
-        "client2 outbound codec must match"
-    );
-    assert!(
-        verify_video_codec_mime_type(&stats2, "inbound-rtp", expected_mime_type),
-        "client2 inbound codec must match"
-    );
-
-    handle1
-        .disconnect()
+    client1
+        .disconnect_and_wait(Duration::from_secs(10))
         .await
         .expect("failed to disconnect client1");
-    handle2
-        .disconnect()
+    client2
+        .disconnect_and_wait(Duration::from_secs(10))
         .await
         .expect("failed to disconnect client2");
-
-    e2e_tests::wait_task_finished(client1_task, "client1_task").await;
-    e2e_tests::wait_task_finished(client2_task, "client2_task").await;
 }
 
 #[tokio::test]

@@ -1,12 +1,12 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use e2e_tests::stats::RtcSentRtpStreamStatsTrait;
 use e2e_tests::{
-    FakeVideoCapturer, FakeVideoCapturerConfig, build_metadata_with_access_token,
-    build_sender_tracks, collect_video_outbound_rid_stats, count_active_simulcast_layers,
-    generate_channel_id, has_simulcast_rids, load_env, openh264_path, secret_key, signaling_urls,
+    FakeVideoCapturer, FakeVideoCapturerConfig, SoraTestConnection,
+    build_metadata_with_access_token, build_sender_tracks, collect_video_outbound_rid_stats,
+    count_active_simulcast_layers, generate_channel_id, has_simulcast_rids, load_env,
+    openh264_path, secret_key, signaling_urls,
 };
 use serial_test::serial;
 #[cfg(any(feature = "amf", feature = "vpl"))]
@@ -22,7 +22,7 @@ use sora_sdk::NvCodecVideoCodecCapability;
 #[cfg(feature = "vpl")]
 use sora_sdk::VplVideoCodecCapability;
 use sora_sdk::{
-    AdmConfig, Openh264VideoCodecCapability, Role, SoraConnection, SoraConnectionContext,
+    AdmConfig, Openh264VideoCodecCapability, Role, SoraConnectionContext,
     SoraConnectionContextConfig, Video, VideoCodecCapability, VideoCodecPreference,
 };
 
@@ -38,18 +38,42 @@ fn simulcast_video_capturer_config() -> FakeVideoCapturerConfig {
     }
 }
 
-async fn wait_for_connected(flag: &Arc<AtomicBool>, timeout_secs: u64) {
-    let flag_for_wait = flag.clone();
-    let wait = tokio::time::timeout(Duration::from_secs(timeout_secs), async move {
-        loop {
-            if flag_for_wait.load(Ordering::SeqCst) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+fn has_basic_simulcast_outbound(stats: &sora_sdk::JsonString) -> bool {
+    has_simulcast_rids(stats, &["r0", "r1", "r2"])
+        && count_active_simulcast_layers(stats, 500, 5) >= 2
+}
+
+fn has_expected_simulcast_outbound(
+    stats: &sora_sdk::JsonString,
+    expected_encoder_impl_substrings: &[&str],
+) -> bool {
+    if expected_encoder_impl_substrings.is_empty() || !has_basic_simulcast_outbound(stats) {
+        return false;
+    }
+    let rid_stats = collect_video_outbound_rid_stats(stats);
+    for rid in ["r0", "r1", "r2"] {
+        let Some(stat) = rid_stats
+            .iter()
+            .find(|stat| stat.rid.as_deref() == Some(rid))
+        else {
+            return false;
+        };
+        let bytes_sent = stat.bytes_sent().unwrap_or(0);
+        let packets_sent = stat.packets_sent().unwrap_or(0);
+        if bytes_sent <= 500 || packets_sent <= 5 {
+            return false;
         }
-    })
-    .await;
-    assert!(wait.is_ok(), "接続待機がタイムアウトしました");
+        let Some(encoder_implementation) = &stat.encoder_implementation else {
+            return false;
+        };
+        if expected_encoder_impl_substrings
+            .iter()
+            .any(|substring| !encoder_implementation.contains(substring))
+        {
+            return false;
+        }
+    }
+    true
 }
 
 fn create_non_builtin_context(
@@ -78,16 +102,11 @@ async fn run_sendonly_simulcast_outbound_layers(
     let (video_track, audio_track) =
         build_sender_tracks(&context, &mut capturer).expect("送信用トラック作成失敗");
 
-    let connected = Arc::new(AtomicBool::new(false));
-    let connected_clone = connected.clone();
-
-    let mut builder = SoraConnection::builder(context, urls, channel_id, Role::SendOnly)
+    let mut builder = SoraTestConnection::builder(context, urls, channel_id, Role::SendOnly)
         .sender_video_track(video_track)
         .sender_audio_track(audio_track)
         .simulcast(true)
-        .on_notify(move |_| {
-            connected_clone.store(true, Ordering::SeqCst);
-        });
+        .disconnect_wait_timeout(Duration::from_secs(1));
     if let Some(video) = video {
         builder = builder.video(video);
     }
@@ -96,67 +115,30 @@ async fn run_sendonly_simulcast_outbound_layers(
         builder = builder.metadata(build_metadata_with_access_token(&token));
     }
 
-    let (connection, handle) = builder
-        .build()
-        .expect("SoraConnection の作成に失敗しました");
+    let mut connection = builder
+        .connect()
+        .expect("SoraTestConnection の作成に失敗しました");
+    connection
+        .wait_for_connect(Duration::from_secs(10))
+        .await
+        .expect("接続待機がタイムアウトしました");
+    connection
+        .wait_video_outbound_packets_sent(Duration::from_secs(10))
+        .await
+        .expect("outbound-rtp packetsSent が 0 より大きくなりませんでした");
 
-    let run_task = tokio::spawn(async move {
-        connection.run().await.expect("connection run failed");
-    });
+    connection
+        .wait_stats(
+            |stats| has_expected_simulcast_outbound(stats, expected_encoder_impl_substrings),
+            Duration::from_secs(15),
+        )
+        .await
+        .expect("simulcast outbound stats が期待値に到達しませんでした");
 
-    wait_for_connected(&connected, 10).await;
-    tokio::time::sleep(Duration::from_secs(8)).await;
-
-    let stats = handle.get_stats().await.expect("get_stats に失敗しました");
-    let rid_stats = collect_video_outbound_rid_stats(&stats);
-
-    assert!(
-        has_simulcast_rids(&stats, &["r0", "r1", "r2"]),
-        "simulcast の rid (r0/r1/r2) が揃っていません"
-    );
-    assert!(
-        count_active_simulcast_layers(&stats, 500, 5) >= 2,
-        "有効な simulcast layer 数が不足しています"
-    );
-    assert!(
-        !expected_encoder_impl_substrings.is_empty(),
-        "expected_encoder_impl_substrings must contain at least one entry"
-    );
-    let mut sorted_rid_stats = rid_stats;
-    sorted_rid_stats.sort_by(|a, b| a.rid.cmp(&b.rid));
-    for (index, stat) in sorted_rid_stats.iter().enumerate() {
-        let Some(rid) = stat.rid.as_deref() else {
-            panic!("rid がありません");
-        };
-        let bytes_sent = stat.bytes_sent().unwrap_or(0);
-        let packets_sent = stat.packets_sent().unwrap_or(0);
-        assert_eq!(rid, format!("r{index}"));
-        assert!(
-            bytes_sent > 500 && packets_sent > 5,
-            "rid={} の送信量が不足しています: bytesSent={}, packetsSent={}",
-            rid,
-            bytes_sent,
-            packets_sent
-        );
-        let Some(encoder_implementation) = &stat.encoder_implementation else {
-            panic!("rid={} に encoderImplementation がありません", rid);
-        };
-        for expected_substring in expected_encoder_impl_substrings {
-            assert!(
-                encoder_implementation.contains(expected_substring),
-                "rid={} の encoderImplementation が期待値を含みません: actual={}, expected_substring={}",
-                rid,
-                encoder_implementation,
-                expected_substring
-            );
-        }
-    }
-
-    handle
-        .disconnect()
+    connection
+        .disconnect_and_wait(Duration::from_secs(10))
         .await
         .expect("disconnect の実行に失敗しました");
-    e2e_tests::wait_task_finished(run_task, "run_task").await;
 }
 
 #[tokio::test]
@@ -367,121 +349,66 @@ async fn test_sendrecv_simulcast_persists_after_reoffer() {
     let (video_track_a, audio_track_a) =
         build_sender_tracks(&context_a, &mut capturer_a).expect("送信用トラック A 作成失敗");
 
-    let connected_a = Arc::new(AtomicBool::new(false));
-    let connected_a_clone = connected_a.clone();
-
     let mut builder_a =
-        SoraConnection::builder(context_a, urls.clone(), channel_id.clone(), Role::SendOnly)
+        SoraTestConnection::builder(context_a, urls.clone(), channel_id.clone(), Role::SendOnly)
             .sender_video_track(video_track_a)
             .sender_audio_track(audio_track_a)
             .simulcast(true)
-            .on_notify(move |_| {
-                connected_a_clone.store(true, Ordering::SeqCst);
-            });
+            .disconnect_wait_timeout(Duration::from_secs(1));
 
     if let Some(token) = secret_key() {
         builder_a = builder_a.metadata(build_metadata_with_access_token(&token));
     }
 
-    let (client_a, handle_a) = builder_a
-        .build()
-        .expect("SoraConnection A の作成に失敗しました");
-    let run_task_a = tokio::spawn(async move {
-        client_a.run().await.expect("client_a run failed");
-    });
-
-    wait_for_connected(&connected_a, 10).await;
-    tokio::time::sleep(Duration::from_secs(5)).await;
-
-    let baseline_stats = handle_a
-        .get_stats()
+    let mut client_a = builder_a
+        .connect()
+        .expect("SoraTestConnection A の作成に失敗しました");
+    client_a
+        .wait_for_connect(Duration::from_secs(10))
         .await
-        .expect("クライアント A の baseline get_stats に失敗しました");
-    assert!(
-        has_simulcast_rids(&baseline_stats, &["r0", "r1", "r2"]),
-        "re-offer 前に simulcast の rid (r0/r1/r2) が揃っていません"
-    );
-    assert!(
-        count_active_simulcast_layers(&baseline_stats, 500, 5) >= 2,
-        "re-offer 前の有効な simulcast layer 数が不足しています"
-    );
+        .expect("クライアント A の接続待機がタイムアウトしました");
+    client_a
+        .wait_video_outbound_packets_sent(Duration::from_secs(10))
+        .await
+        .expect("クライアント A の outbound-rtp packetsSent が 0 より大きくなりませんでした");
+
+    client_a
+        .wait_stats(has_basic_simulcast_outbound, Duration::from_secs(15))
+        .await
+        .expect("re-offer 前の simulcast stats が期待値に到達しませんでした");
 
     // クライアント B: RecvOnly (後から参加)
     let context_b = SoraConnectionContext::new().expect("クライアント B のコンテキスト作成失敗");
-    let connected_b = Arc::new(AtomicBool::new(false));
-    let connected_b_clone = connected_b.clone();
-    let track_received_b = Arc::new(AtomicUsize::new(0));
-    let track_received_b_clone = track_received_b.clone();
-
-    let mut builder_b = SoraConnection::builder(context_b, urls, channel_id, Role::RecvOnly)
-        .on_notify(move |_| {
-            connected_b_clone.store(true, Ordering::SeqCst);
-        })
-        .on_track(move |transceiver| {
-            let receiver = transceiver.receiver();
-            let track = receiver.track();
-            let kind = match track.kind() {
-                Ok(kind) => kind,
-                Err(_) => return,
-            };
-            if kind != "video" {
-                return;
-            }
-            track_received_b_clone.fetch_add(1, Ordering::SeqCst);
-        });
+    let mut builder_b = SoraTestConnection::builder(context_b, urls, channel_id, Role::RecvOnly)
+        .disconnect_wait_timeout(Duration::from_secs(1));
 
     if let Some(token) = secret_key() {
         builder_b = builder_b.metadata(build_metadata_with_access_token(&token));
     }
 
-    let (client_b, handle_b) = builder_b
-        .build()
-        .expect("SoraConnection B の作成に失敗しました");
-    let run_task_b = tokio::spawn(async move {
-        client_b.run().await.expect("client_b run failed");
-    });
-
-    wait_for_connected(&connected_b, 10).await;
-
-    let track_received_for_wait = track_received_b.clone();
-    let track_wait = tokio::time::timeout(Duration::from_secs(15), async move {
-        loop {
-            if track_received_for_wait.load(Ordering::SeqCst) > 0 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await;
-    assert!(
-        track_wait.is_ok(),
-        "クライアント B の on_track 受信待機がタイムアウトしました"
-    );
-
-    tokio::time::sleep(Duration::from_secs(8)).await;
-
-    let post_stats = handle_a
-        .get_stats()
+    let mut client_b = builder_b
+        .connect()
+        .expect("SoraTestConnection B の作成に失敗しました");
+    client_b
+        .wait_for_connect(Duration::from_secs(10))
         .await
-        .expect("クライアント A の re-offer 後 get_stats に失敗しました");
-    assert!(
-        has_simulcast_rids(&post_stats, &["r0", "r1", "r2"]),
-        "re-offer 後に simulcast の rid (r0/r1/r2) が揃っていません"
-    );
-    assert!(
-        count_active_simulcast_layers(&post_stats, 500, 5) >= 2,
-        "re-offer 後の有効な simulcast layer 数が不足しています"
-    );
+        .expect("クライアント B の接続待機がタイムアウトしました");
+    client_b
+        .wait_for_video_track(Duration::from_secs(15))
+        .await
+        .expect("クライアント B の on_track 受信待機がタイムアウトしました");
 
-    handle_b
-        .disconnect()
+    client_a
+        .wait_stats(has_basic_simulcast_outbound, Duration::from_secs(15))
+        .await
+        .expect("re-offer 後の simulcast stats が期待値に到達しませんでした");
+
+    client_b
+        .disconnect_and_wait(Duration::from_secs(10))
         .await
         .expect("クライアント B の disconnect に失敗しました");
-    handle_a
-        .disconnect()
+    client_a
+        .disconnect_and_wait(Duration::from_secs(10))
         .await
         .expect("クライアント A の disconnect に失敗しました");
-
-    e2e_tests::wait_task_finished(run_task_b, "run_task_b").await;
-    e2e_tests::wait_task_finished(run_task_a, "run_task_a").await;
 }
