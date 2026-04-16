@@ -19,6 +19,8 @@ use sora_sdk::CodecDirection;
 use sora_sdk::InternalAppleVideoCodecCapability;
 #[cfg(feature = "nvcodec")]
 use sora_sdk::NvCodecVideoCodecCapability;
+#[cfg(feature = "v4l2")]
+use sora_sdk::V4l2VideoCodecCapability;
 #[cfg(feature = "vpl")]
 use sora_sdk::VplVideoCodecCapability;
 use sora_sdk::{
@@ -192,6 +194,30 @@ async fn test_sendonly_simulcast_outbound_layers_nvcodec() {
         Some(Video::new_h264(None, None)),
         "simulcast-sendonly-nvcodec",
         &["SimulcastEncoderAdapter", "NvCodec"],
+    )
+    .await;
+}
+
+#[cfg(feature = "v4l2")]
+#[tokio::test]
+#[serial]
+async fn test_sendonly_simulcast_outbound_layers_v4l2() {
+    load_env();
+    let capability = match V4l2VideoCodecCapability::new() {
+        Ok(capability) => capability,
+        Err(err) => {
+            eprintln!("V4L2 capability is not available, skipping simulcast test: {err}");
+            return;
+        }
+    };
+
+    let capability: Box<dyn VideoCodecCapability> = Box::new(capability);
+    let context = create_non_builtin_context(capability).expect("コンテキスト作成失敗");
+    run_sendonly_simulcast_outbound_layers(
+        context,
+        Some(Video::new_h264(None, None)),
+        "simulcast-sendonly-v4l2",
+        &["SimulcastEncoderAdapter", "V4L2"],
     )
     .await;
 }

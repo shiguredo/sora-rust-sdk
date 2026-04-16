@@ -57,6 +57,12 @@
   - e2e-tests に VPL の検証を追加する
   - sumomo の `--video-codec-implementation` と `--video-codec-list` で `vpl` を指定・表示できるようにする
   - @melpon
+- [ADD] V4L2 に対応する
+  - `shiguredo_v4l2` を利用した `V4l2VideoCodecCapability` を追加し、H264 エンコーダー/デコーダーを提供する
+  - sumomo の `--video-codec-implementation` と `--video-codec-list` で `v4l2` を指定・表示できるようにする
+  - e2e-tests と Raspberry Pi self-hosted CI で `v4l2` feature の検証を追加する
+  - e2e-tests に v4l2 の simulcast 検証を追加する
+  - @melpon
 - [ADD] libcamera を利用した映像キャプチャを追加する
   - `LibcameraVideoCapturer::builder()` と `LibcameraVideoCapturerBuilder` を追加し、`camera_index` / `width` / `height` / `control(s)` を指定できるようにする
   - sumomo に `--libcamera` と繰り返し指定可能な `--libcamera-control KEY=VALUE` を追加する
