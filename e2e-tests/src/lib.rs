@@ -2,7 +2,7 @@ use std::env;
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aws_lc_rs::hmac;
 use base64::Engine;
@@ -169,6 +169,13 @@ pub fn api_url() -> Option<String> {
 /// OpenH264 動的ライブラリのパスを取得する (設定されている場合)。
 pub fn openh264_path() -> Option<String> {
     env::var("OPENH264_PATH").ok()
+}
+
+pub async fn wait_task_finished(task: tokio::task::JoinHandle<()>, name: &str) {
+    let joined = tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .unwrap_or_else(|_| panic!("{name} did not finish within timeout"));
+    joined.unwrap_or_else(|err| panic!("{name} panicked: {err}"));
 }
 
 fn sum_stats_field_for_type_internal(

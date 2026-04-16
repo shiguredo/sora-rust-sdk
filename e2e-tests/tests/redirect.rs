@@ -57,7 +57,7 @@ async fn test_redirect() {
         .expect("1 つ目の SoraConnection の作成に失敗しました");
 
     let first_task = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(30), first_client.run()).await;
+        first_client.run().await.expect("first_client run failed");
     });
 
     // 1 つ目の接続完了を待つ
@@ -136,7 +136,7 @@ async fn test_redirect() {
         .expect("2 つ目の SoraConnection の作成に失敗しました");
 
     let second_task = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(15), second_client.run()).await;
+        second_client.run().await.expect("second_client run failed");
     });
 
     // 2 つ目のクライアントで redirect → 再接続 → offer の受信を待つ
@@ -157,14 +157,17 @@ async fn test_redirect() {
     .await;
 
     // 切断
-    let _ = second_handle.disconnect().await;
-    second_task.abort();
+    second_handle
+        .disconnect()
+        .await
+        .expect("2 つ目の disconnect に失敗しました");
+    e2e_tests::wait_task_finished(second_task, "second_task").await;
 
     first_handle
         .disconnect()
         .await
         .expect("1 つ目の disconnect に失敗しました");
-    first_task.abort();
+    e2e_tests::wait_task_finished(first_task, "first_task").await;
 
     assert!(
         wait_result.is_ok(),

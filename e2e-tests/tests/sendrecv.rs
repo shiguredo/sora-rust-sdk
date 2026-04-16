@@ -74,7 +74,7 @@ async fn test_sendrecv_bidirectional() {
 
     // クライアント 1 を起動
     let client1_task = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(30), client1.run()).await;
+        client1.run().await.expect("client1 run failed");
     });
 
     // クライアント 1 が接続するまで待機 (最大 10 秒)
@@ -136,7 +136,7 @@ async fn test_sendrecv_bidirectional() {
         .expect("SoraConnection の作成に失敗しました");
 
     let client2_task = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(30), client2.run()).await;
+        client2.run().await.expect("client2 run failed");
     });
 
     // クライアント 2 が接続するまで待機 (最大 10 秒)
@@ -238,9 +238,8 @@ async fn test_sendrecv_bidirectional() {
         .await
         .expect("クライアント 2 の disconnect に失敗しました");
 
-    // タスクをキャンセル
-    client1_task.abort();
-    client2_task.abort();
+    e2e_tests::wait_task_finished(client1_task, "client1_task").await;
+    e2e_tests::wait_task_finished(client2_task, "client2_task").await;
 
     println!("テスト成功: 2 つの SendRecv クライアントが相互に通信しました");
 }

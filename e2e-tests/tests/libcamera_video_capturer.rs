@@ -72,7 +72,10 @@ async fn test_sendonly_recvonly_with_libcamera() {
         .expect("SendOnly クライアント作成失敗");
 
     let sendonly_task = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(30), sendonly_client.run()).await;
+        sendonly_client
+            .run()
+            .await
+            .expect("sendonly_client run failed");
     });
 
     let recvonly_context = SoraConnectionContext::new().expect("RecvOnly コンテキスト作成失敗");
@@ -105,7 +108,10 @@ async fn test_sendonly_recvonly_with_libcamera() {
         .expect("RecvOnly クライアント作成失敗");
 
     let recvonly_task = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(30), recvonly_client.run()).await;
+        recvonly_client
+            .run()
+            .await
+            .expect("recvonly_client run failed");
     });
 
     let mut test_error = None;
@@ -196,8 +202,8 @@ async fn test_sendonly_recvonly_with_libcamera() {
     let _ = sendonly_handle.disconnect().await;
     let _ = recvonly_handle.disconnect().await;
 
-    sendonly_task.abort();
-    recvonly_task.abort();
+    e2e_tests::wait_task_finished(sendonly_task, "sendonly_task").await;
+    e2e_tests::wait_task_finished(recvonly_task, "recvonly_task").await;
     capturer.stop();
 
     if let Some(err) = test_error {

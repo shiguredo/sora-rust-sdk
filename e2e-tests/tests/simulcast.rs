@@ -100,7 +100,7 @@ async fn run_sendonly_simulcast_outbound_layers(
         .expect("SoraConnection の作成に失敗しました");
 
     let run_task = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(40), connection.run()).await;
+        connection.run().await.expect("connection run failed");
     });
 
     wait_for_connected(&connected, 10).await;
@@ -150,7 +150,7 @@ async fn run_sendonly_simulcast_outbound_layers(
         .disconnect()
         .await
         .expect("disconnect の実行に失敗しました");
-    run_task.abort();
+    e2e_tests::wait_task_finished(run_task, "run_task").await;
 }
 
 #[tokio::test]
@@ -381,7 +381,7 @@ async fn test_sendrecv_simulcast_persists_after_reoffer() {
         .build()
         .expect("SoraConnection A の作成に失敗しました");
     let run_task_a = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(50), client_a.run()).await;
+        client_a.run().await.expect("client_a run failed");
     });
 
     wait_for_connected(&connected_a, 10).await;
@@ -432,7 +432,7 @@ async fn test_sendrecv_simulcast_persists_after_reoffer() {
         .build()
         .expect("SoraConnection B の作成に失敗しました");
     let run_task_b = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(50), client_b.run()).await;
+        client_b.run().await.expect("client_b run failed");
     });
 
     wait_for_connected(&connected_b, 10).await;
@@ -476,6 +476,6 @@ async fn test_sendrecv_simulcast_persists_after_reoffer() {
         .await
         .expect("クライアント A の disconnect に失敗しました");
 
-    run_task_b.abort();
-    run_task_a.abort();
+    e2e_tests::wait_task_finished(run_task_b, "run_task_b").await;
+    e2e_tests::wait_task_finished(run_task_a, "run_task_a").await;
 }
