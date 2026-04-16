@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
+use e2e_tests::stats::RtcSentRtpStreamStatsTrait;
 use e2e_tests::{
     FakeVideoCapturer, FakeVideoCapturerConfig, build_metadata_with_access_token,
     build_sender_tracks, collect_video_outbound_rid_stats, count_active_simulcast_layers,
@@ -124,22 +125,27 @@ async fn run_sendonly_simulcast_outbound_layers(
     let mut sorted_rid_stats = rid_stats;
     sorted_rid_stats.sort_by(|a, b| a.rid.cmp(&b.rid));
     for (index, stat) in sorted_rid_stats.iter().enumerate() {
-        assert_eq!(stat.rid, format!("r{index}"));
+        let Some(rid) = stat.rid.as_deref() else {
+            panic!("rid がありません");
+        };
+        let bytes_sent = stat.bytes_sent().unwrap_or(0);
+        let packets_sent = stat.packets_sent().unwrap_or(0);
+        assert_eq!(rid, format!("r{index}"));
         assert!(
-            stat.bytes_sent > 500 && stat.packets_sent > 5,
+            bytes_sent > 500 && packets_sent > 5,
             "rid={} の送信量が不足しています: bytesSent={}, packetsSent={}",
-            stat.rid,
-            stat.bytes_sent,
-            stat.packets_sent
+            rid,
+            bytes_sent,
+            packets_sent
         );
         let Some(encoder_implementation) = &stat.encoder_implementation else {
-            panic!("rid={} に encoderImplementation がありません", stat.rid);
+            panic!("rid={} に encoderImplementation がありません", rid);
         };
         for expected_substring in expected_encoder_impl_substrings {
             assert!(
                 encoder_implementation.contains(expected_substring),
                 "rid={} の encoderImplementation が期待値を含みません: actual={}, expected_substring={}",
-                stat.rid,
+                rid,
                 encoder_implementation,
                 expected_substring
             );
