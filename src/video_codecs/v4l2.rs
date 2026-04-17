@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs::OpenOptions;
 
 use shiguredo_v4l2::v4l2_m2m::{
-    DecodeOutput, DecoderConfig, EncoderConfig, H264Decoder, H264Encoder, InputFrame,
+    DecodeOutput, DecoderConfig, EncoderConfig, H264Decoder, H264Encoder, InputFrame, Resolution,
 };
 use shiguredo_webrtc::{
     CodecSpecificInfo, EncodedImage, EncodedImageBuffer, EncodedImageRef, EnvironmentRef,
@@ -43,22 +43,15 @@ fn build_i420_frame(
     data: &[u8],
     width: u32,
     height: u32,
+    stride: u32,
     timestamp_us: i64,
     rtp_timestamp: u32,
 ) -> Option<VideoFrame> {
-    let width_i32 = i32::try_from(width).ok()?;
-    let height_i32 = i32::try_from(height).ok()?;
-    if width_i32 <= 0 || height_i32 <= 0 {
-        return None;
-    }
-
-    let width = usize::try_from(width).ok()?;
-    let height = usize::try_from(height).ok()?;
-    let chroma_width = width.div_ceil(2);
+    let chroma_stride = stride.div_ceil(2);
     let chroma_height = height.div_ceil(2);
 
-    let y_size = width.checked_mul(height)?;
-    let uv_size = chroma_width.checked_mul(chroma_height)?;
+    let y_size = stride.checked_mul(height)? as usize;
+    let uv_size = chroma_stride.checked_mul(chroma_height)? as usize;
     let total_size = y_size.checked_add(uv_size.checked_mul(2)?)?;
     if data.len() < total_size {
         return None;
@@ -68,11 +61,11 @@ fn build_i420_frame(
     let src_u = &data[y_size..y_size + uv_size];
     let src_v = &data[y_size + uv_size..y_size + uv_size * 2];
 
-    let src_stride_y = i32::try_from(width).ok()?;
-    let src_stride_u = i32::try_from(chroma_width).ok()?;
-    let src_stride_v = i32::try_from(chroma_width).ok()?;
+    let src_stride_y = i32::try_from(stride).ok()?;
+    let src_stride_u = i32::try_from(chroma_stride).ok()?;
+    let src_stride_v = i32::try_from(chroma_stride).ok()?;
 
-    let mut i420 = I420Buffer::new(width_i32, height_i32);
+    let mut i420 = I420Buffer::new(width as i32, height as i32);
     let dst_stride_y = i420.stride_y();
     let dst_stride_u = i420.stride_u();
     let dst_stride_v = i420.stride_v();
@@ -91,8 +84,8 @@ fn build_i420_frame(
         dst_stride_u,
         dst_v,
         dst_stride_v,
-        width_i32,
-        height_i32,
+        width as i32,
+        height as i32,
     ) {
         return None;
     }
@@ -337,6 +330,7 @@ struct V4l2VideoDecoder {
     callback: Option<VideoDecoderDecodedImageCallbackPtr>,
     decoder: Option<H264Decoder>,
     device_path: String,
+    resolution: Option<Resolution>,
 }
 
 impl V4l2VideoDecoder {
@@ -345,6 +339,7 @@ impl V4l2VideoDecoder {
             callback: None,
             decoder: None,
             device_path,
+            resolution: None,
         }
     }
 
@@ -385,6 +380,7 @@ impl VideoDecoderHandler for V4l2VideoDecoder {
         };
 
         let decoder = self.decoder.as_mut().expect("decoder should exist");
+
         let output = match decoder.decode(encoded_data.data(), render_time_ms.saturating_mul(1000))
         {
             Ok(output) => output,
@@ -395,30 +391,34 @@ impl VideoDecoderHandler for V4l2VideoDecoder {
         };
 
         match output {
-            DecodeOutput::Pending | DecodeOutput::ResolutionChanged { .. } => {
+            DecodeOutput::Pending => VideoCodecStatus::NoOutput,
+            DecodeOutput::ResolutionChanged { .. } => {
+                self.resolution = decoder.resolution();
                 VideoCodecStatus::NoOutput
             }
             DecodeOutput::Frame(frame) => {
-                let frame_data = frame.data.to_vec();
+                let frame_data = frame.data;
                 let frame_index = frame.index;
                 let frame_timestamp_us = frame.timestamp_us;
+                let Some(resolution) = self.resolution else {
+                    return VideoCodecStatus::Error;
+                };
+
+                let decoded_frame = build_i420_frame(
+                    frame_data,
+                    resolution.width,
+                    resolution.height,
+                    resolution.stride,
+                    frame_timestamp_us,
+                    input_image.rtp_timestamp(),
+                );
 
                 if let Err(err) = decoder.release_buffer(frame_index) {
                     rtc_log_error!("V4L2 release_buffer failed: {}", err);
                     return VideoCodecStatus::Error;
-                }
-
-                let resolution = match decoder.resolution() {
-                    Some(resolution) => resolution,
-                    None => return VideoCodecStatus::Error,
                 };
-                let Some(decoded_frame) = build_i420_frame(
-                    &frame_data,
-                    resolution.width,
-                    resolution.height,
-                    frame_timestamp_us,
-                    input_image.rtp_timestamp(),
-                ) else {
+
+                let Some(decoded_frame) = decoded_frame else {
                     return VideoCodecStatus::Error;
                 };
 
@@ -626,6 +626,6 @@ mod tests {
 
     #[test]
     fn build_i420_frame_fails_for_short_input() {
-        assert!(build_i420_frame(&[0; 7], 4, 4, 0, 0).is_none());
+        assert!(build_i420_frame(&[0; 7], 4, 4, 4, 0, 0).is_none());
     }
 }
