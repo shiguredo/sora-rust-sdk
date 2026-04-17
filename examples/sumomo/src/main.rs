@@ -46,6 +46,8 @@ use sora_sdk::AmfVideoCodecCapability;
 use sora_sdk::InternalAppleVideoCodecCapability;
 #[cfg(feature = "nvcodec")]
 use sora_sdk::NvCodecVideoCodecCapability;
+#[cfg(feature = "v4l2")]
+use sora_sdk::V4l2VideoCodecCapability;
 #[cfg(feature = "vpl")]
 use sora_sdk::VplVideoCodecCapability;
 use sora_sdk::{
@@ -192,6 +194,21 @@ fn build_context_config(
                         {
                             return Err(io::Error::other(
                                 "VPL is not enabled in this build. Rebuild sumomo with --features vpl",
+                            )
+                            .into());
+                        }
+                    }
+                    VideoCodecImplementationSelection::V4l2 => {
+                        #[cfg(feature = "v4l2")]
+                        {
+                            let v4l2_capability: Box<dyn VideoCodecCapability> =
+                                Box::new(V4l2VideoCodecCapability::new()?);
+                            add_video_codec_capability(&mut context_config, v4l2_capability);
+                        }
+                        #[cfg(not(feature = "v4l2"))]
+                        {
+                            return Err(io::Error::other(
+                                "V4L2 is not enabled in this build. Rebuild sumomo with --features v4l2",
                             )
                             .into());
                         }

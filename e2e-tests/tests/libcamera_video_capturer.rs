@@ -1,6 +1,5 @@
 #![cfg(feature = "libcamera")]
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use e2e_tests::{

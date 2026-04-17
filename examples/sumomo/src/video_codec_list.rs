@@ -7,6 +7,8 @@ use sora_sdk::AmfVideoCodecCapability;
 use sora_sdk::InternalAppleVideoCodecCapability;
 #[cfg(feature = "nvcodec")]
 use sora_sdk::NvCodecVideoCodecCapability;
+#[cfg(feature = "v4l2")]
+use sora_sdk::V4l2VideoCodecCapability;
 #[cfg(feature = "vpl")]
 use sora_sdk::VplVideoCodecCapability;
 use sora_sdk::{
@@ -110,6 +112,7 @@ fn is_selection_selected(
             VideoCodecImplementationSelection::Amf
             | VideoCodecImplementationSelection::Nvcodec
             | VideoCodecImplementationSelection::Vpl
+            | VideoCodecImplementationSelection::V4l2
             | VideoCodecImplementationSelection::Openh264 => false,
         },
     }
@@ -277,6 +280,40 @@ fn probe_vpl(args: &Args) -> VideoCodecCapabilityProbe {
     }
 }
 
+fn probe_v4l2(args: &Args) -> VideoCodecCapabilityProbe {
+    #[cfg(feature = "v4l2")]
+    let (capability, unavailable_reason) = match V4l2VideoCodecCapability::new() {
+        Ok(capability) => {
+            let capability: Box<dyn VideoCodecCapability> = Box::new(capability);
+            if has_any_codec_support(capability.as_ref()) {
+                (Some(capability), None)
+            } else {
+                (
+                    None,
+                    Some("V4L2 does not support any encoder or decoder codec".to_string()),
+                )
+            }
+        }
+        Err(err) => (None, Some(err.to_string())),
+    };
+    #[cfg(not(feature = "v4l2"))]
+    let (capability, unavailable_reason) = (
+        None,
+        Some("V4L2 is not enabled in this build. Rebuild sumomo with --features v4l2".to_string()),
+    );
+    let selected = is_selection_selected(
+        args,
+        VideoCodecImplementationSelection::V4l2,
+        capability.is_some(),
+    );
+    VideoCodecCapabilityProbe {
+        selection: VideoCodecImplementationSelection::V4l2,
+        selected,
+        capability,
+        unavailable_reason,
+    }
+}
+
 fn probe_openh264(args: &Args) -> VideoCodecCapabilityProbe {
     let (capability, unavailable_reason) = match args.openh264_path.as_deref() {
         Some(path) => match Openh264VideoCodecCapability::new(path) {
@@ -316,6 +353,7 @@ fn collect_video_codec_capability_probes(args: &Args) -> Vec<VideoCodecCapabilit
         probe_amf(args),
         probe_nvcodec(args),
         probe_vpl(args),
+        probe_v4l2(args),
         probe_openh264(args),
     ]
 }

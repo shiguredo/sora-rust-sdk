@@ -156,6 +156,14 @@ pub enum Error {
     NvCodecMessage {
         reason: String,
     },
+    #[cfg(feature = "v4l2")]
+    V4l2 {
+        source: shiguredo_v4l2::v4l2_m2m::Error,
+    },
+    #[cfg(feature = "v4l2")]
+    V4l2Message {
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for Error {
@@ -323,6 +331,10 @@ impl std::fmt::Display for Error {
             Error::NvCodec { source } => write!(f, "NVCodec error: {source}"),
             #[cfg(feature = "nvcodec")]
             Error::NvCodecMessage { reason } => write!(f, "NVCodec error: {reason}"),
+            #[cfg(feature = "v4l2")]
+            Error::V4l2 { source } => write!(f, "V4L2 error: {source}"),
+            #[cfg(feature = "v4l2")]
+            Error::V4l2Message { reason } => write!(f, "V4L2 error: {reason}"),
         }
     }
 }
@@ -354,6 +366,8 @@ impl std::error::Error for Error {
             Error::Utf8DecodeFailed(err) => Some(err),
             Error::CommandSendFailed { source, .. } => Some(source),
             Error::CommandResponseMissing { source, .. } => Some(source),
+            #[cfg(feature = "v4l2")]
+            Error::V4l2 { source } => Some(source),
             _ => None,
         }
     }
@@ -451,6 +465,13 @@ impl From<shiguredo_websocket::Error> for Error {
 impl From<shiguredo_nvcodec::Error> for Error {
     fn from(err: shiguredo_nvcodec::Error) -> Self {
         Error::NvCodec { source: err }
+    }
+}
+
+#[cfg(feature = "v4l2")]
+impl From<shiguredo_v4l2::v4l2_m2m::Error> for Error {
+    fn from(err: shiguredo_v4l2::v4l2_m2m::Error) -> Self {
+        Error::V4l2 { source: err }
     }
 }
 

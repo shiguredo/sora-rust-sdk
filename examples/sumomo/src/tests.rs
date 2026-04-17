@@ -110,7 +110,7 @@ fn parse_video_codec_implementation_rejects_unknown_value() {
         VideoCodecImplementationSelections::parse("unknown").expect_err("unknown value must fail");
     assert_eq!(
         err,
-        "video-codec-implementation must be auto/internal/internal-apple/amf/nvcodec/vpl/openh264"
+        "video-codec-implementation must be auto/internal/internal-apple/amf/nvcodec/vpl/v4l2/openh264"
     );
 }
 
@@ -121,6 +121,16 @@ fn parse_video_codec_implementation_accepts_vpl() {
     assert_eq!(
         parsed,
         VideoCodecImplementationSelections::Manual(vec![VideoCodecImplementationSelection::Vpl,])
+    );
+}
+
+#[test]
+fn parse_video_codec_implementation_accepts_v4l2() {
+    let parsed = VideoCodecImplementationSelections::parse("v4l2")
+        .expect("v4l2 must be parsed successfully");
+    assert_eq!(
+        parsed,
+        VideoCodecImplementationSelections::Manual(vec![VideoCodecImplementationSelection::V4l2,])
     );
 }
 
@@ -278,6 +288,20 @@ fn validate_args_rejects_vpl_when_feature_is_disabled() {
     assert!(
         err.to_string()
             .contains("VPL is not enabled in this build. Rebuild sumomo with --features vpl")
+    );
+}
+
+#[cfg(not(feature = "v4l2"))]
+#[test]
+fn validate_args_rejects_v4l2_when_feature_is_disabled() {
+    let args = test_args(
+        VideoCodecImplementationSelections::Manual(vec![VideoCodecImplementationSelection::V4l2]),
+        None,
+    );
+    let err = validate_args(&args).expect_err("v4l2 must fail when feature is disabled");
+    assert!(
+        err.to_string()
+            .contains("V4L2 is not enabled in this build. Rebuild sumomo with --features v4l2")
     );
 }
 

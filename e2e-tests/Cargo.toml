@@ -10,6 +10,7 @@ default = []
 amf = ["sora_sdk/amf"]
 nvcodec = ["sora_sdk/nvcodec", "dep:shiguredo_nvcodec"]
 vpl = ["sora_sdk/vpl"]
+v4l2 = ["sora_sdk/v4l2"]
 libcamera = ["sora_sdk/libcamera"]
 
 [dependencies]
