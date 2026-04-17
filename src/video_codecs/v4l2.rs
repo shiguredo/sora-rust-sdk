@@ -202,47 +202,17 @@ impl VideoEncoderHandler for V4l2VideoEncoder {
             return VideoCodecStatus::Error;
         };
 
-        let width = match usize::try_from(frame_width) {
-            Ok(width) => width,
-            Err(_) => return VideoCodecStatus::Error,
-        };
-        let height = match usize::try_from(frame_height) {
-            Ok(height) => height,
-            Err(_) => return VideoCodecStatus::Error,
-        };
-        let chroma_width = width.div_ceil(2);
-        let chroma_height = height.div_ceil(2);
-        let y_size = match width.checked_mul(height) {
-            Some(size) => size,
-            None => return VideoCodecStatus::Error,
-        };
-        let uv_size = match chroma_width.checked_mul(chroma_height) {
-            Some(size) => size,
-            None => return VideoCodecStatus::Error,
-        };
-        let required_size = match uv_size
-            .checked_mul(2)
-            .and_then(|uv2| y_size.checked_add(uv2))
-        {
-            Some(size) => size,
-            None => return VideoCodecStatus::Error,
-        };
-        let width_i32 = match i32::try_from(width) {
-            Ok(width) => width,
-            Err(_) => return VideoCodecStatus::Error,
-        };
-        let height_i32 = match i32::try_from(height) {
-            Ok(height) => height,
-            Err(_) => return VideoCodecStatus::Error,
-        };
-        let chroma_width_i32 = match i32::try_from(chroma_width) {
-            Ok(chroma_width) => chroma_width,
-            Err(_) => return VideoCodecStatus::Error,
-        };
+        let encoder = self.encoder.as_mut().expect("encoder should exist");
+        let resolution = encoder.resolution();
 
-        let mut i420_data = vec![0u8; required_size];
-        let (dst_y, dst_uv) = i420_data.split_at_mut(y_size);
-        let (dst_u, dst_v) = dst_uv.split_at_mut(uv_size);
+        let chroma_stride = resolution.stride.div_ceil(2);
+        let chroma_height = resolution.height.div_ceil(2);
+        let yuv_size = resolution.yuv420_size();
+        let y_size = resolution.stride * resolution.height;
+        let uv_size = chroma_stride * chroma_height;
+        let mut i420_data = vec![0u8; yuv_size];
+        let (dst_y, dst_uv) = i420_data.split_at_mut(y_size as usize);
+        let (dst_u, dst_v) = dst_uv.split_at_mut(uv_size as usize);
         if !i420_copy(
             i420.y_data(),
             i420.stride_y(),
@@ -251,20 +221,19 @@ impl VideoEncoderHandler for V4l2VideoEncoder {
             i420.v_data(),
             i420.stride_v(),
             dst_y,
-            width_i32,
+            resolution.stride as i32,
             dst_u,
-            chroma_width_i32,
+            chroma_stride as i32,
             dst_v,
-            chroma_width_i32,
-            width_i32,
-            height_i32,
+            chroma_stride as i32,
+            i420.width(),
+            i420.height(),
         ) {
             return VideoCodecStatus::Error;
         }
 
         let force_keyframe = matches!(requested_frame_type, Some(VideoFrameType::Key));
         let timestamp_us = frame.timestamp_us();
-        let encoder = self.encoder.as_mut().expect("encoder should exist");
         let encoded = match encoder.encode(
             InputFrame::I420(&i420_data),
             timestamp_us,
