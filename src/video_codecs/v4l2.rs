@@ -227,30 +227,14 @@ impl VideoEncoderHandler for V4l2VideoEncoder {
 
         let force_keyframe = matches!(requested_frame_type, Some(VideoFrameType::Key));
         let timestamp_us = frame.timestamp_us();
-        let encoded = match encoder.encode(
-            InputFrame::I420(&i420_data),
-            timestamp_us,
-            force_keyframe,
-        ) {
-            Ok(encoded) => encoded,
-            Err(err) if force_keyframe => {
-                rtc_log_warning!(
-                    "V4L2 force_keyframe request failed; retry encode without keyframe request: {}",
-                    err
-                );
-                match encoder.encode(InputFrame::I420(&i420_data), timestamp_us, false) {
-                    Ok(encoded) => encoded,
-                    Err(err) => {
-                        rtc_log_error!("V4L2 encode failed: {}", err);
-                        return VideoCodecStatus::Error;
-                    }
+        let encoded =
+            match encoder.encode(InputFrame::I420(&i420_data), timestamp_us, force_keyframe) {
+                Ok(encoded) => encoded,
+                Err(err) => {
+                    rtc_log_error!("V4L2 encode failed: {}", err);
+                    return VideoCodecStatus::Error;
                 }
-            }
-            Err(err) => {
-                rtc_log_error!("V4L2 encode failed: {}", err);
-                return VideoCodecStatus::Error;
-            }
-        };
+            };
 
         let mut encoded_image = EncodedImage::new();
         let encoded_buffer = EncodedImageBuffer::from_bytes(&encoded.data);
@@ -527,11 +511,8 @@ impl VideoCodecCapability for V4l2VideoCodecCapability {
     fn create_video_decoder(
         &self,
         _env: EnvironmentRef<'_>,
-        format: SdpVideoFormatRef<'_>,
+        _format: SdpVideoFormatRef<'_>,
     ) -> Option<VideoDecoder> {
-        if codec_type_from_format(&format)? != VideoCodecType::H264 {
-            return None;
-        }
         Some(VideoDecoder::new_with_handler(Box::new(
             V4l2VideoDecoder::new(self.decoder_device_path.clone()),
         )))
