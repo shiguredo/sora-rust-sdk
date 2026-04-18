@@ -29,6 +29,8 @@
   - `src/client.rs` / `src/client_context.rs` を `src/connection.rs` / `src/connection_context.rs` にリネームする
   - Sora シグナリング仕様の `client_id` / TLS 用語の `client_cert` / `client_key` / `version::get_sora_client_name()` は据え置く
   - @voluntas
+- [UPDATE] zlib 圧縮/展開の実装を `flate2` から `noflate` に差し替える
+  - @voluntas
 - [UPDATE] `shiguredo_webrtc` を 0.147.1-canary.4 に上げる
   - @sile, @melpon
 - [UPDATE] `shiguredo_nvcodec` を 2026.1.0 に上げる

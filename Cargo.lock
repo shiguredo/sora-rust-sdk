@@ -815,6 +815,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e5dc223a8d69eaeb19c31218a69a55112fe79965764430f092532aed848f1b8"
 
 [[package]]
+name = "noflate"
+version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "20e6fe57c29ed3d9eb2f6d67ece49220b6d411e2a055408479fc51f8035a8ea7"
+
+[[package]]
 name = "nojson"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1539,8 +1545,8 @@ name = "sora_sdk"
 version = "2026.1.0-canary.6"
 dependencies = [
  "aws-lc-rs",
- "flate2",
  "libc",
+ "noflate",
  "nojson",
  "proptest",
  "rand",
