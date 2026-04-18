@@ -92,6 +92,8 @@
   - @melpon
 - [FIX] `AudioOpusParams` と `Video*Params` のフィールドを公開し、利用者がパラメータを構築して `Audio` / `Video` に反映できるように修正する
   - @melpon
+- [FIX] `e2e-tests/tests/video_codec.rs` の未使用 import `std::sync::Arc` を削除する
+  - @voluntas
 
 ### misc
 

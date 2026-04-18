@@ -1,6 +1,4 @@
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-use std::sync::Arc;
-#[cfg(any(target_os = "macos", target_os = "ios"))]
 use std::time::Duration;
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
