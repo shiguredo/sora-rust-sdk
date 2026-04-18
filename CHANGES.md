@@ -108,6 +108,11 @@
   - @melpon
 - [UPDATE] sumomo の `run_with_raw_player` と通常経路の接続初期化を共通化し、`raw-player` 経路のオプション対応を拡張する
   - @melpon
+- [UPDATE] `prek.toml` に builtin フックを追加し、priority で cargo-fmt / cargo-clippy の実行順を明示する
+  - builtin フックとして `trailing-whitespace` / `end-of-file-fixer` / `check-toml` / `check-yaml` / `check-json` / `check-merge-conflict` / `detect-private-key` / `mixed-line-ending` を追加する
+  - `minimum_prek_version` を 0.3.9 に設定し、`target/**` と `.vscode/**` を `exclude` に追加する
+  - `.cargo/config.toml.example` の末尾の余分な空行を削除する
+  - @voluntas
 - [ADD] sumomo に --input-mp4 オプションを追加
   - @voluntas, @melpon
 - [ADD] sumomo に --openh264-path オプションを追加する

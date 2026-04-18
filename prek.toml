@@ -2,6 +2,23 @@
 # See https://prek.j178.dev for more information.
 #:schema https://www.schemastore.org/prek.json
 
+minimum_prek_version = "0.3.9"
+
+exclude = { glob = ["target/**", ".vscode/**"] }
+
+[[repos]]
+repo = "builtin"
+hooks = [
+  { id = "trailing-whitespace" },
+  { id = "end-of-file-fixer" },
+  { id = "check-toml" },
+  { id = "check-yaml" },
+  { id = "check-json" },
+  { id = "check-merge-conflict" },
+  { id = "detect-private-key" },
+  { id = "mixed-line-ending" },
+]
+
 [[repos]]
 repo = "local"
 hooks = [
@@ -11,7 +28,8 @@ hooks = [
     entry = "cargo fmt --all -- --check",
     language = "system",
     types = ["rust"],
-    pass_filenames = false
+    pass_filenames = false,
+    priority = 10,
   },
   {
     id = "cargo-clippy",
@@ -19,6 +37,7 @@ hooks = [
     entry = "cargo clippy --workspace --all-targets -- -D warnings",
     language = "system",
     types = ["rust"],
-    pass_filenames = false
-  }
+    pass_filenames = false,
+    priority = 20,
+  },
 ]
