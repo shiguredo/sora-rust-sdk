@@ -18,8 +18,8 @@ shiguredo_webrtc = { version = "=0.147.1-canary.5" }
 
 [dependencies]
 aws-lc-rs = "1.16"
-flate2 = "1.1"
 libc = { version = "0.2", optional = true }
+noflate = "0.1.0"
 nojson = "0.3"
 rand = "0.9"
 rustls = { version = "0.23", default-features = false, features = [
