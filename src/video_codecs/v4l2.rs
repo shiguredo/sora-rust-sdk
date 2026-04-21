@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::fs::OpenOptions;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use shiguredo_v4l2::v4l2_m2m::{
-    DecodeOutput, DecoderConfig, EncoderConfig, H264Decoder, H264Encoder, InputFrame, Resolution,
+    DecodeCallbackOutput, DecodeInput, DecoderConfig, EncodeCallbackOutput, EncodeInput,
+    EncoderConfig, Error as V4l2Error, H264Decoder, H264Encoder, Resolution,
 };
 use shiguredo_webrtc::{
     CodecSpecificInfo, EncodedImage, EncodedImageBuffer, EncodedImageRef, EnvironmentRef,
@@ -98,9 +100,76 @@ fn build_i420_frame(
     )
 }
 
-struct V4l2VideoEncoder {
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct EncoderCallbackValue {
+    rtp_timestamp: u32,
+    frame_width: u32,
+    frame_height: u32,
+}
+
+#[derive(Default)]
+struct EncoderCallbackState {
     callback: Option<VideoEncoderEncodedImageCallbackPtr>,
-    encoder: Option<H264Encoder>,
+}
+
+fn handle_v4l2_encode_callback(
+    callback_state: &Arc<Mutex<EncoderCallbackState>>,
+    result: shiguredo_v4l2::v4l2_m2m::Result<EncodeCallbackOutput<EncoderCallbackValue>>,
+) {
+    let (encoded, value) = match result {
+        Ok(EncodeCallbackOutput::Frame { frame, value }) => (frame, value),
+        Err(err) => {
+            rtc_log_error!("V4L2 encode callback failed: {}", err);
+            return;
+        }
+    };
+    let Some(encoded_data) = encoded.data() else {
+        rtc_log_error!("V4L2 encode callback returned frame without MMAP data");
+        return;
+    };
+
+    let mut encoded_image = EncodedImage::new();
+    let encoded_buffer = EncodedImageBuffer::from_bytes(encoded_data);
+    encoded_image.set_encoded_data(&encoded_buffer);
+    encoded_image.set_rtp_timestamp(value.rtp_timestamp);
+    encoded_image.set_encoded_width(value.frame_width);
+    encoded_image.set_encoded_height(value.frame_height);
+    encoded_image.set_frame_type(if encoded.is_keyframe() {
+        VideoFrameType::Key
+    } else {
+        VideoFrameType::Delta
+    });
+
+    let mut codec_specific_info = CodecSpecificInfo::new();
+    codec_specific_info.set_codec_type(VideoCodecType::H264);
+    codec_specific_info.set_h264_packetization_mode(H264PacketizationMode::NonInterleaved);
+    codec_specific_info.set_h264_idr_frame(encoded.is_keyframe());
+
+    let callback_state = lock_unpoisoned(callback_state);
+    let Some(callback) = callback_state.callback else {
+        return;
+    };
+
+    let result = unsafe {
+        callback.on_encoded_image(encoded_image.as_ref(), Some(codec_specific_info.as_ref()))
+    };
+    if result.error() != VideoEncoderEncodedImageCallbackResultError::Ok {
+        rtc_log_warning!(
+            "V4L2: on_encoded_image returned non-Ok status; continue encoding to avoid libwebrtc crash"
+        );
+    }
+}
+
+struct V4l2VideoEncoder {
+    encoder: Option<H264Encoder<EncoderCallbackValue>>,
+    callback_state: Arc<Mutex<EncoderCallbackState>>,
     device_path: String,
     width: u32,
     height: u32,
@@ -111,8 +180,8 @@ struct V4l2VideoEncoder {
 impl V4l2VideoEncoder {
     fn new(device_path: String) -> Self {
         Self {
-            callback: None,
             encoder: None,
+            callback_state: Arc::new(Mutex::new(EncoderCallbackState::default())),
             device_path,
             width: 0,
             height: 0,
@@ -131,7 +200,10 @@ impl V4l2VideoEncoder {
         let mut config =
             EncoderConfig::new(self.width, self.height, self.target_bitrate_bps.max(1));
         config.device_path = self.device_path.clone();
-        self.encoder = Some(H264Encoder::new(config)?);
+        let callback_state = self.callback_state.clone();
+        self.encoder = Some(H264Encoder::new(config, move |result| {
+            handle_v4l2_encode_callback(&callback_state, result);
+        })?);
         self.rebuild_needed = false;
         Ok(())
     }
@@ -165,10 +237,13 @@ impl VideoEncoderHandler for V4l2VideoEncoder {
         frame: VideoFrameRef<'_>,
         frame_types: Option<VideoFrameTypeVectorRef<'_>>,
     ) -> VideoCodecStatus {
-        let callback = match self.callback {
-            Some(callback) => callback,
-            None => return VideoCodecStatus::Uninitialized,
+        let has_callback = {
+            let callback_state = lock_unpoisoned(&self.callback_state);
+            callback_state.callback.is_some()
         };
+        if !has_callback {
+            return VideoCodecStatus::Uninitialized;
+        }
 
         let frame_width = frame.width().max(0) as u32;
         let frame_height = frame.height().max(0) as u32;
@@ -196,87 +271,81 @@ impl VideoEncoderHandler for V4l2VideoEncoder {
         };
 
         let encoder = self.encoder.as_mut().expect("encoder should exist");
-        let resolution = encoder.resolution();
 
-        let chroma_stride = resolution.stride.div_ceil(2);
-        let chroma_height = resolution.height.div_ceil(2);
-        let yuv_size = resolution.yuv420_size();
-        let y_size = resolution.stride * resolution.height;
-        let uv_size = chroma_stride * chroma_height;
-        let mut i420_data = vec![0u8; yuv_size];
-        let (dst_y, dst_uv) = i420_data.split_at_mut(y_size as usize);
-        let (dst_u, dst_v) = dst_uv.split_at_mut(uv_size as usize);
-        if !i420_copy(
-            i420.y_data(),
-            i420.stride_y(),
-            i420.u_data(),
-            i420.stride_u(),
-            i420.v_data(),
-            i420.stride_v(),
-            dst_y,
-            resolution.stride as i32,
-            dst_u,
-            chroma_stride as i32,
-            dst_v,
-            chroma_stride as i32,
-            i420.width(),
-            i420.height(),
-        ) {
-            return VideoCodecStatus::Error;
-        }
+        let mut fill = |buf: &mut [u8],
+                        resolution: &Resolution,
+                        _value: &EncoderCallbackValue|
+         -> Option<usize> {
+            let chroma_stride = resolution.stride.div_ceil(2);
+            let chroma_height = resolution.height.div_ceil(2);
+            let yuv_size = resolution.yuv420_size();
+            if buf.len() < yuv_size {
+                return None;
+            }
+            let y_size = (resolution.stride as usize) * (resolution.height as usize);
+            let uv_size = (chroma_stride as usize) * (chroma_height as usize);
+            let dst_stride_y = i32::try_from(resolution.stride).ok()?;
+            let dst_stride_uv = i32::try_from(chroma_stride).ok()?;
+            let (dst_y, dst_uv) = buf.split_at_mut(y_size);
+            let (dst_u, dst_v) = dst_uv.split_at_mut(uv_size);
+            if !i420_copy(
+                i420.y_data(),
+                i420.stride_y(),
+                i420.u_data(),
+                i420.stride_u(),
+                i420.v_data(),
+                i420.stride_v(),
+                dst_y,
+                dst_stride_y,
+                dst_u,
+                dst_stride_uv,
+                dst_v,
+                dst_stride_uv,
+                i420.width(),
+                i420.height(),
+            ) {
+                return None;
+            }
+            Some(yuv_size)
+        };
 
         let force_keyframe = matches!(requested_frame_type, Some(VideoFrameType::Key));
         let timestamp_us = frame.timestamp_us();
-        let encoded =
-            match encoder.encode(InputFrame::I420(&i420_data), timestamp_us, force_keyframe) {
-                Ok(encoded) => encoded,
-                Err(err) => {
-                    rtc_log_error!("V4L2 encode failed: {}", err);
-                    return VideoCodecStatus::Error;
-                }
-            };
-
-        let mut encoded_image = EncodedImage::new();
-        let encoded_buffer = EncodedImageBuffer::from_bytes(&encoded.data);
-        encoded_image.set_encoded_data(&encoded_buffer);
-        encoded_image.set_rtp_timestamp(frame.rtp_timestamp());
-        encoded_image.set_encoded_width(frame_width);
-        encoded_image.set_encoded_height(frame_height);
-        encoded_image.set_frame_type(if encoded.is_keyframe {
-            VideoFrameType::Key
-        } else {
-            VideoFrameType::Delta
-        });
-
-        let mut codec_specific_info = CodecSpecificInfo::new();
-        codec_specific_info.set_codec_type(VideoCodecType::H264);
-        codec_specific_info.set_h264_packetization_mode(H264PacketizationMode::NonInterleaved);
-        codec_specific_info.set_h264_idr_frame(encoded.is_keyframe);
-
-        let result = unsafe {
-            callback.on_encoded_image(encoded_image.as_ref(), Some(codec_specific_info.as_ref()))
+        let callback_value = EncoderCallbackValue {
+            rtp_timestamp: frame.rtp_timestamp(),
+            frame_width,
+            frame_height,
         };
-        if result.error() != VideoEncoderEncodedImageCallbackResultError::Ok {
-            rtc_log_warning!(
-                "V4L2: on_encoded_image returned non-Ok status; continue encoding to avoid libwebrtc crash"
-            );
+        match encoder.encode(
+            EncodeInput::Mmap(&mut fill),
+            timestamp_us,
+            force_keyframe,
+            callback_value,
+        ) {
+            Ok(()) => VideoCodecStatus::Ok,
+            Err(V4l2Error::NoAvailableBuffer) => VideoCodecStatus::NoOutput,
+            Err(err) => {
+                rtc_log_error!("V4L2 encode failed: {}", err);
+                VideoCodecStatus::Error
+            }
         }
-
-        VideoCodecStatus::Ok
     }
 
     fn register_encode_complete_callback(
         &mut self,
         callback: Option<VideoEncoderEncodedImageCallbackRef<'_>>,
     ) -> VideoCodecStatus {
-        self.callback = callback
+        let mut callback_state = lock_unpoisoned(&self.callback_state);
+        callback_state.callback = callback
             .map(|callback| unsafe { VideoEncoderEncodedImageCallbackPtr::from_ref(callback) });
         VideoCodecStatus::Ok
     }
 
     fn release(&mut self) -> VideoCodecStatus {
+        let mut callback_state = lock_unpoisoned(&self.callback_state);
+        callback_state.callback = None;
+        drop(callback_state);
         self.encoder = None;
-        self.callback = None;
         self.rebuild_needed = false;
         VideoCodecStatus::Ok
     }
@@ -310,27 +379,98 @@ impl VideoEncoderHandler for V4l2VideoEncoder {
     }
 }
 
-struct V4l2VideoDecoder {
+#[derive(Clone, Copy)]
+struct DecoderCallbackValue {
+    rtp_timestamp: u32,
+}
+
+#[derive(Default)]
+struct DecoderCallbackState {
     callback: Option<VideoDecoderDecodedImageCallbackPtr>,
-    decoder: Option<H264Decoder>,
-    device_path: String,
     resolution: Option<Resolution>,
+}
+
+fn handle_v4l2_decode_callback(
+    callback_state: &Arc<Mutex<DecoderCallbackState>>,
+    result: shiguredo_v4l2::v4l2_m2m::Result<DecodeCallbackOutput<DecoderCallbackValue>>,
+) {
+    match result {
+        Ok(DecodeCallbackOutput::ResolutionChanged { resolution }) => {
+            let mut callback_state = lock_unpoisoned(callback_state);
+            callback_state.resolution = Some(resolution);
+        }
+        Ok(DecodeCallbackOutput::Frame { frame, value }) => {
+            let callback_state = lock_unpoisoned(callback_state);
+            let resolution = match callback_state.resolution {
+                Some(resolution) => resolution,
+                None => {
+                    rtc_log_error!("V4L2 decode callback returned frame before resolution");
+                    return;
+                }
+            };
+            let Some(frame_data) = frame.data() else {
+                rtc_log_error!("V4L2 decode callback returned frame without MMAP data");
+                return;
+            };
+
+            let decoded_frame = match build_i420_frame(
+                frame_data,
+                resolution.width,
+                resolution.height,
+                resolution.stride,
+                frame.timestamp_us(),
+                value.rtp_timestamp,
+            ) {
+                Some(decoded_frame) => decoded_frame,
+                None => {
+                    rtc_log_error!(
+                        "V4L2 decode callback failed to build I420 frame: width={}, height={}, stride={}, bytes={}",
+                        resolution.width,
+                        resolution.height,
+                        resolution.stride,
+                        frame_data.len(),
+                    );
+                    return;
+                }
+            };
+
+            let Some(callback) = callback_state.callback else {
+                return;
+            };
+            unsafe {
+                callback.decoded(decoded_frame.as_ref());
+            }
+        }
+        Err(err) => {
+            rtc_log_error!("V4L2 decode callback failed: {}", err);
+        }
+    }
+}
+
+struct V4l2VideoDecoder {
+    callback_state: Arc<Mutex<DecoderCallbackState>>,
+    decoder: Option<H264Decoder<DecoderCallbackValue>>,
+    device_path: String,
 }
 
 impl V4l2VideoDecoder {
     fn new(device_path: String) -> Self {
         Self {
-            callback: None,
+            callback_state: Arc::new(Mutex::new(DecoderCallbackState::default())),
             decoder: None,
             device_path,
-            resolution: None,
         }
     }
 
     fn rebuild_decoder(&mut self) -> Result<()> {
         let mut config = DecoderConfig::new();
         config.device_path = self.device_path.clone();
-        self.decoder = Some(H264Decoder::new(config)?);
+        let callback_state = self.callback_state.clone();
+        self.decoder = Some(H264Decoder::new(config, move |result| {
+            handle_v4l2_decode_callback(&callback_state, result);
+        })?);
+        let mut callback_state = lock_unpoisoned(&self.callback_state);
+        callback_state.resolution = None;
         Ok(())
     }
 
@@ -355,6 +495,14 @@ impl VideoDecoderHandler for V4l2VideoDecoder {
         input_image: EncodedImageRef<'_>,
         render_time_ms: i64,
     ) -> VideoCodecStatus {
+        let has_callback = {
+            let callback_state = lock_unpoisoned(&self.callback_state);
+            callback_state.callback.is_some()
+        };
+        if !has_callback {
+            return VideoCodecStatus::Uninitialized;
+        }
+
         if self.ensure_decoder().is_err() {
             return VideoCodecStatus::Error;
         }
@@ -362,58 +510,40 @@ impl VideoDecoderHandler for V4l2VideoDecoder {
         let Some(encoded_data) = input_image.encoded_data() else {
             return VideoCodecStatus::ErrParameter;
         };
-
-        let decoder = self.decoder.as_mut().expect("decoder should exist");
-
-        let output = match decoder.decode(encoded_data.data(), render_time_ms.saturating_mul(1000))
-        {
-            Ok(output) => output,
-            Err(err) => {
-                rtc_log_error!("V4L2 decode failed: {}", err);
-                return VideoCodecStatus::Error;
+        let encoded_bytes = encoded_data.data();
+        let mut fill = |buf: &mut [u8], _value: &DecoderCallbackValue| -> Option<usize> {
+            if buf.len() < encoded_bytes.len() {
+                return None;
             }
+            buf[..encoded_bytes.len()].copy_from_slice(encoded_bytes);
+            Some(encoded_bytes.len())
         };
 
-        match output {
-            DecodeOutput::Pending => VideoCodecStatus::NoOutput,
-            DecodeOutput::ResolutionChanged { .. } => {
-                self.resolution = decoder.resolution();
+        let decoder = self.decoder.as_mut().expect("decoder should exist");
+        let callback_value = DecoderCallbackValue {
+            rtp_timestamp: input_image.rtp_timestamp(),
+        };
+        match decoder.decode(
+            DecodeInput::Mmap(&mut fill),
+            render_time_ms.saturating_mul(1000),
+            callback_value,
+        ) {
+            Ok(()) => {
+                if let Some(resolution) = decoder.resolution() {
+                    let mut callback_state = lock_unpoisoned(&self.callback_state);
+                    callback_state.resolution = Some(resolution);
+                }
+                VideoCodecStatus::Ok
+            }
+            Err(V4l2Error::NoAvailableBuffer) => {
+                rtc_log_warning!(
+                    "V4L2 decode failed: no available buffer; consider increasing the number of buffers in the V4L2 device"
+                );
                 VideoCodecStatus::NoOutput
             }
-            DecodeOutput::Frame(frame) => {
-                let frame_data = frame.data;
-                let frame_index = frame.index;
-                let frame_timestamp_us = frame.timestamp_us;
-                let Some(resolution) = self.resolution else {
-                    return VideoCodecStatus::Error;
-                };
-
-                let decoded_frame = build_i420_frame(
-                    frame_data,
-                    resolution.width,
-                    resolution.height,
-                    resolution.stride,
-                    frame_timestamp_us,
-                    input_image.rtp_timestamp(),
-                );
-
-                if let Err(err) = decoder.release_buffer(frame_index) {
-                    rtc_log_error!("V4L2 release_buffer failed: {}", err);
-                    return VideoCodecStatus::Error;
-                };
-
-                let Some(decoded_frame) = decoded_frame else {
-                    return VideoCodecStatus::Error;
-                };
-
-                let Some(callback) = self.callback.as_ref() else {
-                    return VideoCodecStatus::Uninitialized;
-                };
-                unsafe {
-                    callback.decoded(decoded_frame.as_ref());
-                }
-
-                VideoCodecStatus::Ok
+            Err(err) => {
+                rtc_log_error!("V4L2 decode failed: {}", err);
+                VideoCodecStatus::Error
             }
         }
     }
@@ -422,13 +552,17 @@ impl VideoDecoderHandler for V4l2VideoDecoder {
         &mut self,
         callback: Option<VideoDecoderDecodedImageCallbackPtr>,
     ) -> VideoCodecStatus {
-        self.callback = callback;
+        let mut callback_state = lock_unpoisoned(&self.callback_state);
+        callback_state.callback = callback;
         VideoCodecStatus::Ok
     }
 
     fn release(&mut self) -> VideoCodecStatus {
+        let mut callback_state = lock_unpoisoned(&self.callback_state);
+        callback_state.callback = None;
+        callback_state.resolution = None;
+        drop(callback_state);
         self.decoder = None;
-        self.callback = None;
         VideoCodecStatus::Ok
     }
 
