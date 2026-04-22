@@ -86,8 +86,8 @@ mod tests {
         assert!(capability.is_supported(CodecDirection::Encoder, VideoCodecType::H264));
         assert!(capability.is_supported(CodecDirection::Decoder, VideoCodecType::H264));
 
-        // Apple WebRTC バイナリによって H265 の有無が変わるため、
-        // ここではクラッシュせず問い合わせできることだけを確認する。
+        // 利用している Apple のハードウェアによって H265 HWA の有無が変わるため、
+        // 存在の有無は気にせず、呼び出しによってクラッシュしないことだけ確認する。
         let _ = capability.is_supported(CodecDirection::Encoder, VideoCodecType::H265);
         let _ = capability.is_supported(CodecDirection::Decoder, VideoCodecType::H265);
     }
