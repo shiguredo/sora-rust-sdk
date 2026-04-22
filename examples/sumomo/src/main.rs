@@ -365,7 +365,8 @@ fn create_video_capturer(
         if args.use_libcamera {
             let mut builder = sora_sdk::LibcameraVideoCapturer::builder()
                 .width(640)
-                .height(480);
+                .height(480)
+                .native_frame_output(args.use_libcamera_native);
             for (key, value) in &args.libcamera_controls {
                 builder = builder.control(key.clone(), value.clone());
             }

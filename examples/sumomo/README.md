@@ -50,6 +50,7 @@ systemctl --user enable --now pipewire pipewire-pulse
 | `--video-input-device` | 任意 (値: デバイス ID、`media-device` feature 有効時のみ) | 使用するビデオ入力デバイスの ID |
 | `--audio-input-device` | 任意 (値: デバイス名または ID、`media-device` feature 有効時のみ) | 使用するオーディオ入力デバイスの名前または ID |
 | `--libcamera` | 任意 (フラグ、`libcamera` feature 有効時のみ) | libcamera で映像キャプチャを行う |
+| `--libcamera-native` | 任意 (フラグ、`libcamera` feature 有効時のみ) | libcamera でネイティブバッファ出力を有効にする |
 | `--libcamera-control` | 任意 (値: `KEY=VALUE`、`libcamera` feature 有効時のみ、複数指定可) | libcamera control を設定する |
 | `--help` | フラグ | ヘルプ表示 |
 | `--version` | フラグ | バージョン表示 |
@@ -63,6 +64,7 @@ systemctl --user enable --now pipewire pipewire-pulse
 - `--video-codec-implementation` に `openh264` を含める場合は `--openh264-path` が必須です
 - `--openh264-path` は `--video-codec-implementation` に `openh264` を含めた場合のみ指定できます
 - `--libcamera-control` は `--libcamera` 指定時のみ指定できます
+- `--libcamera-native` は `--libcamera` 指定時のみ指定できます
 - `--libcamera` と `--video-input-device` は同時に指定できません
 
 ## 実行例
@@ -172,6 +174,7 @@ cargo run -p sumomo --features media-device -- \
 ### libcamera で sendonly で接続する
 
 `libcamera` feature を有効にして `--libcamera` を指定すると libcamera キャプチャを利用します。
+`--libcamera-native` を指定すると、libcamera のネイティブバッファ出力を利用します。
 `--libcamera-control` は複数回指定できます。
 
 ```bash
@@ -180,6 +183,7 @@ cargo run -p sumomo --features libcamera -- \
   --channel-id your-channel-id \
   --role sendonly \
   --libcamera \
+  --libcamera-native \
   --libcamera-control Brightness=0.2 \
   --libcamera-control Contrast=1.5
 ```

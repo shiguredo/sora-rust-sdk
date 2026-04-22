@@ -197,28 +197,31 @@ pub struct LibcameraNativeFrameBuffer {
     shared_requeue_token: Arc<LibcameraNativeRequeueToken>,
 }
 
+#[derive(Debug)]
+struct LibcameraNativeFrameBufferConfig {
+    raw_width: i32,
+    raw_height: i32,
+    scaled_width: i32,
+    scaled_height: i32,
+    fd: i32,
+    size: usize,
+    stride: i32,
+    frame_pixel_format: FramePixelFormat,
+    shared_requeue_token: Arc<LibcameraNativeRequeueToken>,
+}
+
 impl LibcameraNativeFrameBuffer {
-    fn new(
-        raw_width: i32,
-        raw_height: i32,
-        scaled_width: i32,
-        scaled_height: i32,
-        fd: i32,
-        size: usize,
-        stride: i32,
-        frame_pixel_format: FramePixelFormat,
-        shared_requeue_token: Arc<LibcameraNativeRequeueToken>,
-    ) -> Self {
+    fn new(config: LibcameraNativeFrameBufferConfig) -> Self {
         Self {
-            raw_width,
-            raw_height,
-            scaled_width,
-            scaled_height,
-            fd,
-            size,
-            stride,
-            frame_pixel_format,
-            shared_requeue_token,
+            raw_width: config.raw_width,
+            raw_height: config.raw_height,
+            scaled_width: config.scaled_width,
+            scaled_height: config.scaled_height,
+            fd: config.fd,
+            size: config.size,
+            stride: config.stride,
+            frame_pixel_format: config.frame_pixel_format,
+            shared_requeue_token: config.shared_requeue_token,
         }
     }
 
@@ -257,6 +260,28 @@ impl LibcameraNativeFrameBuffer {
     pub fn is_nv12(&self) -> bool {
         matches!(self.frame_pixel_format, FramePixelFormat::NV12)
     }
+}
+
+#[derive(Clone, Copy)]
+struct FrameDispatchConfig {
+    width: i32,
+    height: i32,
+    adapted_width: i32,
+    adapted_height: i32,
+    timestamp_us: i64,
+}
+
+#[derive(Clone, Copy)]
+struct NativeFrameDispatchConfig {
+    raw_width: i32,
+    raw_height: i32,
+    scaled_width: i32,
+    scaled_height: i32,
+    timestamp_us: i64,
+    frame_pixel_format: FramePixelFormat,
+    native_info: NativeFrameInfo,
+    stride: i32,
+    cookie: u64,
 }
 
 impl VideoFrameBufferHandler for LibcameraNativeFrameBuffer {
@@ -564,15 +589,17 @@ fn run_libcamera_loop(
                 on_native_frame_buffer(
                     &mut source,
                     &mut aligner,
-                    width,
-                    height,
-                    size.adapted_width,
-                    size.adapted_height,
-                    timestamp_us,
-                    frame_pixel_format,
-                    native_info,
-                    stride_i32,
-                    cookie,
+                    NativeFrameDispatchConfig {
+                        raw_width: width,
+                        raw_height: height,
+                        scaled_width: size.adapted_width,
+                        scaled_height: size.adapted_height,
+                        timestamp_us,
+                        frame_pixel_format,
+                        native_info,
+                        stride: stride_i32,
+                        cookie,
+                    },
                     &delayed_requeue_tx,
                 );
                 // ネイティブフレームが破棄された後に requeue する必要があるので、ここでは requeue_request は呼ばない
@@ -619,11 +646,13 @@ fn run_libcamera_loop(
                     &mut source,
                     &mut aligner,
                     buffer,
-                    width,
-                    height,
-                    size.adapted_width,
-                    size.adapted_height,
-                    timestamp_us,
+                    FrameDispatchConfig {
+                        width,
+                        height,
+                        adapted_width: size.adapted_width,
+                        adapted_height: size.adapted_height,
+                        timestamp_us,
+                    },
                 );
                 requeue_request(&camera, &requests, cookie, &parsed_controls);
             }
@@ -642,25 +671,21 @@ fn on_frame_buffer(
     source: &mut AdaptedVideoTrackSource,
     aligner: &mut TimestampAligner,
     mut frame_buffer: VideoFrameBuffer,
-    width: i32,
-    height: i32,
-    adapted_width: i32,
-    adapted_height: i32,
-    timestamp_us: i64,
+    config: FrameDispatchConfig,
 ) {
     let translated_timestamp_us =
-        aligner.translate(timestamp_us, shiguredo_webrtc::time_millis() * 1000);
+        aligner.translate(config.timestamp_us, shiguredo_webrtc::time_millis() * 1000);
 
-    if adapted_width != width || adapted_height != height {
-        frame_buffer = match frame_buffer.scale(adapted_width, adapted_height) {
+    if config.adapted_width != config.width || config.adapted_height != config.height {
+        frame_buffer = match frame_buffer.scale(config.adapted_width, config.adapted_height) {
             Some(buffer) => buffer,
             None => {
                 rtc_log_warning!(
                     "failed to scale frame buffer: src={}x{} dst={}x{}",
-                    width,
-                    height,
-                    adapted_width,
-                    adapted_height
+                    config.width,
+                    config.height,
+                    config.adapted_width,
+                    config.adapted_height
                 );
                 return;
             }
@@ -678,35 +703,28 @@ fn on_frame_buffer(
 fn on_native_frame_buffer(
     source: &mut AdaptedVideoTrackSource,
     aligner: &mut TimestampAligner,
-    raw_width: i32,
-    raw_height: i32,
-    scaled_width: i32,
-    scaled_height: i32,
-    timestamp_us: i64,
-    frame_pixel_format: FramePixelFormat,
-    native_info: NativeFrameInfo,
-    stride: i32,
-    cookie: u64,
+    config: NativeFrameDispatchConfig,
     delayed_requeue_tx: &std::sync::mpsc::Sender<u64>,
 ) {
     let translated_timestamp_us =
-        aligner.translate(timestamp_us, shiguredo_webrtc::time_millis() * 1000);
+        aligner.translate(config.timestamp_us, shiguredo_webrtc::time_millis() * 1000);
     let requeue_token = Arc::new(LibcameraNativeRequeueToken {
-        cookie,
+        cookie: config.cookie,
         tx: delayed_requeue_tx.clone(),
     });
-    let frame_buffer =
-        VideoFrameBuffer::new_with_handler(Box::new(LibcameraNativeFrameBuffer::new(
-            raw_width,
-            raw_height,
-            scaled_width,
-            scaled_height,
-            native_info.fd,
-            native_info.size,
-            stride,
-            frame_pixel_format,
-            requeue_token,
-        )));
+    let frame_buffer = VideoFrameBuffer::new_with_handler(Box::new(
+        LibcameraNativeFrameBuffer::new(LibcameraNativeFrameBufferConfig {
+            raw_width: config.raw_width,
+            raw_height: config.raw_height,
+            scaled_width: config.scaled_width,
+            scaled_height: config.scaled_height,
+            fd: config.native_info.fd,
+            size: config.native_info.size,
+            stride: config.stride,
+            frame_pixel_format: config.frame_pixel_format,
+            shared_requeue_token: requeue_token,
+        }),
+    ));
     let video_frame = VideoFrame::builder(&frame_buffer)
         .set_timestamp_us(translated_timestamp_us)
         .set_rtp_timestamp(0)
@@ -1364,15 +1382,17 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel::<u64>();
         let requeue_token = Arc::new(LibcameraNativeRequeueToken { cookie, tx });
         let buffer = VideoFrameBuffer::new_with_handler(Box::new(LibcameraNativeFrameBuffer::new(
-            raw_width,
-            raw_height,
-            scaled_width,
-            scaled_height,
-            123,
-            4096,
-            640,
-            FramePixelFormat::I420,
-            requeue_token,
+            LibcameraNativeFrameBufferConfig {
+                raw_width,
+                raw_height,
+                scaled_width,
+                scaled_height,
+                fd: 123,
+                size: 4096,
+                stride: 640,
+                frame_pixel_format: FramePixelFormat::I420,
+                shared_requeue_token: requeue_token,
+            },
         )));
         (buffer, rx)
     }
@@ -1457,7 +1477,7 @@ mod tests {
             CapturedFrameBuffers::Native(_) => panic!("mapped variant expected"),
         }
         let native_view = match &mapped {
-            CapturedFrameBuffers::Native(native_infos) => native_infos.get(0),
+            CapturedFrameBuffers::Native(native_infos) => native_infos.first(),
             CapturedFrameBuffers::Mapped(_) => None,
         };
         assert!(native_view.is_none());
@@ -1470,7 +1490,7 @@ mod tests {
             CapturedFrameBuffers::Mapped(_) => panic!("native variant expected"),
         }
         let mapped_view = match &native {
-            CapturedFrameBuffers::Mapped(mapped_buffers) => mapped_buffers.get(0),
+            CapturedFrameBuffers::Mapped(mapped_buffers) => mapped_buffers.first(),
             CapturedFrameBuffers::Native(_) => None,
         };
         assert!(mapped_view.is_none());

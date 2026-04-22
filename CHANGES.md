@@ -69,6 +69,10 @@
   - sumomo に `--libcamera` と繰り返し指定可能な `--libcamera-control KEY=VALUE` を追加する
   - e2e-tests に libcamera 実機検証を追加し、Raspberry Pi の self-hosted CI で `libcamera` feature を有効化する
   - @melpon
+- [ADD] V4L2 で libcamera ネイティブバッファ入力をエンコードできるようにする
+  - `V4l2VideoEncoder` で `LibcameraNativeFrameBuffer` を検出した場合に、`ImageConverter` の `DMABUF -> DMABUF` 変換結果を `H264Encoder` の `EncodeInput::DmaBuf` へ渡すようにする
+  - sumomo に `--libcamera-native` を追加し、`--libcamera` 指定時のみネイティブバッファ出力を有効化する
+  - @melpon
 - [ADD] `nvcodec` の対応コーデックを拡張する
   - `NvCodecVideoCodecCapability` を H264/H265/AV1 エンコードと H264/H265/AV1/VP8/VP9 デコードの動的判定に対応する
   - @melpon
