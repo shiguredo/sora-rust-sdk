@@ -14,7 +14,7 @@ include = ["/LICENSE", "/README.md", "/src/**"]
 members = ["e2e-tests", "examples/sumomo"]
 
 [workspace.dependencies]
-shiguredo_webrtc = { version = "=0.147.1" }
+shiguredo_webrtc = { version = "=0.147.2" }
 
 [dependencies]
 aws-lc-rs = "1.16"
