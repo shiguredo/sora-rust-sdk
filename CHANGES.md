@@ -115,10 +115,10 @@
   - `minimum_prek_version` を 0.3.9 に設定し、`target/**` と `.vscode/**` を `exclude` に追加する
   - `.cargo/config.toml.example` の末尾の余分な空行を削除する
   - @voluntas
-- [ADD] sumomo に --input-mp4 オプションを追加
-  - @voluntas, @melpon
 - [UPDATE] README に OpenH264 / AMD AMF / NVIDIA Video Codec / Intel VPL / libcamera / V4L2-M2M の対応を明記し、対応コーデック一覧表と MP4 無変換送信のセクションを追加する
   - @voluntas
+- [ADD] sumomo に --input-mp4 オプションを追加
+  - @voluntas, @melpon
 - [ADD] sumomo に --openh264-path オプションを追加する
   - @melpon
 - [ADD] sumomo に --video-codec-implementation オプションを追加し AMF を選択できるようにする
