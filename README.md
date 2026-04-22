@@ -40,8 +40,35 @@ Please read <https://github.com/shiguredo/oss/blob/master/README.en.md> before u
 - TURN-TLS 対応
 - HTTP プロキシ対応
 - VP8 / VP9 / AV1 / H.264 / H.265 対応
+- OpenH264 による H.264 ソフトウェアエンコード/デコード対応
+- AMD AMF (Advanced Media Framework) によるハードウェアエンコード/デコード対応 (Windows / Linux)
+- NVIDIA Video Codec によるハードウェアエンコード/デコード対応 (Windows / Linux)
+- Intel VPL によるハードウェアエンコード/デコード対応 (Windows / Linux)
+- Raspberry Pi 向け libcamera による映像入力対応
+- Raspberry Pi 向け V4L2-M2M によるハードウェアエンコード/デコード対応
 - MP4 ファイルから無変換での音声・映像送信対応
 - 複数クライアント同時実行対応
+
+## 対応コーデック
+
+ハードウェアエンコード/デコードの実際の対応状況は GPU やドライバの対応状況に依存します。
+
+| バックエンド | 対応プラットフォーム | エンコード | デコード |
+|---|---|---|---|
+| ソフトウェア | 全プラットフォーム | VP8 / VP9 / AV1 | VP8 / VP9 / AV1 |
+| OpenH264 | 全プラットフォーム | H.264 | H.264 |
+| Apple VideoToolbox | macOS | H.264 / H.265 | H.264 / H.265 |
+| AMD AMF | Windows / Linux | H.264 / H.265 / AV1 | H.264 / H.265 / AV1 |
+| NVIDIA Video Codec | Windows / Linux | H.264 / H.265 / AV1 | H.264 / H.265 / AV1 / VP8 / VP9 |
+| Intel VPL | Windows / Linux | H.264 / H.265 / VP9 / AV1 | H.264 / H.265 / VP9 / AV1 |
+| V4L2-M2M | Raspberry Pi | H.264 | H.264 |
+
+### MP4 無変換送信
+
+MP4 ファイルに含まれる音声・映像トラックをデコード/エンコードを挟まず、そのまま Sora に送信できる独自機能です。
+
+- 対応プラットフォーム: 全プラットフォーム
+- 対応映像コーデック: H.264 / H.265 / VP8 / VP9 / AV1
 
 ## 使い方
 

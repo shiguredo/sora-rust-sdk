@@ -117,6 +117,8 @@
   - @voluntas
 - [ADD] sumomo に --input-mp4 オプションを追加
   - @voluntas, @melpon
+- [UPDATE] README に OpenH264 / AMD AMF / NVIDIA Video Codec / Intel VPL / libcamera / V4L2-M2M の対応を明記し、対応コーデック一覧表と MP4 無変換送信のセクションを追加する
+  - @voluntas
 - [ADD] sumomo に --openh264-path オプションを追加する
   - @melpon
 - [ADD] sumomo に --video-codec-implementation オプションを追加し AMF を選択できるようにする
