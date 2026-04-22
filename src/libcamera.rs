@@ -10,8 +10,8 @@ use shiguredo_libcamera::{
 };
 use shiguredo_webrtc::{
     AdaptFrameResult, AdaptedVideoTrackSource, I420Buffer, NV12Buffer, TimestampAligner,
-    VideoFrame, VideoFrameBuffer, VideoTrackSource, i420_copy, nv12_copy, rtc_log_error,
-    rtc_log_info, rtc_log_warning,
+    VideoFrame, VideoFrameBuffer, VideoFrameBufferHandler, VideoTrackSource, i420_copy, nv12_copy,
+    rtc_log_error, rtc_log_info, rtc_log_warning,
 };
 
 use crate::error::{Error, Result};
@@ -26,6 +26,7 @@ pub struct LibcameraVideoCapturerBuilder {
     camera_index: u32,
     width: i32,
     height: i32,
+    native_frame_output: bool,
     controls: Vec<(String, String)>,
 }
 
@@ -35,6 +36,7 @@ impl Default for LibcameraVideoCapturerBuilder {
             camera_index: DEFAULT_CAMERA_INDEX,
             width: DEFAULT_WIDTH,
             height: DEFAULT_HEIGHT,
+            native_frame_output: false,
             controls: Vec::new(),
         }
     }
@@ -53,6 +55,11 @@ impl LibcameraVideoCapturerBuilder {
 
     pub fn height(mut self, height: i32) -> Self {
         self.height = height;
+        self
+    }
+
+    pub fn native_frame_output(mut self, native_frame_output: bool) -> Self {
+        self.native_frame_output = native_frame_output;
         self
     }
 
@@ -82,6 +89,7 @@ impl LibcameraVideoCapturerBuilder {
             camera_index: self.camera_index,
             width: self.width,
             height: self.height,
+            native_frame_output: self.native_frame_output,
             controls: self.controls,
             stop: Arc::new(AtomicBool::new(false)),
             thread: None,
@@ -94,6 +102,7 @@ pub struct LibcameraVideoCapturer {
     camera_index: u32,
     width: i32,
     height: i32,
+    native_frame_output: bool,
     controls: Vec<(String, String)>,
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
@@ -115,15 +124,22 @@ impl LibcameraVideoCapturer {
         let camera_index = self.camera_index;
         let width = self.width;
         let height = self.height;
+        let native_frame_output = self.native_frame_output;
         let controls = self.controls.clone();
         let stop = self.stop.clone();
 
         let handle = thread::Builder::new()
             .name("libcamera-capturer".to_string())
             .spawn(move || {
-                if let Err(err) =
-                    run_libcamera_loop(source, camera_index, width, height, controls, stop)
-                {
+                if let Err(err) = run_libcamera_loop(
+                    source,
+                    camera_index,
+                    width,
+                    height,
+                    native_frame_output,
+                    controls,
+                    stop,
+                ) {
                     rtc_log_error!("libcamera capture failed: {}", err);
                 }
             })?;
@@ -154,6 +170,141 @@ impl Drop for LibcameraVideoCapturer {
 enum FramePixelFormat {
     I420,
     NV12,
+}
+
+#[derive(Debug)]
+struct LibcameraNativeRequeueToken {
+    cookie: u64,
+    tx: std::sync::mpsc::Sender<u64>,
+}
+
+impl Drop for LibcameraNativeRequeueToken {
+    fn drop(&mut self) {
+        let _ = self.tx.send(self.cookie);
+    }
+}
+
+#[derive(Debug)]
+pub struct LibcameraNativeFrameBuffer {
+    raw_width: i32,
+    raw_height: i32,
+    scaled_width: i32,
+    scaled_height: i32,
+    fd: i32,
+    size: usize,
+    stride: i32,
+    frame_pixel_format: FramePixelFormat,
+    shared_requeue_token: Arc<LibcameraNativeRequeueToken>,
+}
+
+impl LibcameraNativeFrameBuffer {
+    fn new(
+        raw_width: i32,
+        raw_height: i32,
+        scaled_width: i32,
+        scaled_height: i32,
+        fd: i32,
+        size: usize,
+        stride: i32,
+        frame_pixel_format: FramePixelFormat,
+        shared_requeue_token: Arc<LibcameraNativeRequeueToken>,
+    ) -> Self {
+        Self {
+            raw_width,
+            raw_height,
+            scaled_width,
+            scaled_height,
+            fd,
+            size,
+            stride,
+            frame_pixel_format,
+            shared_requeue_token,
+        }
+    }
+
+    pub fn fd(&self) -> i32 {
+        self.fd
+    }
+
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
+    pub fn stride(&self) -> i32 {
+        self.stride
+    }
+
+    pub fn raw_width(&self) -> i32 {
+        self.raw_width
+    }
+
+    pub fn raw_height(&self) -> i32 {
+        self.raw_height
+    }
+
+    pub fn scaled_width(&self) -> i32 {
+        self.scaled_width
+    }
+
+    pub fn scaled_height(&self) -> i32 {
+        self.scaled_height
+    }
+
+    pub fn is_i420(&self) -> bool {
+        matches!(self.frame_pixel_format, FramePixelFormat::I420)
+    }
+
+    pub fn is_nv12(&self) -> bool {
+        matches!(self.frame_pixel_format, FramePixelFormat::NV12)
+    }
+}
+
+impl VideoFrameBufferHandler for LibcameraNativeFrameBuffer {
+    fn width(&self) -> i32 {
+        self.scaled_width
+    }
+
+    fn height(&self) -> i32 {
+        self.scaled_height
+    }
+
+    fn to_i420(&mut self) -> Option<I420Buffer> {
+        None
+    }
+
+    fn crop_and_scale(
+        &mut self,
+        _offset_x: i32,
+        _offset_y: i32,
+        _crop_width: i32,
+        _crop_height: i32,
+        scaled_width: i32,
+        scaled_height: i32,
+    ) -> Option<VideoFrameBuffer> {
+        Some(VideoFrameBuffer::new_with_handler(Box::new(Self {
+            raw_width: self.raw_width,
+            raw_height: self.raw_height,
+            scaled_width,
+            scaled_height,
+            fd: self.fd,
+            size: self.size,
+            stride: self.stride,
+            frame_pixel_format: self.frame_pixel_format,
+            shared_requeue_token: self.shared_requeue_token.clone(),
+        })))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NativeFrameInfo {
+    fd: i32,
+    size: usize,
+}
+
+struct FrameBufferLayout {
+    planes: Vec<shiguredo_libcamera::FrameBufferPlane>,
+    shared_fd: i32,
+    mapped_len: usize,
 }
 
 /// MappedPlane は I420 や NV12 の各平面（Y/U/V, Y/UV）を表す
@@ -194,25 +345,9 @@ impl Drop for MappedDmabuf {
 }
 
 #[derive(Debug)]
-struct MappedFrameBuffers {
-    planes: Vec<Vec<MappedPlane>>,
-}
-
-impl MappedFrameBuffers {
-    fn new(capacity: usize) -> Self {
-        Self {
-            planes: Vec::with_capacity(capacity),
-        }
-    }
-    fn push(&mut self, mapped_planes: Vec<MappedPlane>) {
-        self.planes.push(mapped_planes);
-    }
-    fn get(&self, index: usize) -> Option<&Vec<MappedPlane>> {
-        self.planes.get(index)
-    }
-    fn len(&self) -> usize {
-        self.planes.len()
-    }
+enum CapturedFrameBuffers {
+    Mapped(Vec<Vec<MappedPlane>>),
+    Native(Vec<NativeFrameInfo>),
 }
 
 fn run_libcamera_loop(
@@ -220,6 +355,7 @@ fn run_libcamera_loop(
     camera_index: u32,
     width: i32,
     height: i32,
+    native_frame_output: bool,
     controls: Vec<(String, String)>,
     stop: Arc<AtomicBool>,
 ) -> Result<()> {
@@ -312,6 +448,7 @@ fn run_libcamera_loop(
     let buffer_count = allocator.allocate(&stream)?;
 
     let (tx, rx) = std::sync::mpsc::channel::<(u64, Option<i64>)>();
+    let (delayed_requeue_tx, delayed_requeue_rx) = std::sync::mpsc::channel::<u64>();
     let stream_for_callback = stream.clone();
     camera.on_request_completed(move |completed| {
         if completed.status() != RequestStatus::Complete {
@@ -334,17 +471,33 @@ fn run_libcamera_loop(
 
     let parsed_controls = parse_controls(&controls);
 
-    let mut mapped_frame_buffers = MappedFrameBuffers::new(buffer_count);
+    let stride_i32 = i32::try_from(stride).map_err(|_| Error::LibcameraMessage {
+        message: format!("stride is too large: {}", stride),
+    })?;
+    let mut captured_frame_buffers = if native_frame_output {
+        CapturedFrameBuffers::Native(Vec::with_capacity(buffer_count))
+    } else {
+        CapturedFrameBuffers::Mapped(Vec::with_capacity(buffer_count))
+    };
     requests.clear();
     requests.reserve(buffer_count);
     for index in 0..buffer_count {
         let buffer = allocator.get_buffer(&stream, index)?;
-        let mapped_planes = map_frame_buffer_readonly(&buffer)?;
+        let frame_buffer_layout = collect_frame_buffer_layout(&buffer)?;
+        match &mut captured_frame_buffers {
+            CapturedFrameBuffers::Mapped(mapped_buffers) => {
+                let mapped_planes = build_mapped_frame_buffer_planes(&frame_buffer_layout)?;
+                mapped_buffers.push(mapped_planes);
+            }
+            CapturedFrameBuffers::Native(native_frame_infos) => {
+                let native_frame_info = build_native_frame_info(&frame_buffer_layout);
+                native_frame_infos.push(native_frame_info);
+            }
+        }
         let request = camera.create_request(index as u64)?;
         request.add_buffer(&stream, &buffer)?;
         apply_controls(&request, &parsed_controls);
         requests.push(request);
-        mapped_frame_buffers.push(mapped_planes);
     }
 
     camera.start()?;
@@ -369,6 +522,11 @@ fn run_libcamera_loop(
             break;
         }
 
+        // 破棄されたネイティブフレームがあったら再キューイングする
+        while let Ok(cookie) = delayed_requeue_rx.try_recv() {
+            requeue_request(&camera, &requests, cookie, &parsed_controls);
+        }
+
         let recv_result = rx.recv_timeout(Duration::from_millis(100));
         let (cookie, frame_info) = match recv_result {
             Ok(v) => v,
@@ -376,47 +534,100 @@ fn run_libcamera_loop(
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         };
 
-        if let Some(timestamp_us) = frame_info {
-            let Some(mapped_planes) = mapped_frame_buffers.get(cookie as usize) else {
-                rtc_log_warning!(
-                    "mapped buffer is missing for request cookie: cookie={} buffers={}",
-                    cookie,
-                    mapped_frame_buffers.len()
-                );
-                requeue_request(&camera, &requests, cookie, &parsed_controls);
-                continue;
-            };
+        let Some(timestamp_us) = frame_info else {
+            rtc_log_warning!(
+                "frame is not successful and will be requeued: cookie={}",
+                cookie
+            );
+            requeue_request(&camera, &requests, cookie, &parsed_controls);
+            continue;
+        };
 
-            let buffer = match frame_pixel_format {
-                FramePixelFormat::I420 => copy_i420_planes_to_buffer(mapped_planes, width, height)
-                    .map(|v| v.cast_to_video_frame_buffer()),
-                FramePixelFormat::NV12 => copy_nv12_planes_to_buffer(mapped_planes, width, height)
-                    .map(|v| v.cast_to_video_frame_buffer()),
-            };
-            match buffer {
-                Ok(buffer) => on_frame_buffer(
+        let AdaptFrameResult { applied, size } = source.adapt_frame(width, height, timestamp_us);
+        if !applied {
+            requeue_request(&camera, &requests, cookie, &parsed_controls);
+            continue;
+        }
+
+        match &captured_frame_buffers {
+            CapturedFrameBuffers::Native(native_infos) => {
+                let Some(native_info) = native_infos.get(cookie as usize).copied() else {
+                    rtc_log_warning!(
+                        "native buffer is missing for request cookie: cookie={} buffers={}",
+                        cookie,
+                        native_infos.len()
+                    );
+                    requeue_request(&camera, &requests, cookie, &parsed_controls);
+                    continue;
+                };
+
+                on_native_frame_buffer(
+                    &mut source,
+                    &mut aligner,
+                    width,
+                    height,
+                    size.adapted_width,
+                    size.adapted_height,
+                    timestamp_us,
+                    frame_pixel_format,
+                    native_info,
+                    stride_i32,
+                    cookie,
+                    &delayed_requeue_tx,
+                );
+                // ネイティブフレームが破棄された後に requeue する必要があるので、ここでは requeue_request は呼ばない
+            }
+            CapturedFrameBuffers::Mapped(mapped_buffers) => {
+                let Some(mapped_planes) = mapped_buffers.get(cookie as usize) else {
+                    rtc_log_warning!(
+                        "mapped buffer is missing for request cookie: cookie={} buffers={}",
+                        cookie,
+                        mapped_buffers.len()
+                    );
+                    requeue_request(&camera, &requests, cookie, &parsed_controls);
+                    continue;
+                };
+
+                let buffer = match frame_pixel_format {
+                    FramePixelFormat::I420 => {
+                        copy_i420_planes_to_buffer(mapped_planes, width, height)
+                            .map(|v| v.cast_to_video_frame_buffer())
+                    }
+                    FramePixelFormat::NV12 => {
+                        copy_nv12_planes_to_buffer(mapped_planes, width, height)
+                            .map(|v| v.cast_to_video_frame_buffer())
+                    }
+                };
+                let buffer = match buffer {
+                    Ok(buffer) => buffer,
+                    Err(err) => {
+                        rtc_log_warning!(
+                            "failed to read frame: format={:?} width={} height={} stride={} planes={} err={}",
+                            frame_pixel_format,
+                            width,
+                            height,
+                            stride,
+                            mapped_planes.len(),
+                            err
+                        );
+                        requeue_request(&camera, &requests, cookie, &parsed_controls);
+                        continue;
+                    }
+                };
+
+                on_frame_buffer(
                     &mut source,
                     &mut aligner,
                     buffer,
                     width,
                     height,
+                    size.adapted_width,
+                    size.adapted_height,
                     timestamp_us,
-                ),
-                Err(err) => {
-                    rtc_log_warning!(
-                        "failed to read frame: format={:?} width={} height={} stride={} planes={} err={}",
-                        frame_pixel_format,
-                        width,
-                        height,
-                        stride,
-                        mapped_planes.len(),
-                        err
-                    );
-                }
+                );
+                requeue_request(&camera, &requests, cookie, &parsed_controls);
             }
         }
-
-        requeue_request(&camera, &requests, cookie, &parsed_controls);
     }
 
     let _ = camera.stop();
@@ -433,26 +644,23 @@ fn on_frame_buffer(
     mut frame_buffer: VideoFrameBuffer,
     width: i32,
     height: i32,
+    adapted_width: i32,
+    adapted_height: i32,
     timestamp_us: i64,
 ) {
-    let AdaptFrameResult { applied, size } = source.adapt_frame(width, height, timestamp_us);
-    if !applied {
-        return;
-    }
-
     let translated_timestamp_us =
         aligner.translate(timestamp_us, shiguredo_webrtc::time_millis() * 1000);
 
-    if size.adapted_width != width || size.adapted_height != height {
-        frame_buffer = match frame_buffer.scale(size.adapted_width, size.adapted_height) {
+    if adapted_width != width || adapted_height != height {
+        frame_buffer = match frame_buffer.scale(adapted_width, adapted_height) {
             Some(buffer) => buffer,
             None => {
                 rtc_log_warning!(
                     "failed to scale frame buffer: src={}x{} dst={}x{}",
                     width,
                     height,
-                    size.adapted_width,
-                    size.adapted_height
+                    adapted_width,
+                    adapted_height
                 );
                 return;
             }
@@ -464,6 +672,45 @@ fn on_frame_buffer(
         .set_rtp_timestamp(0)
         .build();
 
+    source.on_frame(&video_frame);
+}
+
+fn on_native_frame_buffer(
+    source: &mut AdaptedVideoTrackSource,
+    aligner: &mut TimestampAligner,
+    raw_width: i32,
+    raw_height: i32,
+    scaled_width: i32,
+    scaled_height: i32,
+    timestamp_us: i64,
+    frame_pixel_format: FramePixelFormat,
+    native_info: NativeFrameInfo,
+    stride: i32,
+    cookie: u64,
+    delayed_requeue_tx: &std::sync::mpsc::Sender<u64>,
+) {
+    let translated_timestamp_us =
+        aligner.translate(timestamp_us, shiguredo_webrtc::time_millis() * 1000);
+    let requeue_token = Arc::new(LibcameraNativeRequeueToken {
+        cookie,
+        tx: delayed_requeue_tx.clone(),
+    });
+    let frame_buffer =
+        VideoFrameBuffer::new_with_handler(Box::new(LibcameraNativeFrameBuffer::new(
+            raw_width,
+            raw_height,
+            scaled_width,
+            scaled_height,
+            native_info.fd,
+            native_info.size,
+            stride,
+            frame_pixel_format,
+            requeue_token,
+        )));
+    let video_frame = VideoFrame::builder(&frame_buffer)
+        .set_timestamp_us(translated_timestamp_us)
+        .set_rtp_timestamp(0)
+        .build();
     source.on_frame(&video_frame);
 }
 
@@ -486,9 +733,9 @@ fn map_dmabuf_readonly(fd: i32, mapped_len: usize) -> Result<MappedDmabuf> {
     Ok(MappedDmabuf { ptr, mapped_len })
 }
 
-fn map_frame_buffer_readonly(
+fn collect_frame_buffer_layout(
     buffer: &shiguredo_libcamera::FrameBuffer,
-) -> Result<Vec<MappedPlane>> {
+) -> Result<FrameBufferLayout> {
     let planes_count = buffer.planes_count();
     if planes_count == 0 {
         return Err(Error::LibcameraMessage {
@@ -515,15 +762,23 @@ fn map_frame_buffer_readonly(
         });
     }
 
-    // 全 plane をカバーするのに十分な長さのメモリをマッピングする
     let mapped_len = planes
         .iter()
         .map(|plane| plane.offset as usize + plane.length as usize)
         .max()
         .unwrap_or(0);
-    let mapping = Rc::new(map_dmabuf_readonly(first_fd, mapped_len)?);
 
-    Ok(planes
+    Ok(FrameBufferLayout {
+        planes,
+        shared_fd: first_fd,
+        mapped_len,
+    })
+}
+
+fn build_mapped_frame_buffer_planes(layout: &FrameBufferLayout) -> Result<Vec<MappedPlane>> {
+    let mapping = Rc::new(map_dmabuf_readonly(layout.shared_fd, layout.mapped_len)?);
+    Ok(layout
+        .planes
         .iter()
         .map(|plane| MappedPlane {
             mapping: mapping.clone(),
@@ -531,6 +786,13 @@ fn map_frame_buffer_readonly(
             data_len: plane.length as usize,
         })
         .collect::<Vec<_>>())
+}
+
+fn build_native_frame_info(layout: &FrameBufferLayout) -> NativeFrameInfo {
+    NativeFrameInfo {
+        fd: layout.shared_fd,
+        size: layout.mapped_len,
+    }
 }
 
 fn plane_stride_from_len(plane_len: usize, rows: usize) -> Option<i32> {
@@ -556,7 +818,7 @@ where
     }
 
     let height_rows = height as usize;
-    let chroma_rows = ((height + 1) / 2) as usize;
+    let chroma_rows = (height as usize).div_ceil(2);
     let src_y = planes[0].as_ref();
     let src_u = planes[1].as_ref();
     let src_v = planes[2].as_ref();
@@ -630,7 +892,7 @@ where
     }
 
     let height_rows = height as usize;
-    let chroma_rows = ((height + 1) / 2) as usize;
+    let chroma_rows = (height as usize).div_ceil(2);
     let src_y = planes[0].as_ref();
     let src_uv = planes[1].as_ref();
     let src_stride_y =
@@ -1033,6 +1295,7 @@ fn apply_controls(request: &shiguredo_libcamera::Request, controls: &[ParsedCont
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc::TryRecvError;
 
     #[test]
     fn copy_i420_planes_to_buffer_reads_pre_mapped_planes() {
@@ -1089,5 +1352,127 @@ mod tests {
             Err(err) => err,
         };
         assert!(format!("{err}").contains("invalid nv12 uv stride"));
+    }
+
+    fn create_native_frame_buffer_for_test(
+        cookie: u64,
+        raw_width: i32,
+        raw_height: i32,
+        scaled_width: i32,
+        scaled_height: i32,
+    ) -> (VideoFrameBuffer, std::sync::mpsc::Receiver<u64>) {
+        let (tx, rx) = std::sync::mpsc::channel::<u64>();
+        let requeue_token = Arc::new(LibcameraNativeRequeueToken { cookie, tx });
+        let buffer = VideoFrameBuffer::new_with_handler(Box::new(LibcameraNativeFrameBuffer::new(
+            raw_width,
+            raw_height,
+            scaled_width,
+            scaled_height,
+            123,
+            4096,
+            640,
+            FramePixelFormat::I420,
+            requeue_token,
+        )));
+        (buffer, rx)
+    }
+
+    #[test]
+    fn native_frame_buffer_crop_and_scale_updates_scaled_size_only() {
+        let (mut frame_buffer, _rx) = create_native_frame_buffer_for_test(10, 640, 480, 640, 480);
+
+        let scaled = frame_buffer
+            .crop_and_scale(100, 50, 320, 240, 160, 120)
+            .expect("crop_and_scale の実行に失敗しました");
+
+        let native_original = unsafe { frame_buffer.as_native_ref::<LibcameraNativeFrameBuffer>() }
+            .expect("元バッファから native 参照を取得できませんでした");
+        let native_scaled = unsafe { scaled.as_native_ref::<LibcameraNativeFrameBuffer>() }
+            .expect("スケール後バッファから native 参照を取得できませんでした");
+
+        assert_eq!(native_original.raw_width(), 640);
+        assert_eq!(native_original.raw_height(), 480);
+        assert_eq!(native_original.scaled_width(), 640);
+        assert_eq!(native_original.scaled_height(), 480);
+
+        assert_eq!(native_scaled.raw_width(), 640);
+        assert_eq!(native_scaled.raw_height(), 480);
+        assert_eq!(native_scaled.scaled_width(), 160);
+        assert_eq!(native_scaled.scaled_height(), 120);
+        assert_eq!(native_scaled.fd(), 123);
+        assert_eq!(native_scaled.size(), 4096);
+        assert_eq!(native_scaled.stride(), 640);
+    }
+
+    #[test]
+    fn native_frame_buffer_requeue_notified_only_after_all_references_are_dropped() {
+        let (mut frame_buffer, rx) = create_native_frame_buffer_for_test(42, 640, 480, 640, 480);
+
+        let scaled = frame_buffer
+            .crop_and_scale(0, 0, 640, 480, 320, 240)
+            .expect("crop_and_scale の実行に失敗しました");
+
+        drop(frame_buffer);
+        match rx.try_recv() {
+            Err(TryRecvError::Empty) => {}
+            Ok(cookie) => panic!("バッファが残っているのに通知されました: cookie={cookie}"),
+            Err(TryRecvError::Disconnected) => panic!("通知チャネルが切断されました"),
+        }
+
+        drop(scaled);
+        let cookie = rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("最終解放後の通知を受信できませんでした");
+        assert_eq!(cookie, 42);
+
+        match rx.try_recv() {
+            Err(TryRecvError::Empty) => {}
+            Ok(extra) => panic!("通知が複数回送信されました: cookie={extra}"),
+            Err(TryRecvError::Disconnected) => {}
+        }
+    }
+
+    #[test]
+    fn libcamera_builder_native_frame_output_defaults_to_false() {
+        let capturer = LibcameraVideoCapturer::builder()
+            .build()
+            .expect("キャプチャラの生成に失敗しました");
+        assert!(!capturer.native_frame_output);
+    }
+
+    #[test]
+    fn libcamera_builder_native_frame_output_can_be_enabled() {
+        let capturer = LibcameraVideoCapturer::builder()
+            .native_frame_output(true)
+            .build()
+            .expect("キャプチャラの生成に失敗しました");
+        assert!(capturer.native_frame_output);
+    }
+
+    #[test]
+    fn captured_frame_buffers_enforces_exclusive_variants() {
+        let mut mapped = CapturedFrameBuffers::Mapped(Vec::with_capacity(1));
+        match &mut mapped {
+            CapturedFrameBuffers::Mapped(mapped_buffers) => mapped_buffers.push(Vec::new()),
+            CapturedFrameBuffers::Native(_) => panic!("mapped variant expected"),
+        }
+        let native_view = match &mapped {
+            CapturedFrameBuffers::Native(native_infos) => native_infos.get(0),
+            CapturedFrameBuffers::Mapped(_) => None,
+        };
+        assert!(native_view.is_none());
+
+        let mut native = CapturedFrameBuffers::Native(Vec::with_capacity(1));
+        match &mut native {
+            CapturedFrameBuffers::Native(native_infos) => {
+                native_infos.push(NativeFrameInfo { fd: 3, size: 4 });
+            }
+            CapturedFrameBuffers::Mapped(_) => panic!("native variant expected"),
+        }
+        let mapped_view = match &native {
+            CapturedFrameBuffers::Mapped(mapped_buffers) => mapped_buffers.get(0),
+            CapturedFrameBuffers::Native(_) => None,
+        };
+        assert!(mapped_view.is_none());
     }
 }

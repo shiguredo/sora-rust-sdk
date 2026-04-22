@@ -65,6 +65,7 @@
   - @melpon
 - [ADD] libcamera を利用した映像キャプチャを追加する
   - `LibcameraVideoCapturer::builder()` と `LibcameraVideoCapturerBuilder` を追加し、`camera_index` / `width` / `height` / `control(s)` を指定できるようにする
+  - `native_frame_output(bool)` でネイティブフレームにも対応する
   - sumomo に `--libcamera` と繰り返し指定可能な `--libcamera-control KEY=VALUE` を追加する
   - e2e-tests に libcamera 実機検証を追加し、Raspberry Pi の self-hosted CI で `libcamera` feature を有効化する
   - @melpon
