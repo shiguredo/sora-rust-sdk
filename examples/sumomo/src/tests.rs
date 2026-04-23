@@ -30,6 +30,7 @@ fn test_args(
         turn_tls_insecure: false,
         turn_tls_ca_cert: None,
         use_libcamera: false,
+        use_libcamera_native: false,
         libcamera_controls: Vec::new(),
         #[cfg(feature = "raw-player")]
         use_raw_player: false,
@@ -189,6 +190,25 @@ fn parse_args_rejects_invalid_libcamera_control_format() {
 }
 
 #[test]
+fn parse_args_accepts_libcamera_native_flag() {
+    let raw_args = make_raw_args(&[
+        "sumomo",
+        "--signaling-url",
+        "wss://example.com/signaling",
+        "--channel-id",
+        "test-channel",
+        "--role",
+        "sendonly",
+        "--libcamera",
+        "--libcamera-native",
+    ]);
+    let args =
+        crate::args::parse_args(raw_args).expect("libcamera-native フラグの解析に失敗しました");
+    assert!(args.use_libcamera);
+    assert!(args.use_libcamera_native);
+}
+
+#[test]
 fn validate_args_accepts_openh264_with_path() {
     let args = test_args(
         VideoCodecImplementationSelections::Manual(vec![
@@ -251,6 +271,26 @@ fn validate_args_rejects_libcamera_control_without_libcamera() {
         err.to_string()
             .contains("--libcamera-control requires --libcamera")
     );
+}
+
+#[test]
+fn validate_args_rejects_libcamera_native_without_libcamera() {
+    let mut args = test_args(VideoCodecImplementationSelections::Auto, None);
+    args.use_libcamera_native = true;
+    let err = validate_args(&args).expect_err("libcamera-native 単独指定は失敗する必要があります");
+    assert!(
+        err.to_string()
+            .contains("--libcamera-native requires --libcamera")
+    );
+}
+
+#[cfg(feature = "libcamera")]
+#[test]
+fn validate_args_accepts_libcamera_native_with_libcamera() {
+    let mut args = test_args(VideoCodecImplementationSelections::Auto, None);
+    args.use_libcamera = true;
+    args.use_libcamera_native = true;
+    assert!(validate_args(&args).is_ok());
 }
 
 #[cfg(feature = "media-device")]

@@ -29,6 +29,7 @@ pub(crate) struct Args {
     pub(crate) turn_tls_insecure: bool,
     pub(crate) turn_tls_ca_cert: Option<String>,
     pub(crate) use_libcamera: bool,
+    pub(crate) use_libcamera_native: bool,
     pub(crate) libcamera_controls: Vec<(String, String)>,
     #[cfg(feature = "raw-player")]
     pub(crate) use_raw_player: bool,
@@ -179,6 +180,7 @@ pub(crate) fn parse_args(mut args: noargs::RawArgs) -> Result<Args> {
             turn_tls_insecure: false,
             turn_tls_ca_cert: None,
             use_libcamera: false,
+            use_libcamera_native: false,
             libcamera_controls: Vec::new(),
             #[cfg(feature = "raw-player")]
             use_raw_player: false,
@@ -225,6 +227,7 @@ pub(crate) fn parse_args(mut args: noargs::RawArgs) -> Result<Args> {
             openh264_path: None,
             video_codec_list: false,
             use_libcamera: false,
+            use_libcamera_native: false,
             libcamera_controls: Vec::new(),
             #[cfg(feature = "raw-player")]
             use_raw_player: false,
@@ -378,6 +381,10 @@ pub(crate) fn parse_args(mut args: noargs::RawArgs) -> Result<Args> {
         .doc("Use libcamera video capturer")
         .take(&mut args)
         .is_present();
+    let use_libcamera_native = noargs::flag("libcamera-native")
+        .doc("Use native frame buffer output for libcamera")
+        .take(&mut args)
+        .is_present();
 
     // --libcamera-control KEY=VALUE (複数回指定可能)
     let mut libcamera_controls = Vec::new();
@@ -452,6 +459,7 @@ pub(crate) fn parse_args(mut args: noargs::RawArgs) -> Result<Args> {
         turn_tls_insecure,
         turn_tls_ca_cert,
         use_libcamera,
+        use_libcamera_native,
         libcamera_controls,
         #[cfg(feature = "raw-player")]
         use_raw_player,
@@ -491,6 +499,9 @@ pub(crate) fn validate_args(args: &Args) -> Result<()> {
 
     if !args.use_libcamera && !args.libcamera_controls.is_empty() {
         return Err(io::Error::other("--libcamera-control requires --libcamera").into());
+    }
+    if args.use_libcamera_native && !args.use_libcamera {
+        return Err(io::Error::other("--libcamera-native requires --libcamera").into());
     }
 
     #[cfg(not(feature = "libcamera"))]

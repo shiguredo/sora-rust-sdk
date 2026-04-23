@@ -1,7 +1,12 @@
 use std::collections::HashMap;
 use std::fs::OpenOptions;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
+#[cfg(feature = "libcamera")]
+use shiguredo_v4l2::v4l2_m2m::{
+    ConvertCallbackOutput, ConvertInput, ConvertedFrame, ConverterConfig, ImageConverter, Memory,
+    PixelFormat,
+};
 use shiguredo_v4l2::v4l2_m2m::{
     DecodeCallbackOutput, DecodeInput, DecoderConfig, EncodeCallbackOutput, EncodeInput,
     EncoderConfig, Error as V4l2Error, H264Decoder, H264Encoder, Resolution,
@@ -19,6 +24,8 @@ use shiguredo_webrtc::{
 };
 
 use crate::error::{Error, Result};
+#[cfg(feature = "libcamera")]
+use crate::libcamera::LibcameraNativeFrameBuffer;
 use crate::video_codec::{SimulcastCapabilityHelper, codec_type_from_format};
 use crate::video_codec_capability::{
     CodecDirection, VideoCodecCapability, VideoCodecImplementation,
@@ -100,27 +107,97 @@ fn build_i420_frame(
     )
 }
 
-fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
-
-#[derive(Clone, Copy)]
 struct EncoderCallbackValue {
     rtp_timestamp: u32,
     frame_width: u32,
     frame_height: u32,
+    #[cfg(feature = "libcamera")]
+    _converted_frame: Option<ConvertedFrame>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EncoderInputMode {
+    MmapI420,
+    #[cfg(feature = "libcamera")]
+    NativeDmabuf,
+}
+
+#[cfg(feature = "libcamera")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativePixelFormat {
+    I420,
+    NV12,
+}
+
+#[cfg(feature = "libcamera")]
+impl NativePixelFormat {
+    fn from_frame(frame: &LibcameraNativeFrameBuffer) -> Option<Self> {
+        if frame.is_i420() {
+            Some(Self::I420)
+        } else if frame.is_nv12() {
+            Some(Self::NV12)
+        } else {
+            None
+        }
+    }
+
+    fn to_v4l2_pixel_format(self) -> PixelFormat {
+        match self {
+            Self::I420 => PixelFormat::Yuv420,
+            Self::NV12 => PixelFormat::Nv12,
+        }
+    }
+}
+
+#[cfg(feature = "libcamera")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NativeInputConfig {
+    raw_width: u32,
+    raw_height: u32,
+    scaled_width: u32,
+    scaled_height: u32,
+    pixel_format: NativePixelFormat,
+}
+
+#[cfg(feature = "libcamera")]
+impl NativeInputConfig {
+    fn from_frame(frame: &LibcameraNativeFrameBuffer) -> Option<Self> {
+        let raw_width = u32::try_from(frame.raw_width()).ok()?;
+        let raw_height = u32::try_from(frame.raw_height()).ok()?;
+        let scaled_width = u32::try_from(frame.scaled_width()).ok()?;
+        let scaled_height = u32::try_from(frame.scaled_height()).ok()?;
+        if raw_width == 0 || raw_height == 0 || scaled_width == 0 || scaled_height == 0 {
+            return None;
+        }
+        let pixel_format = NativePixelFormat::from_frame(frame)?;
+        Some(Self {
+            raw_width,
+            raw_height,
+            scaled_width,
+            scaled_height,
+            pixel_format,
+        })
+    }
+}
+
+#[cfg(feature = "libcamera")]
+#[derive(Clone)]
+struct ConverterCallbackValue {
+    rtp_timestamp: u32,
+    frame_width: u32,
+    frame_height: u32,
+    force_keyframe: bool,
+    _native_frame: LibcameraNativeFrameBuffer,
 }
 
 #[derive(Default)]
-struct EncoderCallbackState {
+struct EncoderSharedState {
+    encoder: Option<H264Encoder<EncoderCallbackValue>>,
     callback: Option<VideoEncoderEncodedImageCallbackPtr>,
 }
 
 fn handle_v4l2_encode_callback(
-    callback_state: &Arc<Mutex<EncoderCallbackState>>,
+    shared_state: &Arc<Mutex<EncoderSharedState>>,
     result: shiguredo_v4l2::v4l2_m2m::Result<EncodeCallbackOutput<EncoderCallbackValue>>,
 ) {
     let (encoded, value) = match result {
@@ -152,8 +229,11 @@ fn handle_v4l2_encode_callback(
     codec_specific_info.set_h264_packetization_mode(H264PacketizationMode::NonInterleaved);
     codec_specific_info.set_h264_idr_frame(encoded.is_keyframe());
 
-    let callback_state = lock_unpoisoned(callback_state);
-    let Some(callback) = callback_state.callback else {
+    let callback = {
+        let shared_state = shared_state.lock().unwrap();
+        shared_state.callback
+    };
+    let Some(callback) = callback else {
         return;
     };
 
@@ -167,30 +247,99 @@ fn handle_v4l2_encode_callback(
     }
 }
 
+#[cfg(feature = "libcamera")]
+fn handle_v4l2_convert_callback(
+    shared_state: &Arc<Mutex<EncoderSharedState>>,
+    result: shiguredo_v4l2::v4l2_m2m::Result<ConvertCallbackOutput<ConverterCallbackValue>>,
+) {
+    let (converted, value) = match result {
+        Ok(ConvertCallbackOutput::Frame { frame, value }) => (frame, value),
+        Err(err) => {
+            rtc_log_error!("V4L2 convert callback failed: {}", err);
+            return;
+        }
+    };
+
+    let Some(dmabuf_fd) = converted.dmabuf_fd() else {
+        rtc_log_error!("V4L2 convert callback returned frame without DMABUF fd");
+        return;
+    };
+    let bytesused = converted.bytesused();
+    let length = converted.length();
+    let timestamp_us = converted.timestamp_us();
+
+    // ConvertedFrame をエンコーダーに渡すことで、
+    // 変換済み画像のライフタイムをエンコーダーの処理が完了するまで伸ばす。
+    // これをしないと、変換済み画像のバッファがエンコード処理中に解放されてしまう可能性がある。
+    let callback_value = EncoderCallbackValue {
+        rtp_timestamp: value.rtp_timestamp,
+        frame_width: value.frame_width,
+        frame_height: value.frame_height,
+        _converted_frame: Some(converted),
+    };
+
+    let mut shared_state = shared_state.lock().unwrap();
+    let Some(encoder) = shared_state.encoder.as_mut() else {
+        rtc_log_warning!("V4L2 convert callback dropped frame because encoder is not initialized");
+        return;
+    };
+    match encoder.encode(
+        EncodeInput::DmaBuf {
+            fd: dmabuf_fd,
+            bytesused,
+            length,
+        },
+        timestamp_us,
+        value.force_keyframe,
+        callback_value,
+    ) {
+        Ok(()) => {}
+        Err(V4l2Error::NoAvailableBuffer) => {
+            rtc_log_warning!("V4L2 converter to encoder dropped frame due to no available buffer");
+        }
+        Err(err) => {
+            rtc_log_error!("V4L2 converter to encoder failed: {}", err);
+        }
+    }
+}
+
 struct V4l2VideoEncoder {
-    encoder: Option<H264Encoder<EncoderCallbackValue>>,
-    callback_state: Arc<Mutex<EncoderCallbackState>>,
+    shared_state: Arc<Mutex<EncoderSharedState>>,
     device_path: String,
     width: u32,
     height: u32,
     target_bitrate_bps: u32,
+    input_mode: EncoderInputMode,
     rebuild_needed: bool,
+    #[cfg(feature = "libcamera")]
+    converter: Option<ImageConverter<ConverterCallbackValue>>,
+    #[cfg(feature = "libcamera")]
+    native_input_config: Option<NativeInputConfig>,
 }
 
 impl V4l2VideoEncoder {
     fn new(device_path: String) -> Self {
         Self {
-            encoder: None,
-            callback_state: Arc::new(Mutex::new(EncoderCallbackState::default())),
+            shared_state: Arc::new(Mutex::new(EncoderSharedState::default())),
             device_path,
             width: 0,
             height: 0,
             target_bitrate_bps: 500_000,
+            input_mode: EncoderInputMode::MmapI420,
             rebuild_needed: false,
+            #[cfg(feature = "libcamera")]
+            converter: None,
+            #[cfg(feature = "libcamera")]
+            native_input_config: None,
         }
     }
 
-    fn rebuild_encoder(&mut self) -> Result<()> {
+    fn shared_has_encoder(&self) -> bool {
+        let shared_state = self.shared_state.lock().unwrap();
+        shared_state.encoder.is_some()
+    }
+
+    fn rebuild_mmap_encoder(&mut self) -> Result<()> {
         if self.width == 0 || self.height == 0 {
             return Err(Error::V4l2Message {
                 reason: "V4L2 encoder requires non-zero width and height".to_string(),
@@ -200,10 +349,69 @@ impl V4l2VideoEncoder {
         let mut config =
             EncoderConfig::new(self.width, self.height, self.target_bitrate_bps.max(1));
         config.device_path = self.device_path.clone();
-        let callback_state = self.callback_state.clone();
-        self.encoder = Some(H264Encoder::new(config, move |result| {
-            handle_v4l2_encode_callback(&callback_state, result);
-        })?);
+        let shared_state = self.shared_state.clone();
+        let encoder = H264Encoder::new(config, move |result| {
+            handle_v4l2_encode_callback(&shared_state, result);
+        })?;
+
+        let mut shared_state = self.shared_state.lock().unwrap();
+        shared_state.encoder = Some(encoder);
+        drop(shared_state);
+
+        #[cfg(feature = "libcamera")]
+        {
+            self.converter = None;
+            self.native_input_config = None;
+        }
+        self.input_mode = EncoderInputMode::MmapI420;
+        self.rebuild_needed = false;
+        Ok(())
+    }
+
+    // Libcamera からのネイティブフレーム用のエンコードパイプラインを構築する。
+    // ImageConverter と H264Encoder でパイプラインを構築する。
+    #[cfg(feature = "libcamera")]
+    fn rebuild_native_pipeline(&mut self) -> Result<()> {
+        let native_config = self.native_input_config.ok_or_else(|| Error::V4l2Message {
+            reason: "V4L2 native pipeline requires native input config".to_string(),
+        })?;
+
+        let mut encoder_config = EncoderConfig::new(
+            native_config.scaled_width,
+            native_config.scaled_height,
+            self.target_bitrate_bps.max(1),
+        );
+        encoder_config.device_path = self.device_path.clone();
+        encoder_config.input_memory = Memory::DmaBuf;
+        encoder_config.pixel_format = native_config.pixel_format.to_v4l2_pixel_format();
+        let shared_state = self.shared_state.clone();
+        let encoder = H264Encoder::new(encoder_config, move |result| {
+            handle_v4l2_encode_callback(&shared_state, result);
+        })?;
+
+        let mut converter_config = ConverterConfig::new(
+            native_config.raw_width,
+            native_config.raw_height,
+            native_config.scaled_width,
+            native_config.scaled_height,
+        );
+        converter_config.input_memory = Memory::DmaBuf;
+        converter_config.output_memory = Memory::DmaBuf;
+        converter_config.input_pixel_format = native_config.pixel_format.to_v4l2_pixel_format();
+        converter_config.output_pixel_format = native_config.pixel_format.to_v4l2_pixel_format();
+        let shared_state = self.shared_state.clone();
+        let converter = ImageConverter::new(converter_config, move |result| {
+            handle_v4l2_convert_callback(&shared_state, result);
+        })?;
+
+        let mut shared_state = self.shared_state.lock().unwrap();
+        shared_state.encoder = Some(encoder);
+        drop(shared_state);
+
+        self.converter = Some(converter);
+        self.width = native_config.scaled_width;
+        self.height = native_config.scaled_height;
+        self.input_mode = EncoderInputMode::NativeDmabuf;
         self.rebuild_needed = false;
         Ok(())
     }
@@ -223,9 +431,16 @@ impl VideoEncoderHandler for V4l2VideoEncoder {
         self.width = codec.width().max(0) as u32;
         self.height = codec.height().max(0) as u32;
         self.target_bitrate_bps = codec.start_bitrate_kbps().saturating_mul(1000);
+        self.input_mode = EncoderInputMode::MmapI420;
+        #[cfg(feature = "libcamera")]
+        {
+            self.native_input_config = None;
+            self.converter = None;
+        }
         self.rebuild_needed = true;
 
-        if self.rebuild_encoder().is_err() {
+        if let Err(err) = self.rebuild_mmap_encoder() {
+            rtc_log_error!("V4L2 rebuild mmap encoder failed in init_encode: {}", err);
             return VideoCodecStatus::Error;
         }
 
@@ -238,8 +453,8 @@ impl VideoEncoderHandler for V4l2VideoEncoder {
         frame_types: Option<VideoFrameTypeVectorRef<'_>>,
     ) -> VideoCodecStatus {
         let has_callback = {
-            let callback_state = lock_unpoisoned(&self.callback_state);
-            callback_state.callback.is_some()
+            let shared_state = self.shared_state.lock().unwrap();
+            shared_state.callback.is_some()
         };
         if !has_callback {
             return VideoCodecStatus::Uninitialized;
@@ -252,16 +467,97 @@ impl VideoEncoderHandler for V4l2VideoEncoder {
         }
 
         let requested_frame_type = requested_frame_type(frame_types);
+        let force_keyframe = matches!(requested_frame_type, Some(VideoFrameType::Key));
+        let timestamp_us = frame.timestamp_us();
+        let rtp_timestamp = frame.rtp_timestamp();
 
+        // Libcamera からのネイティブフレーム（LibcameraNativeFrameBuffer）は、ImageConverter で変換して H264Encoder に渡す。
+        // ImageConverter によって縮小処理も HWA になるのと、DMABUF を直接扱うためメモリコピーの回数も少ないのでとても高速に処理ができる。
+        #[cfg(feature = "libcamera")]
+        {
+            let frame_buffer = frame.buffer();
+            if let Some(native) =
+                unsafe { frame_buffer.as_native_ref::<LibcameraNativeFrameBuffer>() }
+            {
+                let Some(native_input_config) = NativeInputConfig::from_frame(native) else {
+                    rtc_log_error!("V4L2 native frame metadata is invalid");
+                    return VideoCodecStatus::ErrParameter;
+                };
+                let bytesused = match u32::try_from(native.size()) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        rtc_log_error!("V4L2 native frame size is too large: {}", native.size());
+                        return VideoCodecStatus::ErrParameter;
+                    }
+                };
+
+                // 初回や解像度が変わった時はネイティブフレーム用の初期化を行う
+                if self.input_mode != EncoderInputMode::NativeDmabuf
+                    || self.native_input_config != Some(native_input_config)
+                {
+                    self.native_input_config = Some(native_input_config);
+                    self.rebuild_needed = true;
+                }
+                if !self.shared_has_encoder() || self.converter.is_none() {
+                    self.rebuild_needed = true;
+                }
+                if self.rebuild_needed
+                    && let Err(err) = self.rebuild_native_pipeline()
+                {
+                    rtc_log_error!("V4L2 rebuild native pipeline failed: {}", err);
+                    return VideoCodecStatus::Error;
+                }
+
+                let Some(converter) = self.converter.as_mut() else {
+                    return VideoCodecStatus::Error;
+                };
+                // LibcameraNativeFrameBuffer が破棄される時に libcamera にリキューされて再利用されるので、
+                // 変換処理が完了するまでライフタイムを延ばすために ConverterCallbackValue にも保持しておく。
+                let converter_value = ConverterCallbackValue {
+                    rtp_timestamp,
+                    frame_width,
+                    frame_height,
+                    force_keyframe,
+                    _native_frame: native.clone(),
+                };
+                // 変換
+                return match converter.convert(
+                    ConvertInput::DmaBuf {
+                        fd: native.fd(),
+                        bytesused,
+                        length: bytesused,
+                    },
+                    timestamp_us,
+                    converter_value,
+                ) {
+                    Ok(()) => VideoCodecStatus::Ok,
+                    Err(V4l2Error::NoAvailableBuffer) => VideoCodecStatus::NoOutput,
+                    Err(err) => {
+                        rtc_log_error!("V4L2 convert failed: {}", err);
+                        VideoCodecStatus::Error
+                    }
+                };
+            }
+        }
+
+        // 通常の I420 や NV12 といったフレームの場合のエンコード処理。
+        // 既に前段階で縮小変換されているはずなので、単にエンコーダーに渡すだけで良い。
+
+        if self.input_mode != EncoderInputMode::MmapI420 {
+            self.rebuild_needed = true;
+        }
         if frame_width != self.width || frame_height != self.height {
             self.width = frame_width;
             self.height = frame_height;
             self.rebuild_needed = true;
         }
-        if self.encoder.is_none() {
+        if !self.shared_has_encoder() {
             self.rebuild_needed = true;
         }
-        if self.rebuild_needed && self.rebuild_encoder().is_err() {
+        if self.rebuild_needed
+            && let Err(err) = self.rebuild_mmap_encoder()
+        {
+            rtc_log_error!("V4L2 rebuild mmap encoder failed in encode: {}", err);
             return VideoCodecStatus::Error;
         }
 
@@ -269,9 +565,6 @@ impl VideoEncoderHandler for V4l2VideoEncoder {
         let Some(i420) = frame_buffer.to_i420() else {
             return VideoCodecStatus::Error;
         };
-
-        let encoder = self.encoder.as_mut().expect("encoder should exist");
-
         let mut fill = |buf: &mut [u8],
                         resolution: &Resolution,
                         _value: &EncoderCallbackValue|
@@ -309,12 +602,17 @@ impl VideoEncoderHandler for V4l2VideoEncoder {
             Some(yuv_size)
         };
 
-        let force_keyframe = matches!(requested_frame_type, Some(VideoFrameType::Key));
-        let timestamp_us = frame.timestamp_us();
         let callback_value = EncoderCallbackValue {
-            rtp_timestamp: frame.rtp_timestamp(),
+            rtp_timestamp,
             frame_width,
             frame_height,
+            #[cfg(feature = "libcamera")]
+            _converted_frame: None,
+        };
+        let mut shared_state = self.shared_state.lock().unwrap();
+        let Some(encoder) = shared_state.encoder.as_mut() else {
+            rtc_log_error!("V4L2 encode failed: encoder is not initialized");
+            return VideoCodecStatus::Error;
         };
         match encoder.encode(
             EncodeInput::Mmap(&mut fill),
@@ -335,18 +633,23 @@ impl VideoEncoderHandler for V4l2VideoEncoder {
         &mut self,
         callback: Option<VideoEncoderEncodedImageCallbackRef<'_>>,
     ) -> VideoCodecStatus {
-        let mut callback_state = lock_unpoisoned(&self.callback_state);
-        callback_state.callback = callback
+        let mut shared_state = self.shared_state.lock().unwrap();
+        shared_state.callback = callback
             .map(|callback| unsafe { VideoEncoderEncodedImageCallbackPtr::from_ref(callback) });
         VideoCodecStatus::Ok
     }
 
     fn release(&mut self) -> VideoCodecStatus {
-        let mut callback_state = lock_unpoisoned(&self.callback_state);
-        callback_state.callback = None;
-        drop(callback_state);
-        self.encoder = None;
+        #[cfg(feature = "libcamera")]
+        {
+            self.converter = None;
+            self.native_input_config = None;
+        }
         self.rebuild_needed = false;
+        self.input_mode = EncoderInputMode::MmapI420;
+        let mut shared_state = self.shared_state.lock().unwrap();
+        shared_state.callback = None;
+        shared_state.encoder = None;
         VideoCodecStatus::Ok
     }
 
@@ -357,7 +660,8 @@ impl VideoEncoderHandler for V4l2VideoEncoder {
             .max(1);
         self.target_bitrate_bps = bitrate_bps;
 
-        let Some(encoder) = self.encoder.as_mut() else {
+        let mut shared_state = self.shared_state.lock().unwrap();
+        let Some(encoder) = shared_state.encoder.as_mut() else {
             self.rebuild_needed = true;
             return;
         };
@@ -396,11 +700,11 @@ fn handle_v4l2_decode_callback(
 ) {
     match result {
         Ok(DecodeCallbackOutput::ResolutionChanged { resolution }) => {
-            let mut callback_state = lock_unpoisoned(callback_state);
+            let mut callback_state = callback_state.lock().unwrap();
             callback_state.resolution = Some(resolution);
         }
         Ok(DecodeCallbackOutput::Frame { frame, value }) => {
-            let callback_state = lock_unpoisoned(callback_state);
+            let callback_state = callback_state.lock().unwrap();
             let resolution = match callback_state.resolution {
                 Some(resolution) => resolution,
                 None => {
@@ -469,7 +773,7 @@ impl V4l2VideoDecoder {
         self.decoder = Some(H264Decoder::new(config, move |result| {
             handle_v4l2_decode_callback(&callback_state, result);
         })?);
-        let mut callback_state = lock_unpoisoned(&self.callback_state);
+        let mut callback_state = self.callback_state.lock().unwrap();
         callback_state.resolution = None;
         Ok(())
     }
@@ -487,7 +791,13 @@ impl VideoDecoderHandler for V4l2VideoDecoder {
         if settings.codec_type() != VideoCodecType::H264 {
             return false;
         }
-        self.rebuild_decoder().is_ok()
+        match self.rebuild_decoder() {
+            Ok(()) => true,
+            Err(err) => {
+                rtc_log_error!("V4L2 rebuild decoder failed in configure: {}", err);
+                false
+            }
+        }
     }
 
     fn decode(
@@ -496,14 +806,15 @@ impl VideoDecoderHandler for V4l2VideoDecoder {
         render_time_ms: i64,
     ) -> VideoCodecStatus {
         let has_callback = {
-            let callback_state = lock_unpoisoned(&self.callback_state);
+            let callback_state = self.callback_state.lock().unwrap();
             callback_state.callback.is_some()
         };
         if !has_callback {
             return VideoCodecStatus::Uninitialized;
         }
 
-        if self.ensure_decoder().is_err() {
+        if let Err(err) = self.ensure_decoder() {
+            rtc_log_error!("V4L2 ensure decoder failed in decode: {}", err);
             return VideoCodecStatus::Error;
         }
 
@@ -530,7 +841,7 @@ impl VideoDecoderHandler for V4l2VideoDecoder {
         ) {
             Ok(()) => {
                 if let Some(resolution) = decoder.resolution() {
-                    let mut callback_state = lock_unpoisoned(&self.callback_state);
+                    let mut callback_state = self.callback_state.lock().unwrap();
                     callback_state.resolution = Some(resolution);
                 }
                 VideoCodecStatus::Ok
@@ -552,13 +863,13 @@ impl VideoDecoderHandler for V4l2VideoDecoder {
         &mut self,
         callback: Option<VideoDecoderDecodedImageCallbackPtr>,
     ) -> VideoCodecStatus {
-        let mut callback_state = lock_unpoisoned(&self.callback_state);
+        let mut callback_state = self.callback_state.lock().unwrap();
         callback_state.callback = callback;
         VideoCodecStatus::Ok
     }
 
     fn release(&mut self) -> VideoCodecStatus {
-        let mut callback_state = lock_unpoisoned(&self.callback_state);
+        let mut callback_state = self.callback_state.lock().unwrap();
         callback_state.callback = None;
         callback_state.resolution = None;
         drop(callback_state);

@@ -22,7 +22,9 @@ pub use crate::connection_context::{
 };
 pub use crate::error::{Error, Result};
 #[cfg(feature = "libcamera")]
-pub use crate::libcamera::{LibcameraVideoCapturer, LibcameraVideoCapturerBuilder};
+pub use crate::libcamera::{
+    LibcameraNativeFrameBuffer, LibcameraVideoCapturer, LibcameraVideoCapturerBuilder,
+};
 pub use crate::rpc::{RpcRequestOptions, RpcResponse};
 pub use crate::types::{
     Audio, AudioCodecType, AudioOpusParams, ConnectDataChannel, ForwardingFilter,

@@ -61,11 +61,14 @@
   - @melpon
 - [ADD] V4L2 に対応する
   - `shiguredo_v4l2` を利用した `V4l2VideoCodecCapability` を追加し、H264 エンコーダー/デコーダーを提供する
+  - libcamera ネイティブバッファ入力をエンコードできるようにする
   - sumomo の `--video-codec-implementation` と `--video-codec-list` で `v4l2` を指定・表示できるようにする
   - @melpon
 - [ADD] libcamera を利用した映像キャプチャを追加する
   - `LibcameraVideoCapturer::builder()` と `LibcameraVideoCapturerBuilder` を追加し、`camera_index` / `width` / `height` / `control(s)` を指定できるようにする
+  - `native_frame_output(bool)` でネイティブフレームにも対応する
   - sumomo に `--libcamera` と繰り返し指定可能な `--libcamera-control KEY=VALUE` を追加する
+  - sumomo に `--libcamera-native` を追加し、`--libcamera` 指定時のみネイティブバッファ出力を有効化する
   - e2e-tests に libcamera 実機検証を追加し、Raspberry Pi の self-hosted CI で `libcamera` feature を有効化する
   - @melpon
 - [ADD] `nvcodec` の対応コーデックを拡張する
