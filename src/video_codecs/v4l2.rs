@@ -181,12 +181,13 @@ impl NativeInputConfig {
 }
 
 #[cfg(feature = "libcamera")]
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct ConverterCallbackValue {
     rtp_timestamp: u32,
     frame_width: u32,
     frame_height: u32,
     force_keyframe: bool,
+    _native_frame: LibcameraNativeFrameBuffer,
 }
 
 #[derive(Default)]
@@ -510,11 +511,14 @@ impl VideoEncoderHandler for V4l2VideoEncoder {
                 let Some(converter) = self.converter.as_mut() else {
                     return VideoCodecStatus::Error;
                 };
+                // LibcameraNativeFrameBuffer が破棄される時に libcamera にリキューされて再利用されるので、
+                // 変換処理が完了するまでライフタイムを延ばすために ConverterCallbackValue にも保持しておく。
                 let converter_value = ConverterCallbackValue {
                     rtp_timestamp,
                     frame_width,
                     frame_height,
                     force_keyframe,
+                    _native_frame: native.clone(),
                 };
                 // 変換
                 return match converter.convert(

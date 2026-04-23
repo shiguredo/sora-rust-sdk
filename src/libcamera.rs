@@ -184,7 +184,7 @@ impl Drop for LibcameraNativeRequeueToken {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LibcameraNativeFrameBuffer {
     raw_width: i32,
     raw_height: i32,
