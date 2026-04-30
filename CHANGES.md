@@ -29,6 +29,12 @@
   - `src/client.rs` / `src/client_context.rs` を `src/connection.rs` / `src/connection_context.rs` にリネームする
   - Sora シグナリング仕様の `client_id` / TLS 用語の `client_cert` / `client_key` / `version::get_sora_client_name()` は据え置く
   - @voluntas
+- [CHANGE] VPL デコーダーを非同期コールバック API に対応させる
+  - `Decoder<T>` のジェネリクス型パラメータに対応し、コンストラクタでコールバックを登録する
+  - `Decoder::decode` に value 引数を渡し、`DecodedFrame<T>` で受け取る
+  - `Decoder::next_frame` の廃止に伴い、非同期コールバック方式へ移行する
+  - `nv12_to_i420` による色空間変換を廃止し、`NV12Buffer` + `nv12_copy` で NV12 のまま処理する
+  - @melpon
 - [UPDATE] zlib 圧縮/展開の実装を `flate2` から `noflate` に差し替える
   - @voluntas
 - [UPDATE] `shiguredo_webrtc` を 0.147.1-canary.4 に上げる
