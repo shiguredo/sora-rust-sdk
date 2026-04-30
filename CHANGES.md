@@ -104,6 +104,8 @@
 
 ### misc
 
+- [UPDATE] README から削除済みの zakuro サンプルセクションを取り除く
+  - @voluntas
 - [UPDATE] e2e-tests に `SoraTestConnection` を追加し、`SoraConnection` 直利用テストを callback ログ + predicate 待機ベースへ置き換える
   - @melpon
 - [UPDATE] e2e-tests の WebRTC stats 検証を文字列探索から型付きパースベースへ置き換える
