@@ -6,7 +6,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aws_lc_rs::rand::{SecureRandom as AwsSecureRandom, SystemRandom};
 use nojson::Json;
-use rand::seq::SliceRandom;
 use rustls::ClientConfig;
 use rustls::pki_types::{
     CertificateDer, PrivateKeyDer, ServerName, TrustAnchor, UnixTime, pem::PemObject,
@@ -786,9 +785,18 @@ impl SoraConnection {
             return Err(Error::SignalingUrlsEmpty);
         }
 
-        // URL リストをランダム化して負荷分散する
+        // URL リストをランダム化して負荷分散する (Fisher-Yates シャッフル)
         let mut urls = signaling_urls.clone();
-        urls.shuffle(&mut rand::rng());
+        if urls.len() > 1 {
+            let rng = SystemRandom::new();
+            for i in (1..urls.len()).rev() {
+                let mut buf = [0u8; 8];
+                rng.fill(&mut buf)
+                    .expect("failed to generate random bytes for URL shuffle");
+                let j = (u64::from_le_bytes(buf) % (i as u64 + 1)) as usize;
+                urls.swap(i, j);
+            }
+        }
 
         let websocket_connection_timeout = self.config.websocket_connection_timeout;
         let websocket_close_timeout = self.config.websocket_close_timeout;
