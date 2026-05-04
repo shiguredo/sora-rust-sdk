@@ -1,20 +1,23 @@
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use shiguredo_amf::{
-    Av1EncoderConfig, CodecConfig, Decoder, DecoderCodec, DecoderConfig, EncodeOptions, Encoder,
-    EncoderConfig, FrameFormat, H264EncoderConfig, HevcEncoderConfig, PictureType, RateControlMode,
-    ReconfigureParams, VideoCodecType as AmfCodecType, frame_type, supported_codecs,
+    Av1EncoderConfig, CodecConfig, DecodedFrame, Decoder, DecoderCodec, DecoderConfig,
+    EncodeOptions, EncodedFrame, Encoder, EncoderConfig, FrameFormat, H264EncoderConfig,
+    HevcEncoderConfig, PictureType, RateControlMode, ReconfigureParams,
+    VideoCodecType as AmfCodecType, frame_type, supported_codecs,
 };
+
 use shiguredo_webrtc::{
     CodecSpecificInfo, EncodedImage, EncodedImageBuffer, EncodedImageRef, EnvironmentRef,
-    H264PacketizationMode, I420Buffer, NV12Buffer, ScalabilityMode, SdpVideoFormat,
-    SdpVideoFormatRef, VideoCodecRef, VideoCodecStatus, VideoCodecType, VideoDecoder,
+    H264PacketizationMode, NV12Buffer, ScalabilityMode, SdpVideoFormat, SdpVideoFormatRef,
+    VideoCodecRef, VideoCodecStatus, VideoCodecType, VideoDecoder,
     VideoDecoderDecodedImageCallbackPtr, VideoDecoderDecoderInfo, VideoDecoderHandler,
     VideoDecoderSettingsRef, VideoEncoder, VideoEncoderEncodedImageCallbackPtr,
     VideoEncoderEncodedImageCallbackRef, VideoEncoderEncodedImageCallbackResultError,
     VideoEncoderEncoderInfo, VideoEncoderHandler, VideoEncoderRateControlParametersRef,
     VideoEncoderSettingsRef, VideoFrame, VideoFrameRef, VideoFrameType, VideoFrameTypeVectorRef,
-    i420_to_nv12, nv12_to_i420, rtc_log_error, rtc_log_warning,
+    i420_to_nv12, nv12_copy, rtc_log_error, rtc_log_warning,
 };
 
 use crate::error::Result;
@@ -114,9 +117,73 @@ fn amf_reconfigure_params(target_bitrate_bps: u32, framerate: u32) -> Reconfigur
     }
 }
 
-struct AmfVideoEncoder {
+#[derive(Clone, Copy)]
+struct EncoderCallbackValue {
+    rtp_timestamp: u32,
+    frame_width: u32,
+    frame_height: u32,
+}
+
+#[derive(Default)]
+struct EncoderCallbackState {
     callback: Option<VideoEncoderEncodedImageCallbackPtr>,
-    encoder: Option<Encoder>,
+}
+
+fn handle_amf_encode_callback(
+    callback_state: &Arc<Mutex<EncoderCallbackState>>,
+    encoded: EncodedFrame<EncoderCallbackValue>,
+    codec_type: VideoCodecType,
+) {
+    let picture_type = encoded.picture_type();
+    let output_frame_type = frame_type_from_amf(picture_type);
+    let value = encoded.user_data();
+    let rtp_timestamp = value.rtp_timestamp;
+    let frame_width = value.frame_width;
+    let frame_height = value.frame_height;
+
+    let buffer = encoded.buffer();
+    let ptr = buffer.get_native() as *const u8;
+    let size = buffer.get_size();
+    if ptr.is_null() || size == 0 {
+        rtc_log_error!("AMF encode callback: buffer is null or empty");
+        return;
+    }
+    let data = unsafe { std::slice::from_raw_parts(ptr, size) };
+
+    let mut encoded_image = EncodedImage::new();
+    let encoded_buffer = EncodedImageBuffer::from_bytes(data);
+    encoded_image.set_encoded_data(&encoded_buffer);
+    encoded_image.set_rtp_timestamp(rtp_timestamp);
+    encoded_image.set_encoded_width(frame_width);
+    encoded_image.set_encoded_height(frame_height);
+    encoded_image.set_frame_type(output_frame_type);
+
+    let mut codec_specific_info = CodecSpecificInfo::new();
+    codec_specific_info.set_codec_type(codec_type);
+    if codec_type == VideoCodecType::H264 {
+        codec_specific_info.set_h264_packetization_mode(H264PacketizationMode::NonInterleaved);
+        codec_specific_info.set_h264_idr_frame(matches!(picture_type, PictureType::Idr));
+    }
+
+    let result = {
+        let callback_state = callback_state.lock().unwrap();
+        let Some(callback) = callback_state.callback else {
+            return;
+        };
+        unsafe {
+            callback.on_encoded_image(encoded_image.as_ref(), Some(codec_specific_info.as_ref()))
+        }
+    };
+    if result.error() != VideoEncoderEncodedImageCallbackResultError::Ok {
+        rtc_log_warning!(
+            "AMF: on_encoded_image returned non-Ok status; continue encoding to avoid libwebrtc crash"
+        );
+    }
+}
+
+struct AmfVideoEncoder {
+    encoder: Option<Encoder<EncoderCallbackValue>>,
+    callback_state: Arc<Mutex<EncoderCallbackState>>,
     codec_type: VideoCodecType,
     width: u32,
     height: u32,
@@ -129,8 +196,8 @@ struct AmfVideoEncoder {
 impl AmfVideoEncoder {
     fn new(codec_type: VideoCodecType) -> Self {
         Self {
-            callback: None,
             encoder: None,
+            callback_state: Arc::new(Mutex::new(EncoderCallbackState::default())),
             codec_type,
             width: 0,
             height: 0,
@@ -164,9 +231,13 @@ impl AmfVideoEncoder {
         );
         config.target_kbps = Some(target_kbps_from_bps(self.target_bitrate_bps));
 
+        let callback_state = Arc::clone(&self.callback_state);
+        let callback_codec_type = self.codec_type;
+        self.encoder = Some(Encoder::new(config, move |encoded| {
+            handle_amf_encode_callback(&callback_state, encoded, callback_codec_type);
+        })?);
         self.rebuild_needed = false;
         self.reconfigure_needed = false;
-        self.encoder = Some(Encoder::new(config)?);
         Ok(())
     }
 
@@ -224,10 +295,13 @@ impl VideoEncoderHandler for AmfVideoEncoder {
         frame: VideoFrameRef<'_>,
         frame_types: Option<VideoFrameTypeVectorRef<'_>>,
     ) -> VideoCodecStatus {
-        let callback = match self.callback {
-            Some(callback) => callback,
-            None => return VideoCodecStatus::Uninitialized,
+        let has_callback = {
+            let callback_state = self.callback_state.lock().unwrap();
+            callback_state.callback.is_some()
         };
+        if !has_callback {
+            return VideoCodecStatus::Uninitialized;
+        }
 
         let frame_width = frame.width().max(0) as u32;
         let frame_height = frame.height().max(0) as u32;
@@ -282,68 +356,97 @@ impl VideoEncoderHandler for AmfVideoEncoder {
             Err(_) => return VideoCodecStatus::Error,
         };
 
-        let mut nv12 = NV12Buffer::new(frame_width_i32, frame_height_i32);
-        let src_stride_y = i420.stride_y();
-        let src_stride_u = i420.stride_u();
-        let src_stride_v = i420.stride_v();
-        let dst_stride_y = nv12.stride_y();
-        let dst_stride_uv = nv12.stride_uv();
-        {
-            let (dst_y, dst_uv) = nv12.planes_mut();
-            if !i420_to_nv12(
-                i420.y_data(),
-                src_stride_y,
-                i420.u_data(),
-                src_stride_u,
-                i420.v_data(),
-                src_stride_v,
-                dst_y,
-                dst_stride_y,
-                dst_uv,
-                dst_stride_uv,
-                frame_width_i32,
-                frame_height_i32,
-            ) {
+        let Some(encoder) = self.encoder.as_ref() else {
+            return VideoCodecStatus::Error;
+        };
+        let surface = match encoder.alloc_surface() {
+            Ok(s) => s,
+            Err(err) => {
+                rtc_log_error!(
+                    "AMF alloc_surface failed for {:?}: {}",
+                    self.codec_type,
+                    err
+                );
                 return VideoCodecStatus::Error;
             }
-        }
-
-        let options = EncodeOptions {
-            frame_type: amf_force_frame_type(requested_frame_type),
         };
-        let encoder = self.encoder.as_mut().expect("encoder should exist");
-        if let Err(err) = encoder.encode(nv12.data(), &options) {
-            rtc_log_error!("AMF encode failed for {:?}: {}", self.codec_type, err);
+
+        let plane_y = match surface.get_plane_at(0) {
+            Ok(p) => p,
+            Err(err) => {
+                rtc_log_error!(
+                    "AMF encoder get_plane_at(0) failed for {:?}: {}",
+                    self.codec_type,
+                    err
+                );
+                return VideoCodecStatus::Error;
+            }
+        };
+        let plane_uv = match surface.get_plane_at(1) {
+            Ok(p) => p,
+            Err(err) => {
+                rtc_log_error!(
+                    "AMF encoder get_plane_at(1) failed for {:?}: {}",
+                    self.codec_type,
+                    err
+                );
+                return VideoCodecStatus::Error;
+            }
+        };
+
+        let y_stride = plane_y.get_hpitch();
+        let uv_stride = plane_uv.get_hpitch();
+        let surface_height = plane_y.get_height();
+        assert_eq!(surface_height as u32, frame_height);
+
+        let Some(y_size) = (y_stride as usize).checked_mul(surface_height as usize) else {
+            return VideoCodecStatus::ErrParameter;
+        };
+        let Some(uv_size) = (uv_stride as usize).checked_mul((surface_height as usize).div_ceil(2))
+        else {
+            return VideoCodecStatus::ErrParameter;
+        };
+        let dst_y = {
+            let ptr = plane_y.get_native() as *mut u8;
+            unsafe { std::slice::from_raw_parts_mut(ptr, y_size) }
+        };
+        let dst_uv = {
+            let ptr = plane_uv.get_native() as *mut u8;
+            unsafe { std::slice::from_raw_parts_mut(ptr, uv_size) }
+        };
+
+        if !i420_to_nv12(
+            i420.y_data(),
+            i420.stride_y(),
+            i420.u_data(),
+            i420.stride_u(),
+            i420.v_data(),
+            i420.stride_v(),
+            dst_y,
+            y_stride,
+            dst_uv,
+            uv_stride,
+            frame_width_i32,
+            frame_height_i32,
+        ) {
             return VideoCodecStatus::Error;
         }
 
-        while let Some(encoded_frame) = encoder.next_frame() {
-            let mut encoded_image = EncodedImage::new();
-            let encoded_buffer = EncodedImageBuffer::from_bytes(encoded_frame.data());
-            encoded_image.set_encoded_data(&encoded_buffer);
-            encoded_image.set_rtp_timestamp(frame.rtp_timestamp());
-            encoded_image.set_encoded_width(frame_width);
-            encoded_image.set_encoded_height(frame_height);
-            encoded_image.set_frame_type(frame_type_from_amf(encoded_frame.picture_type()));
-
-            let mut codec_specific_info = CodecSpecificInfo::new();
-            codec_specific_info.set_codec_type(self.codec_type);
-            if self.codec_type == VideoCodecType::H264 {
-                codec_specific_info
-                    .set_h264_packetization_mode(H264PacketizationMode::NonInterleaved);
-                codec_specific_info
-                    .set_h264_idr_frame(matches!(encoded_frame.picture_type(), PictureType::Idr));
-            }
-
-            let result = unsafe {
-                callback
-                    .on_encoded_image(encoded_image.as_ref(), Some(codec_specific_info.as_ref()))
-            };
-            if result.error() != VideoEncoderEncodedImageCallbackResultError::Ok {
-                rtc_log_warning!(
-                    "AMF: on_encoded_image returned non-Ok status; continue encoding to avoid libwebrtc crash"
-                );
-            }
+        let rtp_timestamp = frame.rtp_timestamp();
+        let options = EncodeOptions {
+            frame_type: amf_force_frame_type(requested_frame_type),
+        };
+        let callback_value = EncoderCallbackValue {
+            rtp_timestamp,
+            frame_width,
+            frame_height,
+        };
+        let Some(encoder) = self.encoder.as_mut() else {
+            return VideoCodecStatus::Error;
+        };
+        if let Err(err) = encoder.encode(surface, &options, callback_value) {
+            rtc_log_error!("AMF encode failed for {:?}: {}", self.codec_type, err);
+            return VideoCodecStatus::Error;
         }
 
         VideoCodecStatus::Ok
@@ -353,14 +456,17 @@ impl VideoEncoderHandler for AmfVideoEncoder {
         &mut self,
         callback: Option<VideoEncoderEncodedImageCallbackRef<'_>>,
     ) -> VideoCodecStatus {
-        self.callback = callback
+        let mut callback_state = self.callback_state.lock().unwrap();
+        callback_state.callback = callback
             .map(|callback| unsafe { VideoEncoderEncodedImageCallbackPtr::from_ref(callback) });
         VideoCodecStatus::Ok
     }
 
     fn release(&mut self) -> VideoCodecStatus {
+        let mut callback_state = self.callback_state.lock().unwrap();
+        callback_state.callback = None;
+        drop(callback_state);
         self.encoder = None;
-        self.callback = None;
         self.rebuild_needed = false;
         self.reconfigure_needed = false;
         VideoCodecStatus::Ok
@@ -383,31 +489,141 @@ impl VideoEncoderHandler for AmfVideoEncoder {
     }
 }
 
-struct AmfVideoDecoder {
+#[derive(Clone, Copy)]
+struct DecoderCallbackValue {
+    rtp_timestamp: u32,
+    render_time_ms: i64,
+}
+
+#[derive(Default)]
+struct DecoderCallbackState {
     callback: Option<VideoDecoderDecodedImageCallbackPtr>,
-    decoder: Option<Decoder>,
+}
+
+fn handle_amf_decode_callback(
+    callback_state: &Arc<Mutex<DecoderCallbackState>>,
+    decoded: DecodedFrame<DecoderCallbackValue>,
+) {
+    let surface = decoded.surface();
+    let value = decoded.user_data();
+
+    let plane_y = match surface.get_plane_at(0) {
+        Ok(p) => p,
+        Err(err) => {
+            rtc_log_error!("AMF decode callback: failed to get Y plane: {}", err);
+            return;
+        }
+    };
+    let plane_uv = match surface.get_plane_at(1) {
+        Ok(p) => p,
+        Err(err) => {
+            rtc_log_error!("AMF decode callback: failed to get UV plane: {}", err);
+            return;
+        }
+    };
+
+    let width = plane_y.get_width();
+    let height = plane_y.get_height();
+    let y_pitch = plane_y.get_hpitch();
+    let uv_pitch = plane_uv.get_hpitch();
+
+    let width_i32 = match i32::try_from(width) {
+        Ok(v) => v,
+        Err(_) => {
+            rtc_log_error!("AMF decode callback: width exceeds i32::MAX: {}", width);
+            return;
+        }
+    };
+    let height_i32 = match i32::try_from(height) {
+        Ok(v) => v,
+        Err(_) => {
+            rtc_log_error!("AMF decode callback: height exceeds i32::MAX: {}", height);
+            return;
+        }
+    };
+
+    let y_native = plane_y.get_native() as *const u8;
+    let uv_native = plane_uv.get_native() as *const u8;
+    let Some(y_size) = (y_pitch as usize).checked_mul(height as usize) else {
+        rtc_log_error!(
+            "AMF decode callback: y_size overflow: y_pitch={}, height={}",
+            y_pitch,
+            height
+        );
+        return;
+    };
+    let Some(uv_size) = (uv_pitch as usize).checked_mul((height as usize).div_ceil(2)) else {
+        rtc_log_error!(
+            "AMF decode callback: uv_size overflow: uv_pitch={}, height={}",
+            uv_pitch,
+            height
+        );
+        return;
+    };
+    let src_y = unsafe { std::slice::from_raw_parts(y_native, y_size) };
+    let src_uv = unsafe { std::slice::from_raw_parts(uv_native, uv_size) };
+
+    let mut nv12 = NV12Buffer::new(width_i32, height_i32);
+    let dst_stride_y = nv12.stride_y();
+    let dst_stride_uv = nv12.stride_uv();
+    {
+        let (dst_y, dst_uv) = nv12.planes_mut();
+        if !nv12_copy(
+            src_y,
+            y_pitch,
+            src_uv,
+            uv_pitch,
+            dst_y,
+            dst_stride_y,
+            dst_uv,
+            dst_stride_uv,
+            width_i32,
+            height_i32,
+        ) {
+            rtc_log_error!("AMF decode callback: nv12_copy failed");
+            return;
+        }
+    }
+
+    let decoded_frame = VideoFrame::builder(&nv12.cast_to_video_frame_buffer())
+        .set_timestamp_us(value.render_time_ms.saturating_mul(1000))
+        .set_rtp_timestamp(value.rtp_timestamp)
+        .build();
+
+    let callback_state = callback_state.lock().unwrap();
+    let Some(callback) = callback_state.callback else {
+        return;
+    };
+    unsafe {
+        callback.decoded(decoded_frame.as_ref());
+    }
+}
+
+struct AmfVideoDecoder {
+    callback_state: Arc<Mutex<DecoderCallbackState>>,
+    decoder: Option<Decoder<DecoderCallbackValue>>,
     codec_type: VideoCodecType,
 }
 
 impl AmfVideoDecoder {
     fn new(codec_type: VideoCodecType) -> Self {
         Self {
-            callback: None,
+            callback_state: Arc::new(Mutex::new(DecoderCallbackState::default())),
             decoder: None,
             codec_type,
         }
     }
 
-    fn ensure_decoder(&mut self) -> Result<()> {
-        if self.decoder.is_none() {
-            let Some(codec) = decoder_codec(self.codec_type) else {
-                return Err(crate::Error::AmfMessage {
-                    reason: "AMF decoder codec type is not supported".to_string(),
-                });
-            };
-            let decoder = Decoder::new(DecoderConfig { codec })?;
-            self.decoder = Some(decoder);
-        }
+    fn rebuild_decoder(&mut self) -> Result<()> {
+        let Some(codec) = decoder_codec(self.codec_type) else {
+            return Err(crate::Error::AmfMessage {
+                reason: "AMF decoder codec type is not supported".to_string(),
+            });
+        };
+        let callback_state = Arc::clone(&self.callback_state);
+        self.decoder = Some(Decoder::new(DecoderConfig { codec }, move |decoded| {
+            handle_amf_decode_callback(&callback_state, decoded);
+        })?);
         Ok(())
     }
 }
@@ -417,11 +633,13 @@ impl VideoDecoderHandler for AmfVideoDecoder {
         if settings.codec_type() != self.codec_type {
             return false;
         }
-        let Some(codec) = decoder_codec(self.codec_type) else {
-            return false;
-        };
-        self.decoder = Decoder::new(DecoderConfig { codec }).ok();
-        self.decoder.is_some()
+        match self.rebuild_decoder() {
+            Ok(()) => true,
+            Err(err) => {
+                rtc_log_error!("AMF rebuild decoder failed in configure: {}", err);
+                false
+            }
+        }
     }
 
     fn decode(
@@ -429,78 +647,62 @@ impl VideoDecoderHandler for AmfVideoDecoder {
         input_image: EncodedImageRef<'_>,
         render_time_ms: i64,
     ) -> VideoCodecStatus {
-        if self.ensure_decoder().is_err() {
-            return VideoCodecStatus::Error;
+        let has_callback = {
+            let callback_state = self.callback_state.lock().unwrap();
+            callback_state.callback.is_some()
+        };
+        if !has_callback {
+            return VideoCodecStatus::Uninitialized;
         }
 
         let Some(encoded_data) = input_image.encoded_data() else {
             return VideoCodecStatus::ErrParameter;
         };
 
-        let rtp_timestamp = input_image.rtp_timestamp();
-        let decoder = self.decoder.as_mut().expect("decoder should exist");
-        if decoder.decode(encoded_data.data()).is_err() {
+        if self.decoder.is_none()
+            && let Err(err) = self.rebuild_decoder()
+        {
+            rtc_log_error!("AMF rebuild decoder failed in decode: {}", err);
             return VideoCodecStatus::Error;
         }
 
-        let mut decoded_images = Vec::new();
-        while let Some(frame) = decoder.next_frame() {
-            let Some(y_plane_size) = frame.width().checked_mul(frame.height()) else {
-                return VideoCodecStatus::Error;
-            };
-            if frame.data().len() < y_plane_size {
-                return VideoCodecStatus::Error;
-            }
-            let (src_y, src_uv) = frame.data().split_at(y_plane_size);
-
-            let width_i32 = match i32::try_from(frame.width()) {
-                Ok(v) => v,
-                Err(_) => return VideoCodecStatus::Error,
-            };
-            let height_i32 = match i32::try_from(frame.height()) {
-                Ok(v) => v,
-                Err(_) => return VideoCodecStatus::Error,
-            };
-
-            let mut i420 = I420Buffer::new(width_i32, height_i32);
-            let dst_stride_y = i420.stride_y();
-            let dst_stride_u = i420.stride_u();
-            let dst_stride_v = i420.stride_v();
-            let (dst_y, dst_u, dst_v) = i420.planes_mut();
-            if !nv12_to_i420(
-                src_y,
-                width_i32,
-                src_uv,
-                width_i32,
-                dst_y,
-                dst_stride_y,
-                dst_u,
-                dst_stride_u,
-                dst_v,
-                dst_stride_v,
-                width_i32,
-                height_i32,
-            ) {
-                return VideoCodecStatus::Error;
-            }
-
-            decoded_images.push(
-                VideoFrame::builder(&i420.cast_to_video_frame_buffer())
-                    .set_timestamp_us(render_time_ms.saturating_mul(1000))
-                    .set_rtp_timestamp(rtp_timestamp)
-                    .build(),
-            );
-        }
-
-        let Some(callback) = self.callback.as_ref() else {
-            return VideoCodecStatus::Uninitialized;
+        let encoded_bytes = encoded_data.data();
+        let Some(decoder) = self.decoder.as_ref() else {
+            return VideoCodecStatus::Error;
         };
-        for decoded_image in &decoded_images {
-            unsafe {
-                callback.decoded(decoded_image.as_ref());
+        let buffer = match decoder.alloc_buffer(encoded_bytes.len()) {
+            Ok(b) => b,
+            Err(err) => {
+                rtc_log_error!("AMF alloc_buffer failed for {:?}: {}", self.codec_type, err);
+                return VideoCodecStatus::Error;
             }
+        };
+
+        let ptr = buffer.get_native() as *mut u8;
+        let size = buffer.get_size();
+        if encoded_bytes.len() > size {
+            rtc_log_error!(
+                "AMF decoder: encoded data size {} exceeds buffer size {}",
+                encoded_bytes.len(),
+                size
+            );
+            return VideoCodecStatus::Error;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(encoded_bytes.as_ptr(), ptr, encoded_bytes.len());
         }
 
+        let callback_value = DecoderCallbackValue {
+            rtp_timestamp: input_image.rtp_timestamp(),
+            render_time_ms,
+        };
+        let Some(decoder) = self.decoder.as_mut() else {
+            return VideoCodecStatus::Error;
+        };
+        if let Err(err) = decoder.decode(buffer, callback_value) {
+            rtc_log_error!("AMF decode failed for {:?}: {}", self.codec_type, err);
+            return VideoCodecStatus::Error;
+        }
         VideoCodecStatus::Ok
     }
 
@@ -508,13 +710,16 @@ impl VideoDecoderHandler for AmfVideoDecoder {
         &mut self,
         callback: Option<VideoDecoderDecodedImageCallbackPtr>,
     ) -> VideoCodecStatus {
-        self.callback = callback;
+        let mut callback_state = self.callback_state.lock().unwrap();
+        callback_state.callback = callback;
         VideoCodecStatus::Ok
     }
 
     fn release(&mut self) -> VideoCodecStatus {
+        let mut callback_state = self.callback_state.lock().unwrap();
+        callback_state.callback = None;
+        drop(callback_state);
         self.decoder = None;
-        self.callback = None;
         VideoCodecStatus::Ok
     }
 
@@ -764,7 +969,7 @@ mod tests {
     }
 
     #[test]
-    fn amf_frame_type_mapping_matches_idr_only_keyframe() {
+    fn amf_frame_type_mapping_matches_expected() {
         assert_eq!(frame_type_from_amf(PictureType::Idr), VideoFrameType::Key);
         assert_eq!(frame_type_from_amf(PictureType::I), VideoFrameType::Delta);
         assert_eq!(frame_type_from_amf(PictureType::P), VideoFrameType::Delta);

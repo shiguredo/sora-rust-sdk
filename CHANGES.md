@@ -35,6 +35,12 @@
   - `Decoder::next_frame` の廃止に伴い、非同期コールバック方式へ移行する
   - `nv12_to_i420` による色空間変換を廃止し、`NV12Buffer` + `nv12_copy` で NV12 のまま処理する
   - @melpon
+- [CHANGE] AMF エンコーダー/デコーダーを非同期コールバック API に対応させる
+  - `Encoder<T>` / `Decoder<T>` のコンストラクタにコールバッククロージャを渡す
+  - `Encoder::encode` に `Surface` + user_data を渡し、出力はコールバック経由で `EncodedFrame<T>` として受け取る
+  - `Decoder::decode` に `Buffer` + user_data を渡し、出力はコールバック経由で `DecodedFrame<T>` として受け取る
+  - `Encoder::next_frame` / `Decoder::next_frame` の廃止に伴い、非同期コールバック方式へ移行する
+  - @melpon
 - [UPDATE] zlib 圧縮/展開の実装を `flate2` から `noflate` に差し替える
   - @voluntas
 - [UPDATE] `shiguredo_webrtc` を 0.147.1-canary.4 に上げる
