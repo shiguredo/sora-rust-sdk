@@ -29,6 +29,8 @@
   - `src/client.rs` / `src/client_context.rs` を `src/connection.rs` / `src/connection_context.rs` にリネームする
   - Sora シグナリング仕様の `client_id` / TLS 用語の `client_cert` / `client_key` / `version::get_sora_client_name()` は据え置く
   - @voluntas
+- [UPDATE] `shiguredo_http11` を 2026.2 に上げる
+  - @voluntas
 - [UPDATE] zlib 圧縮/展開の実装を `flate2` から `noflate` に差し替える
   - @voluntas
 - [UPDATE] `rand` 依存を削除し、シグナリング URL のシャッフルを `aws-lc-rs` の `SystemRandom` を用いた Fisher-Yates 実装に置き換える

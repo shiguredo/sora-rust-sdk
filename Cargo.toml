@@ -17,12 +17,12 @@ members = ["e2e-tests", "examples/sumomo"]
 shiguredo_webrtc = { version = "=0.147.2" }
 
 [dependencies]
-## 時雨堂クレート
+# 時雨堂クレート
 
 # AMD AMF (Advanced Media Framework) によるハードウェアエンコード/デコード
 shiguredo_amf = { version = "2026.2", optional = true }
 # HTTP プロキシの CONNECT トンネリングと URI パースで利用
-shiguredo_http11 = "2026.1"
+shiguredo_http11 = "2026.2"
 # libcamera 経由のカメラキャプチャ (Linux 向け)
 shiguredo_libcamera = { version = "2026.1.0-canary.1", optional = true }
 # MP4 ファイルからの映像入力で利用するデマルチプレクサ
@@ -40,7 +40,7 @@ shiguredo_webrtc = { workspace = true }
 # Sora シグナリングへの接続で利用する WebSocket クライアント実装
 shiguredo_websocket = "2026.1"
 
-## 外部クレート
+# 外部クレート
 
 # rustls の暗号バックエンドおよび WebSocket の SecureRandom 実装に利用
 aws-lc-rs = "1.16"
@@ -57,7 +57,7 @@ rustls = { version = "0.23", default-features = false, features = [
   "tls12",
 ] }
 # OS 標準のルート証明書ストアによるサーバー証明書検証
-rustls-platform-verifier = "0.6"
+rustls-platform-verifier = "0.7"
 # TURN over TLS 用の CA 証明書による独自サーバー証明書検証に利用
 rustls-webpki = { version = "0.103", default-features = false, features = [
   "aws-lc-rs",
