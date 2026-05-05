@@ -491,17 +491,18 @@ async fn test_sendrecv_bidirectional_via_proxy() {
     client1
         .wait_video_inbound_packets_received(Duration::from_secs(10))
         .await
-        .expect("クライアント 1 の inbound-rtp packetsReceived が 0 より大きくなりませんでした");
+        .expect("クライアント 1 の inbound-rtp の packetsReceived と framesDecoded が 0 より大きくなりませんでした");
     client2
         .wait_video_inbound_packets_received(Duration::from_secs(10))
         .await
-        .expect("クライアント 2 の inbound-rtp packetsReceived が 0 より大きくなりませんでした");
+        .expect("クライアント 2 の inbound-rtp の packetsReceived と framesDecoded が 0 より大きくなりませんでした");
 
     client1
         .wait_stats(
             |stats| {
                 verify_video_stats_field_positive(stats, "outbound-rtp", "packetsSent")
                     && verify_video_stats_field_positive(stats, "inbound-rtp", "packetsReceived")
+                    && verify_video_stats_field_positive(stats, "inbound-rtp", "framesDecoded")
                     && sum_video_stats_field_for_type(stats, "outbound-rtp", "bytesSent")
                         >= MIN_RTP_BYTES_PER_CLIENT
                     && sum_video_stats_field_for_type(stats, "inbound-rtp", "bytesReceived")
@@ -516,6 +517,7 @@ async fn test_sendrecv_bidirectional_via_proxy() {
             |stats| {
                 verify_video_stats_field_positive(stats, "outbound-rtp", "packetsSent")
                     && verify_video_stats_field_positive(stats, "inbound-rtp", "packetsReceived")
+                    && verify_video_stats_field_positive(stats, "inbound-rtp", "framesDecoded")
                     && sum_video_stats_field_for_type(stats, "outbound-rtp", "bytesSent")
                         >= MIN_RTP_BYTES_PER_CLIENT
                     && sum_video_stats_field_for_type(stats, "inbound-rtp", "bytesReceived")

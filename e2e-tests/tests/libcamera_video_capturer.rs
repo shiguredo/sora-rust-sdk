@@ -93,7 +93,8 @@ async fn test_sendonly_recvonly_with_libcamera() {
         .expect("sendonly stats did not reach expected values within timeout");
     recvonly
         .wait_stats(
-            |stats| verify_video_stats_field_positive(stats, "inbound-rtp", "packetsReceived"),
+            |stats| verify_video_stats_field_positive(stats, "inbound-rtp", "packetsReceived")
+                    && verify_video_stats_field_positive(stats, "inbound-rtp", "framesDecoded"),
             Duration::from_secs(15),
         )
         .await

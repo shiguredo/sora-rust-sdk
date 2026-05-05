@@ -82,7 +82,7 @@ async fn test_sendonly_then_recvonly() {
     recvonly
         .wait_video_inbound_packets_received(Duration::from_secs(10))
         .await
-        .expect("RecvOnly の inbound-rtp の packetsReceived が 0 より大きくなりませんでした");
+        .expect("RecvOnly の inbound-rtp の packetsReceived と framesDecoded が 0 より大きくなりませんでした");
 
     sendonly
         .disconnect_and_wait(Duration::from_secs(10))
@@ -126,7 +126,7 @@ async fn test_recvonly_then_sendonly() {
     recvonly
         .wait_video_inbound_packets_received(Duration::from_secs(10))
         .await
-        .expect("RecvOnly の inbound-rtp の packetsReceived が 0 より大きくなりませんでした");
+        .expect("RecvOnly の inbound-rtp の packetsReceived と framesDecoded が 0 より大きくなりませんでした");
 
     sendonly
         .disconnect_and_wait(Duration::from_secs(10))
