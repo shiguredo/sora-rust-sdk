@@ -857,7 +857,13 @@ impl SoraConnection {
         loop {
             tokio::select! {
                 read = stream.read(&mut buf), if !websocket_closed => {
-                    let n = read?;
+                    // ピアが close_notify を送らずに TCP を閉じた場合 UnexpectedEof になるため、
+                    // n == 0 と同じ「相手から切られた」扱いに合流させる。
+                    let n = match read {
+                        Ok(n) => n,
+                        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => 0,
+                        Err(e) => return Err(e.into()),
+                    };
                     if n == 0 {
                         if switched_ignore_disconnect_websocket {
                             rtc_log_info!(
@@ -1203,12 +1209,28 @@ impl SoraConnection {
                 }
             }
 
+            // WebSocket クローズ後の break は、ignore_disconnect_websocket=true
+            // 成立時のみ DataChannel シグナリング継続のために抑制する。
             if let Ok(true) = flush_ws_output(&mut ws, &mut stream, &mut timers).await {
-                break;
+                if switched_ignore_disconnect_websocket && !websocket_closed {
+                    rtc_log_info!(
+                        "WebSocket 接続が閉じられました (DataChannel シグナリングを継続)"
+                    );
+                    websocket_closed = true;
+                } else if !switched_ignore_disconnect_websocket {
+                    break;
+                }
             }
 
             if ws.state() == ConnectionState::Closed {
-                break;
+                if switched_ignore_disconnect_websocket && !websocket_closed {
+                    rtc_log_info!(
+                        "WebSocket 接続が閉じられました (DataChannel シグナリングを継続)"
+                    );
+                    websocket_closed = true;
+                } else if !switched_ignore_disconnect_websocket {
+                    break;
+                }
             }
         }
 

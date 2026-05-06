@@ -103,6 +103,10 @@
   - @melpon
 - [FIX] `e2e-tests/tests/video_codec.rs` の未使用 import `std::sync::Arc` を削除する
   - @voluntas
+- [FIX] `ignore_disconnect_websocket=true` 指定時に WebSocket クローズ後も DataChannel シグナリングが継続するように修正する
+  - WebSocket close 完了時に `run()` ループが無条件で break して DataChannel シグナリングが継続しなかった問題を修正する
+  - 防御的に `stream.read()` の `UnexpectedEof` (ピアが close_notify を送らずに TCP を閉じたケース) も `n == 0` と同等扱いに合流させる
+  - @voluntas
 
 ### misc
 
