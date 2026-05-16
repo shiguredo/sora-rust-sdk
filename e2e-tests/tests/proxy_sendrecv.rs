@@ -145,10 +145,12 @@ async fn decode_connect_request(stream: &mut TcpStream) -> Result<ConnectTarget>
     let mut buf = [0u8; 2048];
     loop {
         if let Some((head, _body_kind)) = decoder.decode_headers()? {
-            if !head.method.eq_ignore_ascii_case("CONNECT") {
-                return Err(ProxyHarnessError::UnsupportedMethod(head.method));
+            if !head.method().eq_ignore_ascii_case("CONNECT") {
+                return Err(ProxyHarnessError::UnsupportedMethod(
+                    head.method().to_string(),
+                ));
             }
-            return parse_authority(&head.uri, None).ok_or(ProxyHarnessError::InvalidAuthority);
+            return parse_authority(head.uri(), None).ok_or(ProxyHarnessError::InvalidAuthority);
         }
 
         let n = stream.read(&mut buf).await?;
@@ -168,8 +170,12 @@ async fn handle_proxy_connection(
     connect_log.lock().unwrap().push(target.clone());
 
     let mut upstream = TcpStream::connect((target.host.as_str(), target.port)).await?;
-    let response = Response::new(200, "Connection Established");
-    downstream.write_all(&response.encode()).await?;
+    let response = Response::new(200, "Connection Established")
+        .expect("固定値の Response::new に失敗しました");
+    let encoded = response
+        .encode()
+        .expect("固定値の Response::encode に失敗しました");
+    downstream.write_all(&encoded).await?;
     let (mut downstream_reader, mut downstream_writer) = downstream.split();
     let (mut upstream_reader, mut upstream_writer) = upstream.split();
     let (downstream_to_upstream, upstream_to_downstream) = tokio::join!(

@@ -2301,17 +2301,17 @@ fn build_proxy_connect_request(
     proxy: &ParsedProxyInfo,
 ) -> Result<Vec<u8>> {
     let authority = format!("{}:{}", format_bracketed_host(&target.host), target.port);
-    let mut request = Request::new("CONNECT", &authority)
-        .header("Host", &authority)
-        .header("User-Agent", &proxy.user_agent);
+    let mut request = Request::new("CONNECT", &authority)?
+        .header("Host", &authority)?
+        .header("User-Agent", &proxy.user_agent)?;
     if proxy.username.is_some() || proxy.password.is_some() {
         let username = proxy.username.as_deref().unwrap_or("");
         let password = proxy.password.as_deref().unwrap_or("");
         let auth = BasicAuth::new(username, password)?;
         let header = auth.to_header_value();
-        request = request.header("Proxy-Authorization", &header);
+        request = request.header("Proxy-Authorization", &header)?;
     }
-    Ok(request.encode())
+    Ok(request.encode()?)
 }
 
 fn ensure_proxy_connect_status_success(status_code: u16, reason_phrase: &str) -> Result<()> {
@@ -2343,7 +2343,7 @@ async fn connect_http_proxy_tunnel(
         }
         decoder.feed(&buf[..n])?;
         if let Some((head, _body_kind)) = decoder.decode_headers()? {
-            ensure_proxy_connect_status_success(head.status_code, &head.reason_phrase)?;
+            ensure_proxy_connect_status_success(head.status_code(), head.reason_phrase())?;
             let remaining = decoder.take_remaining();
             stream.push_pending_read(remaining);
             return Ok(());
@@ -2738,7 +2738,7 @@ mod tests {
             .expect("レスポンスヘッダーの decode に失敗しました")
             .expect("レスポンスヘッダーが完成していません");
         assert_eq!(body_kind, shiguredo_http11::BodyKind::Tunnel);
-        ensure_proxy_connect_status_success(head.status_code, &head.reason_phrase)
+        ensure_proxy_connect_status_success(head.status_code(), head.reason_phrase())
             .expect("2xx は成功扱いである必要があります");
     }
 
@@ -2757,7 +2757,7 @@ mod tests {
             body_kind,
             shiguredo_http11::BodyKind::ContentLength(0)
         ));
-        let err = ensure_proxy_connect_status_success(head.status_code, &head.reason_phrase)
+        let err = ensure_proxy_connect_status_success(head.status_code(), head.reason_phrase())
             .expect_err("非 2xx は失敗扱いである必要があります");
         assert!(matches!(
             err,

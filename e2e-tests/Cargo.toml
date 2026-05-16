@@ -10,7 +10,7 @@ aws-lc-rs = "1.16"
 base64 = "0.22"
 nojson = "0.3"
 raden = { version = "2026.1" }
-shiguredo_http11 = "2026.2"
+shiguredo_http11 = "2026.4"
 shiguredo_nvcodec = { version = "2026.1", optional = true }
 shiguredo_video_device = { version = "2026.1" }
 shiguredo_webrtc = { workspace = true }
