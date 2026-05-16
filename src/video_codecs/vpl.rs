@@ -1,10 +1,14 @@
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
+#[cfg(target_os = "linux")]
+use shiguredo_vpl::supported_codecs;
 use shiguredo_vpl::{
-    Av1EncoderConfig, CodecConfig, Decoder, DecoderCodec, DecoderConfig, EncodeOptions, Encoder,
-    EncoderConfig, FrameFormat, H264EncoderConfig, HevcEncoderConfig, PictureType, RateControlMode,
-    ReconfigureParams, VideoCodecType as VplCodecType, Vp9EncoderConfig, Vp9Profile, frame_type,
-    supported_codecs,
+    AdapterSelector, Av1EncoderConfig, CodecConfig, DecodedFrame, Decoder, DecoderCodec,
+    DecoderConfig, EncodeOptions, EncodedFrame, Encoder, EncoderConfig, FnDecodeHandler,
+    FnEncodeHandler, FrameFormat, H264EncoderConfig, HevcEncoderConfig, PictureType,
+    RateControlMode, ReconfigureParams, VideoCodecType as VplCodecType, Vp9EncoderConfig,
+    Vp9Profile, frame_type, list_adapters,
 };
 use shiguredo_webrtc::{
     CodecSpecificInfo, EncodedImage, EncodedImageBuffer, EncodedImageRef, EnvironmentRef,
@@ -24,8 +28,49 @@ use crate::video_codec_capability::{
     CodecDirection, VideoCodecCapability, VideoCodecImplementation,
 };
 
-fn collect_supported_formats() -> Result<(Vec<SdpVideoFormat>, Vec<SdpVideoFormat>)> {
-    let codec_infos = supported_codecs()?;
+/// 非 Linux 環境向け `supported_codecs` スタブ
+///
+/// `shiguredo_vpl::supported_codecs` は Linux 専用関数のため、それ以外の
+/// プラットフォームでは常に空のリストを返す。
+#[cfg(not(target_os = "linux"))]
+fn supported_codecs(
+    _adapter: AdapterSelector,
+) -> std::result::Result<Vec<shiguredo_vpl::CodecInfo>, shiguredo_vpl::Error> {
+    Ok(Vec::new())
+}
+
+/// VPL エンコーダーのコールバックハンドラに渡すユーザーデータ
+struct VplEncoderUserData {
+    rtp_timestamp: u32,
+    width: u32,
+    height: u32,
+}
+
+/// VPL デコーダーのコールバックハンドラに渡すユーザーデータ
+struct VplDecoderUserData {
+    rtp_timestamp: u32,
+    timestamp_us: i64,
+}
+
+type SharedEncoderCallback = Arc<Mutex<Option<VideoEncoderEncodedImageCallbackPtr>>>;
+type SharedDecoderCallback = Arc<Mutex<Option<VideoDecoderDecodedImageCallbackPtr>>>;
+
+/// 利用可能な Intel HW アダプターから先頭のものを選択する
+fn default_adapter() -> Result<AdapterSelector> {
+    let adapters = list_adapters()?;
+    let adapter = adapters
+        .into_iter()
+        .next()
+        .ok_or_else(|| crate::Error::VplMessage {
+            reason: "no Intel VPL adapter found".to_string(),
+        })?;
+    Ok(AdapterSelector::DrmRenderNode(adapter.drm_render_node))
+}
+
+fn collect_supported_formats(
+    adapter: AdapterSelector,
+) -> Result<(Vec<SdpVideoFormat>, Vec<SdpVideoFormat>)> {
+    let codec_infos = supported_codecs(adapter)?;
 
     let mut encoder_supported_formats = Vec::new();
     let mut decoder_supported_formats = Vec::new();
@@ -148,9 +193,159 @@ fn vpl_rate_control_mode(codec_type: VideoCodecType) -> RateControlMode {
     }
 }
 
+fn dispatch_encoded_frame(
+    callback_state: &SharedEncoderCallback,
+    codec_type: VideoCodecType,
+    frame: EncodedFrame<VplEncoderUserData>,
+) {
+    let callback = {
+        let guard = callback_state.lock().unwrap();
+        *guard
+    };
+    let Some(callback) = callback else {
+        return;
+    };
+
+    let picture_type = frame.picture_type();
+    let user_data = frame.user_data();
+
+    let bitstream = frame.data();
+    let encoded_payload = if codec_type == VideoCodecType::Vp9 {
+        match vp9_payload_from_vpl(bitstream) {
+            Ok(payload) => payload,
+            Err(err) => {
+                rtc_log_error!("VPL VP9 payload normalization failed: {}", err);
+                return;
+            }
+        }
+    } else {
+        bitstream
+    };
+
+    let mut encoded_image = EncodedImage::new();
+    let encoded_buffer = EncodedImageBuffer::from_bytes(encoded_payload);
+    encoded_image.set_encoded_data(&encoded_buffer);
+    encoded_image.set_rtp_timestamp(user_data.rtp_timestamp);
+    encoded_image.set_encoded_width(user_data.width);
+    encoded_image.set_encoded_height(user_data.height);
+    let output_frame_type = frame_type_from_vpl(picture_type);
+    encoded_image.set_frame_type(output_frame_type);
+
+    let mut codec_specific_info = CodecSpecificInfo::new();
+    codec_specific_info.set_codec_type(codec_type);
+    if codec_type == VideoCodecType::Vp9 {
+        let is_key = output_frame_type == VideoFrameType::Key;
+        // VP9 では end_of_picture を明示しないと受信側で codec 判定が外れるケースがある。
+        codec_specific_info.set_end_of_picture(true);
+        // num_spatial_layers を設定しないと first_active_layer / num_spatial_layers が不整合でエラーになる
+        codec_specific_info.set_vp9_num_spatial_layers(1);
+        codec_specific_info.set_vp9_temporal_idx(shiguredo_webrtc::no_temporal_idx().into());
+        // 実機で動作確認したところ、以下の設定は必須ではないことが分かっている。
+        // ただ他の実機や libwebrtc の仕様変更のことを考えると、
+        // 一応明示しておいた方が安定しそうなので設定しておく。
+        codec_specific_info.set_vp9_first_frame_in_picture(true);
+        codec_specific_info.set_vp9_spatial_layer_resolution_present(false);
+        codec_specific_info.set_vp9_ss_data_available(false);
+        codec_specific_info.set_vp9_temporal_up_switch(true);
+        codec_specific_info.set_vp9_inter_pic_predicted(!is_key);
+        codec_specific_info.set_vp9_flexible_mode(false);
+        codec_specific_info.set_vp9_inter_layer_predicted(false);
+    }
+    if codec_type == VideoCodecType::H264 {
+        codec_specific_info.set_h264_packetization_mode(H264PacketizationMode::NonInterleaved);
+        codec_specific_info.set_h264_idr_frame(matches!(picture_type, PictureType::Idr));
+    }
+
+    let result = unsafe {
+        callback.on_encoded_image(encoded_image.as_ref(), Some(codec_specific_info.as_ref()))
+    };
+    if result.error() != VideoEncoderEncodedImageCallbackResultError::Ok {
+        rtc_log_warning!(
+            "VPL: on_encoded_image returned non-Ok status; continue encoding to avoid libwebrtc crash"
+        );
+    }
+}
+
+fn dispatch_decoded_frame(
+    callback_state: &SharedDecoderCallback,
+    frame: DecodedFrame<'_, VplDecoderUserData>,
+) {
+    let width = frame.width();
+    let height = frame.height();
+    let pitch = frame.pitch();
+    let src_y = frame.y();
+    let src_uv = frame.uv();
+    let user_data = frame.user_data();
+
+    let width_i32 = match i32::try_from(width) {
+        Ok(v) => v,
+        Err(_) => {
+            rtc_log_error!("VPL decoded width overflows i32: {}", width);
+            return;
+        }
+    };
+    let height_i32 = match i32::try_from(height) {
+        Ok(v) => v,
+        Err(_) => {
+            rtc_log_error!("VPL decoded height overflows i32: {}", height);
+            return;
+        }
+    };
+    let pitch_i32 = match i32::try_from(pitch) {
+        Ok(v) => v,
+        Err(_) => {
+            rtc_log_error!("VPL decoded pitch overflows i32: {}", pitch);
+            return;
+        }
+    };
+
+    let mut i420 = I420Buffer::new(width_i32, height_i32);
+    let dst_stride_y = i420.stride_y();
+    let dst_stride_u = i420.stride_u();
+    let dst_stride_v = i420.stride_v();
+    let (dst_y, dst_u, dst_v) = i420.planes_mut();
+    if !nv12_to_i420(
+        src_y,
+        pitch_i32,
+        src_uv,
+        pitch_i32,
+        dst_y,
+        dst_stride_y,
+        dst_u,
+        dst_stride_u,
+        dst_v,
+        dst_stride_v,
+        width_i32,
+        height_i32,
+    ) {
+        rtc_log_error!("VPL nv12_to_i420 conversion failed");
+        return;
+    }
+
+    let decoded_image = VideoFrame::builder(&i420.cast_to_video_frame_buffer())
+        .set_timestamp_us(user_data.timestamp_us)
+        .set_rtp_timestamp(user_data.rtp_timestamp)
+        .build();
+
+    let callback = {
+        let guard = callback_state.lock().unwrap();
+        *guard
+    };
+    let Some(callback) = callback else {
+        return;
+    };
+    unsafe {
+        callback.decoded(decoded_image.as_ref());
+    }
+}
+
+type VplEncoderInstance = Encoder<FnEncodeHandler<VplEncoderUserData>>;
+type VplDecoderInstance = Decoder<FnDecodeHandler<VplDecoderUserData>>;
+
 struct VplVideoEncoder {
-    callback: Option<VideoEncoderEncodedImageCallbackPtr>,
-    encoder: Option<Encoder>,
+    adapter: AdapterSelector,
+    callback: SharedEncoderCallback,
+    encoder: Option<VplEncoderInstance>,
     codec_type: VideoCodecType,
     width: u32,
     height: u32,
@@ -158,12 +353,15 @@ struct VplVideoEncoder {
     target_bitrate_bps: u32,
     rebuild_needed: bool,
     reconfigure_needed: bool,
+    /// 最後に作成したエンコーダーの coded_size をキャッシュする
+    coded_size: (usize, usize),
 }
 
 impl VplVideoEncoder {
-    fn new(codec_type: VideoCodecType) -> Self {
+    fn new(adapter: AdapterSelector, codec_type: VideoCodecType) -> Self {
         Self {
-            callback: None,
+            adapter,
+            callback: Arc::new(Mutex::new(None)),
             encoder: None,
             codec_type,
             width: 0,
@@ -172,6 +370,7 @@ impl VplVideoEncoder {
             target_bitrate_bps: 500_000,
             rebuild_needed: false,
             reconfigure_needed: false,
+            coded_size: (0, 0),
         }
     }
 
@@ -188,6 +387,7 @@ impl VplVideoEncoder {
         };
 
         let mut config = EncoderConfig::new(
+            self.adapter,
             codec_config,
             self.width,
             self.height,
@@ -198,9 +398,23 @@ impl VplVideoEncoder {
         );
         config.target_kbps = Some(target_kbps_from_bps(self.target_bitrate_bps));
 
+        // 既存のエンコーダーがあれば、新規生成前に確実に終了させる
+        self.encoder = None;
+
+        let callback_state = self.callback.clone();
+        let codec_type = self.codec_type;
+        let handler = FnEncodeHandler::new(move |result| match result {
+            Ok(frame) => dispatch_encoded_frame(&callback_state, codec_type, frame),
+            Err(err) => {
+                rtc_log_error!("VPL encode worker error for {:?}: {}", codec_type, err);
+            }
+        });
+
+        let encoder = Encoder::new(config, handler)?;
+        self.coded_size = encoder.coded_size();
+        self.encoder = Some(encoder);
         self.rebuild_needed = false;
         self.reconfigure_needed = false;
-        self.encoder = Some(Encoder::new(config)?);
         Ok(())
     }
 
@@ -258,10 +472,9 @@ impl VideoEncoderHandler for VplVideoEncoder {
         frame: VideoFrameRef<'_>,
         frame_types: Option<VideoFrameTypeVectorRef<'_>>,
     ) -> VideoCodecStatus {
-        let callback = match self.callback {
-            Some(callback) => callback,
-            None => return VideoCodecStatus::Uninitialized,
-        };
+        if self.callback.lock().unwrap().is_none() {
+            return VideoCodecStatus::Uninitialized;
+        }
 
         let frame_width = frame.width().max(0) as u32;
         let frame_height = frame.height().max(0) as u32;
@@ -278,31 +491,28 @@ impl VideoEncoderHandler for VplVideoEncoder {
             self.rebuild_needed = true;
         }
 
-        // rebuild_needed, reconfigure_needed のハンドリング
         if self.rebuild_needed {
             if self.rebuild_encoder().is_err() {
                 return VideoCodecStatus::Error;
             }
-        } else if self.reconfigure_needed {
-            // ビットレートやフレームレートの更新は再初期化ではなく reconfigure を行う
-            if self.reconfigure_encoder().is_err() {
-                // reconfigure が失敗することがあるため、再初期化にフォールバックする。
-                //
-                // reconfigure のエラーは実際に発生する。GMKtec K9 のマシンでは H265 と AV1 で以下のエラーになった。
-                //
-                // ```
-                // MFXVideoENCODE_Reset() failed[status=-14]: Incompatible video parameters (MFX_ERR_INCOMPATIBLE_VIDEO_PARAM)
-                // ```
-                //
-                // そのためこのフォールバックは必須となる。
-                rtc_log_warning!(
-                    "VPL encoder reconfigure failed for {:?}; falling back to rebuild",
-                    self.codec_type
-                );
-                self.rebuild_needed = true;
-                if self.rebuild_encoder().is_err() {
-                    return VideoCodecStatus::Error;
-                }
+        } else if self.reconfigure_needed && self.reconfigure_encoder().is_err() {
+            // ビットレートやフレームレートの更新は再初期化ではなく reconfigure を行うが、
+            // reconfigure が失敗することがあるため、再初期化にフォールバックする。
+            //
+            // reconfigure のエラーは実際に発生する。GMKtec K9 のマシンでは H265 と AV1 で以下のエラーになった。
+            //
+            // ```
+            // MFXVideoENCODE_Reset() failed[status=-14]: Incompatible video parameters (MFX_ERR_INCOMPATIBLE_VIDEO_PARAM)
+            // ```
+            //
+            // そのためこのフォールバックは必須となる。
+            rtc_log_warning!(
+                "VPL encoder reconfigure failed for {:?}; falling back to rebuild",
+                self.codec_type
+            );
+            self.rebuild_needed = true;
+            if self.rebuild_encoder().is_err() {
+                return VideoCodecStatus::Error;
             }
         }
 
@@ -319,13 +529,7 @@ impl VideoEncoderHandler for VplVideoEncoder {
             Err(_) => return VideoCodecStatus::Error,
         };
 
-        let src_stride_y = i420.stride_y();
-        let src_stride_u = i420.stride_u();
-        let src_stride_v = i420.stride_v();
-
-        let rtp_timestamp = frame.rtp_timestamp();
-        let encoder = self.encoder.as_mut().expect("encoder should exist");
-        let (coded_width, coded_height) = encoder.coded_size();
+        let (coded_width, coded_height) = self.coded_size;
         let Some((coded_nv12_size, y_plane_size, dst_stride_y, dst_stride_uv)) =
             || -> Option<(usize, usize, i32, i32)> {
                 let y_plane_size = coded_width.checked_mul(coded_height)?;
@@ -343,16 +547,17 @@ impl VideoEncoderHandler for VplVideoEncoder {
             );
             return VideoCodecStatus::Error;
         };
+
         let mut nv12 = vec![0u8; coded_nv12_size];
         {
             let (dst_y, dst_uv) = nv12.split_at_mut(y_plane_size);
             if !i420_to_nv12(
                 i420.y_data(),
-                src_stride_y,
+                i420.stride_y(),
                 i420.u_data(),
-                src_stride_u,
+                i420.stride_u(),
                 i420.v_data(),
-                src_stride_v,
+                i420.stride_v(),
                 dst_y,
                 dst_stride_y,
                 dst_uv,
@@ -369,69 +574,16 @@ impl VideoEncoderHandler for VplVideoEncoder {
         let encode_options = EncodeOptions {
             frame_type: force_frame_type,
         };
-        if let Err(err) = encoder.encode(&nv12, &encode_options) {
+        let user_data = VplEncoderUserData {
+            rtp_timestamp: frame.rtp_timestamp(),
+            width: frame_width,
+            height: frame_height,
+        };
+
+        let encoder = self.encoder.as_mut().expect("encoder should exist");
+        if let Err(err) = encoder.encode(&nv12, user_data, &encode_options) {
             rtc_log_error!("VPL encode failed for {:?}: {}", self.codec_type, err);
             return VideoCodecStatus::Error;
-        }
-
-        while let Some(encoded_frame) = encoder.next_frame() {
-            let mut encoded_image = EncodedImage::new();
-            let encoded_payload = if self.codec_type == VideoCodecType::Vp9 {
-                match vp9_payload_from_vpl(encoded_frame.data()) {
-                    Ok(payload) => payload,
-                    Err(err) => {
-                        rtc_log_error!("VPL VP9 payload normalization failed: {}", err);
-                        return VideoCodecStatus::Error;
-                    }
-                }
-            } else {
-                encoded_frame.data()
-            };
-            let encoded_buffer = EncodedImageBuffer::from_bytes(encoded_payload);
-            encoded_image.set_encoded_data(&encoded_buffer);
-            encoded_image.set_rtp_timestamp(rtp_timestamp);
-            encoded_image.set_encoded_width(frame_width);
-            encoded_image.set_encoded_height(frame_height);
-            let output_frame_type = frame_type_from_vpl(encoded_frame.picture_type());
-            encoded_image.set_frame_type(output_frame_type);
-
-            let mut codec_specific_info = CodecSpecificInfo::new();
-            codec_specific_info.set_codec_type(self.codec_type);
-            if self.codec_type == VideoCodecType::Vp9 {
-                let is_key = output_frame_type == VideoFrameType::Key;
-                // VP9 では end_of_picture を明示しないと受信側で codec 判定が外れるケースがある。
-                codec_specific_info.set_end_of_picture(true);
-                // num_spatial_layers を設定しないと first_active_layer / num_spatial_layers が不整合でエラーになる
-                codec_specific_info.set_vp9_num_spatial_layers(1);
-                codec_specific_info
-                    .set_vp9_temporal_idx(shiguredo_webrtc::no_temporal_idx().into());
-                // 実機で動作確認したところ、以下の設定は必須ではないことが分かっている。
-                // ただ他の実機や libwebrtc の仕様変更のことを考えると、
-                // 一応明示しておいた方が安定しそうなので設定しておく。
-                codec_specific_info.set_vp9_first_frame_in_picture(true);
-                codec_specific_info.set_vp9_spatial_layer_resolution_present(false);
-                codec_specific_info.set_vp9_ss_data_available(false);
-                codec_specific_info.set_vp9_temporal_up_switch(true);
-                codec_specific_info.set_vp9_inter_pic_predicted(!is_key);
-                codec_specific_info.set_vp9_flexible_mode(false);
-                codec_specific_info.set_vp9_inter_layer_predicted(false);
-            }
-            if self.codec_type == VideoCodecType::H264 {
-                codec_specific_info
-                    .set_h264_packetization_mode(H264PacketizationMode::NonInterleaved);
-                codec_specific_info
-                    .set_h264_idr_frame(matches!(encoded_frame.picture_type(), PictureType::Idr));
-            }
-
-            let result = unsafe {
-                callback
-                    .on_encoded_image(encoded_image.as_ref(), Some(codec_specific_info.as_ref()))
-            };
-            if result.error() != VideoEncoderEncodedImageCallbackResultError::Ok {
-                rtc_log_warning!(
-                    "NVCODEC: on_encoded_image returned non-Ok status; continue encoding to avoid libwebrtc crash"
-                );
-            }
         }
 
         VideoCodecStatus::Ok
@@ -441,14 +593,17 @@ impl VideoEncoderHandler for VplVideoEncoder {
         &mut self,
         callback: Option<VideoEncoderEncodedImageCallbackRef<'_>>,
     ) -> VideoCodecStatus {
-        self.callback = callback
+        let mut guard = self.callback.lock().unwrap();
+        *guard = callback
             .map(|callback| unsafe { VideoEncoderEncodedImageCallbackPtr::from_ref(callback) });
         VideoCodecStatus::Ok
     }
 
     fn release(&mut self) -> VideoCodecStatus {
+        *self.callback.lock().unwrap() = None;
         self.encoder = None;
-        self.callback = None;
+        self.rebuild_needed = false;
+        self.reconfigure_needed = false;
         VideoCodecStatus::Ok
     }
 
@@ -470,29 +625,40 @@ impl VideoEncoderHandler for VplVideoEncoder {
 }
 
 struct VplVideoDecoder {
-    callback: Option<VideoDecoderDecodedImageCallbackPtr>,
-    decoder: Option<Decoder>,
+    adapter: AdapterSelector,
+    callback: SharedDecoderCallback,
+    decoder: Option<VplDecoderInstance>,
     codec_type: VideoCodecType,
 }
 
 impl VplVideoDecoder {
-    fn new(codec_type: VideoCodecType) -> Self {
+    fn new(adapter: AdapterSelector, codec_type: VideoCodecType) -> Self {
         Self {
-            callback: None,
+            adapter,
+            callback: Arc::new(Mutex::new(None)),
             decoder: None,
             codec_type,
         }
     }
 
     fn ensure_decoder(&mut self) -> Result<()> {
-        if self.decoder.is_none() {
-            let Some(codec) = decoder_codec(self.codec_type) else {
-                return Err(crate::Error::VplMessage {
-                    reason: "VPL decoder codec type is not supported".to_string(),
-                });
-            };
-            self.decoder = Some(Decoder::new(DecoderConfig { codec })?);
+        if self.decoder.is_some() {
+            return Ok(());
         }
+        let Some(codec) = decoder_codec(self.codec_type) else {
+            return Err(crate::Error::VplMessage {
+                reason: "VPL decoder codec type is not supported".to_string(),
+            });
+        };
+        let callback_state = self.callback.clone();
+        let handler = FnDecodeHandler::new(move |result| match result {
+            Ok(frame) => dispatch_decoded_frame(&callback_state, frame),
+            Err(err) => {
+                rtc_log_error!("VPL decode worker error: {}", err);
+            }
+        });
+        let decoder = Decoder::new(DecoderConfig::new(self.adapter, codec), handler)?;
+        self.decoder = Some(decoder);
         Ok(())
     }
 }
@@ -502,11 +668,8 @@ impl VideoDecoderHandler for VplVideoDecoder {
         if settings.codec_type() != self.codec_type {
             return false;
         }
-        let Some(codec) = decoder_codec(self.codec_type) else {
-            return false;
-        };
-        self.decoder = Decoder::new(DecoderConfig { codec }).ok();
-        self.decoder.is_some()
+        self.decoder = None;
+        self.ensure_decoder().is_ok()
     }
 
     fn decode(
@@ -521,69 +684,20 @@ impl VideoDecoderHandler for VplVideoDecoder {
         let Some(encoded_data) = input_image.encoded_data() else {
             return VideoCodecStatus::ErrParameter;
         };
-
-        let rtp_timestamp = input_image.rtp_timestamp();
-        let decoder = self.decoder.as_mut().expect("decoder should exist");
-        if decoder.decode(encoded_data.data()).is_err() {
-            return VideoCodecStatus::Error;
+        let bitstream = encoded_data.data();
+        if bitstream.is_empty() {
+            return VideoCodecStatus::ErrParameter;
         }
 
-        let mut decoded_images = Vec::new();
-        while let Some(frame) = decoder.next_frame() {
-            let Some(y_plane_size) = frame.width().checked_mul(frame.height()) else {
-                return VideoCodecStatus::Error;
-            };
-            if frame.data().len() < y_plane_size {
-                return VideoCodecStatus::Error;
-            }
-            let (src_y, src_uv) = frame.data().split_at(y_plane_size);
-
-            let width_i32 = match i32::try_from(frame.width()) {
-                Ok(v) => v,
-                Err(_) => return VideoCodecStatus::Error,
-            };
-            let height_i32 = match i32::try_from(frame.height()) {
-                Ok(v) => v,
-                Err(_) => return VideoCodecStatus::Error,
-            };
-
-            let mut i420 = I420Buffer::new(width_i32, height_i32);
-            let dst_stride_y = i420.stride_y();
-            let dst_stride_u = i420.stride_u();
-            let dst_stride_v = i420.stride_v();
-            let (dst_y, dst_u, dst_v) = i420.planes_mut();
-            if !nv12_to_i420(
-                src_y,
-                width_i32,
-                src_uv,
-                width_i32,
-                dst_y,
-                dst_stride_y,
-                dst_u,
-                dst_stride_u,
-                dst_v,
-                dst_stride_v,
-                width_i32,
-                height_i32,
-            ) {
-                return VideoCodecStatus::Error;
-            }
-
-            decoded_images.push(
-                VideoFrame::builder(&i420.cast_to_video_frame_buffer())
-                    .set_timestamp_us(render_time_ms.saturating_mul(1000))
-                    .set_rtp_timestamp(rtp_timestamp)
-                    .build(),
-            );
-        }
-
-        let Some(callback) = self.callback.as_ref() else {
-            return VideoCodecStatus::Uninitialized;
+        let user_data = VplDecoderUserData {
+            rtp_timestamp: input_image.rtp_timestamp(),
+            timestamp_us: render_time_ms.saturating_mul(1000),
         };
-        for decoded_image in &decoded_images {
-            unsafe {
-                callback.decoded(decoded_image.as_ref());
-            }
+
+        let decoder = self.decoder.as_mut().expect("decoder should exist");
+        if let Err(err) = decoder.decode(bitstream, user_data) {
+            rtc_log_error!("VPL decode failed: {}", err);
+            return VideoCodecStatus::Error;
         }
 
         VideoCodecStatus::Ok
@@ -593,13 +707,14 @@ impl VideoDecoderHandler for VplVideoDecoder {
         &mut self,
         callback: Option<VideoDecoderDecodedImageCallbackPtr>,
     ) -> VideoCodecStatus {
-        self.callback = callback;
+        let mut guard = self.callback.lock().unwrap();
+        *guard = callback;
         VideoCodecStatus::Ok
     }
 
     fn release(&mut self) -> VideoCodecStatus {
+        *self.callback.lock().unwrap() = None;
         self.decoder = None;
-        self.callback = None;
         VideoCodecStatus::Ok
     }
 
@@ -612,6 +727,7 @@ impl VideoDecoderHandler for VplVideoDecoder {
 }
 
 pub struct VplVideoCodecCapability {
+    adapter: AdapterSelector,
     encoder_supported_formats: Vec<SdpVideoFormat>,
     decoder_supported_formats: Vec<SdpVideoFormat>,
     simulcast_capability_helper: SimulcastCapabilityHelper,
@@ -619,34 +735,41 @@ pub struct VplVideoCodecCapability {
 
 impl VplVideoCodecCapability {
     pub fn new() -> Result<Self> {
-        let (encoder_supported_formats, decoder_supported_formats) = collect_supported_formats()?;
+        let adapter = default_adapter()?;
+        let (encoder_supported_formats, decoder_supported_formats) =
+            collect_supported_formats(adapter)?;
         if encoder_supported_formats.is_empty() && decoder_supported_formats.is_empty() {
             return Err(crate::Error::VplMessage {
                 reason: "VPL does not support any encoder or decoder codec".to_string(),
             });
         }
-        Self::new_with_formats(encoder_supported_formats, decoder_supported_formats)
+        Self::new_with_formats(
+            adapter,
+            encoder_supported_formats,
+            decoder_supported_formats,
+        )
     }
 
     fn new_with_formats(
+        adapter: AdapterSelector,
         encoder_supported_formats: Vec<SdpVideoFormat>,
         decoder_supported_formats: Vec<SdpVideoFormat>,
     ) -> Result<Self> {
         let encoder_supported_formats_for_factory = encoder_supported_formats.clone();
+        let adapter_for_factory = adapter;
 
         let simulcast_capability_helper = SimulcastCapabilityHelper::new_with_builder(
             move || encoder_supported_formats_for_factory.clone(),
-            {
-                move |_env, format| {
-                    let codec_type = codec_type_from_format(&format)?;
-                    Some(VideoEncoder::new_with_handler(Box::new(
-                        VplVideoEncoder::new(codec_type),
-                    )))
-                }
+            move |_env, format| {
+                let codec_type = codec_type_from_format(&format)?;
+                Some(VideoEncoder::new_with_handler(Box::new(
+                    VplVideoEncoder::new(adapter_for_factory, codec_type),
+                )))
             },
         );
 
         Ok(Self {
+            adapter,
             encoder_supported_formats,
             decoder_supported_formats,
             simulcast_capability_helper,
@@ -682,7 +805,7 @@ impl VideoCodecCapability for VplVideoCodecCapability {
     ) -> Option<VideoDecoder> {
         let codec_type = codec_type_from_format(&format)?;
         Some(VideoDecoder::new_with_handler(Box::new(
-            VplVideoDecoder::new(codec_type),
+            VplVideoDecoder::new(self.adapter, codec_type),
         )))
     }
 }
@@ -693,7 +816,14 @@ impl VplVideoCodecCapability {
         encoder_supported_formats: Vec<SdpVideoFormat>,
         decoder_supported_formats: Vec<SdpVideoFormat>,
     ) -> Result<Self> {
-        Self::new_with_formats(encoder_supported_formats, decoder_supported_formats)
+        // テストでは実際のアダプターを参照しないが、AdapterSelector::DrmRenderNode(0) は
+        // libvpl の予約値のため、ダミーとして 128 (Linux の典型値) を使う。
+        let adapter = AdapterSelector::DrmRenderNode(128);
+        Self::new_with_formats(
+            adapter,
+            encoder_supported_formats,
+            decoder_supported_formats,
+        )
     }
 }
 
@@ -716,7 +846,7 @@ mod tests {
             test_supported_formats(&[VideoCodecType::H264]),
             test_supported_formats(&[VideoCodecType::H264]),
         )
-        .expect("Failed to create VplVideoCodecCapability for test");
+        .expect("VplVideoCodecCapability の生成に失敗");
         assert_eq!(capability.get_implementation().name(), "vpl");
     }
 
@@ -734,7 +864,7 @@ mod tests {
                 VideoCodecType::Av1,
             ]),
         )
-        .expect("Failed to create VplVideoCodecCapability for test");
+        .expect("VplVideoCodecCapability の生成に失敗");
 
         assert!(capability.is_supported(CodecDirection::Encoder, VideoCodecType::H264));
         assert!(capability.is_supported(CodecDirection::Decoder, VideoCodecType::H264));
@@ -764,7 +894,7 @@ mod tests {
                 CodecDirection::Encoder,
                 SdpVideoFormat::new("H264").as_ref(),
             )
-            .expect("h264 format should be resolved");
+            .expect("H264 フォーマットの解決に失敗");
         let params = resolved
             .to_owned()
             .parameters_mut()
@@ -786,7 +916,7 @@ mod tests {
             test_supported_formats(&[VideoCodecType::Vp9]),
             test_supported_formats(&[VideoCodecType::Vp9]),
         )
-        .expect("Failed to create VplVideoCodecCapability for test");
+        .expect("VplVideoCodecCapability の生成に失敗");
         let env = Environment::new();
         let format = SdpVideoFormat::new_with_parameters(
             "VP9",
@@ -795,7 +925,7 @@ mod tests {
         );
         let encoder = capability
             .create_video_encoder(env.as_ref(), format.as_ref())
-            .expect("encoder must be created for supported VP9 format");
+            .expect("VP9 対応フォーマットで encoder の生成に失敗");
         let info = encoder.get_encoder_info();
         let implementation_name = info
             .implementation_name()
@@ -812,12 +942,12 @@ mod tests {
             test_supported_formats(&[VideoCodecType::H264]),
             test_supported_formats(&[VideoCodecType::H264]),
         )
-        .expect("Failed to create VplVideoCodecCapability for test");
+        .expect("VplVideoCodecCapability の生成に失敗");
         let env = Environment::new();
         let format = SdpVideoFormat::new("H264");
         let encoder = capability
             .create_video_encoder(env.as_ref(), format.as_ref())
-            .expect("encoder must be created for supported format");
+            .expect("対応フォーマットで encoder の生成に失敗");
         let info = encoder.get_encoder_info();
         let implementation_name = info
             .implementation_name()
@@ -877,14 +1007,14 @@ mod tests {
         data.extend_from_slice(&[4, 0, 0, 0]);
         data.extend_from_slice(&[0; 8]);
         data.extend_from_slice(&[1, 2, 3, 4]);
-        let payload = vp9_payload_from_vpl(&data).expect("vp9 payload should be extracted");
+        let payload = vp9_payload_from_vpl(&data).expect("VP9 payload の抽出に失敗");
         assert_eq!(payload, &[1, 2, 3, 4]);
     }
 
     #[test]
     fn vp9_payload_from_vpl_rejects_truncated_frame_header() {
         let data = vec![0u8; 11];
-        let err = vp9_payload_from_vpl(&data).expect_err("truncated frame header must fail");
+        let err = vp9_payload_from_vpl(&data).expect_err("frame header 不足のとき失敗するべき");
         assert_eq!(err, "VP9 IVF frame header is truncated");
     }
 
