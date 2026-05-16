@@ -43,7 +43,7 @@
   - @voluntas
 - [UPDATE] `rand` 依存を削除し、シグナリング URL のシャッフルを `aws-lc-rs` の `SystemRandom` を用いた Fisher-Yates 実装に置き換える
   - @voluntas
-- [UPDATE] `shiguredo_webrtc` を 0.147.2 に上げる
+- [UPDATE] `shiguredo_webrtc` を 0.148.0 に上げる
   - @sile, @melpon
 - [UPDATE] `shiguredo_nvcodec` を 2026.1.0 に上げる
   - @melpon
