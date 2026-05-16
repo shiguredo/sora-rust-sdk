@@ -1329,9 +1329,9 @@ dependencies = [
 
 [[package]]
 name = "shiguredo_http11"
-version = "2026.5.0-canary.1"
+version = "2026.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca043c9a9db8dd15c93a971fba1974ceb17ea74b1096e2de8625c7bb29e39457"
+checksum = "33d3ac49f07c211b152f7dc8940719c0ad8aa81bb2e04667e25e18b4ca073b39"
 
 [[package]]
 name = "shiguredo_libcamera"
@@ -1410,9 +1410,9 @@ dependencies = [
 
 [[package]]
 name = "shiguredo_webrtc"
-version = "0.147.2"
+version = "0.148.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c4764b5f4a437c6d7223febf3a4d3884a9772732a277b6393c1acabed3541a7"
+checksum = "8a26f753387f11ebabcbe168957395552a953666ec9a7f2c7e98c6b30fe36ad7"
 dependencies = [
  "bindgen",
  "nojson",
@@ -1422,9 +1422,9 @@ dependencies = [
 
 [[package]]
 name = "shiguredo_websocket"
-version = "2026.2.0-canary.3"
+version = "2026.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5fe6db8f07bc6d5a3e780ed8289bb286b0a2513edc46c464c8af0ef77c62fc4"
+checksum = "d59d4968b0ec66e3befd03e531d3998db3ae2653c35c6b183ce8f657aaf6d33f"
 dependencies = [
  "aws-lc-rs",
  "base64ct",

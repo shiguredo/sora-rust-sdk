@@ -32,18 +32,18 @@
 - [CHANGE] `Error` 列挙型に `ProxyConnectEncode(EncodeError)` バリアントを追加する
   - `shiguredo_http11` 2026.4 で `Request::new` / `Request::header` / `Request::encode` が `Result<_, EncodeError>` を返すようになったため、Proxy CONNECT リクエストの構築失敗を伝播する
   - @voluntas
-- [UPDATE] `shiguredo_http11` を 2026.4 に上げる
+- [UPDATE] `shiguredo_http11` を 2026.5 に上げる
   - `RequestHead` / `ResponseHead` のフィールド非公開化に追従し、`status_code` / `reason_phrase` / `method` / `uri` をアクセサメソッド呼び出しに変更する
   - `Request::new` / `Request::header` / `Request::encode` の `Result` 化に追従する
   - e2e-tests の `shiguredo_http11` も同バージョンに揃える
   - @voluntas
-- [UPDATE] `shiguredo_websocket` を 2026.2.0-canary.1 に上げる
+- [UPDATE] `shiguredo_websocket` を 2026.2.0 に上げる
   - @voluntas
 - [UPDATE] zlib 圧縮/展開の実装を `flate2` から `noflate` に差し替える
   - @voluntas
 - [UPDATE] `rand` 依存を削除し、シグナリング URL のシャッフルを `aws-lc-rs` の `SystemRandom` を用いた Fisher-Yates 実装に置き換える
   - @voluntas
-- [UPDATE] `shiguredo_webrtc` を 0.147.1-canary.4 に上げる
+- [UPDATE] `shiguredo_webrtc` を 0.148.0 に上げる
   - @sile, @melpon
 - [UPDATE] `shiguredo_nvcodec` を 2026.1.0 に上げる
   - @melpon
