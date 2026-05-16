@@ -14,7 +14,19 @@ include = ["/LICENSE", "/README.md", "/src/**"]
 members = ["e2e-tests", "examples/sumomo"]
 
 [workspace.dependencies]
-shiguredo_webrtc = { version = "=0.147.2" }
+# SDK 本体
+sora_sdk = { path = "." }
+
+# 時雨堂クレート
+shiguredo_http11 = "2026.5.0-canary.1"
+shiguredo_nvcodec = "2026.1"
+shiguredo_webrtc = "=0.147.2"
+shiguredo_websocket = "2026.2.0-canary.3"
+
+# 外部クレート
+aws-lc-rs = "1.16"
+nojson = "0.3"
+tokio = "1.52"
 
 [dependencies]
 # 時雨堂クレート
@@ -22,13 +34,13 @@ shiguredo_webrtc = { version = "=0.147.2" }
 # AMD AMF (Advanced Media Framework) によるハードウェアエンコード/デコード
 shiguredo_amf = { version = "2026.2", optional = true }
 # HTTP プロキシの CONNECT トンネリングと URI パースで利用
-shiguredo_http11 = "2026.2"
+shiguredo_http11.workspace = true
 # libcamera 経由のカメラキャプチャ (Linux 向け)
 shiguredo_libcamera = { version = "2026.1.0-canary.1", optional = true }
 # MP4 ファイルからの映像入力で利用するデマルチプレクサ
 shiguredo_mp4 = "2026.3"
 # NVIDIA Video Codec によるハードウェアエンコード/デコード
-shiguredo_nvcodec = { version = "2026.1", optional = true }
+shiguredo_nvcodec = { workspace = true, optional = true }
 # OpenH264 による H.264 ソフトウェアエンコード/デコード
 shiguredo_openh264 = { version = "2026.1", optional = true }
 # V4L2 M2M によるハードウェアコーデックと画像変換 (Linux 向け)
@@ -36,20 +48,20 @@ shiguredo_v4l2 = { version = "2026.1.0-canary.3", optional = true }
 # Intel VPL によるハードウェアエンコード/デコード
 shiguredo_vpl = { version = "2026.1", optional = true }
 # WebRTC スタック本体 (PeerConnection、メディアエンジン等)
-shiguredo_webrtc = { workspace = true }
+shiguredo_webrtc.workspace = true
 # Sora シグナリングへの接続で利用する WebSocket クライアント実装
-shiguredo_websocket = "2026.1"
+shiguredo_websocket.workspace = true
 
 # 外部クレート
 
 # rustls の暗号バックエンドおよび WebSocket の SecureRandom 実装に利用
-aws-lc-rs = "1.16"
+aws-lc-rs.workspace = true
 # libcamera のフレームバッファを mmap/munmap するための POSIX FFI
 libc = { version = "0.2", optional = true }
 # DataChannel メッセージの zlib 圧縮/解凍に利用
 noflate = "0.1"
 # シグナリングメッセージ等の JSON パース・生成
-nojson = "0.3"
+nojson.workspace = true
 # Sora シグナリングへの WSS 接続で利用する TLS 1.2/1.3 実装
 rustls = { version = "0.23", default-features = false, features = [
   "aws-lc-rs",
@@ -64,7 +76,7 @@ rustls-webpki = { version = "0.103", default-features = false, features = [
   "std",
 ] }
 # SDK 全体の非同期処理を支える非同期ランタイム
-tokio = { version = "1.52", features = [
+tokio = { workspace = true, features = [
   "io-util",
   "macros",
   "net",

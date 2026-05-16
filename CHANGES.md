@@ -29,7 +29,15 @@
   - `src/client.rs` / `src/client_context.rs` を `src/connection.rs` / `src/connection_context.rs` にリネームする
   - Sora シグナリング仕様の `client_id` / TLS 用語の `client_cert` / `client_key` / `version::get_sora_client_name()` は据え置く
   - @voluntas
-- [UPDATE] `shiguredo_http11` を 2026.2 に上げる
+- [CHANGE] `Error` 列挙型に `ProxyConnectEncode(EncodeError)` バリアントを追加する
+  - `shiguredo_http11` 2026.4 で `Request::new` / `Request::header` / `Request::encode` が `Result<_, EncodeError>` を返すようになったため、Proxy CONNECT リクエストの構築失敗を伝播する
+  - @voluntas
+- [UPDATE] `shiguredo_http11` を 2026.4 に上げる
+  - `RequestHead` / `ResponseHead` のフィールド非公開化に追従し、`status_code` / `reason_phrase` / `method` / `uri` をアクセサメソッド呼び出しに変更する
+  - `Request::new` / `Request::header` / `Request::encode` の `Result` 化に追従する
+  - e2e-tests の `shiguredo_http11` も同バージョンに揃える
+  - @voluntas
+- [UPDATE] `shiguredo_websocket` を 2026.2.0-canary.1 に上げる
   - @voluntas
 - [UPDATE] zlib 圧縮/展開の実装を `flate2` から `noflate` に差し替える
   - @voluntas
@@ -110,6 +118,12 @@
 
 ### misc
 
+- [UPDATE] workspace.dependencies を整理しサブクレートを `dep.workspace = true` 形式に統一する
+  - `sora_sdk = { path = "." }` を `[workspace.dependencies]` に追加し、e2e-tests / examples/sumomo から相対パス指定を排除する
+  - sora_sdk 本体が利用する依存 (`aws-lc-rs` / `nojson` / `tokio` / `shiguredo_nvcodec`) を `[workspace.dependencies]` に集約する
+  - sora_sdk 本体が利用しない依存 (`serial_test` / `shiguredo_audio_device` / `shiguredo_video_device`) は集約せず、各サブクレートに直接記載のままとする
+  - workspace 経由の参照を `dep.workspace = true` のショートハンド形式に統一する (optional / features 指定がある場合のみインラインテーブル形式を維持する)
+  - @voluntas
 - [UPDATE] README から削除済みの zakuro サンプルセクションを取り除く
   - @voluntas
 - [UPDATE] e2e-tests に `SoraTestConnection` を追加し、`SoraConnection` 直利用テストを callback ログ + predicate 待機ベースへ置き換える

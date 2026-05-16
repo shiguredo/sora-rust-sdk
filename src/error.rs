@@ -2,7 +2,7 @@
 use std::io;
 
 use nojson::JsonParseError;
-use shiguredo_http11::{auth::AuthError, uri::UriError};
+use shiguredo_http11::{EncodeError, auth::AuthError, uri::UriError};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::connection::SoraConnectionCommand;
@@ -33,6 +33,7 @@ pub enum Error {
     },
     ProxyUrlQueryNotAllowed,
     ProxyConnectDecode(shiguredo_http11::Error),
+    ProxyConnectEncode(EncodeError),
     ProxyConnectResponseMissing,
     ProxyConnectStatusNotSuccessful {
         status_code: u16,
@@ -202,6 +203,9 @@ impl std::fmt::Display for Error {
             Error::ProxyConnectDecode(err) => {
                 write!(f, "Proxy CONNECT レスポンスの解析に失敗しました: {err}")
             }
+            Error::ProxyConnectEncode(err) => {
+                write!(f, "Proxy CONNECT リクエストの生成に失敗しました: {err}")
+            }
             Error::ProxyConnectResponseMissing => {
                 f.write_str("Proxy CONNECT レスポンス受信前に接続が閉じられました")
             }
@@ -344,6 +348,7 @@ impl std::error::Error for Error {
         match self {
             Error::UriParse(err) => Some(err),
             Error::ProxyConnectDecode(err) => Some(err),
+            Error::ProxyConnectEncode(err) => Some(err),
             Error::ProxyAuth(err) => Some(err),
             Error::DnsResolve { source, .. } => Some(source),
             Error::TcpConnect { source, .. } => Some(source),
@@ -394,6 +399,12 @@ impl From<UriError> for Error {
 impl From<shiguredo_http11::Error> for Error {
     fn from(err: shiguredo_http11::Error) -> Self {
         Error::ProxyConnectDecode(err)
+    }
+}
+
+impl From<EncodeError> for Error {
+    fn from(err: EncodeError) -> Self {
+        Error::ProxyConnectEncode(err)
     }
 }
 
