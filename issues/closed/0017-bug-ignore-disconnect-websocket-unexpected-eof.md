@@ -2,6 +2,7 @@
 
 Created: 2026-05-06
 Completed: 2026-05-06
+Priority: High
 Model: Opus 4.7
 
 ## 概要

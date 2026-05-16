@@ -866,10 +866,10 @@ impl SoraConnection {
                     };
                     if n == 0 {
                         if switched_ignore_disconnect_websocket {
-                            rtc_log_info!(
-                                "WebSocket 接続が閉じられました (DataChannel シグナリングを継続)"
-                            );
+                            rtc_log_info!("WebSocket closed; continuing DataChannel signaling");
                             websocket_closed = true;
+                            // 期限切れ sleep_until で select! がスピンしないようリセットする
+                            ws_disconnect_delay_start = None;
                         } else {
                             rtc_log_info!("接続が閉じられました");
                             break;
@@ -1209,26 +1209,33 @@ impl SoraConnection {
                 }
             }
 
-            // WebSocket クローズ後の break は、ignore_disconnect_websocket=true
-            // 成立時のみ DataChannel シグナリング継続のために抑制する。
-            if let Ok(true) = flush_ws_output(&mut ws, &mut stream, &mut timers).await {
-                if switched_ignore_disconnect_websocket && !websocket_closed {
-                    rtc_log_info!(
-                        "WebSocket 接続が閉じられました (DataChannel シグナリングを継続)"
-                    );
-                    websocket_closed = true;
-                } else if !switched_ignore_disconnect_websocket {
-                    break;
+            // WebSocket クローズ検知 (CloseConnection 出力 / ws.state() == Closed) を 1 箇所に集約する。
+            // ignore_disconnect_websocket=true 成立時は break せず DataChannel シグナリングを継続する。
+            let close_emitted = match flush_ws_output(&mut ws, &mut stream, &mut timers).await {
+                Ok(emitted) => emitted,
+                Err(e) => {
+                    if switched_ignore_disconnect_websocket && !websocket_closed {
+                        // switched 後の WebSocket I/O 失敗は DataChannel シグナリング継続のため吸収する
+                        rtc_log_warning!(
+                            "flush WebSocket output failed; continuing DataChannel signaling: {}",
+                            e
+                        );
+                        true
+                    } else {
+                        return Err(e);
+                    }
                 }
-            }
+            };
 
-            if ws.state() == ConnectionState::Closed {
-                if switched_ignore_disconnect_websocket && !websocket_closed {
-                    rtc_log_info!(
-                        "WebSocket 接続が閉じられました (DataChannel シグナリングを継続)"
-                    );
-                    websocket_closed = true;
-                } else if !switched_ignore_disconnect_websocket {
+            if close_emitted || ws.state() == ConnectionState::Closed {
+                if switched_ignore_disconnect_websocket {
+                    if !websocket_closed {
+                        rtc_log_info!("WebSocket closed; continuing DataChannel signaling");
+                        websocket_closed = true;
+                        // 期限切れ sleep_until で select! がスピンしないようリセットする
+                        ws_disconnect_delay_start = None;
+                    }
+                } else {
                     break;
                 }
             }
