@@ -50,8 +50,8 @@ async fn test_recvonly_ignore_disconnect_websocket_keeps_signaling() {
         .expect("WebSocket Close コールバックが届きませんでした");
 
     // WebSocket クローズ後も DataChannel 経由で stats が取得できることを確認する。
-    // バグがある場合は run task が UnexpectedEof で終了しているため、
-    // get_stats が応答しないかタスク終了でエラーになる。
+    // バグがある場合は run task が早期終了し、command channel が切れて
+    // get_stats が CommandResponseMissing で失敗する。
     connection
         .wait_stats(
             |stats| verify_data_channel_label(stats, "signaling"),

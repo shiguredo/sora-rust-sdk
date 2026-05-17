@@ -857,13 +857,19 @@ impl SoraConnection {
         loop {
             tokio::select! {
                 read = stream.read(&mut buf), if !websocket_closed => {
-                    let n = read?;
+                    // ピアが close_notify を送らずに TCP を閉じた場合 UnexpectedEof になるため、
+                    // n == 0 と同じ「相手から切られた」扱いに合流させる。
+                    let n = match read {
+                        Ok(n) => n,
+                        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => 0,
+                        Err(e) => return Err(e.into()),
+                    };
                     if n == 0 {
                         if switched_ignore_disconnect_websocket {
-                            rtc_log_info!(
-                                "WebSocket 接続が閉じられました (DataChannel シグナリングを継続)"
-                            );
+                            rtc_log_info!("WebSocket closed; continuing DataChannel signaling");
                             websocket_closed = true;
+                            // 期限切れ sleep_until で select! がスピンしないようリセットする
+                            ws_disconnect_delay_start = None;
                         } else {
                             rtc_log_info!("接続が閉じられました");
                             break;
@@ -1203,12 +1209,35 @@ impl SoraConnection {
                 }
             }
 
-            if let Ok(true) = flush_ws_output(&mut ws, &mut stream, &mut timers).await {
-                break;
-            }
+            // WebSocket クローズ検知 (CloseConnection 出力 / ws.state() == Closed) を 1 箇所に集約する。
+            // ignore_disconnect_websocket=true 成立時は break せず DataChannel シグナリングを継続する。
+            let close_emitted = match flush_ws_output(&mut ws, &mut stream, &mut timers).await {
+                Ok(emitted) => emitted,
+                Err(e) => {
+                    if switched_ignore_disconnect_websocket && !websocket_closed {
+                        // switched 後の WebSocket I/O 失敗は DataChannel シグナリング継続のため吸収する
+                        rtc_log_warning!(
+                            "flush WebSocket output failed; continuing DataChannel signaling: {}",
+                            e
+                        );
+                        true
+                    } else {
+                        return Err(e);
+                    }
+                }
+            };
 
-            if ws.state() == ConnectionState::Closed {
-                break;
+            if close_emitted || ws.state() == ConnectionState::Closed {
+                if switched_ignore_disconnect_websocket {
+                    if !websocket_closed {
+                        rtc_log_info!("WebSocket closed; continuing DataChannel signaling");
+                        websocket_closed = true;
+                        // 期限切れ sleep_until で select! がスピンしないようリセットする
+                        ws_disconnect_delay_start = None;
+                    }
+                } else {
+                    break;
+                }
             }
         }
 
