@@ -522,6 +522,10 @@ impl VideoEncoderHandler for VplVideoEncoder {
     fn release(&mut self) -> VideoCodecStatus {
         let mut callback_state = self.callback_state.lock().unwrap();
         callback_state.callback = None;
+        // self.encoder = None で drain 処理が走ってコールバックハンドラが呼ばれ、
+        // コールバックハンドラの中でロックを獲得しようとするので、
+        // ここで Mutex を unlock しておかないとデッドロックになる
+        drop(callback_state);
         self.encoder = None;
         VideoCodecStatus::Ok
     }
@@ -737,6 +741,9 @@ impl VideoDecoderHandler for VplVideoDecoder {
     fn release(&mut self) -> VideoCodecStatus {
         let mut callback_state = self.callback_state.lock().unwrap();
         callback_state.callback = None;
+        // self.decoder = None で drain 処理が走ってコールバックハンドラが呼ばれ、
+        // コールバックハンドラの中でロックを獲得しようとするので、
+        // ここで Mutex を unlock しておかないとデッドロックになる
         drop(callback_state);
         self.decoder = None;
         VideoCodecStatus::Ok
