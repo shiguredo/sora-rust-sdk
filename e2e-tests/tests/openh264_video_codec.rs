@@ -114,6 +114,7 @@ async fn test_openh264_sendonly_recvonly() {
         .wait_stats(
             |stats| {
                 verify_video_stats_field_positive(stats, "inbound-rtp", "packetsReceived")
+                    && verify_video_stats_field_positive(stats, "inbound-rtp", "framesDecoded")
                     && verify_video_codec_mime_type(stats, "inbound-rtp", "video/H264")
             },
             Duration::from_secs(15),
@@ -202,6 +203,7 @@ async fn test_openh264_sendrecv() {
             |stats| {
                 verify_video_stats_field_positive(stats, "outbound-rtp", "packetsSent")
                     && verify_video_stats_field_positive(stats, "inbound-rtp", "packetsReceived")
+                    && verify_video_stats_field_positive(stats, "inbound-rtp", "framesDecoded")
                     && verify_video_codec_mime_type(stats, "outbound-rtp", "video/H264")
                     && verify_video_codec_mime_type(stats, "inbound-rtp", "video/H264")
             },
@@ -214,6 +216,7 @@ async fn test_openh264_sendrecv() {
             |stats| {
                 verify_video_stats_field_positive(stats, "outbound-rtp", "packetsSent")
                     && verify_video_stats_field_positive(stats, "inbound-rtp", "packetsReceived")
+                    && verify_video_stats_field_positive(stats, "inbound-rtp", "framesDecoded")
                     && verify_video_codec_mime_type(stats, "outbound-rtp", "video/H264")
                     && verify_video_codec_mime_type(stats, "inbound-rtp", "video/H264")
             },

@@ -370,6 +370,9 @@ pub struct RtcInboundRtpStreamStats {
     pub remote_id: Option<String>,
     pub bytes_received: Option<u64>,
     pub packets_discarded: Option<u64>,
+    pub frames_received: Option<u64>,
+    pub frames_decoded: Option<u64>,
+    pub key_frames_decoded: Option<u64>,
     pub decoder_implementation: Option<String>,
 }
 
@@ -430,6 +433,9 @@ impl<'text, 'raw> TryFrom<RawJsonValue<'text, 'raw>> for RtcInboundRtpStreamStat
             remote_id: optional_string(value, "remoteId")?,
             bytes_received: optional_u64(value, "bytesReceived")?,
             packets_discarded: optional_u64(value, "packetsDiscarded")?,
+            frames_received: optional_u64(value, "framesReceived")?,
+            frames_decoded: optional_u64(value, "framesDecoded")?,
+            key_frames_decoded: optional_u64(value, "keyFramesDecoded")?,
             decoder_implementation: optional_string(value, "decoderImplementation")?,
         })
     }

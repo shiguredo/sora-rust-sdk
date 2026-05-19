@@ -245,6 +245,9 @@ fn numeric_field_value(stat: &WebRtcStat, field_name: &str) -> Option<u64> {
         WebRtcStat::InboundRtp(inbound) => {
             numeric_field_from_received(inbound, field_name).or(match field_name {
                 "bytesReceived" => inbound.bytes_received,
+                "framesReceived" => inbound.frames_received,
+                "framesDecoded" => inbound.frames_decoded,
+                "keyFramesDecoded" => inbound.key_frames_decoded,
                 _ => None,
             })
         }

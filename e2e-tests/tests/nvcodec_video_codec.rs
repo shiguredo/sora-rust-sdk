@@ -207,6 +207,7 @@ async fn run_sendonly_recvonly_with_contexts(
             .wait_stats(
                 |stats| {
                     verify_video_stats_field_positive(stats, "inbound-rtp", "packetsReceived")
+                        && verify_video_stats_field_positive(stats, "inbound-rtp", "framesDecoded")
                         && verify_video_codec_mime_type(stats, "inbound-rtp", expected_mime_type)
                 },
                 Duration::from_secs(15),
@@ -289,6 +290,7 @@ async fn run_sendrecv_with_codec(codec_type: VideoCodecType) {
             |stats| {
                 verify_video_stats_field_positive(stats, "outbound-rtp", "packetsSent")
                     && verify_video_stats_field_positive(stats, "inbound-rtp", "packetsReceived")
+                    && verify_video_stats_field_positive(stats, "inbound-rtp", "framesDecoded")
                     && verify_video_codec_mime_type(stats, "outbound-rtp", expected_mime_type)
                     && verify_video_codec_mime_type(stats, "inbound-rtp", expected_mime_type)
             },
@@ -301,6 +303,7 @@ async fn run_sendrecv_with_codec(codec_type: VideoCodecType) {
             |stats| {
                 verify_video_stats_field_positive(stats, "outbound-rtp", "packetsSent")
                     && verify_video_stats_field_positive(stats, "inbound-rtp", "packetsReceived")
+                    && verify_video_stats_field_positive(stats, "inbound-rtp", "framesDecoded")
                     && verify_video_codec_mime_type(stats, "outbound-rtp", expected_mime_type)
                     && verify_video_codec_mime_type(stats, "inbound-rtp", expected_mime_type)
             },

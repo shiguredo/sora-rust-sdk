@@ -32,7 +32,7 @@ tokio = "1.52"
 # 時雨堂クレート
 
 # AMD AMF (Advanced Media Framework) によるハードウェアエンコード/デコード
-shiguredo_amf = { version = "2026.2", optional = true }
+shiguredo_amf = { version = "2026.3.0-canary.0", optional = true }
 # HTTP プロキシの CONNECT トンネリングと URI パースで利用
 shiguredo_http11.workspace = true
 # libcamera 経由のカメラキャプチャ (Linux 向け)

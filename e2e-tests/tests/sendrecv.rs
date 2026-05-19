@@ -87,6 +87,7 @@ async fn test_sendrecv_bidirectional() {
             |stats| {
                 verify_video_stats_field_positive(stats, "outbound-rtp", "packetsSent")
                     && verify_video_stats_field_positive(stats, "inbound-rtp", "packetsReceived")
+                    && verify_video_stats_field_positive(stats, "inbound-rtp", "framesDecoded")
             },
             Duration::from_secs(10),
         )
@@ -98,6 +99,7 @@ async fn test_sendrecv_bidirectional() {
             |stats| {
                 verify_video_stats_field_positive(stats, "outbound-rtp", "packetsSent")
                     && verify_video_stats_field_positive(stats, "inbound-rtp", "packetsReceived")
+                    && verify_video_stats_field_positive(stats, "inbound-rtp", "framesDecoded")
             },
             Duration::from_secs(10),
         )
