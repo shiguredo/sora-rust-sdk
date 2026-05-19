@@ -6,7 +6,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aws_lc_rs::rand::{SecureRandom as AwsSecureRandom, SystemRandom};
 use nojson::Json;
-use rand::seq::SliceRandom;
 use rustls::ClientConfig;
 use rustls::pki_types::{
     CertificateDer, PrivateKeyDer, ServerName, TrustAnchor, UnixTime, pem::PemObject,
@@ -786,9 +785,18 @@ impl SoraConnection {
             return Err(Error::SignalingUrlsEmpty);
         }
 
-        // URL リストをランダム化して負荷分散する
+        // URL リストをランダム化して負荷分散する (Fisher-Yates シャッフル)
         let mut urls = signaling_urls.clone();
-        urls.shuffle(&mut rand::rng());
+        if urls.len() > 1 {
+            let rng = SystemRandom::new();
+            for i in (1..urls.len()).rev() {
+                let mut buf = [0u8; 8];
+                rng.fill(&mut buf)
+                    .expect("failed to generate random bytes for URL shuffle");
+                let j = (u64::from_le_bytes(buf) % (i as u64 + 1)) as usize;
+                urls.swap(i, j);
+            }
+        }
 
         let websocket_connection_timeout = self.config.websocket_connection_timeout;
         let websocket_close_timeout = self.config.websocket_close_timeout;
@@ -849,13 +857,19 @@ impl SoraConnection {
         loop {
             tokio::select! {
                 read = stream.read(&mut buf), if !websocket_closed => {
-                    let n = read?;
+                    // ピアが close_notify を送らずに TCP を閉じた場合 UnexpectedEof になるため、
+                    // n == 0 と同じ「相手から切られた」扱いに合流させる。
+                    let n = match read {
+                        Ok(n) => n,
+                        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => 0,
+                        Err(e) => return Err(e.into()),
+                    };
                     if n == 0 {
                         if switched_ignore_disconnect_websocket {
-                            rtc_log_info!(
-                                "WebSocket 接続が閉じられました (DataChannel シグナリングを継続)"
-                            );
+                            rtc_log_info!("WebSocket closed; continuing DataChannel signaling");
                             websocket_closed = true;
+                            // 期限切れ sleep_until で select! がスピンしないようリセットする
+                            ws_disconnect_delay_start = None;
                         } else {
                             rtc_log_info!("接続が閉じられました");
                             break;
@@ -1195,12 +1209,35 @@ impl SoraConnection {
                 }
             }
 
-            if let Ok(true) = flush_ws_output(&mut ws, &mut stream, &mut timers).await {
-                break;
-            }
+            // WebSocket クローズ検知 (CloseConnection 出力 / ws.state() == Closed) を 1 箇所に集約する。
+            // ignore_disconnect_websocket=true 成立時は break せず DataChannel シグナリングを継続する。
+            let close_emitted = match flush_ws_output(&mut ws, &mut stream, &mut timers).await {
+                Ok(emitted) => emitted,
+                Err(e) => {
+                    if switched_ignore_disconnect_websocket && !websocket_closed {
+                        // switched 後の WebSocket I/O 失敗は DataChannel シグナリング継続のため吸収する
+                        rtc_log_warning!(
+                            "flush WebSocket output failed; continuing DataChannel signaling: {}",
+                            e
+                        );
+                        true
+                    } else {
+                        return Err(e);
+                    }
+                }
+            };
 
-            if ws.state() == ConnectionState::Closed {
-                break;
+            if close_emitted || ws.state() == ConnectionState::Closed {
+                if switched_ignore_disconnect_websocket {
+                    if !websocket_closed {
+                        rtc_log_info!("WebSocket closed; continuing DataChannel signaling");
+                        websocket_closed = true;
+                        // 期限切れ sleep_until で select! がスピンしないようリセットする
+                        ws_disconnect_delay_start = None;
+                    }
+                } else {
+                    break;
+                }
             }
         }
 
@@ -2293,17 +2330,17 @@ fn build_proxy_connect_request(
     proxy: &ParsedProxyInfo,
 ) -> Result<Vec<u8>> {
     let authority = format!("{}:{}", format_bracketed_host(&target.host), target.port);
-    let mut request = Request::new("CONNECT", &authority)
-        .header("Host", &authority)
-        .header("User-Agent", &proxy.user_agent);
+    let mut request = Request::new("CONNECT", &authority)?
+        .header("Host", &authority)?
+        .header("User-Agent", &proxy.user_agent)?;
     if proxy.username.is_some() || proxy.password.is_some() {
         let username = proxy.username.as_deref().unwrap_or("");
         let password = proxy.password.as_deref().unwrap_or("");
         let auth = BasicAuth::new(username, password)?;
         let header = auth.to_header_value();
-        request = request.header("Proxy-Authorization", &header);
+        request = request.header("Proxy-Authorization", &header)?;
     }
-    Ok(request.encode())
+    Ok(request.encode()?)
 }
 
 fn ensure_proxy_connect_status_success(status_code: u16, reason_phrase: &str) -> Result<()> {
@@ -2335,7 +2372,7 @@ async fn connect_http_proxy_tunnel(
         }
         decoder.feed(&buf[..n])?;
         if let Some((head, _body_kind)) = decoder.decode_headers()? {
-            ensure_proxy_connect_status_success(head.status_code, &head.reason_phrase)?;
+            ensure_proxy_connect_status_success(head.status_code(), head.reason_phrase())?;
             let remaining = decoder.take_remaining();
             stream.push_pending_read(remaining);
             return Ok(());
@@ -2730,7 +2767,7 @@ mod tests {
             .expect("レスポンスヘッダーの decode に失敗しました")
             .expect("レスポンスヘッダーが完成していません");
         assert_eq!(body_kind, shiguredo_http11::BodyKind::Tunnel);
-        ensure_proxy_connect_status_success(head.status_code, &head.reason_phrase)
+        ensure_proxy_connect_status_success(head.status_code(), head.reason_phrase())
             .expect("2xx は成功扱いである必要があります");
     }
 
@@ -2749,7 +2786,7 @@ mod tests {
             body_kind,
             shiguredo_http11::BodyKind::ContentLength(0)
         ));
-        let err = ensure_proxy_connect_status_success(head.status_code, &head.reason_phrase)
+        let err = ensure_proxy_connect_status_success(head.status_code(), head.reason_phrase())
             .expect_err("非 2xx は失敗扱いである必要があります");
         assert!(matches!(
             err,

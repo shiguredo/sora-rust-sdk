@@ -383,19 +383,6 @@ cargo run -p sumomo -- \
     --role sendrecv
 ```
 
-### zakuro
-
-Sora WebRTC SFU 負荷試験ツールです。将来的に [zakuro](https://github.com/shiguredo/zakuro) (C++ 版) を置き換える予定です。
-詳細は [examples/zakuro/README.md](examples/zakuro/README.md) を参照してください。
-
-```bash
-cargo run -p zakuro -- \
-    --sora-signaling-url wss://sora.example.com/signaling \
-    --sora-channel-id zakuro-test \
-    --sora-role sendonly \
-    --vcs 10
-```
-
 ## ビルド
 
 ### 前提条件

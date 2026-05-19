@@ -2,10 +2,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use shiguredo_vpl::{
-    Av1EncoderConfig, CodecConfig, DecodedFrame, Decoder, DecoderCodec, DecoderConfig,
-    EncodeOptions, EncodedFrame, Encoder, EncoderConfig, Error as VplError, FrameFormat,
-    H264EncoderConfig, HevcEncoderConfig, PictureType, RateControlMode, ReconfigureParams,
-    VideoCodecType as VplCodecType, Vp9EncoderConfig, Vp9Profile, frame_type, supported_codecs,
+    AdapterSelector, Av1EncoderConfig, CodecConfig, DecodedFrame, Decoder, DecoderCodec,
+    DecoderConfig, EncodeOptions, EncodedFrame, Encoder, EncoderConfig, Error as VplError,
+    FnDecodeHandler, FnEncodeHandler, FrameFormat, H264EncoderConfig, HevcEncoderConfig,
+    PictureType, RateControlMode, ReconfigureParams, VideoCodecType as VplCodecType,
+    Vp9EncoderConfig, Vp9Profile, frame_type, list_adapters, supported_codecs,
 };
 use shiguredo_webrtc::{
     CodecSpecificInfo, EncodedImage, EncodedImageBuffer, EncodedImageRef, EnvironmentRef,
@@ -25,8 +26,10 @@ use crate::video_codec_capability::{
     CodecDirection, VideoCodecCapability, VideoCodecImplementation,
 };
 
-fn collect_supported_formats() -> Result<(Vec<SdpVideoFormat>, Vec<SdpVideoFormat>)> {
-    let codec_infos = supported_codecs()?;
+fn collect_supported_formats(
+    adapter: AdapterSelector,
+) -> Result<(Vec<SdpVideoFormat>, Vec<SdpVideoFormat>)> {
+    let codec_infos = supported_codecs(adapter)?;
 
     let mut encoder_supported_formats = Vec::new();
     let mut decoder_supported_formats = Vec::new();
@@ -182,9 +185,9 @@ fn handle_vpl_encode_callback(
 
     let picture_type = encoded.picture_type();
     let output_frame_type = frame_type_from_vpl(picture_type);
-    let rtp_timestamp = encoded.value().rtp_timestamp;
-    let frame_width = encoded.value().frame_width;
-    let frame_height = encoded.value().frame_height;
+    let rtp_timestamp = encoded.user_data().rtp_timestamp;
+    let frame_width = encoded.user_data().frame_width;
+    let frame_height = encoded.user_data().frame_height;
 
     let data = encoded.into_data();
     let encoded_payload = if codec_type == VideoCodecType::Vp9 {
@@ -249,8 +252,9 @@ fn handle_vpl_encode_callback(
 }
 
 struct VplVideoEncoder {
-    encoder: Option<Encoder<EncoderCallbackValue>>,
+    encoder: Option<Encoder<FnEncodeHandler<EncoderCallbackValue>>>,
     callback_state: Arc<Mutex<EncoderCallbackState>>,
+    adapter: AdapterSelector,
     codec_type: VideoCodecType,
     width: u32,
     height: u32,
@@ -261,10 +265,11 @@ struct VplVideoEncoder {
 }
 
 impl VplVideoEncoder {
-    fn new(codec_type: VideoCodecType) -> Self {
+    fn new(adapter: AdapterSelector, codec_type: VideoCodecType) -> Self {
         Self {
             encoder: None,
             callback_state: Arc::new(Mutex::new(EncoderCallbackState::default())),
+            adapter,
             codec_type,
             width: 0,
             height: 0,
@@ -288,6 +293,7 @@ impl VplVideoEncoder {
         };
 
         let mut config = EncoderConfig::new(
+            self.adapter,
             codec_config,
             self.width,
             self.height,
@@ -300,9 +306,16 @@ impl VplVideoEncoder {
 
         let callback_state_for_callback = self.callback_state.clone();
         let callback_codec_type = self.codec_type;
-        let encoder = Encoder::new(config, move |result| {
-            handle_vpl_encode_callback(&callback_state_for_callback, result, callback_codec_type);
-        })?;
+        let encoder = Encoder::new(
+            config,
+            FnEncodeHandler::new(move |result| {
+                handle_vpl_encode_callback(
+                    &callback_state_for_callback,
+                    result,
+                    callback_codec_type,
+                );
+            }),
+        )?;
 
         self.encoder = Some(encoder);
         self.rebuild_needed = false;
@@ -509,6 +522,10 @@ impl VideoEncoderHandler for VplVideoEncoder {
     fn release(&mut self) -> VideoCodecStatus {
         let mut callback_state = self.callback_state.lock().unwrap();
         callback_state.callback = None;
+        // self.encoder = None で drain 処理が走ってコールバックハンドラが呼ばれ、
+        // コールバックハンドラの中でロックを獲得しようとするので、
+        // ここで Mutex を unlock しておかないとデッドロックになる
+        drop(callback_state);
         self.encoder = None;
         VideoCodecStatus::Ok
     }
@@ -612,7 +629,7 @@ fn handle_vpl_decode_callback(
         }
     }
 
-    let value = frame.value();
+    let value = frame.user_data();
     let decoded_frame = VideoFrame::builder(&nv12.cast_to_video_frame_buffer())
         .set_timestamp_us(value.render_time_ms.saturating_mul(1000))
         .set_rtp_timestamp(value.rtp_timestamp)
@@ -629,15 +646,17 @@ fn handle_vpl_decode_callback(
 
 struct VplVideoDecoder {
     callback_state: Arc<Mutex<DecoderCallbackState>>,
-    decoder: Option<Decoder<DecoderCallbackValue>>,
+    decoder: Option<Decoder<FnDecodeHandler<DecoderCallbackValue>>>,
+    adapter: AdapterSelector,
     codec_type: VideoCodecType,
 }
 
 impl VplVideoDecoder {
-    fn new(codec_type: VideoCodecType) -> Self {
+    fn new(adapter: AdapterSelector, codec_type: VideoCodecType) -> Self {
         Self {
             callback_state: Arc::new(Mutex::new(DecoderCallbackState::default())),
             decoder: None,
+            adapter,
             codec_type,
         }
     }
@@ -648,11 +667,14 @@ impl VplVideoDecoder {
                 reason: "VPL decoder codec type is not supported".to_string(),
             });
         };
-        let config = DecoderConfig::new(codec);
+        let config = DecoderConfig::new(self.adapter, codec);
         let callback_state = self.callback_state.clone();
-        self.decoder = Some(Decoder::new(config, move |result| {
-            handle_vpl_decode_callback(&callback_state, result);
-        })?);
+        self.decoder = Some(Decoder::new(
+            config,
+            FnDecodeHandler::new(move |result| {
+                handle_vpl_decode_callback(&callback_state, result);
+            }),
+        )?);
         Ok(())
     }
 }
@@ -719,6 +741,9 @@ impl VideoDecoderHandler for VplVideoDecoder {
     fn release(&mut self) -> VideoCodecStatus {
         let mut callback_state = self.callback_state.lock().unwrap();
         callback_state.callback = None;
+        // self.decoder = None で drain 処理が走ってコールバックハンドラが呼ばれ、
+        // コールバックハンドラの中でロックを獲得しようとするので、
+        // ここで Mutex を unlock しておかないとデッドロックになる
         drop(callback_state);
         self.decoder = None;
         VideoCodecStatus::Ok
@@ -733,6 +758,7 @@ impl VideoDecoderHandler for VplVideoDecoder {
 }
 
 pub struct VplVideoCodecCapability {
+    adapter: AdapterSelector,
     encoder_supported_formats: Vec<SdpVideoFormat>,
     decoder_supported_formats: Vec<SdpVideoFormat>,
     simulcast_capability_helper: SimulcastCapabilityHelper,
@@ -740,16 +766,27 @@ pub struct VplVideoCodecCapability {
 
 impl VplVideoCodecCapability {
     pub fn new() -> Result<Self> {
-        let (encoder_supported_formats, decoder_supported_formats) = collect_supported_formats()?;
+        let adapters = list_adapters()?;
+        let adapter_info = adapters.first().ok_or_else(|| crate::Error::VplMessage {
+            reason: "VPL: no hardware adapter found".to_string(),
+        })?;
+        let adapter = AdapterSelector::DrmRenderNode(adapter_info.drm_render_node);
+        let (encoder_supported_formats, decoder_supported_formats) =
+            collect_supported_formats(adapter)?;
         if encoder_supported_formats.is_empty() && decoder_supported_formats.is_empty() {
             return Err(crate::Error::VplMessage {
                 reason: "VPL does not support any encoder or decoder codec".to_string(),
             });
         }
-        Self::new_with_formats(encoder_supported_formats, decoder_supported_formats)
+        Self::new_with_formats(
+            adapter,
+            encoder_supported_formats,
+            decoder_supported_formats,
+        )
     }
 
     fn new_with_formats(
+        adapter: AdapterSelector,
         encoder_supported_formats: Vec<SdpVideoFormat>,
         decoder_supported_formats: Vec<SdpVideoFormat>,
     ) -> Result<Self> {
@@ -761,13 +798,14 @@ impl VplVideoCodecCapability {
                 move |_env, format| {
                     let codec_type = codec_type_from_format(&format)?;
                     Some(VideoEncoder::new_with_handler(Box::new(
-                        VplVideoEncoder::new(codec_type),
+                        VplVideoEncoder::new(adapter, codec_type),
                     )))
                 }
             },
         );
 
         Ok(Self {
+            adapter,
             encoder_supported_formats,
             decoder_supported_formats,
             simulcast_capability_helper,
@@ -803,7 +841,7 @@ impl VideoCodecCapability for VplVideoCodecCapability {
     ) -> Option<VideoDecoder> {
         let codec_type = codec_type_from_format(&format)?;
         Some(VideoDecoder::new_with_handler(Box::new(
-            VplVideoDecoder::new(codec_type),
+            VplVideoDecoder::new(self.adapter, codec_type),
         )))
     }
 }
@@ -814,7 +852,12 @@ impl VplVideoCodecCapability {
         encoder_supported_formats: Vec<SdpVideoFormat>,
         decoder_supported_formats: Vec<SdpVideoFormat>,
     ) -> Result<Self> {
-        Self::new_with_formats(encoder_supported_formats, decoder_supported_formats)
+        let adapter = AdapterSelector::DrmRenderNode(128);
+        Self::new_with_formats(
+            adapter,
+            encoder_supported_formats,
+            decoder_supported_formats,
+        )
     }
 }
 

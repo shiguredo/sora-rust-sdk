@@ -2,7 +2,7 @@
 # See https://prek.j178.dev for more information.
 #:schema https://www.schemastore.org/prek.json
 
-minimum_prek_version = "0.3.9"
+minimum_prek_version = "0.4.0"
 
 exclude = { glob = ["target/**", ".vscode/**"] }
 
@@ -11,12 +11,19 @@ repo = "builtin"
 hooks = [
   { id = "trailing-whitespace" },
   { id = "end-of-file-fixer" },
+  { id = "mixed-line-ending" },
   { id = "check-toml" },
   { id = "check-yaml" },
   { id = "check-json" },
   { id = "check-merge-conflict" },
+  { id = "check-added-large-files" },
+  { id = "check-case-conflict" },
+  { id = "check-vcs-permalinks" },
+  { id = "check-symlinks" },
+  { id = "destroyed-symlinks" },
+  { id = "check-executables-have-shebangs", exclude = "\\.rs$" },
+  { id = "check-shebang-scripts-are-executable", exclude = "\\.rs$" },
   { id = "detect-private-key" },
-  { id = "mixed-line-ending" },
 ]
 
 [[repos]]

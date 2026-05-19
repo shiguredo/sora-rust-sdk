@@ -29,10 +29,9 @@
   - `src/client.rs` / `src/client_context.rs` を `src/connection.rs` / `src/connection_context.rs` にリネームする
   - Sora シグナリング仕様の `client_id` / TLS 用語の `client_cert` / `client_key` / `version::get_sora_client_name()` は据え置く
   - @voluntas
-- [CHANGE] VPL デコーダーを非同期コールバック API に対応させる
-  - `Decoder<T>` のジェネリクス型パラメータに対応し、コンストラクタでコールバックを登録する
-  - `Decoder::decode` に value 引数を渡し、`DecodedFrame<T>` で受け取る
-  - `Decoder::next_frame` の廃止に伴い、非同期コールバック方式へ移行する
+- [CHANGE] VPL エンコーダーとデコーダーを非同期コールバック API に対応させる
+  - `Encoder<H>`, `Decoder<H>` のジェネリクス型パラメータに対応し、コンストラクタでコールバックハンドラを登録する
+  - `Encoder::encode()`, `Decoder::decode()` に user_data 引数を渡し、`EncodedFrame<T>`, `DecodedFrame<T>` で受け取る
   - `nv12_to_i420` による色空間変換を廃止し、`NV12Buffer` + `nv12_copy` で NV12 のまま処理する
   - @melpon
 - [CHANGE] AMF エンコーダー/デコーダーを非同期コールバック API に対応させる
@@ -41,9 +40,21 @@
   - `Decoder::decode` に `Buffer` + user_data を渡し、出力はコールバック経由で `DecodedFrame<T>` として受け取る
   - `Encoder::next_frame` / `Decoder::next_frame` の廃止に伴い、非同期コールバック方式へ移行する
   - @melpon
+- [CHANGE] `Error` 列挙型に `ProxyConnectEncode(EncodeError)` バリアントを追加する
+  - `shiguredo_http11` 2026.4 で `Request::new` / `Request::header` / `Request::encode` が `Result<_, EncodeError>` を返すようになったため、Proxy CONNECT リクエストの構築失敗を伝播する
+  - @voluntas
+- [UPDATE] `shiguredo_http11` を 2026.5 に上げる
+  - `RequestHead` / `ResponseHead` のフィールド非公開化に追従し、`status_code` / `reason_phrase` / `method` / `uri` をアクセサメソッド呼び出しに変更する
+  - `Request::new` / `Request::header` / `Request::encode` の `Result` 化に追従する
+  - e2e-tests の `shiguredo_http11` も同バージョンに揃える
+  - @voluntas
+- [UPDATE] `shiguredo_websocket` を 2026.2.0 に上げる
+  - @voluntas
 - [UPDATE] zlib 圧縮/展開の実装を `flate2` から `noflate` に差し替える
   - @voluntas
-- [UPDATE] `shiguredo_webrtc` を 0.147.1-canary.4 に上げる
+- [UPDATE] `rand` 依存を削除し、シグナリング URL のシャッフルを `aws-lc-rs` の `SystemRandom` を用いた Fisher-Yates 実装に置き換える
+  - @voluntas
+- [UPDATE] `shiguredo_webrtc` を 0.148.0 に上げる
   - @sile, @melpon
 - [UPDATE] `shiguredo_nvcodec` を 2026.1.0 に上げる
   - @melpon
@@ -111,9 +122,21 @@
   - @melpon
 - [FIX] `e2e-tests/tests/video_codec.rs` の未使用 import `std::sync::Arc` を削除する
   - @voluntas
+- [FIX] `ignore_disconnect_websocket=true` 指定時に WebSocket クローズ後も DataChannel シグナリングが継続するように修正する
+  - WebSocket close 完了時に `run()` ループが無条件で break して DataChannel シグナリングが継続しなかった問題を修正する
+  - 防御的に `stream.read()` の `UnexpectedEof` (ピアが close_notify を送らずに TCP を閉じたケース) も `n == 0` と同等扱いに合流させる
+  - @voluntas
 
 ### misc
 
+- [UPDATE] workspace.dependencies を整理しサブクレートを `dep.workspace = true` 形式に統一する
+  - `sora_sdk = { path = "." }` を `[workspace.dependencies]` に追加し、e2e-tests / examples/sumomo から相対パス指定を排除する
+  - sora_sdk 本体が利用する依存 (`aws-lc-rs` / `nojson` / `tokio` / `shiguredo_nvcodec`) を `[workspace.dependencies]` に集約する
+  - sora_sdk 本体が利用しない依存 (`serial_test` / `shiguredo_audio_device` / `shiguredo_video_device`) は集約せず、各サブクレートに直接記載のままとする
+  - workspace 経由の参照を `dep.workspace = true` のショートハンド形式に統一する (optional / features 指定がある場合のみインラインテーブル形式を維持する)
+  - @voluntas
+- [UPDATE] README から削除済みの zakuro サンプルセクションを取り除く
+  - @voluntas
 - [UPDATE] e2e-tests に `SoraTestConnection` を追加し、`SoraConnection` 直利用テストを callback ログ + predicate 待機ベースへ置き換える
   - @melpon
 - [UPDATE] e2e-tests の WebRTC stats 検証を文字列探索から型付きパースベースへ置き換える

@@ -7,33 +7,33 @@ edition = "2024"
 
 [dependencies]
 noargs = "0.4"
-nojson = "0.3"
-rustls-pki-types = "1"
-sora_sdk = { path = "../.." }
-shiguredo_webrtc = { workspace = true }
-raw_player = { version = "2026.1.0-canary.1", optional = true }
-shiguredo_video_device = { version = "2026.1.0-canary.3", optional = true }
-shiguredo_audio_device = { version = "2026.1.0-canary.0", optional = true }
-tokio = { version = "1", features = [
-    "io-util",
-    "macros",
-    "net",
-    "rt-multi-thread",
-    "sync",
-    "time",
+nojson.workspace = true
+raw_player = { version = "2026.1", optional = true }
+rustls-pki-types = "1.14"
+shiguredo_audio_device = { version = "2026.1", optional = true }
+shiguredo_video_device = { version = "2026.1", optional = true }
+shiguredo_webrtc.workspace = true
+sora_sdk.workspace = true
+tokio = { workspace = true, features = [
+  "io-util",
+  "macros",
+  "net",
+  "rt-multi-thread",
+  "sync",
+  "time",
 ] }
+
+[dev-dependencies]
+serial_test = "3.4"
 
 [features]
 default = []
 amf = ["sora_sdk/amf"]
-nvcodec = ["sora_sdk/nvcodec"]
-vpl = ["sora_sdk/vpl"]
-v4l2 = ["sora_sdk/v4l2"]
 libcamera = ["sora_sdk/libcamera"]
-raw-player = ["dep:raw_player"]
 # Linux では追加で pipewire-pulse と libpulse-dev が必要:
 #   sudo apt install pipewire-pulse libpulse-dev
-media-device = ["dep:shiguredo_video_device", "dep:shiguredo_audio_device"]
-
-[dev-dependencies]
-serial_test = "3"
+media-device = ["dep:shiguredo_audio_device", "dep:shiguredo_video_device"]
+nvcodec = ["sora_sdk/nvcodec"]
+raw-player = ["dep:raw_player"]
+v4l2 = ["sora_sdk/v4l2"]
+vpl = ["sora_sdk/vpl"]
