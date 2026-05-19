@@ -29,6 +29,11 @@
   - `src/client.rs` / `src/client_context.rs` を `src/connection.rs` / `src/connection_context.rs` にリネームする
   - Sora シグナリング仕様の `client_id` / TLS 用語の `client_cert` / `client_key` / `version::get_sora_client_name()` は据え置く
   - @voluntas
+- [CHANGE] VPL エンコーダーとデコーダーを非同期コールバック API に対応させる
+  - `Encoder<H>`, `Decoder<H>` のジェネリクス型パラメータに対応し、コンストラクタでコールバックハンドラを登録する
+  - `Encoder::encode()`, `Decoder::decode()` に user_data 引数を渡し、`EncodedFrame<T>`, `DecodedFrame<T>` で受け取る
+  - `nv12_to_i420` による色空間変換を廃止し、`NV12Buffer` + `nv12_copy` で NV12 のまま処理する
+  - @melpon
 - [CHANGE] `Error` 列挙型に `ProxyConnectEncode(EncodeError)` バリアントを追加する
   - `shiguredo_http11` 2026.4 で `Request::new` / `Request::header` / `Request::encode` が `Result<_, EncodeError>` を返すようになったため、Proxy CONNECT リクエストの構築失敗を伝播する
   - @voluntas

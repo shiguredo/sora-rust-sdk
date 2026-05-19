@@ -46,7 +46,7 @@ shiguredo_openh264 = { version = "2026.1", optional = true }
 # V4L2 M2M によるハードウェアコーデックと画像変換 (Linux 向け)
 shiguredo_v4l2 = { version = "2026.1.0-canary.3", optional = true }
 # Intel VPL によるハードウェアエンコード/デコード
-shiguredo_vpl = { version = "2026.1", optional = true }
+shiguredo_vpl = { version = "2026.3.0-canary.0", optional = true }
 # WebRTC スタック本体 (PeerConnection、メディアエンジン等)
 shiguredo_webrtc.workspace = true
 # Sora シグナリングへの接続で利用する WebSocket クライアント実装
