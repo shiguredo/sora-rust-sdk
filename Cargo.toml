@@ -39,7 +39,7 @@ shiguredo_mp4 = "2026.3"
 shiguredo_nvcodec = { version = "2026.1", optional = true }
 shiguredo_openh264 = { version = "2026.1", optional = true }
 shiguredo_v4l2 = { version = "2026.1.0-canary.3", optional = true }
-shiguredo_vpl = { version = "2026.1", optional = true }
+shiguredo_vpl = { version = "2026.3.0-canary.0", optional = true }
 shiguredo_webrtc = { workspace = true }
 shiguredo_websocket = "2026.1"
 tokio = { version = "1", features = [
