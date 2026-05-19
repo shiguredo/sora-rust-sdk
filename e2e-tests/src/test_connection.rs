@@ -673,7 +673,11 @@ impl SoraTestConnection {
         self.wait_stats(
             |stats| {
                 crate::verify_video_stats_field_positive(stats, "inbound-rtp", "packetsReceived")
-                    && crate::verify_video_stats_field_positive(stats, "inbound-rtp", "framesDecoded")
+                    && crate::verify_video_stats_field_positive(
+                        stats,
+                        "inbound-rtp",
+                        "framesDecoded",
+                    )
             },
             timeout,
         )

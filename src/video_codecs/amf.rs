@@ -3,9 +3,9 @@ use std::sync::{Arc, Mutex};
 
 use shiguredo_amf::{
     Av1EncoderConfig, CodecConfig, DecodedFrame, Decoder, DecoderCodec, DecoderConfig,
-    EncodeOptions, EncodedFrame, Encoder, EncoderConfig, FrameFormat, H264EncoderConfig,
-    HevcEncoderConfig, PictureType, RateControlMode, ReconfigureParams,
-    VideoCodecType as AmfCodecType, frame_type, supported_codecs,
+    EncodeOptions, EncodedFrame, Encoder, EncoderConfig, FnDecodeHandler, FnEncodeHandler,
+    FrameFormat, H264EncoderConfig, HevcEncoderConfig, PictureType, RateControlMode,
+    ReconfigureParams, VideoCodecType as AmfCodecType, frame_type, supported_codecs,
 };
 
 use shiguredo_webrtc::{
@@ -131,9 +131,17 @@ struct EncoderCallbackState {
 
 fn handle_amf_encode_callback(
     callback_state: &Arc<Mutex<EncoderCallbackState>>,
-    encoded: EncodedFrame<EncoderCallbackValue>,
+    result: Result<EncodedFrame<EncoderCallbackValue>>,
     codec_type: VideoCodecType,
 ) {
+    let encoded = match result {
+        Ok(encoded) => encoded,
+        Err(e) => {
+            rtc_log_error!("AMF encode callback: encode error: {e}");
+            return;
+        }
+    };
+
     let picture_type = encoded.picture_type();
     let output_frame_type = frame_type_from_amf(picture_type);
     let value = encoded.user_data();
@@ -182,7 +190,7 @@ fn handle_amf_encode_callback(
 }
 
 struct AmfVideoEncoder {
-    encoder: Option<Encoder<EncoderCallbackValue>>,
+    encoder: Option<Encoder<FnEncodeHandler<EncoderCallbackValue, crate::Error>>>,
     callback_state: Arc<Mutex<EncoderCallbackState>>,
     codec_type: VideoCodecType,
     width: u32,
@@ -233,9 +241,12 @@ impl AmfVideoEncoder {
 
         let callback_state = Arc::clone(&self.callback_state);
         let callback_codec_type = self.codec_type;
-        self.encoder = Some(Encoder::new(config, move |encoded| {
-            handle_amf_encode_callback(&callback_state, encoded, callback_codec_type);
-        })?);
+        self.encoder = Some(Encoder::new(
+            config,
+            FnEncodeHandler::new(move |result: Result<EncodedFrame<EncoderCallbackValue>>| {
+                handle_amf_encode_callback(&callback_state, result, callback_codec_type);
+            }),
+        )?);
         self.rebuild_needed = false;
         self.reconfigure_needed = false;
         Ok(())
@@ -502,8 +513,16 @@ struct DecoderCallbackState {
 
 fn handle_amf_decode_callback(
     callback_state: &Arc<Mutex<DecoderCallbackState>>,
-    decoded: DecodedFrame<DecoderCallbackValue>,
+    result: Result<DecodedFrame<DecoderCallbackValue>>,
 ) {
+    let decoded = match result {
+        Ok(decoded) => decoded,
+        Err(e) => {
+            rtc_log_error!("AMF decode callback: decode error: {e}");
+            return;
+        }
+    };
+
     let surface = decoded.surface();
     let value = decoded.user_data();
 
@@ -527,21 +546,6 @@ fn handle_amf_decode_callback(
     let y_pitch = plane_y.get_hpitch();
     let uv_pitch = plane_uv.get_hpitch();
 
-    let width_i32 = match i32::try_from(width) {
-        Ok(v) => v,
-        Err(_) => {
-            rtc_log_error!("AMF decode callback: width exceeds i32::MAX: {}", width);
-            return;
-        }
-    };
-    let height_i32 = match i32::try_from(height) {
-        Ok(v) => v,
-        Err(_) => {
-            rtc_log_error!("AMF decode callback: height exceeds i32::MAX: {}", height);
-            return;
-        }
-    };
-
     let y_native = plane_y.get_native() as *const u8;
     let uv_native = plane_uv.get_native() as *const u8;
     let Some(y_size) = (y_pitch as usize).checked_mul(height as usize) else {
@@ -563,7 +567,7 @@ fn handle_amf_decode_callback(
     let src_y = unsafe { std::slice::from_raw_parts(y_native, y_size) };
     let src_uv = unsafe { std::slice::from_raw_parts(uv_native, uv_size) };
 
-    let mut nv12 = NV12Buffer::new(width_i32, height_i32);
+    let mut nv12 = NV12Buffer::new(width, height);
     let dst_stride_y = nv12.stride_y();
     let dst_stride_uv = nv12.stride_uv();
     {
@@ -577,8 +581,8 @@ fn handle_amf_decode_callback(
             dst_stride_y,
             dst_uv,
             dst_stride_uv,
-            width_i32,
-            height_i32,
+            width,
+            height,
         ) {
             rtc_log_error!("AMF decode callback: nv12_copy failed");
             return;
@@ -601,7 +605,7 @@ fn handle_amf_decode_callback(
 
 struct AmfVideoDecoder {
     callback_state: Arc<Mutex<DecoderCallbackState>>,
-    decoder: Option<Decoder<DecoderCallbackValue>>,
+    decoder: Option<Decoder<FnDecodeHandler<DecoderCallbackValue, crate::Error>>>,
     codec_type: VideoCodecType,
 }
 
@@ -621,9 +625,12 @@ impl AmfVideoDecoder {
             });
         };
         let callback_state = Arc::clone(&self.callback_state);
-        self.decoder = Some(Decoder::new(DecoderConfig { codec }, move |decoded| {
-            handle_amf_decode_callback(&callback_state, decoded);
-        })?);
+        self.decoder = Some(Decoder::new(
+            DecoderConfig { codec },
+            FnDecodeHandler::new(move |result: Result<DecodedFrame<DecoderCallbackValue>>| {
+                handle_amf_decode_callback(&callback_state, result);
+            }),
+        )?);
         Ok(())
     }
 }
