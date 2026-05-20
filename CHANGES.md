@@ -29,17 +29,6 @@
   - `src/client.rs` / `src/client_context.rs` を `src/connection.rs` / `src/connection_context.rs` にリネームする
   - Sora シグナリング仕様の `client_id` / TLS 用語の `client_cert` / `client_key` / `version::get_sora_client_name()` は据え置く
   - @voluntas
-- [CHANGE] VPL エンコーダーとデコーダーを非同期コールバック API に対応させる
-  - `Encoder<H>`, `Decoder<H>` のジェネリクス型パラメータに対応し、コンストラクタでコールバックハンドラを登録する
-  - `Encoder::encode()`, `Decoder::decode()` に user_data 引数を渡し、`EncodedFrame<T>`, `DecodedFrame<T>` で受け取る
-  - `nv12_to_i420` による色空間変換を廃止し、`NV12Buffer` + `nv12_copy` で NV12 のまま処理する
-  - @melpon
-- [CHANGE] AMF エンコーダー/デコーダーを非同期コールバック API に対応させる
-  - `Encoder<H>` / `Decoder<H>` のコンストラクタにコールバックハンドラを渡す
-  - `Encoder::encode` に `Surface` + user_data を渡し、出力はコールバック経由で `EncodedFrame<T>` として受け取る
-  - `Decoder::decode` に `Buffer` + user_data を渡し、出力はコールバック経由で `DecodedFrame<T>` として受け取る
-  - `Encoder::next_frame` / `Decoder::next_frame` の廃止に伴い、非同期コールバック方式へ移行する
-  - @melpon
 - [CHANGE] `Error` 列挙型に `ProxyConnectEncode(EncodeError)` バリアントを追加する
   - `shiguredo_http11` 2026.4 で `Request::new` / `Request::header` / `Request::encode` が `Result<_, EncodeError>` を返すようになったため、Proxy CONNECT リクエストの構築失敗を伝播する
   - @voluntas
@@ -59,6 +48,21 @@
 - [UPDATE] `shiguredo_nvcodec` を 2026.1.0 に上げる
   - @melpon
 - [UPDATE] `nvcodec` の対応コーデック判定を `shiguredo_nvcodec::supported_codecs()` に統一し、`device_id` を API で指定可能にする
+  - @melpon
+- [UPDATE] VPL エンコーダーとデコーダーを非同期コールバック API に対応させる
+  - `Encoder<H>`, `Decoder<H>` のジェネリクス型パラメータに対応し、コンストラクタでコールバックハンドラを登録する
+  - `Encoder::encode()`, `Decoder::decode()` に user_data 引数を渡し、`EncodedFrame<T>`, `DecodedFrame<T>` で受け取る
+  - `nv12_to_i420` による色空間変換を廃止し、`NV12Buffer` + `nv12_copy` で NV12 のまま処理する
+  - @melpon
+- [UPDATE] AMF エンコーダー/デコーダーを非同期コールバック API に対応させる
+  - `Encoder<H>` / `Decoder<H>` のコンストラクタにコールバックハンドラを渡す
+  - `Encoder::encode` に `Surface` + user_data を渡し、出力はコールバック経由で `EncodedFrame<T>` として受け取る
+  - `Decoder::decode` に `Buffer` + user_data を渡し、出力はコールバック経由で `DecodedFrame<T>` として受け取る
+  - `Encoder::next_frame` / `Decoder::next_frame` の廃止に伴い、非同期コールバック方式へ移行する
+  - @melpon
+- [UPDATE] NvCodec エンコーダー/デコーダーを非同期コールバック API に対応させる
+  - `Encoder<H>` / `Decoder<H>` のコンストラクタにコールバックハンドラを渡す
+  - `Encoder::encode`, `Decoder::decode`  に user_data を渡し、出力はコールバックハンドラ経由で `EncodedFrame<T>`, `DecodedFrame<T>` として受け取る
   - @melpon
 - [ADD] Windows に対応する
   - @melpon

@@ -1,20 +1,22 @@
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use shiguredo_nvcodec::{
     Av1EncoderConfig, BufferFormat, CodecConfig, Decoder, DecoderCodec, DecoderConfig,
-    EncodeOptions, Encoder, EncoderConfig, H264EncoderConfig, HevcEncoderConfig, PictureType,
-    Preset, RateControlMode, ReconfigureParams, SurfaceFormat, TuningInfo, supported_codecs,
+    EncodeOptions, Encoder, EncoderConfig, FnDecodeHandler, FnEncodeHandler, H264EncoderConfig,
+    HevcEncoderConfig, PictureType, Preset, RateControlMode, ReconfigureParams, SurfaceFormat,
+    TuningInfo, supported_codecs,
 };
 use shiguredo_webrtc::{
     CodecSpecificInfo, EncodedImage, EncodedImageBuffer, EncodedImageRef, EnvironmentRef,
-    H264PacketizationMode, I420Buffer, NV12Buffer, ScalabilityMode, SdpVideoFormat,
-    SdpVideoFormatRef, VideoCodecRef, VideoCodecStatus, VideoCodecType, VideoDecoder,
+    H264PacketizationMode, NV12Buffer, ScalabilityMode, SdpVideoFormat, SdpVideoFormatRef,
+    VideoCodecRef, VideoCodecStatus, VideoCodecType, VideoDecoder,
     VideoDecoderDecodedImageCallbackPtr, VideoDecoderDecoderInfo, VideoDecoderHandler,
     VideoDecoderSettingsRef, VideoEncoder, VideoEncoderEncodedImageCallbackPtr,
     VideoEncoderEncodedImageCallbackRef, VideoEncoderEncodedImageCallbackResultError,
     VideoEncoderEncoderInfo, VideoEncoderHandler, VideoEncoderRateControlParametersRef,
     VideoEncoderSettingsRef, VideoFrame, VideoFrameRef, VideoFrameType, VideoFrameTypeVectorRef,
-    i420_to_nv12, nv12_to_i420, rtc_log_error, rtc_log_warning,
+    i420_to_nv12, nv12_copy, rtc_log_error, rtc_log_warning,
 };
 
 use crate::error::{Error, Result};
@@ -110,9 +112,175 @@ fn requested_frame_type(
     frame_types.and_then(|frame_types| frame_types.get(0))
 }
 
-struct NvCodecVideoEncoder {
+fn frame_type_from_nvcodec(picture_type: PictureType) -> VideoFrameType {
+    match picture_type {
+        PictureType::Idr | PictureType::I => VideoFrameType::Key,
+        PictureType::P | PictureType::B | PictureType::Unknown => VideoFrameType::Delta,
+        _ => VideoFrameType::Delta,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct EncoderCallbackValue {
+    rtp_timestamp: u32,
+    frame_width: u32,
+    frame_height: u32,
+}
+
+#[derive(Default)]
+struct EncoderCallbackState {
     callback: Option<VideoEncoderEncodedImageCallbackPtr>,
-    encoder: Option<Encoder>,
+}
+
+fn handle_nvcodec_encode_callback(
+    callback_state: &Arc<Mutex<EncoderCallbackState>>,
+    result: Result<shiguredo_nvcodec::EncodedFrame<EncoderCallbackValue>>,
+    codec_type: VideoCodecType,
+) {
+    let encoded = match result {
+        Ok(encoded) => encoded,
+        Err(err) => {
+            rtc_log_error!(
+                "NVCODEC encode callback failed for {:?}: {}",
+                codec_type,
+                err
+            );
+            return;
+        }
+    };
+
+    let picture_type = encoded.picture_type();
+    let output_frame_type = frame_type_from_nvcodec(picture_type);
+    let value = encoded.user_data();
+    let rtp_timestamp = value.rtp_timestamp;
+    let frame_width = value.frame_width;
+    let frame_height = value.frame_height;
+
+    let mut encoded_image = EncodedImage::new();
+    let encoded_buffer = EncodedImageBuffer::from_bytes(encoded.data());
+    encoded_image.set_encoded_data(&encoded_buffer);
+    encoded_image.set_rtp_timestamp(rtp_timestamp);
+    encoded_image.set_encoded_width(frame_width);
+    encoded_image.set_encoded_height(frame_height);
+    encoded_image.set_frame_type(output_frame_type);
+
+    let mut codec_specific_info = CodecSpecificInfo::new();
+    codec_specific_info.set_codec_type(codec_type);
+    if codec_type == VideoCodecType::H264 {
+        codec_specific_info.set_h264_packetization_mode(H264PacketizationMode::NonInterleaved);
+        codec_specific_info.set_h264_idr_frame(matches!(picture_type, PictureType::Idr));
+    }
+
+    let result = {
+        let callback_state = callback_state.lock().unwrap();
+        let Some(callback) = callback_state.callback else {
+            return;
+        };
+        unsafe {
+            callback.on_encoded_image(encoded_image.as_ref(), Some(codec_specific_info.as_ref()))
+        }
+    };
+    if result.error() != VideoEncoderEncodedImageCallbackResultError::Ok {
+        rtc_log_warning!(
+            "NVCODEC: on_encoded_image returned non-Ok status; continue encoding to avoid libwebrtc crash"
+        );
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DecoderCallbackValue {
+    rtp_timestamp: u32,
+    render_time_ms: i64,
+}
+
+#[derive(Default)]
+struct DecoderCallbackState {
+    callback: Option<VideoDecoderDecodedImageCallbackPtr>,
+}
+
+fn handle_nvcodec_decode_callback(
+    callback_state: &Arc<Mutex<DecoderCallbackState>>,
+    result: Result<shiguredo_nvcodec::DecodedFrame<DecoderCallbackValue>>,
+) {
+    let frame = match result {
+        Ok(frame) => frame,
+        Err(err) => {
+            rtc_log_error!("NVCODEC decode callback failed: {}", err);
+            return;
+        }
+    };
+
+    let width_i32 = match i32::try_from(frame.width()) {
+        Ok(v) => v,
+        Err(_) => {
+            rtc_log_error!(
+                "NVCODEC decoded frame width exceeds i32::MAX: {}",
+                frame.width()
+            );
+            return;
+        }
+    };
+    let height_i32 = match i32::try_from(frame.height()) {
+        Ok(v) => v,
+        Err(_) => {
+            rtc_log_error!(
+                "NVCODEC decoded frame height exceeds i32::MAX: {}",
+                frame.height()
+            );
+            return;
+        }
+    };
+    let pitch_i32 = match i32::try_from(frame.y_stride()) {
+        Ok(v) => v,
+        Err(_) => {
+            rtc_log_error!(
+                "NVCODEC decoded frame pitch exceeds i32::MAX: {}",
+                frame.y_stride()
+            );
+            return;
+        }
+    };
+
+    let mut nv12 = NV12Buffer::new(width_i32, height_i32);
+    let dst_stride_y = nv12.stride_y();
+    let dst_stride_uv = nv12.stride_uv();
+    {
+        let (dst_y, dst_uv) = nv12.planes_mut();
+        if !nv12_copy(
+            frame.y_plane(),
+            pitch_i32,
+            frame.uv_plane(),
+            pitch_i32,
+            dst_y,
+            dst_stride_y,
+            dst_uv,
+            dst_stride_uv,
+            width_i32,
+            height_i32,
+        ) {
+            rtc_log_error!("NVCODEC decode callback: nv12_copy failed");
+            return;
+        }
+    }
+
+    let value = frame.user_data();
+    let decoded_frame = VideoFrame::builder(&nv12.cast_to_video_frame_buffer())
+        .set_timestamp_us(value.render_time_ms.saturating_mul(1000))
+        .set_rtp_timestamp(value.rtp_timestamp)
+        .build();
+
+    let callback_state = callback_state.lock().unwrap();
+    let Some(callback) = callback_state.callback else {
+        return;
+    };
+    unsafe {
+        callback.decoded(decoded_frame.as_ref());
+    }
+}
+
+struct NvCodecVideoEncoder {
+    encoder: Option<Encoder<FnEncodeHandler<EncoderCallbackValue, Error>>>,
+    callback_state: Arc<Mutex<EncoderCallbackState>>,
     codec_type: VideoCodecType,
     device_id: i32,
     width: u32,
@@ -126,8 +294,8 @@ struct NvCodecVideoEncoder {
 impl NvCodecVideoEncoder {
     fn new(codec_type: VideoCodecType, device_id: i32) -> Self {
         Self {
-            callback: None,
             encoder: None,
+            callback_state: Arc::new(Mutex::new(EncoderCallbackState::default())),
             codec_type,
             device_id,
             width: 0,
@@ -170,14 +338,22 @@ impl NvCodecVideoEncoder {
             buffer_format: BufferFormat::Nv12,
             device_id: self.device_id,
         };
+
+        let callback_state = Arc::clone(&self.callback_state);
+        let callback_codec_type = self.codec_type;
+        self.encoder = Some(Encoder::new(
+            config,
+            FnEncodeHandler::new(move |result| {
+                handle_nvcodec_encode_callback(&callback_state, result, callback_codec_type);
+            }),
+        )?);
         self.rebuild_needed = false;
         self.reconfigure_needed = false;
-        self.encoder = Some(Encoder::new(config)?);
         Ok(())
     }
 
     fn reconfigure_encoder(&mut self) -> Result<()> {
-        let Some(encoder) = self.encoder.as_mut() else {
+        let Some(encoder) = self.encoder.as_ref() else {
             return Err(Error::NvCodecMessage {
                 reason: "encoder must be initialized before reconfigure".to_string(),
             });
@@ -216,10 +392,13 @@ impl VideoEncoderHandler for NvCodecVideoEncoder {
         frame: VideoFrameRef<'_>,
         frame_types: Option<VideoFrameTypeVectorRef<'_>>,
     ) -> VideoCodecStatus {
-        let callback = match self.callback {
-            Some(callback) => callback,
-            None => return VideoCodecStatus::Uninitialized,
+        let has_callback = {
+            let callback_state = self.callback_state.lock().unwrap();
+            callback_state.callback.is_some()
         };
+        if !has_callback {
+            return VideoCodecStatus::Uninitialized;
+        }
 
         let frame_width = frame.width().max(0) as u32;
         let frame_height = frame.height().max(0) as u32;
@@ -297,48 +476,21 @@ impl VideoEncoderHandler for NvCodecVideoEncoder {
         }
 
         let rtp_timestamp = frame.rtp_timestamp();
-        let encoder = self.encoder.as_mut().expect("encoder should exist");
+        let encoder = self.encoder.as_ref().expect("encoder should exist");
         let force_key_frame = matches!(requested_frame_type, Some(VideoFrameType::Key));
         let encode_options = EncodeOptions {
             force_intra: false,
             force_idr: force_key_frame,
             output_spspps: force_key_frame,
         };
-        if let Err(err) = encoder.encode(nv12.data(), &encode_options) {
+        let callback_value = EncoderCallbackValue {
+            rtp_timestamp,
+            frame_width,
+            frame_height,
+        };
+        if let Err(err) = encoder.encode(nv12.data(), &encode_options, callback_value) {
             rtc_log_error!("NVCODEC encode failed for {:?}: {}", self.codec_type, err);
             return VideoCodecStatus::Error;
-        }
-
-        while let Some(encoded_frame) = encoder.next_frame() {
-            let mut encoded_image = EncodedImage::new();
-            let encoded_buffer = EncodedImageBuffer::from_bytes(encoded_frame.data());
-            encoded_image.set_encoded_data(&encoded_buffer);
-            encoded_image.set_rtp_timestamp(rtp_timestamp);
-            encoded_image.set_encoded_width(frame_width);
-            encoded_image.set_encoded_height(frame_height);
-            encoded_image.set_frame_type(match encoded_frame.picture_type() {
-                PictureType::Idr | PictureType::I => VideoFrameType::Key,
-                _ => VideoFrameType::Delta,
-            });
-
-            let mut codec_specific_info = CodecSpecificInfo::new();
-            codec_specific_info.set_codec_type(self.codec_type);
-            if self.codec_type == VideoCodecType::H264 {
-                codec_specific_info
-                    .set_h264_packetization_mode(H264PacketizationMode::NonInterleaved);
-                codec_specific_info
-                    .set_h264_idr_frame(matches!(encoded_frame.picture_type(), PictureType::Idr));
-            }
-
-            let result = unsafe {
-                callback
-                    .on_encoded_image(encoded_image.as_ref(), Some(codec_specific_info.as_ref()))
-            };
-            if result.error() != VideoEncoderEncodedImageCallbackResultError::Ok {
-                rtc_log_warning!(
-                    "NVCODEC: on_encoded_image returned non-Ok status; continue encoding to avoid libwebrtc crash"
-                );
-            }
         }
 
         VideoCodecStatus::Ok
@@ -348,14 +500,17 @@ impl VideoEncoderHandler for NvCodecVideoEncoder {
         &mut self,
         callback: Option<VideoEncoderEncodedImageCallbackRef<'_>>,
     ) -> VideoCodecStatus {
-        self.callback = callback
+        let mut callback_state = self.callback_state.lock().unwrap();
+        callback_state.callback = callback
             .map(|callback| unsafe { VideoEncoderEncodedImageCallbackPtr::from_ref(callback) });
         VideoCodecStatus::Ok
     }
 
     fn release(&mut self) -> VideoCodecStatus {
+        let mut callback_state = self.callback_state.lock().unwrap();
+        callback_state.callback = None;
+        drop(callback_state);
         self.encoder = None;
-        self.callback = None;
         VideoCodecStatus::Ok
     }
 
@@ -377,8 +532,8 @@ impl VideoEncoderHandler for NvCodecVideoEncoder {
 }
 
 struct NvCodecVideoDecoder {
-    callback: Option<VideoDecoderDecodedImageCallbackPtr>,
-    decoder: Option<Decoder>,
+    decoder: Option<Decoder<FnDecodeHandler<DecoderCallbackValue, Error>>>,
+    callback_state: Arc<Mutex<DecoderCallbackState>>,
     codec_type: VideoCodecType,
     device_id: i32,
 }
@@ -386,8 +541,8 @@ struct NvCodecVideoDecoder {
 impl NvCodecVideoDecoder {
     fn new(codec_type: VideoCodecType, device_id: i32) -> Self {
         Self {
-            callback: None,
             decoder: None,
+            callback_state: Arc::new(Mutex::new(DecoderCallbackState::default())),
             codec_type,
             device_id,
         }
@@ -404,13 +559,17 @@ impl NvCodecVideoDecoder {
         })
     }
 
-    fn ensure_decoder(&mut self) -> Result<()> {
-        if self.decoder.is_none() {
-            let config = self.decoder_config().ok_or_else(|| Error::NvCodecMessage {
-                reason: "decoder config is not available".to_string(),
-            })?;
-            self.decoder = Some(Decoder::new(config)?);
-        }
+    fn rebuild_decoder(&mut self) -> Result<()> {
+        let config = self.decoder_config().ok_or_else(|| Error::NvCodecMessage {
+            reason: "decoder config is not available".to_string(),
+        })?;
+        let callback_state = Arc::clone(&self.callback_state);
+        self.decoder = Some(Decoder::new(
+            config,
+            FnDecodeHandler::new(move |result| {
+                handle_nvcodec_decode_callback(&callback_state, result);
+            }),
+        )?);
         Ok(())
     }
 }
@@ -420,11 +579,13 @@ impl VideoDecoderHandler for NvCodecVideoDecoder {
         if settings.codec_type() != self.codec_type {
             return false;
         }
-        let Some(config) = self.decoder_config() else {
-            return false;
-        };
-        self.decoder = Decoder::new(config).ok();
-        self.decoder.is_some()
+        match self.rebuild_decoder() {
+            Ok(()) => true,
+            Err(err) => {
+                rtc_log_error!("NVCODEC rebuild decoder failed in configure: {}", err);
+                false
+            }
+        }
     }
 
     fn decode(
@@ -432,67 +593,34 @@ impl VideoDecoderHandler for NvCodecVideoDecoder {
         input_image: EncodedImageRef<'_>,
         render_time_ms: i64,
     ) -> VideoCodecStatus {
-        if self.ensure_decoder().is_err() {
-            return VideoCodecStatus::Error;
+        let has_callback = {
+            let callback_state = self.callback_state.lock().unwrap();
+            callback_state.callback.is_some()
+        };
+        if !has_callback {
+            return VideoCodecStatus::Uninitialized;
         }
+
         let Some(encoded_data) = input_image.encoded_data() else {
             return VideoCodecStatus::ErrParameter;
         };
 
-        let rtp_timestamp = input_image.rtp_timestamp();
-        let mut decoded_images = Vec::new();
-        let decoder = self.decoder.as_mut().expect("decoder should exist");
-        if decoder.decode(encoded_data.data()).is_err() {
+        if self.decoder.is_none()
+            && let Err(err) = self.rebuild_decoder()
+        {
+            rtc_log_error!("NVCODEC rebuild decoder failed in decode: {}", err);
             return VideoCodecStatus::Error;
         }
 
-        loop {
-            let frame = match decoder.next_frame() {
-                Ok(v) => v,
-                Err(_) => return VideoCodecStatus::Error,
-            };
-            let Some(frame) = frame else {
-                break;
-            };
-
-            let mut i420 = I420Buffer::new(frame.width() as i32, frame.height() as i32);
-            let dst_stride_y = i420.stride_y();
-            let dst_stride_u = i420.stride_u();
-            let dst_stride_v = i420.stride_v();
-            let (dst_y, dst_u, dst_v) = i420.planes_mut();
-            if !nv12_to_i420(
-                frame.y_plane(),
-                frame.y_stride() as i32,
-                frame.uv_plane(),
-                frame.uv_stride() as i32,
-                dst_y,
-                dst_stride_y,
-                dst_u,
-                dst_stride_u,
-                dst_v,
-                dst_stride_v,
-                frame.width() as i32,
-                frame.height() as i32,
-            ) {
-                return VideoCodecStatus::Error;
-            }
-
-            decoded_images.push(
-                VideoFrame::builder(&i420.cast_to_video_frame_buffer())
-                    .set_timestamp_us(render_time_ms.saturating_mul(1000))
-                    .set_rtp_timestamp(rtp_timestamp)
-                    .build(),
-            );
-        }
-        let Some(callback) = self.callback.as_ref() else {
-            return VideoCodecStatus::Uninitialized;
+        let callback_value = DecoderCallbackValue {
+            rtp_timestamp: input_image.rtp_timestamp(),
+            render_time_ms,
         };
-        for decoded_image in &decoded_images {
-            unsafe {
-                callback.decoded(decoded_image.as_ref());
-            }
+        let decoder = self.decoder.as_ref().expect("decoder should exist");
+        if let Err(err) = decoder.decode(encoded_data.data(), callback_value) {
+            rtc_log_error!("NVCODEC decode failed for {:?}: {}", self.codec_type, err);
+            return VideoCodecStatus::Error;
         }
-
         VideoCodecStatus::Ok
     }
 
@@ -500,13 +628,16 @@ impl VideoDecoderHandler for NvCodecVideoDecoder {
         &mut self,
         callback: Option<VideoDecoderDecodedImageCallbackPtr>,
     ) -> VideoCodecStatus {
-        self.callback = callback;
+        let mut callback_state = self.callback_state.lock().unwrap();
+        callback_state.callback = callback;
         VideoCodecStatus::Ok
     }
 
     fn release(&mut self) -> VideoCodecStatus {
+        let mut callback_state = self.callback_state.lock().unwrap();
+        callback_state.callback = None;
+        drop(callback_state);
         self.decoder = None;
-        self.callback = None;
         VideoCodecStatus::Ok
     }
 

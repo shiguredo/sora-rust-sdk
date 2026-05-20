@@ -1345,9 +1345,9 @@ checksum = "b135058874815f8f13edae644ceedb659f7238fe4a9e2b1bdceecc72dc659b35"
 
 [[package]]
 name = "shiguredo_nvcodec"
-version = "2026.1.0"
+version = "2026.2.0-canary.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbc8f44c9c10940619cb3a940127e623b995740b655a9122e6ba93e73e004f20"
+checksum = "b61971ba46762ce1a736115f0ff3815c88c973f50b1afdd44ed00eaa48e82bee"
 dependencies = [
  "bindgen",
  "shiguredo_toml",
