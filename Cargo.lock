@@ -389,7 +389,6 @@ dependencies = [
  "serial_test",
  "shiguredo_audio_device",
  "shiguredo_http11",
- "shiguredo_nvcodec",
  "shiguredo_video_device",
  "shiguredo_webrtc",
  "sora_sdk",
