@@ -7,11 +7,10 @@ publish = false
 
 [dependencies]
 aws-lc-rs.workspace = true
-base64 = "0.22"
+base64ct = "1.8"
 nojson.workspace = true
 raden = "2026.1"
 shiguredo_http11.workspace = true
-shiguredo_nvcodec = { workspace = true, optional = true }
 shiguredo_video_device = "2026.1"
 shiguredo_webrtc.workspace = true
 sora_sdk.workspace = true
@@ -27,6 +26,6 @@ shiguredo_audio_device = "2026.1"
 default = []
 amf = ["sora_sdk/amf"]
 libcamera = ["sora_sdk/libcamera"]
-nvcodec = ["dep:shiguredo_nvcodec", "sora_sdk/nvcodec"]
+nvcodec = ["sora_sdk/nvcodec"]
 v4l2 = ["sora_sdk/v4l2"]
 vpl = ["sora_sdk/vpl"]

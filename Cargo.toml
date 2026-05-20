@@ -19,7 +19,6 @@ sora_sdk = { path = "." }
 
 # 時雨堂クレート
 shiguredo_http11 = "2026.5.0"
-shiguredo_nvcodec = "=2026.2.0-canary.2"
 shiguredo_webrtc = "=0.148.0"
 shiguredo_websocket = "2026.2.0"
 
@@ -40,7 +39,7 @@ shiguredo_libcamera = { version = "2026.1.0-canary.1", optional = true }
 # MP4 ファイルからの映像入力で利用するデマルチプレクサ
 shiguredo_mp4 = "2026.3"
 # NVIDIA Video Codec によるハードウェアエンコード/デコード
-shiguredo_nvcodec = { workspace = true, optional = true }
+shiguredo_nvcodec = { version = "=2026.2.0-canary.2", optional = true }
 # OpenH264 による H.264 ソフトウェアエンコード/デコード
 shiguredo_openh264 = { version = "2026.1", optional = true }
 # V4L2 M2M によるハードウェアコーデックと画像変換 (Linux 向け)
