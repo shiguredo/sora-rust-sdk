@@ -8,8 +8,8 @@ use shiguredo_v4l2::v4l2_m2m::{
     PixelFormat,
 };
 use shiguredo_v4l2::v4l2_m2m::{
-    DecodeCallbackOutput, DecodeInput, DecoderConfig, EncodeCallbackOutput, EncodeInput,
-    EncoderConfig, Error as V4l2Error, H264Decoder, H264Encoder, Resolution,
+    DecodeInput, DecodedFrame, DecoderConfig, EncodeInput, EncodedFrame, EncoderConfig,
+    Error as V4l2Error, FnDecodeHandler, FnEncodeHandler, H264Decoder, H264Encoder, Resolution,
 };
 use shiguredo_webrtc::{
     CodecSpecificInfo, EncodedImage, EncodedImageBuffer, EncodedImageRef, EnvironmentRef,
@@ -192,16 +192,16 @@ struct ConverterCallbackValue {
 
 #[derive(Default)]
 struct EncoderSharedState {
-    encoder: Option<H264Encoder<EncoderCallbackValue>>,
+    encoder: Option<H264Encoder<FnEncodeHandler<EncoderCallbackValue>>>,
     callback: Option<VideoEncoderEncodedImageCallbackPtr>,
 }
 
 fn handle_v4l2_encode_callback(
     shared_state: &Arc<Mutex<EncoderSharedState>>,
-    result: shiguredo_v4l2::v4l2_m2m::Result<EncodeCallbackOutput<EncoderCallbackValue>>,
+    result: shiguredo_v4l2::v4l2_m2m::Result<EncodedFrame<EncoderCallbackValue>>,
 ) {
-    let (encoded, value) = match result {
-        Ok(EncodeCallbackOutput::Frame { frame, value }) => (frame, value),
+    let encoded = match result {
+        Ok(encoded) => encoded,
         Err(err) => {
             rtc_log_error!("V4L2 encode callback failed: {}", err);
             return;
@@ -215,9 +215,9 @@ fn handle_v4l2_encode_callback(
     let mut encoded_image = EncodedImage::new();
     let encoded_buffer = EncodedImageBuffer::from_bytes(encoded_data);
     encoded_image.set_encoded_data(&encoded_buffer);
-    encoded_image.set_rtp_timestamp(value.rtp_timestamp);
-    encoded_image.set_encoded_width(value.frame_width);
-    encoded_image.set_encoded_height(value.frame_height);
+    encoded_image.set_rtp_timestamp(encoded.user_data().rtp_timestamp);
+    encoded_image.set_encoded_width(encoded.user_data().frame_width);
+    encoded_image.set_encoded_height(encoded.user_data().frame_height);
     encoded_image.set_frame_type(if encoded.is_keyframe() {
         VideoFrameType::Key
     } else {
@@ -350,9 +350,12 @@ impl V4l2VideoEncoder {
             EncoderConfig::new(self.width, self.height, self.target_bitrate_bps.max(1));
         config.device_path = self.device_path.clone();
         let shared_state = self.shared_state.clone();
-        let encoder = H264Encoder::new(config, move |result| {
-            handle_v4l2_encode_callback(&shared_state, result);
-        })?;
+        let encoder = H264Encoder::new(
+            config,
+            FnEncodeHandler::new(move |result| {
+                handle_v4l2_encode_callback(&shared_state, result);
+            }),
+        )?;
 
         let mut shared_state = self.shared_state.lock().unwrap();
         shared_state.encoder = Some(encoder);
@@ -385,9 +388,12 @@ impl V4l2VideoEncoder {
         encoder_config.input_memory = Memory::DmaBuf;
         encoder_config.pixel_format = native_config.pixel_format.to_v4l2_pixel_format();
         let shared_state = self.shared_state.clone();
-        let encoder = H264Encoder::new(encoder_config, move |result| {
-            handle_v4l2_encode_callback(&shared_state, result);
-        })?;
+        let encoder = H264Encoder::new(
+            encoder_config,
+            FnEncodeHandler::new(move |result| {
+                handle_v4l2_encode_callback(&shared_state, result);
+            }),
+        )?;
 
         let mut converter_config = ConverterConfig::new(
             native_config.raw_width,
@@ -694,66 +700,70 @@ struct DecoderCallbackState {
     resolution: Option<Resolution>,
 }
 
-fn handle_v4l2_decode_callback(
+fn handle_v4l2_decode_resolution_changed(
     callback_state: &Arc<Mutex<DecoderCallbackState>>,
-    result: shiguredo_v4l2::v4l2_m2m::Result<DecodeCallbackOutput<DecoderCallbackValue>>,
+    resolution: Resolution,
 ) {
-    match result {
-        Ok(DecodeCallbackOutput::ResolutionChanged { resolution }) => {
-            let mut callback_state = callback_state.lock().unwrap();
-            callback_state.resolution = Some(resolution);
-        }
-        Ok(DecodeCallbackOutput::Frame { frame, value }) => {
-            let callback_state = callback_state.lock().unwrap();
-            let resolution = match callback_state.resolution {
-                Some(resolution) => resolution,
-                None => {
-                    rtc_log_error!("V4L2 decode callback returned frame before resolution");
-                    return;
-                }
-            };
-            let Some(frame_data) = frame.data() else {
-                rtc_log_error!("V4L2 decode callback returned frame without MMAP data");
-                return;
-            };
+    let mut callback_state = callback_state.lock().unwrap();
+    callback_state.resolution = Some(resolution);
+}
 
-            let decoded_frame = match build_i420_frame(
-                frame_data,
+fn handle_v4l2_decode_frame(
+    callback_state: &Arc<Mutex<DecoderCallbackState>>,
+    result: shiguredo_v4l2::v4l2_m2m::Result<DecodedFrame<DecoderCallbackValue>>,
+) {
+    let frame = match result {
+        Ok(frame) => frame,
+        Err(err) => {
+            rtc_log_error!("V4L2 decode callback failed: {}", err);
+            return;
+        }
+    };
+    let callback_state = callback_state.lock().unwrap();
+    let resolution = match callback_state.resolution {
+        Some(resolution) => resolution,
+        None => {
+            rtc_log_error!("V4L2 decode callback returned frame before resolution");
+            return;
+        }
+    };
+    let Some(frame_data) = frame.data() else {
+        rtc_log_error!("V4L2 decode callback returned frame without MMAP data");
+        return;
+    };
+
+    let decoded_frame = match build_i420_frame(
+        frame_data,
+        resolution.width,
+        resolution.height,
+        resolution.stride,
+        frame.timestamp_us(),
+        frame.user_data().rtp_timestamp,
+    ) {
+        Some(decoded_frame) => decoded_frame,
+        None => {
+            rtc_log_error!(
+                "V4L2 decode callback failed to build I420 frame: width={}, height={}, stride={}, bytes={}",
                 resolution.width,
                 resolution.height,
                 resolution.stride,
-                frame.timestamp_us(),
-                value.rtp_timestamp,
-            ) {
-                Some(decoded_frame) => decoded_frame,
-                None => {
-                    rtc_log_error!(
-                        "V4L2 decode callback failed to build I420 frame: width={}, height={}, stride={}, bytes={}",
-                        resolution.width,
-                        resolution.height,
-                        resolution.stride,
-                        frame_data.len(),
-                    );
-                    return;
-                }
-            };
+                frame_data.len(),
+            );
+            return;
+        }
+    };
 
-            let Some(callback) = callback_state.callback else {
-                return;
-            };
-            unsafe {
-                callback.decoded(decoded_frame.as_ref());
-            }
-        }
-        Err(err) => {
-            rtc_log_error!("V4L2 decode callback failed: {}", err);
-        }
+    let Some(callback) = callback_state.callback else {
+        return;
+    };
+    unsafe {
+        callback.decoded(decoded_frame.as_ref());
     }
 }
 
 struct V4l2VideoDecoder {
     callback_state: Arc<Mutex<DecoderCallbackState>>,
-    decoder: Option<H264Decoder<DecoderCallbackValue>>,
+    decoder: Option<H264Decoder<FnDecodeHandler<DecoderCallbackValue>>>,
     device_path: String,
 }
 
@@ -769,10 +779,19 @@ impl V4l2VideoDecoder {
     fn rebuild_decoder(&mut self) -> Result<()> {
         let mut config = DecoderConfig::new();
         config.device_path = self.device_path.clone();
-        let callback_state = self.callback_state.clone();
-        self.decoder = Some(H264Decoder::new(config, move |result| {
-            handle_v4l2_decode_callback(&callback_state, result);
-        })?);
+        let callback_state1 = self.callback_state.clone();
+        let callback_state2 = self.callback_state.clone();
+        self.decoder = Some(H264Decoder::new(
+            config,
+            FnDecodeHandler::new(
+                move |result| {
+                    handle_v4l2_decode_frame(&callback_state1, result);
+                },
+                move |resolution| {
+                    handle_v4l2_decode_resolution_changed(&callback_state2, resolution);
+                },
+            ),
+        )?);
         let mut callback_state = self.callback_state.lock().unwrap();
         callback_state.resolution = None;
         Ok(())
