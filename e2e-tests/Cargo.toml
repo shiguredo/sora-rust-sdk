@@ -7,7 +7,7 @@ publish = false
 
 [dependencies]
 aws-lc-rs.workspace = true
-base64 = "0.22"
+base64ct = "1.8"
 nojson.workspace = true
 raden = "2026.1"
 shiguredo_http11.workspace = true

@@ -5,8 +5,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aws_lc_rs::hmac;
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64ct::{Base64UrlUnpadded, Encoding};
 use nojson::JsonObjectFormatter;
 use shiguredo_webrtc::{AudioTrack, VideoTrack};
 use sora_sdk::{JsonString, Result, SoraConnectionContext};
@@ -118,8 +117,8 @@ where
 
     let signing_input = format!(
         "{}.{}",
-        URL_SAFE_NO_PAD.encode(header),
-        URL_SAFE_NO_PAD.encode(&payload),
+        Base64UrlUnpadded::encode_string(header.as_bytes()),
+        Base64UrlUnpadded::encode_string(payload.as_bytes()),
     );
 
     let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
@@ -128,7 +127,7 @@ where
     format!(
         "{}.{}",
         signing_input,
-        URL_SAFE_NO_PAD.encode(signature.as_ref())
+        Base64UrlUnpadded::encode_string(signature.as_ref())
     )
 }
 
