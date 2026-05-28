@@ -18,9 +18,9 @@ members = ["e2e-tests", "examples/sumomo"]
 sora_sdk = { path = "." }
 
 # 時雨堂クレート
-shiguredo_http11 = "2026.5.0"
+shiguredo_http11 = "2026.6"
 shiguredo_webrtc = "=0.148.0"
-shiguredo_websocket = "2026.2.0"
+shiguredo_websocket = "2026.3"
 
 # 外部クレート
 aws-lc-rs = "1.17"

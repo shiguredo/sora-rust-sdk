@@ -32,12 +32,12 @@
 - [CHANGE] `Error` 列挙型に `ProxyConnectEncode(EncodeError)` バリアントを追加する
   - `shiguredo_http11` 2026.4 で `Request::new` / `Request::header` / `Request::encode` が `Result<_, EncodeError>` を返すようになったため、Proxy CONNECT リクエストの構築失敗を伝播する
   - @voluntas
-- [UPDATE] `shiguredo_http11` を 2026.5 に上げる
+- [UPDATE] `shiguredo_http11` を 2026.6 に上げる
   - `RequestHead` / `ResponseHead` のフィールド非公開化に追従し、`status_code` / `reason_phrase` / `method` / `uri` をアクセサメソッド呼び出しに変更する
   - `Request::new` / `Request::header` / `Request::encode` の `Result` 化に追従する
   - e2e-tests の `shiguredo_http11` も同バージョンに揃える
   - @voluntas
-- [UPDATE] `shiguredo_websocket` を 2026.2.0 に上げる
+- [UPDATE] `shiguredo_websocket` を 2026.3 に上げる
   - @voluntas
 - [UPDATE] zlib 圧縮/展開の実装を `flate2` から `noflate` に差し替える
   - @voluntas
