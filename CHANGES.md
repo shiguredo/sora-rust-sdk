@@ -133,6 +133,10 @@
 
 ### misc
 
+- [ADD] `skills/sora-rust-sdk/SKILL.md` を追加する
+  - sora_sdk クレートの機能・API リファレンスを Claude Code のスキルとして提供する
+  - shiguredo-http11 リポジトリの SKILL.md と同じ構成・粒度に揃える
+  - @voluntas
 - [UPDATE] e2e-tests の JWT 生成で利用する Base64 実装を `base64` から `base64ct` に切り替える
   - @voluntas
 - [UPDATE] workspace.dependencies を整理しサブクレートを `dep.workspace = true` 形式に統一する
