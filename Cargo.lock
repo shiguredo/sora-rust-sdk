@@ -812,6 +812,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pbt"
+version = "0.0.0"
+dependencies = [
+ "proptest",
+ "sora_sdk",
+]
+
+[[package]]
 name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1477,7 +1485,6 @@ dependencies = [
  "libc",
  "noflate",
  "nojson",
- "proptest",
  "rustls",
  "rustls-platform-verifier",
  "rustls-webpki",

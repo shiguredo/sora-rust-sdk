@@ -3,6 +3,7 @@
 - Priority: Medium
 - Created: 2026-06-12
 - Polished: 2026-06-12
+- Completed: 2026-06-12
 - Model: Opus 4.7
 - Branch: feature/refactor-extract-proptest-to-pbt-crate
 
@@ -156,3 +157,15 @@ CLAUDE.md で PBT は `pbt/tests/prop_<module>.rs` に配置するルールに�
 - `cargo clippy --workspace --all-targets -- -D warnings` が通る。
 - `cargo test --workspace` が通る (移動した 4 件の PBT および `src/connection.rs` に残る通常 `#[test]` が全て成功する)。
 - `make pbt-with-cover` が exit 0 で終了する (`cargo-llvm-cov` 未導入の場合は事前に `cargo install cargo-llvm-cov` を行う)。
+
+## 解決方法
+
+- `pbt` ワークスペースクレート (`pbt/Cargo.toml` と `pbt/tests/prop_connection.rs`) を新規追加し、ルート `Cargo.toml` の `[workspace] members` に `pbt` を追加した。
+- `parse_proxy_url_accepts_http` / `parse_proxy_url_rejects_https` / `parse_proxy_url_rejects_socks` / `parse_proxy_url_rejects_userinfo` の PBT 4 件を `pbt/tests/prop_connection.rs` に移動した。
+- `url_getters_roundtrip_command_response` PBT、`block_on_test` ヘルパ、`use std::future::Future;` を `src/connection.rs` から削除した。
+- `ParsedProxyInfo` 構造体と `ParsedProxyInfo::parse` 関数を `pub` 化し、`host` / `port` フィールドを `pub` にして日本語の doc コメントを付与した。
+- `src/lib.rs` の `pub use crate::connection::{ ... };` ブレースに `ParsedProxyInfo` をアルファベット順で先頭に追加した。
+- ルート `Cargo.toml` の `[dev-dependencies]` セクションを見出しごと削除した。`[workspace.dependencies]` の `proptest = "1.11"` は維持した。
+- `Makefile:1` の `.PHONY` 行を整理し、実在しないターゲット `pbt` / `pbt-cover` / `fuzz` を削除して `pbt-with-cover` に置き換えた (既存の不整合解消)。
+- `CHANGES.md` の既存 `### misc` サブセクション末尾に `[ADD] ParsedProxyInfo と ParsedProxyInfo::parse を公開する` と `[UPDATE] proptest のテストを pbt ワークスペースクレートに分離する` の 2 エントリを `[ADD]` → `[UPDATE]` の順で追加した。
+- 検証コマンド (`cargo fmt --all -- --check` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo test --workspace` / `make pbt-with-cover`) がいずれも通過することを確認した。

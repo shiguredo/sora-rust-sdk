@@ -173,3 +173,7 @@
   - @melpon
 - [ADD] sumomo に --video-codec-list オプションを追加し capability と preference を表示できるようにする
   - @melpon
+- [ADD] `ParsedProxyInfo` と `ParsedProxyInfo::parse` を公開する
+  - @voluntas
+- [UPDATE] proptest のテストを `pbt` ワークスペースクレートに分離する
+  - @voluntas
