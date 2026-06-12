@@ -11,7 +11,7 @@ license = "Apache-2.0"
 include = ["/LICENSE", "/README.md", "/src/**"]
 
 [workspace]
-members = ["e2e-tests", "examples/sumomo"]
+members = ["e2e-tests", "examples/sumomo", "pbt"]
 
 [workspace.dependencies]
 # SDK 本体
@@ -102,9 +102,6 @@ tokio = { workspace = true, features = [
   "time",
 ] }
 tokio-rustls.workspace = true
-
-[dev-dependencies]
-proptest.workspace = true
 
 [features]
 default = ["openh264"]

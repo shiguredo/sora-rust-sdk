@@ -15,7 +15,8 @@ mod video_codecs;
 mod zlib;
 
 pub use crate::connection::{
-    SoraConnection, SoraConnectionBuilder, SoraConnectionCommand, SoraConnectionHandle, TlsConfig,
+    ParsedProxyInfo, SoraConnection, SoraConnectionBuilder, SoraConnectionCommand,
+    SoraConnectionHandle, TlsConfig,
 };
 pub use crate::connection_context::{
     AdmConfig, SoraConnectionContext, SoraConnectionContextConfig,

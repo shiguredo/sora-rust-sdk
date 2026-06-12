@@ -1,0 +1,10 @@
+[package]
+name = "pbt"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+
+[dev-dependencies]
+sora_sdk.workspace = true
+proptest.workspace = true

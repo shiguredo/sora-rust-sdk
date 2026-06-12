@@ -1926,17 +1926,25 @@ struct SignalingTarget {
     tls: bool,
 }
 
+/// `ProxyInfo` を解析し、HTTP プロキシ接続に必要な情報に正規化した結果。
+///
+/// PBT 等の検証目的を主用途として公開している型のため、通常の利用者がこの型を
+/// 直接構築する必要はなく、`ParsedProxyInfo::parse` 経由で取得する。
 #[derive(Debug, Clone)]
-struct ParsedProxyInfo {
-    host: String,
-    port: u16,
+pub struct ParsedProxyInfo {
+    pub host: String,
+    pub port: u16,
     username: Option<String>,
     password: Option<String>,
     user_agent: String,
 }
 
 impl ParsedProxyInfo {
-    fn parse(proxy: &ProxyInfo) -> Result<ParsedProxyInfo> {
+    /// `ProxyInfo` を解析し、検証済みのプロキシ接続情報を返す。
+    ///
+    /// 受理するのは `http://host[:port]` 形式のみで、`https://` / `socks*://` や
+    /// userinfo / fragment / query / 非空パスを含む URL は拒否する。
+    pub fn parse(proxy: &ProxyInfo) -> Result<ParsedProxyInfo> {
         let uri = Uri::parse(&proxy.url)?;
         let scheme = uri.scheme().ok_or_else(|| Error::UrlMissingScheme)?;
         if !scheme.eq_ignore_ascii_case("http") {
@@ -2482,22 +2490,12 @@ fn send_text<R: RandomSource>(ws: &mut WebSocketClientConnection<R>, text: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
-    use std::future::Future;
 
     fn proxy_info_with_url(url: String) -> ProxyInfo {
         ProxyInfo {
             url,
             ..Default::default()
         }
-    }
-
-    fn block_on_test(fut: impl Future<Output = ()>) {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("テスト用 runtime の構築に失敗しました");
-        runtime.block_on(fut);
     }
 
     fn is_turn_tcp_or_udp_url(url: &str) -> bool {
@@ -2564,100 +2562,6 @@ mod tests {
         let configurer: Arc<IceServerUrlConfigurer> = Arc::new(|_, _| {});
         SoraConnection::configure_ice_server_urls(&mut server_entry, &urls, Some(&configurer));
         assert_eq!(server_entry.urls_len(), 0);
-    }
-
-    proptest! {
-        #[test]
-        fn url_getters_roundtrip_command_response(
-            selected in "[ -~]{1,64}",
-            connected in "[ -~]{1,64}"
-        ) {
-            block_on_test(async move {
-                let (command_tx, mut command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
-                let handle = SoraConnectionHandle { command_tx };
-
-                let selected_value = selected.clone();
-                let connected_value = connected.clone();
-                let worker = tokio::spawn(async move {
-                    while let Some(command) = command_rx.recv().await {
-                        match command {
-                            SoraConnectionCommand::GetSelectedSignalingUrl(response_tx) => {
-                                let _ = response_tx.send(Some(selected_value.clone()));
-                            }
-                            SoraConnectionCommand::GetConnectedSignalingUrl(response_tx) => {
-                                let _ = response_tx.send(Some(connected_value.clone()));
-                            }
-                            _ => {}
-                        }
-                    }
-                });
-
-                let actual_selected = handle
-                    .selected_signaling_url()
-                    .await
-                    .expect("selected_signaling_url の取得に失敗しました");
-                let actual_connected = handle
-                    .connected_signaling_url()
-                    .await
-                    .expect("connected_signaling_url の取得に失敗しました");
-
-                assert_eq!(actual_selected, Some(selected));
-                assert_eq!(actual_connected, Some(connected));
-
-                drop(handle);
-                worker
-                    .await
-                    .expect("URL 応答タスクが panic しました");
-            });
-        }
-
-        #[test]
-        fn parse_proxy_url_accepts_http(
-            label in "[a-z][a-z0-9]{0,15}",
-            port in 1u16..=65535
-        ) {
-            let proxy = proxy_info_with_url(format!("http://{label}:{port}"));
-            let parsed = ParsedProxyInfo::parse(&proxy).expect("http proxy URL の解析に失敗しました");
-            prop_assert_eq!(parsed.host, label);
-            prop_assert_eq!(parsed.port, port);
-        }
-
-        #[test]
-        fn parse_proxy_url_rejects_https(
-            label in "[a-z][a-z0-9]{0,15}",
-            port in 1u16..=65535
-        ) {
-            let proxy = proxy_info_with_url(format!("https://{label}:{port}"));
-            let err = ParsedProxyInfo::parse(&proxy).expect_err("https proxy URL は拒否される必要があります");
-            match err {
-                Error::ProxyUrlUnsupportedScheme { .. } => {}
-                _ => prop_assert!(false),
-            }
-        }
-
-        #[test]
-        fn parse_proxy_url_rejects_socks(
-            label in "[a-z][a-z0-9]{0,15}",
-            port in 1u16..=65535,
-            scheme in prop_oneof![Just("socks"), Just("socks4"), Just("socks5")]
-        ) {
-            let proxy = proxy_info_with_url(format!("{scheme}://{label}:{port}"));
-            let err = ParsedProxyInfo::parse(&proxy).expect_err("socks proxy URL は拒否される必要があります");
-            match err {
-                Error::ProxyUrlUnsupportedScheme { .. } => {}
-                _ => prop_assert!(false),
-            }
-        }
-
-        #[test]
-        fn parse_proxy_url_rejects_userinfo(
-            label in "[a-z][a-z0-9]{0,15}",
-            port in 1u16..=65535
-        ) {
-            let proxy = proxy_info_with_url(format!("http://user:pass@{label}:{port}"));
-            let err = ParsedProxyInfo::parse(&proxy).expect_err("userinfo 付き proxy URL は拒否される必要があります");
-            prop_assert!(matches!(err, Error::ProxyUrlUserinfoNotSupported));
-        }
     }
 
     #[test]
