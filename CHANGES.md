@@ -141,8 +141,8 @@
   - @voluntas
 - [UPDATE] workspace.dependencies を整理しサブクレートを `dep.workspace = true` 形式に統一する
   - `sora_sdk = { path = "." }` を `[workspace.dependencies]` に追加し、e2e-tests / examples/sumomo から相対パス指定を排除する
-  - sora_sdk 本体が常に利用する依存 (`aws-lc-rs` / `nojson` / `tokio` 等) を `[workspace.dependencies]` に集約する
-  - sora_sdk 本体が利用しない依存 (`serial_test` / `shiguredo_audio_device` / `shiguredo_video_device`) は集約せず、各サブクレートに直接記載のままとする
+  - sora_sdk 本体で利用する依存を `[workspace.dependencies]` に集約し、用途コメントもまとめて記載する
+  - サンプル (sumomo) や e2e-tests でしか使わない依存 (`base64ct` / `noargs` / `raden` / `raw_player` / `rustls-pki-types` / `serial_test` / `shiguredo_audio_device` / `shiguredo_video_device`) は集約せず、各サブクレートに直接記載のままとする
   - workspace 経由の参照を `dep.workspace = true` のショートハンド形式に統一する (optional / features 指定がある場合のみインラインテーブル形式を維持する)
   - @voluntas
 - [UPDATE] README から削除済みの zakuro サンプルセクションを取り除く
