@@ -35,18 +35,19 @@
 
 ### 派生 issue 切り出しルール
 
-- 本 issue を親として、以下の Must（致命的）11 件 + Should（重要・改善）7 グループ群から個別 issue を起票する
+- 本 issue を親として、以下の Must（致命的）10 件 + Should（重要・改善）7 グループ群から個別 issue を起票する
 - 派生 issue は `shiguredo-issues` 規約に従う（1 issue = 1 目的 1 カテゴリ、命名規則、メタデータ）
 - 派生 issue 起票時は本 issue のチェックボックスに issue 番号を追記して進捗管理する
-- まず Must 11 件（正式リリースのブロッカー）を起票する
+- まず Must 10 件（正式リリースのブロッカー）を起票する
 - Should は Must の対応状況を見ながら順次起票する
+- M2 は対応しない（メタデータ整備は不要との判断）。番号は欠番として残す（M3 以降の参照を維持するため）
 
 ### 派生 issue 一覧（Must）
 
 正式リリース前に必ず終わらせる。**SemVer 互換の観点から正式版リリース後では取り戻せない項目**。
 
 - [ ] M1. 時雨堂依存クレートを正式版に切り替える（`shiguredo_amf` / `shiguredo_libcamera` / `shiguredo_nvcodec` / `shiguredo_v4l2` / `shiguredo_vpl` / `shiguredo_webrtc` の canary・完全 pin 解消）
-- [ ] M2. `Cargo.toml` のリリースメタデータ整備（`description` 改善 / `keywords` / `categories` / `documentation` / `[package.metadata.docs.rs]` / `package.include` に `THIRD_PARTY_LICENSES.md` と `CHANGES.md` 追加）
+- M2. （欠番。対応しないと判断）
 - [ ] M3. 公開 API への `#[non_exhaustive]` 一斉付与
 - [ ] M4. `SoraConnectionCommand` を `pub(crate)` 化
 - [ ] M5. `shiguredo_webrtc` の公開 API 型を `pub use` で再エクスポート
@@ -71,19 +72,19 @@
 
 ## 完了条件
 
-- 上記 M1〜M11 のチェックボックスがすべて完了している
+- 上記 Must のチェックボックス（M2 を除く M1 と M3〜M11）がすべて完了している
 - `cargo publish --dry-run` が CI 上で通る
 - `Cargo.toml` の依存が canary を含まず、`shiguredo_webrtc` の完全 pin が外れている
 - `CHANGES.md` の `## develop` が `## 2026.1.0` にリネームされ、リリース日が記載されている
 - `release.yml` が新規タグ push で正式版を crates.io に公開できる状態になっている
 - 派生 issue がすべて closed または明示的に「正式リリース 2026.1.0 後に対応する」として pending に分けられている
-- `sora_sdk 2026.1.0` 正式版が crates.io に公開され、docs.rs にビルドされ、全 feature 付き API がドキュメントから参照可能になっている
+- `sora_sdk 2026.1.0` 正式版が crates.io に公開され、docs.rs にビルドされている
 
 S1〜S7 の Should グループは正式版リリース後でも段階対応可能なため、本 issue の完了条件から外す（個別 issue で追跡する）。
 
 ## 解決方法
 
-1. 本 issue 作成と同時に、Must の M1〜M11 を派生 issue として順次起票する
+1. 本 issue 作成と同時に、Must の M1 と M3〜M11（M2 を除く）を派生 issue として順次起票する
 2. 各派生 issue は `shiguredo-issues` / `shiguredo-git` / `shiguredo-changelog` 規約に従い、1 issue 1 目的 1 ブランチで対応する
 3. 派生 issue を起票するたび、本 issue 内のチェックボックスに issue 番号を追記する（例: `- [ ] M1. ... (#XXXX)`）
 4. 派生 issue が closed になるたび、本 issue 内のチェックボックスにチェックを入れて closed コミットに本 issue 番号を含める
@@ -93,7 +94,7 @@ S1〜S7 の Should グループは正式版リリース後でも段階対応可�
 ## 派生 issue の起票方針
 
 - カテゴリは各派生 issue の本質に合わせる
-  - M1, M2, M9: `other`（リリース準備・CI・依存管理）
+  - M1, M9: `other`（リリース準備・CI・依存管理）
   - M3, M4, M5, M7: `change`（公開 API の互換破壊変更）
   - M6: `doc`
   - M8: `fix`（規約違反の修正なので `fix` がより適切。`change` でも可）
