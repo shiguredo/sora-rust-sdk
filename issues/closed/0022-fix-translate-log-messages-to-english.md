@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-06-22
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-06-22
 - Model: Opus 4.7
 - Branch: feature/fix-translate-log-messages-to-english
 - Polished: {YYYY-MM-DD}
@@ -61,16 +61,11 @@ AGENTS.md「ログメッセージは全て英語にすること」に違反し�
 
 ## 解決方法
 
-1. `src/connection.rs` の該当 26 行を英語化する
-2. `examples/sumomo/src/main.rs` の該当 17 行を英語化する
-3. ローカルで `cargo build` / `cargo test` / `cargo clippy` を実行して通ることを確認する
-4. 上記の grep 検出コマンドで日本語ログが残っていないことを確認する
-5. `CHANGES.md` の `## develop` に `[FIX] ログメッセージを英語に統一する` のエントリを追加する
+PR #33 で対応。
 
-## CHANGES.md エントリ案
-
-```markdown
-- [FIX] ログメッセージを英語に統一する
-  - AGENTS.md「ログメッセージは全て英語にすること」に違反していた日本語ログを全て英語に書き換える
-  - @voluntas
-```
+- `src/connection.rs` の `rtc_log_*` マクロ 26 件を英語化
+- `examples/sumomo/src/main.rs` の `rtc_log_*` マクロ 17 件を英語化
+- 完了確認: `grep -rn "rtc_log_" src examples/sumomo/src | grep -cE '"[^"]*[ぁ-んァ-ヶー一-龯]'` の結果が `0`
+- `cargo build --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo test --workspace` 全通過
+- `CHANGES.md` の `## develop` に `[FIX] ログメッセージを英語に統一する` を追加
+- GitHub Actions の CI（GitHub-hosted 5 ジョブ + self-hosted 5 ジョブ + slack_notify）全 pass で squash merge
