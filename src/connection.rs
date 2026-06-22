@@ -653,7 +653,7 @@ impl SoraConnection {
 
         impl PeerConnectionObserverHandler for PcObserverHandler {
             fn on_connection_change(&mut self, new_state: PeerConnectionState) {
-                rtc_log_info!("PeerConnection の状態: {:?}", new_state);
+                rtc_log_info!("PeerConnection state: {:?}", new_state);
             }
 
             fn on_track(&mut self, transceiver: RtpTransceiver) {
@@ -871,7 +871,7 @@ impl SoraConnection {
                             // 期限切れ sleep_until で select! がスピンしないようリセットする
                             ws_disconnect_delay_start = None;
                         } else {
-                            rtc_log_info!("接続が閉じられました");
+                            rtc_log_info!("Connection closed");
                             break;
                         }
                     } else {
@@ -908,7 +908,7 @@ impl SoraConnection {
                             let Ok(label) = channel.label() else {
                                 continue;
                             };
-                            rtc_log_info!("DataChannel '{}' を登録しました", label);
+                            rtc_log_info!("Registered DataChannel '{}'", label);
                             on_data_channel(&label);
                             self.register_data_channel(channel, &event_tx);
                             self.handle_datachannel_state(&label, &on_data_channel_open, &on_data_channel_close, &mut opened_datachannels, &mut use_datachannel_signaling);
@@ -927,10 +927,10 @@ impl SoraConnection {
                 Some(command) = self.command_rx.recv() => {
                     match command {
                         SoraConnectionCommand::Disconnect(ack_tx) => {
-                            rtc_log_info!("切断要求を受信しました");
+                            rtc_log_info!("Received disconnect request");
                             // オープン中の DataChannel に対して close コールバックを呼ぶ
                             for label in &opened_datachannels {
-                                rtc_log_info!("DataChannel '{}' がクローズしました", label);
+                                rtc_log_info!("DataChannel '{}' closed", label);
                                 on_data_channel_close(label);
                             }
                             opened_datachannels.clear();
@@ -992,7 +992,7 @@ impl SoraConnection {
             while let Some(event) = ws.poll_event() {
                 match event {
                     ConnectionEvent::Connected { .. } => {
-                        rtc_log_info!("WebSocket 接続が完了しました");
+                        rtc_log_info!("WebSocket connection established");
                         let connect_message = OutgoingMessage::new_connect(
                             &channel_id,
                             role,
@@ -1025,11 +1025,11 @@ impl SoraConnection {
                         send_text(&mut ws, &connect_text)?;
                     }
                     ConnectionEvent::TextMessage(text) => {
-                        rtc_log_info!("[WebSocket] テキストメッセージを受信しました: {}", text);
+                        rtc_log_info!("[WebSocket] Received text message: {}", text);
                         let message = match IncomingMessage::parse(&text) {
                             Ok(message) => message,
                             Err(err) => {
-                                rtc_log_error!("JSON メッセージの解析に失敗しました: {}", err);
+                                rtc_log_error!("Failed to parse JSON message: {}", err);
                                 continue;
                             }
                         };
@@ -1108,12 +1108,12 @@ impl SoraConnection {
                                     SignalingDirection::Received,
                                     &text,
                                 );
-                                rtc_log_info!("リダイレクトメッセージを受信しました: {}", location);
+                                rtc_log_info!("Received redirect message: {}", location);
                                 redirect_location = Some(location);
                                 break;
                             }
                             IncomingMessageData::Close {} => {
-                                rtc_log_info!("Sora サーバーから切断されました");
+                                rtc_log_info!("Disconnected from Sora server");
                                 break;
                             }
                         }
@@ -1125,21 +1125,21 @@ impl SoraConnection {
                         );
                     }
                     ConnectionEvent::Ping(_) => {
-                        rtc_log_info!("[WebSocket] Ping を受信しました");
+                        rtc_log_info!("[WebSocket] Received Ping");
                     }
                     ConnectionEvent::Pong(_) => {
-                        rtc_log_info!("[WebSocket] Pong を受信しました");
+                        rtc_log_info!("[WebSocket] Received Pong");
                     }
                     ConnectionEvent::Close { code, reason } => {
-                        rtc_log_info!("[WebSocket] Close を受信しました: {:?} {}", code, reason);
+                        rtc_log_info!("[WebSocket] Received Close: {:?} {}", code, reason);
                         on_websocket_close(code.map(|c| c.0), &reason);
                         break;
                     }
                     ConnectionEvent::StateChanged(state) => {
-                        rtc_log_info!("[WebSocket] 状態: {:?}", state);
+                        rtc_log_info!("[WebSocket] State: {:?}", state);
                     }
                     ConnectionEvent::Error(err) => {
-                        rtc_log_error!("[WebSocket] エラー: {}", err);
+                        rtc_log_error!("[WebSocket] Error: {}", err);
                     }
                 }
             }
@@ -1257,7 +1257,7 @@ impl SoraConnection {
                 match timeout_result {
                     Ok(label) if !label.is_empty() => {
                         if opened_datachannels.remove(&label) {
-                            rtc_log_info!("DataChannel '{}' がクローズしました", label);
+                            rtc_log_info!("DataChannel '{}' closed", label);
                             on_data_channel_close(&label);
                         }
                     }
@@ -1293,11 +1293,11 @@ impl SoraConnection {
             })
             .await;
             if close_result.is_err() {
-                rtc_log_warning!("WebSocket クローズがタイムアウトしました");
+                rtc_log_warning!("WebSocket close timed out");
             }
         }
 
-        rtc_log_info!("終了します");
+        rtc_log_info!("Shutting down");
         Ok(())
     }
 
@@ -1650,14 +1650,14 @@ impl SoraConnection {
         use_datachannel_signaling: &mut bool,
     ) {
         if self.is_datachannel_open(label) && !opened_datachannels.contains(label) {
-            rtc_log_info!("DataChannel '{}' がオープンしました", label);
+            rtc_log_info!("DataChannel '{}' opened", label);
             opened_datachannels.insert(label.to_string());
             on_data_channel_open(label);
             if opened_datachannels.len() == self.data_channel_configs.len() {
                 *use_datachannel_signaling = true;
             }
         } else if self.is_datachannel_closed(label) && opened_datachannels.contains(label) {
-            rtc_log_info!("DataChannel '{}' がクローズしました", label);
+            rtc_log_info!("DataChannel '{}' closed", label);
             opened_datachannels.remove(label);
             on_data_channel_close(label);
         }
@@ -1685,7 +1685,7 @@ impl SoraConnection {
             message.as_bytes().to_vec()
         };
 
-        rtc_log_info!("DataChannel '{}' にメッセージを送信: {}", label, &message);
+        rtc_log_info!("Sent message to DataChannel '{}': {}", label, &message);
 
         if !managed.channel.send(&data, true) {
             return Err(Error::DataChannelSendFailed);
@@ -1806,13 +1806,13 @@ impl SoraConnection {
                         on_push(&text);
                     }
                     _ => {
-                        rtc_log_warning!("DataChannel 経由で未対応のメッセージを受信しました");
+                        rtc_log_warning!("Received unsupported message via DataChannel");
                     }
                 }
             }
             "rpc" => {
                 let text = String::from_utf8(message_bytes)?;
-                rtc_log_info!("DataChannel 経由で RPC メッセージを受信しました");
+                rtc_log_info!("Received RPC message via DataChannel");
                 let (id, response) = RpcResponse::parse(&text)?;
                 if let Some(id) = id
                     && let Some(pending) = self.pending_rpc_responses.remove(&id)
@@ -1826,7 +1826,7 @@ impl SoraConnection {
                 on_message(label, &message_bytes);
             }
             _ => {
-                rtc_log_warning!("DataChannel 経由で未対応のラベルを受信しました: {}", label);
+                rtc_log_warning!("Received unsupported label via DataChannel: {}", label);
             }
         }
 
@@ -2440,7 +2440,7 @@ async fn connect_signaling_urls(
                 return Ok((stream, target, url));
             }
             Ok((url, Err(e))) => {
-                rtc_log_warning!("接続失敗: {}: {}", url, e);
+                rtc_log_warning!("Connection failed: {}: {}", url, e);
                 errors.push((url, e.to_string()));
             }
             Err(join_err) => {
@@ -2482,7 +2482,7 @@ async fn flush_ws_output<R: RandomSource>(
 }
 
 fn send_text<R: RandomSource>(ws: &mut WebSocketClientConnection<R>, text: &str) -> Result<()> {
-    rtc_log_info!("[WebSocket] テキストメッセージを送信しました: {}", text);
+    rtc_log_info!("[WebSocket] Sent text message: {}", text);
     ws.send_text(text)?;
     Ok(())
 }

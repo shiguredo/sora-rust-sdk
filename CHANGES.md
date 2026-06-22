@@ -130,6 +130,10 @@
   - WebSocket close 完了時に `run()` ループが無条件で break して DataChannel シグナリングが継続しなかった問題を修正する
   - 防御的に `stream.read()` の `UnexpectedEof` (ピアが close_notify を送らずに TCP を閉じたケース) も `n == 0` と同等扱いに合流させる
   - @voluntas
+- [FIX] ログメッセージを英語に統一する
+  - AGENTS.md「ログメッセージは全て英語にすること」に違反していた日本語ログを全て英語に書き換える
+  - 対象は `src/connection.rs` (26 件) と `examples/sumomo/src/main.rs` (17 件)
+  - @voluntas
 
 ### misc
 

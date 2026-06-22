@@ -437,13 +437,13 @@ fn handle_on_track_event<F>(
         Err(_) => "unknown".to_string(),
     };
     if kind != "video" {
-        rtc_log_warning!("ビデオ以外のトラックを受信しました: kind={}", kind);
+        rtc_log_warning!("Received non-video track: kind={}", kind);
         return;
     }
     let track_id = match track.id() {
         Ok(id) => id,
         Err(_) => {
-            rtc_log_warning!("MediaStreamTrack の id が取得できませんでした");
+            rtc_log_warning!("Failed to get MediaStreamTrack id");
             return;
         }
     };
@@ -454,11 +454,11 @@ fn handle_on_track_event<F>(
             tracks.insert(track_id, old_entry);
             return;
         }
-        rtc_log_info!("既存のトラックを削除します: track_id={}", track_id);
+        rtc_log_info!("Removing existing track: track_id={}", track_id);
         video_track.remove_sink(&old_entry.sink);
     }
 
-    rtc_log_info!("ビデオ トラックが追加されました: track_id={}", track_id);
+    rtc_log_info!("Video track added: track_id={}", track_id);
     let sink = build_sink(track_id.clone());
     let wants = VideoSinkWants::new();
     video_track.add_or_update_sink(&sink, &wants);
@@ -473,7 +473,7 @@ fn handle_on_remove_track_event(
     let track_id = match track.id() {
         Ok(id) => id,
         Err(_) => {
-            rtc_log_warning!("MediaStreamTrack の id が取得できませんでした");
+            rtc_log_warning!("Failed to get MediaStreamTrack id");
             return;
         }
     };
@@ -482,14 +482,14 @@ fn handle_on_remove_track_event(
         Err(_) => "unknown".to_string(),
     };
     if kind != "video" {
-        rtc_log_warning!("ビデオ以外のトラックが削除されました: kind={}", kind);
+        rtc_log_warning!("Non-video track removed: kind={}", kind);
         return;
     }
     let mut video_track = track.cast_to_video_track();
     if let Some(entry) = tracks.remove(&track_id) {
         video_track.remove_sink(&entry.sink);
     }
-    rtc_log_info!("ビデオ トラックが削除されました: track_id={}", track_id);
+    rtc_log_info!("Video track removed: track_id={}", track_id);
 }
 
 #[cfg(feature = "raw-player")]
@@ -544,7 +544,7 @@ fn run_with_raw_player(args: Args) -> Result<()> {
                     .state();
                 let mut capturer = AudioDeviceCapturer::new(Some(device_id.clone()), state)?;
                 capturer.start()?;
-                rtc_log_info!("オーディオ入力デバイスを開始しました: {}", device_id);
+                rtc_log_info!("Started audio input device: {}", device_id);
                 Some(capturer)
             } else {
                 None
@@ -558,7 +558,7 @@ fn run_with_raw_player(args: Args) -> Result<()> {
             let mut tracks: HashMap<String, TrackEntry> = HashMap::new();
             let mut run = Box::pin(connection.run());
             let duration_sleep = args.duration.map(|secs| {
-                rtc_log_info!("{} 秒後に切断します", secs);
+                rtc_log_info!("Will disconnect after {} seconds", secs);
                 tokio::time::sleep(std::time::Duration::from_secs(secs))
             });
             tokio::pin!(duration_sleep);
@@ -574,7 +574,7 @@ fn run_with_raw_player(args: Args) -> Result<()> {
                         return result.map_err(AppError::Sora);
                     }
                     _ = async { duration_sleep.as_mut().as_pin_mut().unwrap().await }, if duration_sleep.is_some() => {
-                        rtc_log_info!("指定された時間が経過しました。切断します");
+                        rtc_log_info!("Specified duration elapsed, disconnecting");
                         stop_for_thread.store(true, Ordering::Relaxed);
                         break;
                     }
@@ -582,10 +582,10 @@ fn run_with_raw_player(args: Args) -> Result<()> {
                         while let Ok(event) = event_rx.try_recv() {
                             match event {
                                 AppEvent::Notify(text) => {
-                                    rtc_log_info!("notify を受信しました: {}", text);
+                                    rtc_log_info!("Received notify: {}", text);
                                 }
                                 AppEvent::Push(text) => {
-                                    rtc_log_info!("push を受信しました: {}", text);
+                                    rtc_log_info!("Received push: {}", text);
                                 }
                                 AppEvent::OnTrack(transceiver) => {
                                     handle_on_track_event(&mut tracks, transceiver, true, |track_id| {
@@ -702,7 +702,7 @@ async fn main() -> Result<()> {
             .state();
         let mut capturer = AudioDeviceCapturer::new(Some(device_id.clone()), state)?;
         capturer.start()?;
-        rtc_log_info!("オーディオ入力デバイスを開始しました: {}", device_id);
+        rtc_log_info!("Started audio input device: {}", device_id);
         Some(capturer)
     } else {
         None
@@ -723,7 +723,7 @@ async fn main() -> Result<()> {
 
     // duration が指定されている場合はタイマーを設定
     let duration_sleep = args.duration.map(|secs| {
-        rtc_log_info!("{} 秒後に切断します", secs);
+        rtc_log_info!("Will disconnect after {} seconds", secs);
         tokio::time::sleep(std::time::Duration::from_secs(secs))
     });
     tokio::pin!(duration_sleep);
@@ -734,7 +734,7 @@ async fn main() -> Result<()> {
                 return result.map_err(AppError::Sora);
             }
             _ = async { duration_sleep.as_mut().as_pin_mut().unwrap().await }, if duration_sleep.is_some() => {
-                rtc_log_info!("指定された時間が経過しました。切断します");
+                rtc_log_info!("Specified duration elapsed, disconnecting");
                 break;
             }
             event = event_rx.recv() => {
@@ -743,10 +743,10 @@ async fn main() -> Result<()> {
                 };
                 match event {
                     AppEvent::Notify(text) => {
-                        rtc_log_info!("notify を受信しました: {}", text);
+                        rtc_log_info!("Received notify: {}", text);
                     }
                     AppEvent::Push(text) => {
-                        rtc_log_info!("push を受信しました: {}", text);
+                        rtc_log_info!("Received push: {}", text);
                     }
                     AppEvent::OnTrack(transceiver) => {
                         handle_on_track_event(&mut tracks, transceiver, false, |track_id| {
