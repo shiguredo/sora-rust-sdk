@@ -46,7 +46,7 @@
 
 正式リリース前に必ず終わらせる。**SemVer 互換の観点から正式版リリース後では取り戻せない項目**。
 
-- [ ] M1. 時雨堂依存クレートを正式版に切り替える（`shiguredo_amf` / `shiguredo_libcamera` / `shiguredo_nvcodec` / `shiguredo_v4l2` / `shiguredo_vpl` / `shiguredo_webrtc` の canary・完全 pin 解消）
+- [ ] M1. 時雨堂依存クレートを正式版に切り替える（`shiguredo_amf` / `shiguredo_libcamera` / `shiguredo_nvcodec` / `shiguredo_v4l2` / `shiguredo_vpl` / `shiguredo_webrtc` の canary・完全 pin 解消）（#0021）
 - M2. （欠番。対応しないと判断）
 - [ ] M3. 公開 API への `#[non_exhaustive]` 一斉付与
 - [ ] M4. `SoraConnectionCommand` を `pub(crate)` 化
