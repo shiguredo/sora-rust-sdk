@@ -53,7 +53,7 @@
 - [ ] M5. `shiguredo_webrtc` の公開 API 型を `pub use` で再エクスポート
 - [ ] M6. 公開 API の rustdoc 拡充（`lib.rs` クレートドキュメント・`types.rs` / `error.rs` / `video_codec*.rs` / `video_codecs/*.rs` のモジュールドキュメントと項目ドキュメント）
 - [ ] M7. `Mp4Error` を `Error` 系へ統合（`From<Mp4Error> for Error` または `Error::Mp4` バリアント追加 + `Mp4Error::Display` 日本語化）
-- [ ] M8. 日本語ログメッセージの英語化（`src/connection.rs` 26 件、`examples/sumomo/src/main.rs` 17 件）（#0022）
+- [x] M8. 日本語ログメッセージの英語化（`src/connection.rs` 26 件、`examples/sumomo/src/main.rs` 17 件）（#0022）
 - [ ] M9. `release.yml` の整備（ビルド依存 `apt-get install` ステップ、`timeout-minutes`、`concurrency`、prerelease 判定の SemVer 対応、`cargo publish --dry-run` 別ジョブ、`-p sora_sdk` 明示）
 - [ ] M10. `CHANGES.md` の整合化とリリース手順整備（エントリ順序、`shiguredo_webrtc` / `shiguredo_nvcodec` / `prek` 等の本文の実態追従、`[ADD] ParsedProxyInfo` の本体移動、表記揺れ、`### misc` 扱いの確定、`## develop` → `## 2026.1.0` リネーム手順の明文化）
 - [ ] M11. `SKILL.md` のバージョン追従ルールと iOS 対応の確定（`canary.X` 手動同期の自動化 or 粗い表記化 / `InternalAppleVideoCodecCapability` の iOS gate 維持か削除か）
