@@ -23,11 +23,11 @@
 
 `Cargo.toml` の `[workspace.dependencies]` 内の指定（canary または完全 pin）:
 
-- `shiguredo_amf = "2026.3.0-canary.0"`（Cargo.toml:23）
+- ~~`shiguredo_amf = "2026.3.0-canary.0"`~~ → `shiguredo_amf = "2026.3"`（Cargo.toml:23。2026-06-23 に正式版へ切り替え済み）
 - ~~`shiguredo_libcamera = "2026.1.0-canary.1"`~~ → `shiguredo_libcamera = "2026.1"`（Cargo.toml:27。2026-06-23 に正式版へ切り替え済み）
 - ~~`shiguredo_nvcodec = "=2026.2.0-canary.2"`~~ → `shiguredo_nvcodec = "=2026.2.0"`（Cargo.toml:31。2026-06-23 に正式版へ切り替え済み。完全 pin は維持）
 - ~~`shiguredo_v4l2 = "2026.1.0-canary.4"`~~ → `shiguredo_v4l2 = "2026.1"`（Cargo.toml:35。2026-06-23 に正式版へ切り替え済み）
-- `shiguredo_vpl = "2026.3.0-canary.0"`（Cargo.toml:37）
+- ~~`shiguredo_vpl = "2026.3.0-canary.0"`~~ → `shiguredo_vpl = "2026.3"`（Cargo.toml:37。2026-06-23 に正式版へ切り替え済み）
 - ~~`shiguredo_webrtc = "=0.150.1"`~~ → `shiguredo_webrtc = "0.150.2"`（Cargo.toml:39。2026-06-23 に正式版へ切り替え済み）
 
 サブクレートでも個別に依存している時雨堂クレートがあれば追従が必要:
@@ -69,7 +69,8 @@
 - 2026-06-23: `shiguredo_libcamera` と `shiguredo_v4l2` を 2026.1 安定版に切り替え、`Cargo.lock` と `CHANGES.md` を更新済み
 - 2026-06-23: `shiguredo_webrtc` を 0.150.2 に上げ、`Cargo.lock` と `CHANGES.md` を更新済み
 - 2026-06-23: `shiguredo_nvcodec` を `=2026.2.0` 正式版に切り替え、`Cargo.lock` と `CHANGES.md` を更新済み（完全 pin は維持）
+- 2026-06-23: `shiguredo_amf` と `shiguredo_vpl` を `2026.3` 正式版に切り替え、`Cargo.lock` と `CHANGES.md` を更新済み。依存先 6 クレートはすべて正式版になり、残る作業は `shiguredo_nvcodec` の完全 pin 外し、全 feature 組合せでの build/test 確認、最終的な CHANGES.md 集約のみ
 
 ## 依存待ち
 
-依存先 6 クレートのうち、残り 2 クレート（`shiguredo_amf` / `shiguredo_vpl`）の正式版リリース完了が前提条件。リリーススケジュールが大きく遅れる場合は本 issue を `issues/pending/` に移動する選択肢がある。
+依存先 6 クレートはすべて正式版がリリース済み。本 issue の残作業は `shiguredo_nvcodec` の完全 pin 外しと最終確認のみ。
