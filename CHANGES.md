@@ -49,8 +49,9 @@
   - @voluntas
 - [UPDATE] `shiguredo_webrtc` を 0.150.2 に上げる
   - @voluntas
-- [UPDATE] `shiguredo_nvcodec` を 2026.1.0 に上げる
+- [UPDATE] `shiguredo_nvcodec` を 2026.2.0 に上げる
   - @melpon
+  - @voluntas
 - [UPDATE] `nvcodec` の対応コーデック判定を `shiguredo_nvcodec::supported_codecs()` に統一し、`device_id` を API で指定可能にする
   - @melpon
 - [UPDATE] VPL エンコーダーとデコーダーを非同期コールバック API に対応させる
