@@ -1231,9 +1231,9 @@ dependencies = [
 
 [[package]]
 name = "shiguredo_amf"
-version = "2026.3.0-canary.0"
+version = "2026.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baaa5fea12fc0a51620a7f2c1192dcb521b291424ced4477581fc16a6d16fc53"
+checksum = "93ba1bd91dcf5c7191c2c98479392e20817063d351cf8ac8c6f977780f2ca5ae"
 dependencies = [
  "bindgen",
  "log",
@@ -1334,9 +1334,9 @@ dependencies = [
 
 [[package]]
 name = "shiguredo_vpl"
-version = "2026.3.0-canary.0"
+version = "2026.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41650f4425961e0b6dfae92c562bf8fe9a7e17dd315cad329b08806533b22a25"
+checksum = "1c623b31f830ff7c33c840f8d61274f1dea696e59f698081612629ff3ad22def"
 dependencies = [
  "bindgen",
  "shiguredo_cmake",
