@@ -234,6 +234,8 @@ let (connection, handle) = SoraConnection::builder(context, signaling_urls, chan
     .signaling_notify_metadata(notify_metadata)  // シグナリング通知メタデータ
     .data_channels(data_channels)                // DataChannel 設定
     .forwarding_filters(filters)                 // 転送フィルター
+    // ICE サーバー設定
+    .ice_server_url_configurer(|server, urls| { /* IceServer に追加する URL を取捨選択 */ })
     // TLS 設定
     .insecure(false)                             // サーバー証明書の検証をスキップ
     .client_cert(cert, key)                      // クライアント証明書 (PEM)
@@ -266,6 +268,12 @@ tokio::spawn(async move {
 
 // 統計情報を取得する
 let stats = handle.get_stats().await?;
+
+// 最初に WebSocket 接続が成功したシグナリング URL を取得する
+let selected = handle.selected_signaling_url().await?;
+
+// 現在接続中のシグナリング URL を取得する (リダイレクト後はリダイレクト先)
+let connected = handle.connected_signaling_url().await?;
 ```
 
 ### メッセージ受信
