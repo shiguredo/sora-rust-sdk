@@ -39,12 +39,16 @@
   - @voluntas
 - [UPDATE] `shiguredo_websocket` を 2026.3 に上げる
   - @voluntas
+- [UPDATE] `shiguredo_libcamera` を 2026.1 に上げる
+  - @voluntas
+- [UPDATE] `shiguredo_v4l2` を 2026.1 に上げる
+  - @voluntas
 - [UPDATE] zlib 圧縮/展開の実装を `flate2` から `noflate` に差し替える
   - @voluntas
 - [UPDATE] `rand` 依存を削除し、シグナリング URL のシャッフルを `aws-lc-rs` の `SystemRandom` を用いた Fisher-Yates 実装に置き換える
   - @voluntas
-- [UPDATE] `shiguredo_webrtc` を 0.148.0 に上げる
-  - @sile, @melpon
+- [UPDATE] `shiguredo_webrtc` を 0.150.2 に上げる
+  - @voluntas
 - [UPDATE] `shiguredo_nvcodec` を 2026.1.0 に上げる
   - @melpon
 - [UPDATE] `nvcodec` の対応コーデック判定を `shiguredo_nvcodec::supported_codecs()` に統一し、`device_id` を API で指定可能にする
