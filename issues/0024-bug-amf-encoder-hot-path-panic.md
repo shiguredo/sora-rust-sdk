@@ -7,6 +7,8 @@
 - Branch: feature/fix-amf-encoder-hot-path-panic
 - Polished: {YYYY-MM-DD}
 
+親 issue: [`0020-other-prepare-stable-release-2026-1-0.md`](./0020-other-prepare-stable-release-2026-1-0.md) の Should 派生 issue S2 (video codec 層の致命的バグ修正) のうち「`amf.rs` のホットパス `assert_eq!`」分。
+
 ## 目的
 
 `src/video_codecs/amf.rs` の AMF エンコーダー実装で、`encode()` のホットパスに残った `assert_eq!(surface_height as u32, frame_height);` が、入力フレームの高さと AMF が確保した surface の高さが一致しない条件で毎フレーム panic する。AMF SDK は内部で surface サイズをアライメント境界に切り上げる実装が一般的であり、特定解像度では確実に発火する。WebRTC のエンコーダーは外部スレッド (内部実装では VideoStreamEncoder の encoder queue 等) から呼ばれるため、panic は親プロセスを巻き込んでクラッシュさせる。

@@ -7,6 +7,8 @@
 - Branch: feature/fix-mp4-length-size-minus-one
 - Polished: {YYYY-MM-DD}
 
+親 issue: [`0020-other-prepare-stable-release-2026-1-0.md`](./0020-other-prepare-stable-release-2026-1-0.md) の Should 派生 issue S2 (video codec 層の致命的バグ修正) のうち「`mp4.rs` の `lengthSizeMinusOne` 無視」分。
+
 ## 目的
 
 `src/video_codecs/mp4.rs:406-425` の `length_prefixed_nalu_to_annex_b` は AVCC / HVCC 形式の NAL 長プレフィックスを常に 4 バイトとして読んでいる。実際には MP4 (ISO/IEC 14496-15) では NAL 長プレフィックスのバイト数は `AvccBox::length_size_minus_one` / `HvccBox::length_size_minus_one` で 1 / 2 / 4 バイトのいずれかが指定される。値 0 (= 1 バイト) や値 1 (= 2 バイト) が指定された MP4 を入力すると、4 バイト読みが実際の NAL 境界を踏み外し、Annex B 変換結果が完全に壊れる。WebRTC 受信側はデコード不能となる (panic ではないがデコードは破綻する)。

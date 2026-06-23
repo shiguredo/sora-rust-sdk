@@ -7,6 +7,8 @@
 - Branch: feature/fix-libcamera-acquire-release-leak
 - Polished: {YYYY-MM-DD}
 
+親 issue: [`0020-other-prepare-stable-release-2026-1-0.md`](./0020-other-prepare-stable-release-2026-1-0.md) の Should 派生 issue S2 (video codec 層の致命的バグ修正) のうち「`libcamera.rs` の `acquire()` 後リソースリーク」分。
+
 ## 目的
 
 `src/libcamera.rs:378` の `run_libcamera_loop` は L405 で `camera.acquire()` を呼んだ後、設定生成・バッファ確保・ストリーム開始など多数の処理を `?` 演算子で連結している。これらが失敗して早期 return した場合、唯一の `camera.release()` 呼び出し (L663) と `camera.stop()` 呼び出し (L662) は実行されない。libcamera は acquire したカメラを release しないと次回 acquire が拒否される実装であり、SDK プロセスを再起動するまでカメラが使えなくなる。

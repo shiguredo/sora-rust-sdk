@@ -7,6 +7,8 @@
 - Branch: feature/fix-v4l2-encoder-release-deadlock
 - Polished: {YYYY-MM-DD}
 
+親 issue: [`0020-other-prepare-stable-release-2026-1-0.md`](./0020-other-prepare-stable-release-2026-1-0.md) の Should 派生 issue S2 (video codec 層の致命的バグ修正) のうち「`v4l2.rs` の callback と encoder 同居デッドロック懸念」分。
+
 ## 目的
 
 `src/video_codecs/v4l2.rs:648-660` の `V4l2VideoEncoder::release()` は `shared_state` の `MutexGuard` を保持したまま `shared_state.encoder = None;` を実行している。エンコーダー破棄時に drain 処理が走り、内部から登録済みコールバック (`handle_v4l2_encode_callback`) が呼ばれた場合、そのコールバックは同じ `shared_state` の `lock()` を取りに来るため自己デッドロックする。
