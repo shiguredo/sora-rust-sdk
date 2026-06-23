@@ -56,8 +56,8 @@
   - @voluntas
 - [UPDATE] `shiguredo_vpl` を 2026.3 に上げる
   - @voluntas
-- [UPDATE] 時雨堂依存クレート 10 件を `= "X.Y.Z"` 形式で完全 pin に統一する
-  - `shiguredo_amf` / `shiguredo_http11` / `shiguredo_libcamera` / `shiguredo_mp4` / `shiguredo_nvcodec` / `shiguredo_openh264` / `shiguredo_v4l2` / `shiguredo_vpl` / `shiguredo_webrtc` / `shiguredo_websocket` の workspace 依存をパッチバージョンまで完全一致指定にする
+- [UPDATE] 時雨堂依存クレート 10 件を `~X.Y` 形式に統一する
+  - `shiguredo_amf` / `shiguredo_http11` / `shiguredo_libcamera` / `shiguredo_mp4` / `shiguredo_nvcodec` / `shiguredo_openh264` / `shiguredo_v4l2` / `shiguredo_vpl` / `shiguredo_webrtc` / `shiguredo_websocket` の workspace 依存をマイナーバージョンまで固定し、パッチバージョンは自動追従する tilde requirement に揃える
   - @voluntas
 - [UPDATE] `nvcodec` の対応コーデック判定を `shiguredo_nvcodec::supported_codecs()` に統一し、`device_id` を API で指定可能にする
   - @melpon
