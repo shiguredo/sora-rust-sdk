@@ -23,7 +23,7 @@
 ## 現状
 
 - バージョン: `2026.1.0-canary.10`（`Cargo.toml:3`）
-- 時雨堂依存クレートが canary 版または完全 pin のまま
+- 時雨堂依存クレートのうち `shiguredo_libcamera` / `shiguredo_v4l2` / `shiguredo_webrtc` を正式版に切り替え済み。残りは canary 版または完全 pin のまま
 - 公開 API に `#[non_exhaustive]` ゼロ件、rustdoc 大幅不足、`SoraConnectionCommand` 等の内部実装が公開されている
 - `release.yml` にビルド依存インストールが無く、`cargo publish` の verify が失敗するリスク
 - `CHANGES.md` の本文と実態が乖離、エントリ順序も規約違反
@@ -47,6 +47,9 @@
 正式リリース前に必ず終わらせる。**SemVer 互換の観点から正式版リリース後では取り戻せない項目**。
 
 - [ ] M1. 時雨堂依存クレートを正式版に切り替える（`shiguredo_amf` / `shiguredo_libcamera` / `shiguredo_nvcodec` / `shiguredo_v4l2` / `shiguredo_vpl` / `shiguredo_webrtc` の canary・完全 pin 解消）（#0021）
+  - `shiguredo_libcamera` / `shiguredo_v4l2` は 2026.1 に切り替え済み
+  - `shiguredo_webrtc` は 0.150.2 に切り替え済み
+  - 残: `shiguredo_amf` / `shiguredo_nvcodec` / `shiguredo_vpl`
 - M2. （欠番。対応しないと判断）
 - [ ] M3. 公開 API への `#[non_exhaustive]` 一斉付与
 - [ ] M4. `SoraConnectionCommand` を `pub(crate)` 化
