@@ -23,7 +23,7 @@ WebRTC SFU Sora のクライアントを Rust で実装するための SDK。シ
 ## バージョン情報
 
 - crate 名: `sora_sdk`
-- バージョン: 2026.1.0-canary.9
+- バージョン: 2026.1.0-canary.10
 - Rust Edition: 2024
 - 最小 Rust バージョン: 1.88
 - ライセンス: Apache-2.0
@@ -63,6 +63,8 @@ WebRTC SFU Sora のクライアントを Rust で実装するための SDK。シ
 |----|------|
 | `SoraConnection` | 接続本体。`run()` でシグナリングからメディア接続までを駆動する |
 | `SoraConnectionBuilder` | ビルダー。ムーブスタイルで連結し `.build()` で `(SoraConnection, SoraConnectionHandle)` を返す |
+| `SoraConnectionCommand` | `SoraConnectionHandle` が内部的に送信するコマンドの enum。通常はユーザーが直接構築しない |
+| `TlsConfig` | WebSocket (シグナリング接続) の TLS 設定。`insecure` / `client_cert` / `client_key` / `ca_cert` を保持。Builder の `insecure` / `client_cert` / `ca_cert` メソッド経由で設定する |
 
 `SoraConnection::builder(context, signaling_urls, channel_id, role) -> SoraConnectionBuilder` で開始。`signaling_urls` は `Vec<String>`、`channel_id` は `String`、`role` は `Role`。
 
@@ -177,7 +179,7 @@ pub enum Role { SendOnly, RecvOnly, SendRecv }
 | `Audio` | `Bool(bool)`, `Audio { codec_type: Option<AudioCodecType>, bit_rate: Option<u32>, opus_params: Option<AudioOpusParams> }` |
 | `AudioCodecType` | `OPUS` |
 | `AudioOpusParams` | `channels`, `maxplaybackrate`, `minptime`, `ptime`, `stereo`, `sprop_stereo`, `useinbandfec`, `usedtx` (すべて `Option`) |
-| `Video` | `Bool(bool)`, `Video { codec_type, bit_rate, vp9_params, h264_params, h265_params, av1_params }` |
+| `Video` | `Bool(bool)`, `Video { codec_type, bit_rate, vp9_params, av1_params, h264_params, h265_params }` |
 | `VideoCodecType` | `VP8`, `VP9`, `H264`, `H265`, `AV1` |
 | `VideoVP9Params` | `profile_id: Option<u32>` (0..3) |
 | `VideoH264Params` | `profile_level_id: Option<String>`, `b_frame: Option<bool>` |
@@ -203,10 +205,11 @@ H.264 / H.265 の `b_frame: true` は Sora 側の `sora.conf` で対応する設
 
 | 型 | フィールド |
 |----|----------|
-| `ConnectDataChannel` | `label`, `direction`, `ordered: Option<bool>`, `max_packet_life_time: Option<i32>`, `max_retransmits: Option<i32>`, `protocol: Option<String>`, `compress: Option<bool>`, `header: Option<Vec<JsonString>>` |
-| `ForwardingFilter` | `name`, `priority`, `action`, `rules: Vec<Vec<ForwardingFilterRule>>` 等 |
-| `ForwardingFilterRule` | フィルタルール |
+| `ConnectDataChannel` | `label: String`, `direction: String`, `ordered: Option<bool>`, `max_packet_life_time: Option<i32>`, `max_retransmits: Option<i32>`, `protocol: Option<String>`, `compress: Option<bool>`, `header: Option<Vec<JsonString>>` |
+| `ForwardingFilter` | `name: Option<String>`, `priority: Option<i32>`, `action: Option<String>`, `rules: Vec<Vec<ForwardingFilterRule>>`, `version: Option<String>`, `metadata: Option<JsonString>` |
+| `ForwardingFilterRule` | `field: String`, `operator: String`, `values: Vec<String>` |
 | `ProxyInfo` | `url: String`, `username: Option<String>`, `password: Option<String>`, `user_agent: Option<String>` |
+| `ParsedProxyInfo` | `ProxyInfo::parse()` で検証済みのプロキシ接続情報を取得する公開型。`host` / `port` は公開、それ以外は非公開。主に PBT 用途で公開されている |
 | `JsonString` | `nojson::RawJsonOwned` のラッパー。`str::parse::<JsonString>()` で構築 (不正 JSON は `Error::JsonParse`) |
 | `SignalingType` | `WebSocket`, `DataChannel` |
 | `SignalingDirection` | `Sent`, `Received` |
@@ -215,16 +218,16 @@ H.264 / H.265 の `b_frame: true` は Sora 側の `sora.conf` で対応する設
 
 | 型 | 説明 |
 |----|------|
-| `VideoCodecPreference` | コーデック選好。`default()` で空。`new_from_capability(&dyn VideoCodecCapability)` で 1 つの capability から生成。`merge(&other)` で他の preference を取り込む |
-| `PreferenceCodec` | preference 内のコーデックエントリ |
-| `VideoCodecCapability` | トレイト。各バックエンドが実装する。`SoraConnectionContextConfig::video_codec_capabilities` に `Box<dyn VideoCodecCapability>` を積む |
-| `VideoCodecImplementation` | 実装識別 enum |
-| `CodecDirection` | encoder / decoder の方向 |
-| `validate_video_codec_preference(preference, capabilities)` | `new_with_config` 内部でも呼ばれる整合性チェック。preference と capabilities が一致しない場合 `Error::InvalidVideoCodecPreference` |
+| `VideoCodecPreference` | コーデック選好。`default()` で空。`new(Vec<PreferenceCodec>)` / `new_from_capability(&dyn VideoCodecCapability)` で生成。`codecs()` / `find(direction, codec_type)` / `find_mut(...)` / `get_or_add(...)` / `has_implementation(impl)` / `merge(&other)` を提供 |
+| `PreferenceCodec` | preference 内のコーデックエントリ。`new(direction, codec_type, implementation)` で生成。`direction()` / `codec_type()` / `implementation()` / `set_implementation(impl)` を提供 |
+| `VideoCodecCapability` | トレイト (`: Send`)。各バックエンドが実装する。`SoraConnectionContextConfig::video_codec_capabilities` に `Box<dyn VideoCodecCapability>` を積む。必須メソッドは `get_implementation()` と `get_supported_formats(direction)`。デフォルト実装つきメソッドは `is_supported(direction, codec_type)` / `resolve_sdp_format(direction, format)` / `create_video_encoder(env, format) -> Option<VideoEncoder>` / `create_video_decoder(env, format) -> Option<VideoDecoder>` |
+| `VideoCodecImplementation` | 実装識別。`new(name, description)` で生成。`name()` / `description()` を提供 |
+| `CodecDirection` | encoder / decoder の方向。`as_str()` (`"Encoder"` / `"Decoder"`) / `as_label()` (`"encoder"` / `"decoder"`) を提供 |
+| `validate_video_codec_preference(&preference, &[Box<dyn VideoCodecCapability>])` | `new_with_config` 内部でも呼ばれる整合性チェック。preference と capabilities が一致しない場合 `Error::InvalidVideoCodecPreference` |
 | `SoraVideoEncoderFactory` / `SoraVideoDecoderFactory` | 内部で利用される factory (通常はユーザーが直接触らない) |
 | `AlignmentEncoderAdapter` | エンコーダーのアライメント補正アダプタ |
 | `SimulcastCapabilityHelper` | サイマルキャスト対応判定ヘルパー |
-| `codec_type_from_format(...)` | フォーマットから `VideoCodecType` を解決 |
+| `codec_type_from_format(&SdpVideoFormatRef)` | フォーマットから `VideoCodecType` を解決 |
 
 ### 標準のコーデックバックエンド
 
@@ -261,7 +264,7 @@ H.264 / H.265 の `b_frame: true` は Sora 側の `sora.conf` で対応する設
 | 受信ハンドラ | `SoraConnectionBuilder::on_message(Fn(&str, &[u8]))` (ラベルは `#` 始まり) |
 | 送信 | `SoraConnectionHandle::send_message(label, data)` |
 
-JSON-RPC 2.0 は SDK 側で `{ "jsonrpc": "2.0", "method": ..., "params": ..., "id": ... }` を組み立てる。利用側は内側の `params` を `JsonString` で渡すだけ。
+JSON-RPC 2.0 は SDK 側で `{ "jsonrpc": "2.0", "method": ..., "params": ..., "id": ... }` を組み立てる。利用側は内側の `params` を `Option<JsonString>` で渡すだけ (パラメータ不要なら `None`)。
 
 | 型 | フィールド / バリアント |
 |----|----------------------|
@@ -294,8 +297,8 @@ let (connection, handle) = SoraConnection::builder(
     Role::SendRecv,
 )
 .sender_audio_track(audio_track)
-.on_notify(|text| log::info!("notify: {text}"))
-.on_track(|transceiver| log::info!("track: {:?}", transceiver.mid()))
+.on_notify(|text| println!("notify: {text}"))
+.on_track(|transceiver| println!("track: {:?}", transceiver.mid()))
 .build()?;
 
 tokio::spawn(async move {
@@ -357,7 +360,7 @@ builder = builder.audio(audio).video(video);
 ```rust
 let (_conn, handle) = SoraConnection::builder(/* ... */)
     .on_message(|label, data| {
-        log::info!("recv {label}: {} bytes", data.len());
+        println!("recv {label}: {} bytes", data.len());
     })
     .build()?;
 
@@ -411,7 +414,7 @@ let h = handle.clone();
 tokio::spawn(async move {
     tokio::time::sleep(std::time::Duration::from_secs(60)).await;
     if let Ok(stats) = h.get_stats().await {
-        log::info!("stats: {stats}");
+        println!("stats: {stats}");
     }
     let _ = h.disconnect().await;
 });
@@ -472,7 +475,7 @@ tokio::spawn(async move { let _ = conn.run().await; });
 
 // 接続成立後、勝者の URL を確認できる
 if let Some(url) = handle.selected_signaling_url().await? {
-    log::info!("connected via {url}");
+    println!("connected via {url}");
 }
 // リダイレクト後の URL は connected_signaling_url() で取得する
 ```
@@ -492,7 +495,7 @@ if let Some(url) = handle.selected_signaling_url().await? {
 | TLS 証明書 | `TurnTlsCaCert`, `ClientCertParse`, `ClientKeyParse`, `CaCertParse`, `ClientCertKeyIncomplete` |
 | コーデック | `InvalidVideoCodecCapability`, `InvalidVideoCodecPreference` |
 | 内部コマンド | `CommandSendFailed`, `CommandResponseMissing` |
-| バックエンド固有 (feature 付き) | `Libcamera`, `LibcameraMessage`, `Openh264`, `Amf`, `AmfMessage`, `Vpl`, `VplMessage`, `NvCodec`, `NvCodecMessage`, `V4l2`, `V4l2Message` |
+| バックエンド固有 (feature 付き) | `Libcamera`, `LibcameraMessage`, `Openh264`, `Amf { source }`, `AmfMessage`, `Vpl { source }`, `VplMessage`, `NvCodec { source }`, `NvCodecMessage`, `V4l2 { source }`, `V4l2Message` |
 
 エラーメッセージ (`Display`) は日本語。ログメッセージは英語、というプロジェクト方針と分けて扱うこと。
 
@@ -507,5 +510,5 @@ if let Some(url) = handle.selected_signaling_url().await? {
 - **`VideoTrackSource` は本クレートでは作らない**: `shiguredo_webrtc` 側の capturer / source、もしくは本クレートの `Mp4VideoCapturer` / `LibcameraVideoCapturer` から生成する。
 - **`#` プレフィックス以外のラベルは触らない**: `send_message` / `on_message` はユーザー定義 DataChannel 専用。SDK 内部用ラベル (`signaling` 等) を渡すと `Error::DataChannelMissing` になる。
 - **JSON-RPC の id は SDK が管理する**: 利用側が `id` を組み立てる必要はない。`params` の中身だけ渡す。
-- **ロギングは `log` クレート**: `tracing` ではない。ロガー実装はコンテキスト生成前に登録する。
+- **ロギングは `shiguredo_webrtc` の `rtc_log_*` マクロ**: SDK 内のログは libwebrtc 側 (`rtc_log_info!` / `rtc_log_warning!` / `rtc_log_error!`) に流れる。`log` / `tracing` クレートには依存していない。
 - **デフォルトの ADM は Dummy**: マイク入力が必要な場合は `AdmConfig::UseBuiltIn` か `UseExternal` を明示する。
