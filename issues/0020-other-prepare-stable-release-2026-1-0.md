@@ -66,7 +66,7 @@
 技術的負債だが正式リリース後でも段階対応可能。Must 完了後に順次起票する。
 
 - [ ] S1. テスト戦略強化（PBT 追加 / `IncomingMessage::parse` `RpcResponse::parse` 単体テスト追加 / `parse_stats_lossy` 誤合格修正 / `redirect.rs` 環境変数欠落時の return 修正 / TURN-TLS / `client_cert` / `spotlight` / `forwarding_filters` の e2e 追加）
-- [ ] S2. video codec 層の致命的バグ修正（`v4l2.rs` の callback と encoder 同居デッドロック懸念 / `libcamera.rs` の `acquire()` 後リソースリーク / `v4l2.rs` の stride バッファ計算 / `mp4.rs` の `lengthSizeMinusOne` 無視 / `mp4.rs` の停止応答遅延 / `amf.rs` のホットパス `assert_eq!` / `find_capability` 重複定義）
+- [ ] S2. video codec 層の致命的バグ修正（`v4l2.rs` の callback と encoder 同居デッドロック懸念（#0026） / `libcamera.rs` の `acquire()` 後リソースリーク（#0025） / `v4l2.rs` の stride バッファ計算 / `mp4.rs` の `lengthSizeMinusOne` 無視（#0027） / `mp4.rs` の停止応答遅延 / `amf.rs` のホットパス `assert_eq!`（#0024） / `find_capability` 重複定義）
 - [ ] S3. 公開 API 設計の追加修正（`SoraConnection` / `TimerManager` の `Drop` 実装 / `Result<T>` エイリアスの扱い / `tokio` の `rt-multi-thread` 削除 / `SecureRandom` 毎フレーム初期化と panic 経路 / `now()` の panic 経路 / URL シャッフルの modulo bias / `TlsConfig` の二重インターフェース / 公開構造体の `Debug` 手書き実装 / `ParsedProxyInfo` のフィールド可視性整合）
 - [ ] S4. CI ワークフロー強化（`macos-15` / `macos-26` マトリクス追加 / MSRV 1.88 検証 / `clippy --all-targets` 追加 / `cargo doc -D warnings` 追加 / nightly 確認 / self-hosted の `--skip` をテスト側 `#[ignore]` へ移動 / `cp .cargo/config.toml.ci` の用途明確化）
 - [ ] S5. README / docs の整備（`README.md` のプレースホルダ修正 / Linux ビルド依存の網羅 / 構成図に `pbt/` `docs/` 追加 / 対応プラットフォームと CI matrix の整合 / Sora 対応上限明示 / 「優先実装」セクション整理 / Copyright 表記見直し / `docs/SORA_CPP_SDK.md` の `HTTP Proxy 未実装` 等の古い記述修正 / `sumomo` README の `libssl-dev` 誤記削除 / CLI オプション一覧追加 / サンプル URL を `example.com` 化 / `examples/sumomo/Cargo.toml` メタデータ追加）
