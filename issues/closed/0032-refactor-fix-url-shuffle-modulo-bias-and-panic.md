@@ -2,7 +2,7 @@
 
 - Priority: Low
 - Created: 2026-06-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-06-24
 - Model: Opus 4.7
 - Branch: feature/fix-url-shuffle-modulo-bias-and-panic
 - Polished: {YYYY-MM-DD}
@@ -117,3 +117,13 @@ if urls.len() > 1 {
 3. `rng.fill()` が `Err` を返した場合は早期 return `false` で抜け、呼び出し元はログ警告を出してシャッフルを諦める
 4. テスト容易性のため、`try_shuffle_urls` の RNG 部分をトレイトか関数注入で抽象化する案も検討する (ただし「モックやスタブは絶対に利用しないこと」(AGENTS.md) のため、本物の `SystemRandom` を使うか、シャッフルロジックを純関数化して `Vec<u64>` を入力に取る単体テストにする)
 5. テストは決定論的な乱数列を入力に「期待されるシャッフル結果が得られる」「`u64::MAX` 付近の値が `n` の倍数の手前で reject される」ことを確認する
+
+## 解決方法
+
+本 issue は対応不要と判断し、コード変更なしで closed にする。
+
+理由:
+
+- modulo bias は URL 数が高々 100 以下 (< $2^{64}$ に比べて桁違いに小さい) の状況では偏りが $10^{-18}$ オーダーであり、完全に無視できる
+- `SystemRandom::fill()` 失敗は通常の Linux 環境では事実上発生しない。`getrandom()` が seccomp で塞がれるような極端な環境では、他の箇所でも同様に落ちるため panic でも実害は無い
+- rejection sampling や u128 経由の対応を入れると、効果が無いにも関わらずコードが複雑化するだけである
