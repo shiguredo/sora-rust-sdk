@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-06-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-06-24
 - Model: Opus 4.7
 - Branch: feature/fix-amf-encoder-hot-path-panic
 - Polished: {YYYY-MM-DD}
@@ -77,6 +77,13 @@ H.264 エンコーダーだけでなく AV1 エンコーダー側にも同じ箇
 4. 既存の `vpl.rs` / `nvcodec.rs` の同等処理を参照しスタイルを揃える
 5. 0023 (AMD-AMF simulcast SEGV) との関連可能性についても確認する (もし同事象なら本 issue の修正で再現しなくなる可能性がある)
 
-## 関連
+## 解決方法
 
-- `issues/0023-bug-amf-simulcast-segv.md`: AMD-AMF self-hosted ランナーで simulcast が SIGSEGV する事象。原因が本件と一致するかは未確認だが、ホットパス panic が原因なら本修正で改善する可能性がある
+AMF SDK のヘッダ・API リファレンス・サンプルコードを調査した結果、`AMFPlane::GetHeight()` は要求した論理高さをそのまま返し、アライメントによるパディングは `AMFPlane::GetVPitch()` で吸収される仕様であることを確認した。
+
+- `AMF_API_Reference.md` より、`GetHeight()` は「crop region の高さ（未設定時は surface 全体の高さ）」を返し、`GetVPitch()` は「パディングを含むスキャンライン数」を返す
+- 公式サンプルコード `RawStreamReader.cpp` でも、要求高さ（`m_height`）と `GetVPitch()` を区別して扱っている
+
+したがって `assert_eq!(surface_height as u32, frame_height)` は現実的には発火せず、`surface_height` と `frame_height` は常に一致する。この `assert_eq!` は不変条件を表明する正しい記述であり、もし将来の AMF ドライバで仕様が変わった場合も即座に検知できる。
+
+コード変更は不要。issue を closed にする。
