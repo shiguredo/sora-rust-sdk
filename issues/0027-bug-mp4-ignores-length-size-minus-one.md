@@ -5,7 +5,7 @@
 - Completed: {YYYY-MM-DD}
 - Model: Opus 4.7
 - Branch: feature/fix-mp4-length-size-minus-one
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-06-25
 
 親 issue: [`0020-other-prepare-stable-release-2026-1-0.md`](./0020-other-prepare-stable-release-2026-1-0.md) の Should 派生 issue S2 (video codec 層の致命的バグ修正) のうち「`mp4.rs` の `lengthSizeMinusOne` 無視」分。
 
@@ -67,41 +67,59 @@ fn length_prefixed_nalu_to_annex_b(data: &[u8]) -> Vec<u8> {
 
 問題:
 
-- 常に 4 バイトの大端整数として NAL 長を読む
-- `length_size_minus_one` が 0 (= 1 バイト) や 1 (= 2 バイト) の MP4 では、最初の NAL 長 1〜2 バイトの後ろに NAL ペイロードが続いているのに、4 バイト分を「長さ」と解釈してしまう
-- 結果として nal_size が極端に大きな値になり、`offset + nal_size > data.len()` で break されて以降の NAL を全てスキップする (または、たまたま条件をすり抜けると変な範囲のバイト列を NAL データとして出力する)
+- 常に 4 バイトの大端整数として NAL 長を読むため、`length_size_minus_one` が 0 (= 1 バイト) や 1 (= 2 バイト) の MP4 では NAL 境界を誤読する
+- 結果として nal_size が極端に大きな値になり、`offset + nal_size > data.len()` で break されて以降の NAL を全てスキップする
 
-`extract_track_info` (`src/video_codecs/mp4.rs:245-323`) でも `length_size_minus_one` を参照していない。`shiguredo_mp4::boxes::AvccBox::length_size_minus_one: Uint<u8, 2>` および `HvccBox` 側の同等フィールドが利用可能なはず (要 shiguredo_mp4 のドキュメント / ソース確認)。
+`extract_track_info` (`src/video_codecs/mp4.rs:245-323`) でも `length_size_minus_one` を参照していない。`shiguredo_mp4::boxes::AvccBox::length_size_minus_one: Uint<u8, 2>` および `HvccBox::length_size_minus_one: Uint<u8, 2, 0>` が利用可能であり、`.get()` で `u8` 値（下位 2 ビットをマスクした値）を取得できる。`.get() + 1` により NAL 長プレフィックスのバイト数 (1/2/3/4) が得られる。
 
-なお `extract_hevc_parameter_sets` (`src/video_codecs/mp4.rs:330-339`) は HvccBox の `nalu_arrays` 内 `nalus` を直接 `extend_from_slice` で結合しているため、長さプレフィックスを読む必要が無く、本問題の影響を受けない。本件は `get_sample` 経路 (`src/video_codecs/mp4.rs:365-388`) で `length_prefixed_nalu_to_annex_b` を呼び出す H.264 / H.265 サンプルデータの取り出しに限定される。
+なお `extract_hevc_parameter_sets` (`src/video_codecs/mp4.rs:330-339`) は HvccBox の `nalu_arrays` 内 `nalus` を直接 `extend_from_slice` で結合しているため、長さプレフィックスを読む必要が無く、本問題の影響を受けない。
 
 ## 設計方針
 
-1. `Mp4VideoTrackInfo` に `nal_length_size: u8` を追加する (H.264 / H.265 トラックでのみ有意。VP8/VP9/AV1 では未使用なので `Option<u8>` でも可だが、H264/H265 でしか参照されないので `u8` のデフォルト 4 で十分)
+1. `Mp4VideoTrackInfo` に `nal_length_size: u8` を追加する (H.264 / H.265 トラックでのみ有意。VP8/VP9/AV1 では使用しないがデフォルト値 4 を入れておく)
 2. `extract_track_info` の `Avc1` ケースで `avc1.avcc_box.length_size_minus_one.get() + 1` を取り、Mp4VideoTrackInfo に保存する
 3. `Hev1` / `Hvc1` ケースも同様に `hev1.hvcc_box.length_size_minus_one.get() + 1` / `hvc1.hvcc_box.length_size_minus_one.get() + 1` を保存する
-4. `length_prefixed_nalu_to_annex_b` を `length_prefixed_nalu_to_annex_b(data: &[u8], nal_length_size: u8) -> Vec<u8>` のシグネチャに拡張する。`nal_length_size` は 1 / 2 / 4 を受け入れる (3 は MP4 では未使用だが念のため将来拡張を含めて 1〜4 を許容してもよい)
-5. `get_sample` から `track_info.nal_length_size` を渡す
-6. `length_prefixed_nalu_to_annex_b` の単体テスト (`src/video_codecs/mp4.rs:761` 付近) に 1 バイト・2 バイト・4 バイトのケースを追加する
+4. `Vp08` / `Vp09` / `Av01` ケースでは `nal_length_size: 4` を入れる（`get_sample` で使用されないが、誤使用時の防御）
+5. `length_prefixed_nalu_to_annex_b` を `length_prefixed_nalu_to_annex_b(data: &[u8], nal_length_size: u8) -> Vec<u8>` のシグネチャに拡張する。`nal_length_size` バイトを大端で読むループを実装し、1 / 2 / 4 のいずれにも対応する。値 3 (= 3 バイト NAL 長) は ISO/IEC 14496-15 上 `lengthSizeMinusOne` の取りうる値 (0〜3) には含まれるが実際の利用例が知られていないため、`nal_length_size` が 1/2/4 以外の場合は `panic!` させる (実装の健全性を優先)
+6. `get_sample` から `track_info.nal_length_size` を渡す
+7. `length_prefixed_nalu_to_annex_b` のドキュメントコメント (L397-405) の「4 バイトの長さプレフィックス」記述を `nal_length_size` バイトに対応した説明に更新する
+8. `get_sample` のドキュメントコメント (L358-364) の「4 バイト長さプレフィックス」記述も更新する
 
-`shiguredo_mp4::Uint::get()` の戻り値型と `length_size_minus_one` の正確な格納方法 (`Uint<u8, 2>` で 2 ビット幅) は実装時に shiguredo_mp4 の API を確認する。
+### nal_length_size フィールドの型について
+
+`u8` とする。`Option<u8>` にして VP8/VP9/AV1 で「NAL 長プレフィックスの概念がない」ことを型で表現する選択肢もあるが、`get_sample` 内で毎回 `unwrap_or(4)` が必要になり、H.264/H.265 での誤った `None` の混入をコンパイル時に防げないため、`u8` で十分。
 
 ## 完了条件
 
-- `Mp4VideoTrackInfo` が NAL 長プレフィックスバイト数を保持している
-- `length_prefixed_nalu_to_annex_b` が NAL 長プレフィックスバイト数を引数で受け取り、1 / 2 / 4 バイトのいずれにも対応している
-- H.264 と H.265 のいずれも、`length_size_minus_one` の値に応じた正しい変換が行われる
-- 1 バイト・2 バイト・4 バイトの NAL 長プレフィックスを持つテストデータでの単体テストが追加され通る
+- `Mp4VideoTrackInfo` が `nal_length_size: u8` フィールドを保持している
+- `length_prefixed_nalu_to_annex_b` が `nal_length_size` を引数で受け取り、1 / 2 / 4 バイトのいずれにも対応している（1/2/4 以外の値では `panic!` する）
+- H.264 (`Avc1`) と H.265 (`Hev1` / `Hvc1`) のいずれも、`length_size_minus_one` の値に応じた正しい変換が行われる
+- `length_prefixed_nalu_to_annex_b` および `get_sample` のドキュメントコメントが `nal_length_size` に対応した説明に更新されている
+- 単体テストが以下の全ケースをカバーし通過すること:
+  - 1 バイト NAL 長プレフィックス: 単一 NAL / 複数 NAL / truncated NAL
+  - 2 バイト NAL 長プレフィックス: 単一 NAL / 複数 NAL / truncated NAL
+  - 4 バイト NAL 長プレフィックス: 単一 NAL / 複数 NAL / truncated NAL（既存テストを拡張して継続確認）
+- 既存の fixture テスト (`sample_reader_reads_fixture_h264_mp4`) で `get_sample(0)` の出力データの先頭 NAL が正しく Annex B 変換されていることを検証する
+- VP8/VP9/AV1 のパススルー経路 (`_ => raw_data.to_vec()`) に変更がないこと
 - `cargo +nightly fmt` / `cargo clippy --all-targets --all-features -- -D warnings` が通る
 
 ## 解決方法
 
-1. `Mp4VideoTrackInfo` 構造体に `nal_length_size: u8` フィールドを追加する (`src/video_codecs/mp4.rs:115` 付近)
-2. `extract_track_info` の各分岐 (`Avc1` / `Hev1` / `Hvc1`) で `length_size_minus_one + 1` を読んで保存する。VP8/VP9/AV1 は使われないのでデフォルト値 (例えば 0 もしくは 4) を入れる
-3. `length_prefixed_nalu_to_annex_b` を引数付きに変更し、`u32::from_be_bytes` の代わりに `nal_length_size` バイトを大端で読むようにする (1 / 2 / 4 を switch、もしくは汎用に `nal_length_size` バイトをループで読む)
-4. `get_sample` から `self.track_info.nal_length_size` を渡す
-5. 単体テスト (`length_prefixed_nalu_to_annex_b` の既存テスト群、`src/video_codecs/mp4.rs:761` および `:773` 付近) を拡張し、1 バイト・2 バイト・4 バイトの各ケースをカバーする。テストコメントは日本語、テストログは日本語 (AGENTS.md)
-6. 既存の呼び出し箇所 (`src/video_codecs/mp4.rs:375` `extract_hevc_parameter_sets` 内ではない、`get_sample` 内) の API を新シグネチャに合わせる
+1. `Mp4VideoTrackInfo` に `nal_length_size: u8` フィールドを追加する
+2. `extract_track_info` の `Avc1` / `Hev1` / `Hvc1` 各分岐で `length_size_minus_one.get() + 1` を `nal_length_size` に保存する
+3. `Vp08` / `Vp09` / `Av01` の各分岐で `nal_length_size: 4` を設定する
+4. `length_prefixed_nalu_to_annex_b` のシグネチャを `(data: &[u8], nal_length_size: u8)` に変更し、`nal_length_size` バイトをループで大端読みする実装に書き換える。`nal_length_size` が 1/2/4 以外の場合は `panic!` させる
+5. `get_sample` の H.264/H.265 分岐で `length_prefixed_nalu_to_annex_b(raw_data, self.track_info.nal_length_size)` を呼ぶように変更する
+6. ドキュメントコメントを更新する:
+   - `length_prefixed_nalu_to_annex_b` のコメント: 「4 バイトの長さプレフィックス」→ `nal_length_size` バイトに対応
+   - `get_sample` のコメント: 「4 バイト長さプレフィックス」→ `nal_length_size` バイトに対応
+7. 単体テストを拡張する:
+   - 1 バイト NAL 長: 単一 NAL / 複数 NAL / truncated NAL
+   - 2 バイト NAL 長: 単一 NAL / 複数 NAL / truncated NAL
+   - 4 バイト NAL 長: 既存テストを維持しつつ、明示的に `nal_length_size: 4` を渡す
+8. fixture テスト (`sample_reader_reads_fixture_h264_mp4`) を拡張し、`reader.get_sample(0).data` の先頭に Annex B スタートコード `[0x00, 0x00, 0x00, 0x01]` が存在することを検証する
+9. `CHANGES.md` に `[FIX] MP4 リーダーが length_size_minus_one を無視して 4 バイト固定で NAL 長を読む問題を修正する` エントリを追記する
+10. `cargo +nightly fmt` / `cargo clippy --all-targets --all-features -- -D warnings` が通ることを確認する
 
 ## 関連
 
