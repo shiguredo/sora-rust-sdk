@@ -843,7 +843,8 @@ impl SoraConnection {
             .header("User-Agent", &user_agent);
         let (timer_tx, mut timer_rx) = mpsc::channel::<TimerId>(16);
         let mut timers = TimerManager::new(timer_tx);
-        let mut ws = WebSocketClientConnection::new(options, SecureRandom);
+        let secure_random = SecureRandom::new();
+        let mut ws = WebSocketClientConnection::new(options, secure_random.clone());
         ws.connect()?;
         if flush_ws_output(&mut ws, &mut stream, &mut timers).await? {
             return Ok(());
@@ -1187,7 +1188,7 @@ impl SoraConnection {
                 let (new_timer_tx, new_timer_rx) = mpsc::channel::<TimerId>(16);
                 timers = TimerManager::new(new_timer_tx);
                 timer_rx = new_timer_rx;
-                ws = WebSocketClientConnection::new(options, SecureRandom);
+                ws = WebSocketClientConnection::new(options, secure_random.clone());
                 ws.connect()?;
                 websocket_closed = false;
                 redirect = true;
@@ -1855,22 +1856,33 @@ struct ManagedDataChannel {
 const DEFAULT_TLS_PORT: u16 = 443;
 const DEFAULT_PLAIN_PORT: u16 = 80;
 
-struct SecureRandom;
+#[derive(Clone)]
+struct SecureRandom {
+    rng: SystemRandom,
+}
+
+impl SecureRandom {
+    fn new() -> Self {
+        Self {
+            rng: SystemRandom::new(),
+        }
+    }
+}
 
 impl RandomSource for SecureRandom {
     fn masking_key(&mut self) -> [u8; 4] {
         let mut key = [0u8; 4];
-        SystemRandom::new()
+        self.rng
             .fill(&mut key)
-            .expect("failed to generate masking key");
+            .expect("failed to generate masking key: aws-lc-rs SystemRandom::fill failed, OS RNG may be unavailable or exhausted");
         key
     }
 
     fn nonce(&mut self) -> [u8; 16] {
         let mut nonce = [0u8; 16];
-        SystemRandom::new()
+        self.rng
             .fill(&mut nonce)
-            .expect("failed to generate nonce");
+            .expect("failed to generate nonce: aws-lc-rs SystemRandom::fill failed, OS RNG may be unavailable or exhausted");
         nonce
     }
 }
@@ -2791,5 +2803,27 @@ mod tests {
         {
             panic!("RpcTimeout が届いた。timeout_handle が abort されていない");
         }
+    }
+
+    #[test]
+    fn secure_random_masking_key_returns_valid_data() {
+        let mut sr = SecureRandom::new();
+        let key1 = sr.masking_key();
+        let key2 = sr.masking_key();
+        assert_ne!(
+            key1, key2,
+            "masking_key の連続呼び出しで異なる値が返る必要がある"
+        );
+    }
+
+    #[test]
+    fn secure_random_nonce_returns_valid_data() {
+        let mut sr = SecureRandom::new();
+        let nonce1 = sr.nonce();
+        let nonce2 = sr.nonce();
+        assert_ne!(
+            nonce1, nonce2,
+            "nonce の連続呼び出しで異なる値が返る必要がある"
+        );
     }
 }
