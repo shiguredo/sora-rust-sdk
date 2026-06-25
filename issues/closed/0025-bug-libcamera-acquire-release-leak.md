@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-06-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-06-25
 - Model: Opus 4.7
 - Branch: feature/fix-libcamera-acquire-release-leak
 - Polished: 2026-06-25
@@ -150,3 +150,15 @@ fn run_libcamera_loop_inner(
 5. 異常系の実機確認: `camera.release()` 漏れを誘発する失敗注入（非対応 pixel format カメラ、`start()` 後の `queue_request()` 失敗等）を実施する。libcamera 実機が必要で、モックやスタブは不可 (AGENTS.md)
 6. `CHANGES.md` に `[FIX] libcamera の acquire() 後の早期 return で release() / stop() が漏れる問題を修正する` エントリを追記する
 7. `cargo +nightly fmt` / `cargo clippy --all-targets --all-features -- -D warnings` が通ることを確認する
+
+## 解決方法
+
+`run_libcamera_loop` を 2 つの関数に分割し、acquire/release の対称性を確保した。
+
+- `run_libcamera_loop`（外側関数）: `camera.acquire()` → `run_libcamera_loop_inner()` 呼び出し → `camera.stop()` → `camera.release()` の順序で実行
+- `run_libcamera_loop_inner`（内側関数）: acquire 以降の全処理を担当。早期 return しても外側で必ず stop/release が実行される
+- `camera.release()` の戻り値をエラーログ出力に変更
+
+### 修正ファイル
+- `src/libcamera.rs`: 関数分割と release エラーログ追加
+- `CHANGES.md`: [FIX] エントリ追加
