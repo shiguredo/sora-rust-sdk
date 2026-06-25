@@ -147,6 +147,8 @@
   - 対象は `src/connection.rs` (26 件) と `examples/sumomo/src/main.rs` (17 件)
   - @voluntas
 - [FIX] V4L2 エンコーダーの `release()` で Mutex 保持中に encoder を drop してデッドロックする問題を修正する
+- [FIX] MP4 リーダーが `length_size_minus_one` を無視して 4 バイト固定で NAL 長を読む問題を修正する
+  - @voluntas
   - @voluntas
 - [FIX] libcamera の `acquire()` 後の早期 return で `release()` / `stop()` が漏れる問題を修正する
   - @voluntas

@@ -123,6 +123,9 @@ struct Mp4VideoTrackInfo {
     /// キーフレーム送信時にフレームデータの先頭に付与する。
     /// VP8/VP9/AV1 では `None`。
     parameter_sets: Option<Vec<u8>>,
+    /// NAL 長プレフィックスのバイト数 (length_size_minus_one + 1)。
+    /// H.264/H.265 では 1/2/4 のいずれか。VP8/VP9/AV1 ではデフォルト値 4。
+    nal_length_size: u8,
 }
 
 /// MP4 ファイルからビデオサンプルを読み出すリーダー。
@@ -269,6 +272,7 @@ impl Mp4SampleReader {
                     height,
                     timescale,
                     parameter_sets: Some(parameter_sets),
+                    nal_length_size: avc1.avcc_box.length_size_minus_one.get() + 1,
                 })
             }
             // H.265 には hev1 と hvc1 の 2 種類の SampleEntry がある。
@@ -284,6 +288,7 @@ impl Mp4SampleReader {
                     height,
                     timescale,
                     parameter_sets: Some(parameter_sets),
+                    nal_length_size: hev1.hvcc_box.length_size_minus_one.get() + 1,
                 })
             }
             SampleEntry::Hvc1(hvc1) => {
@@ -295,6 +300,7 @@ impl Mp4SampleReader {
                     height,
                     timescale,
                     parameter_sets: Some(parameter_sets),
+                    nal_length_size: hvc1.hvcc_box.length_size_minus_one.get() + 1,
                 })
             }
             SampleEntry::Vp08(vp08) => Ok(Mp4VideoTrackInfo {
@@ -303,6 +309,7 @@ impl Mp4SampleReader {
                 height: vp08.visual.height,
                 timescale,
                 parameter_sets: None,
+                nal_length_size: 4,
             }),
             SampleEntry::Vp09(vp09) => Ok(Mp4VideoTrackInfo {
                 codec_type: VideoCodecType::Vp9,
@@ -310,6 +317,7 @@ impl Mp4SampleReader {
                 height: vp09.visual.height,
                 timescale,
                 parameter_sets: None,
+                nal_length_size: 4,
             }),
             SampleEntry::Av01(av01) => Ok(Mp4VideoTrackInfo {
                 codec_type: VideoCodecType::Av1,
@@ -317,6 +325,7 @@ impl Mp4SampleReader {
                 height: av01.visual.height,
                 timescale,
                 parameter_sets: None,
+                nal_length_size: 4,
             }),
             _ => Err(Mp4Error::UnsupportedVideoCodec),
         }
@@ -372,7 +381,10 @@ impl Mp4SampleReader {
                 if keyframe && let Some(ref ps) = self.track_info.parameter_sets {
                     annex_b.extend_from_slice(ps);
                 }
-                annex_b.extend_from_slice(&length_prefixed_nalu_to_annex_b(raw_data));
+                annex_b.extend_from_slice(&length_prefixed_nalu_to_annex_b(
+                    raw_data,
+                    self.track_info.nal_length_size,
+                ));
                 annex_b
             }
             _ => raw_data.to_vec(),
@@ -397,23 +409,34 @@ impl Mp4SampleReader {
 /// 長さプレフィックス付き NAL ユニットを Annex B 形式に変換する。
 ///
 /// MP4 内の H.264/H.265 フレームデータは AVCC/HVCC 形式で格納されている:
-///   [4 バイト NAL 長][NAL データ][4 バイト NAL 長][NAL データ]...
+///   [nal_length_size バイトの NAL 長][NAL データ][...]
 ///
 /// WebRTC (RTP) では Annex B 形式が期待される:
 ///   [0x00 0x00 0x00 0x01][NAL データ][0x00 0x00 0x00 0x01][NAL データ]...
 ///
-/// この関数は 4 バイトの長さプレフィックスを 4 バイトのスタートコードに置き換える。
-fn length_prefixed_nalu_to_annex_b(data: &[u8]) -> Vec<u8> {
-    let mut result = Vec::with_capacity(data.len());
+/// `nal_length_size` は NAL 長プレフィックスのバイト数 (1/2/4)。
+/// 1/2/4 以外の値では panic する。
+fn length_prefixed_nalu_to_annex_b(data: &[u8], nal_length_size: u8) -> Vec<u8> {
+    assert!(
+        nal_length_size == 1 || nal_length_size == 2 || nal_length_size == 4,
+        "nal_length_size must be 1, 2, or 4"
+    );
+    let nal_length_size = nal_length_size as usize;
+    let mut result = Vec::new();
     let mut offset = 0;
-    while offset + 4 <= data.len() {
-        let nal_size = u32::from_be_bytes([
-            data[offset],
-            data[offset + 1],
-            data[offset + 2],
-            data[offset + 3],
-        ]) as usize;
-        offset += 4;
+    while offset + nal_length_size <= data.len() {
+        let nal_size = match nal_length_size {
+            1 => data[offset] as usize,
+            2 => u16::from_be_bytes([data[offset], data[offset + 1]]) as usize,
+            4 => u32::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]) as usize,
+            _ => unreachable!(),
+        };
+        offset += nal_length_size;
         if offset + nal_size > data.len() {
             break;
         }
@@ -758,7 +781,7 @@ mod tests {
         let input = [
             0x00, 0x00, 0x00, 0x02, 0x11, 0x22, 0x00, 0x00, 0x00, 0x03, 0x33, 0x44, 0x55,
         ];
-        let output = length_prefixed_nalu_to_annex_b(&input);
+        let output = length_prefixed_nalu_to_annex_b(&input, 4);
         assert_eq!(
             output,
             vec![
@@ -770,7 +793,59 @@ mod tests {
     #[test]
     fn annex_b_conversion_ignores_truncated_nalu() {
         let input = [0x00, 0x00, 0x00, 0x05, 0x11, 0x22, 0x33];
-        let output = length_prefixed_nalu_to_annex_b(&input);
+        let output = length_prefixed_nalu_to_annex_b(&input, 4);
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn annex_b_conversion_1byte_nal_length_single_nalu() {
+        let input = [0x03, 0x11, 0x22, 0x33];
+        let output = length_prefixed_nalu_to_annex_b(&input, 1);
+        assert_eq!(output, vec![0x00, 0x00, 0x00, 0x01, 0x11, 0x22, 0x33]);
+    }
+
+    #[test]
+    fn annex_b_conversion_1byte_nal_length_multiple_nalus() {
+        let input = [0x02, 0xAA, 0xBB, 0x03, 0xCC, 0xDD, 0xEE];
+        let output = length_prefixed_nalu_to_annex_b(&input, 1);
+        assert_eq!(
+            output,
+            vec![
+                0x00, 0x00, 0x00, 0x01, 0xAA, 0xBB, 0x00, 0x00, 0x00, 0x01, 0xCC, 0xDD, 0xEE
+            ]
+        );
+    }
+
+    #[test]
+    fn annex_b_conversion_1byte_nal_length_truncated_nalu() {
+        let input = [0x05, 0x11, 0x22];
+        let output = length_prefixed_nalu_to_annex_b(&input, 1);
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn annex_b_conversion_2byte_nal_length_single_nalu() {
+        let input = [0x00, 0x03, 0x11, 0x22, 0x33];
+        let output = length_prefixed_nalu_to_annex_b(&input, 2);
+        assert_eq!(output, vec![0x00, 0x00, 0x00, 0x01, 0x11, 0x22, 0x33]);
+    }
+
+    #[test]
+    fn annex_b_conversion_2byte_nal_length_multiple_nalus() {
+        let input = [0x00, 0x02, 0xAA, 0xBB, 0x00, 0x03, 0xCC, 0xDD, 0xEE];
+        let output = length_prefixed_nalu_to_annex_b(&input, 2);
+        assert_eq!(
+            output,
+            vec![
+                0x00, 0x00, 0x00, 0x01, 0xAA, 0xBB, 0x00, 0x00, 0x00, 0x01, 0xCC, 0xDD, 0xEE
+            ]
+        );
+    }
+
+    #[test]
+    fn annex_b_conversion_2byte_nal_length_truncated_nalu() {
+        let input = [0x00, 0x05, 0x11, 0x22];
+        let output = length_prefixed_nalu_to_annex_b(&input, 2);
         assert!(output.is_empty());
     }
 
@@ -796,5 +871,8 @@ mod tests {
         let reader = reader.expect("failed to parse fixture MP4");
         assert_eq!(reader.codec_type(), VideoCodecType::H264);
         assert!(!reader.is_empty());
+        let sample = reader.get_sample(0);
+        assert!(sample.data.len() >= 4);
+        assert_eq!(&sample.data[0..4], &[0x00, 0x00, 0x00, 0x01]);
     }
 }
