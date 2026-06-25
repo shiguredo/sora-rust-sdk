@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-06-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-06-25
 - Model: Opus 4.7
 - Branch: feature/fix-mp4-length-size-minus-one
 - Polished: 2026-06-25
@@ -126,3 +126,15 @@ fn length_prefixed_nalu_to_annex_b(data: &[u8]) -> Vec<u8> {
 - ISO/IEC 14496-15 (Carriage of NAL unit structured video in the ISO Base Media File Format)
 - `shiguredo_mp4::boxes::AvccBox::length_size_minus_one`
 - `shiguredo_mp4::boxes::HvccBox::length_size_minus_one`
+
+## 解決方法
+
+`Mp4VideoTrackInfo` に `nal_length_size: u8` フィールドを追加。
+`extract_track_info` で各 codec の `length_size_minus_one` から計算。
+`length_prefixed_nalu_to_annex_b` のシグネチャを `(data, nal_length_size)` に変更し 1/2/4 バイト対応。
+テスト追加: 1/2/4 バイト NAL 長。
+フィクスチャテストに Annex B スタートコード検証追加。
+
+### 修正ファイル
+- `src/video_codecs/mp4.rs`
+- `CHANGES.md`
