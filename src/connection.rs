@@ -882,7 +882,7 @@ impl SoraConnection {
                             break;
                         }
                     } else {
-                        ws.feed_recv_buf(&buf[..n], now())?;
+                        ws.feed_recv_buf(&buf[..n], now()?)?;
                     }
                 }
                 Some(timer_id) = timer_rx.recv() => {
@@ -1291,7 +1291,7 @@ impl SoraConnection {
                     if n == 0 {
                         return Ok(());
                     }
-                    ws.feed_recv_buf(&buf[..n], now())?;
+                    ws.feed_recv_buf(&buf[..n], now()?)?;
                     while let Some(_event) = ws.poll_event() {}
                     if ws.state() == ConnectionState::Closed {
                         return Ok(());
@@ -1887,12 +1887,9 @@ impl RandomSource for SecureRandom {
     }
 }
 
-fn now() -> Timestamp {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
-    Timestamp::from_millis(millis)
+fn now() -> Result<Timestamp> {
+    let millis = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
+    Ok(Timestamp::from_millis(millis))
 }
 
 fn default_port(tls: bool) -> u16 {
@@ -2825,5 +2822,11 @@ mod tests {
             nonce1, nonce2,
             "nonce の連続呼び出しで異なる値が返る必要がある"
         );
+    }
+
+    #[test]
+    fn now_returns_ok_timestamp() {
+        let result = super::now();
+        assert!(result.is_ok(), "now() は Ok を返す必要があります");
     }
 }
