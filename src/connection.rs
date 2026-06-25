@@ -922,7 +922,7 @@ impl SoraConnection {
                         }
                         SoraEvent::RpcTimeout { id } => {
                             if let Some(mut pending) = self.pending_rpc_responses.remove(&id) {
-                                let _ = pending.response_tx.take().unwrap().send(Err(Error::RpcTimeout));
+                                let _ = pending.response_tx.take().expect("response_tx は必ず存在する").send(Err(Error::RpcTimeout));
                             }
                         }
                         SoraEvent::DataChannelStateChange(label) => {
@@ -1825,7 +1825,11 @@ impl SoraConnection {
                     && let Some(mut pending) = self.pending_rpc_responses.remove(&id)
                 {
                     pending.timeout_handle.abort();
-                    let _ = pending.response_tx.take().unwrap().send(Ok(Some(response)));
+                    let _ = pending
+                        .response_tx
+                        .take()
+                        .expect("response_tx は必ず存在する")
+                        .send(Ok(Some(response)));
                 }
             }
             // # で始まるラベルはユーザー定義メッセージとして処理
