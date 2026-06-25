@@ -11,16 +11,16 @@
 
 ## develop
 - [CHANGE] `ParsedProxyInfo` のフィールド可視性を `pub(crate)` に統一し accessor を追加する
+  - `host()` / `port()` / `username()` / `password()` / `user_agent()` の 5 件の accessor を追加し、フィールド直接アクセスは不可になる
+  - @melpon
 - [CHANGE] `TlsConfig` / `ParsedProxyInfo` / `ProxyInfo` の `Debug` 実装を手書き化し、秘密情報をマスクする
   - `client_key` / `username` / `password` は `<redacted>` でマスクする
   - `client_cert` / `ca_cert` は `<present>` で表記する
   - `ProxyInfo.url` の userinfo 部は `<redacted>@` でマスクする
-  - @voluntas
-  - `host()` / `port()` / `username()` / `password()` / `user_agent()` の 5 件の accessor を追加し、フィールド直接アクセスは不可になる
-  - @voluntas
+  - @melpon
 - [CHANGE] `TlsConfig` のフィールドを `pub` から `pub(crate)` に変更し、builder メソッド (`new()` / `insecure()` / `client_cert()` / `ca_cert()`) を追加する
   - `TlsConfig { insecure: true, .. }` による構築は不可になり、`TlsConfig::new().insecure(true)` に移行する
-  - @voluntas
+  - @melpon
 
 - [CHANGE] `validate_video_codec_preference` の `capabilities` 引数を `&Vec<Box<dyn VideoCodecCapability>>` から `&[Box<dyn VideoCodecCapability>]` に変更する
   - @melpon
@@ -158,11 +158,11 @@
   - 対象は `src/connection.rs` (26 件) と `examples/sumomo/src/main.rs` (17 件)
   - @voluntas
 - [FIX] V4L2 エンコーダーの `release()` で Mutex 保持中に encoder を drop してデッドロックする問題を修正する
+  - @melpon
 - [FIX] MP4 リーダーが `length_size_minus_one` を無視して 4 バイト固定で NAL 長を読む問題を修正する
-  - @voluntas
-  - @voluntas
+  - @melpon
 - [FIX] libcamera の `acquire()` 後の早期 return で `release()` / `stop()` が漏れる問題を修正する
-  - @voluntas
+  - @melpon
 
 ### misc
 
