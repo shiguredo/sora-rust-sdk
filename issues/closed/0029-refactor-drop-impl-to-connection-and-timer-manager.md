@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-06-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-06-25
 - Model: Opus 4.7
 - Branch: feature/refactor-drop-impl-to-connection-and-timer-manager
 - Polished: 2026-06-25
@@ -141,3 +141,12 @@ impl Drop for PendingRpcRequest {
 - **単体テスト**: `Drop` によるタスク停止と二重 abort の安全性を検証。テストは `src/connection.rs` の `#[cfg(test)] mod tests` に追加する（`TimerManager` はプライベート型のため外部テストファイルからアクセス不可）
 - **PBT**: 適用しない。`Drop` の検証は副作用が本質であり、proptest のランダム入力による property 検証に馴染まない
 - **Fuzzing**: 適用しない。任意入力を受け付ける経路ではない
+
+## 解決方法
+
+- `TimerManager` に `Drop` を実装し、全 `JoinHandle` を `abort()` する
+- `PendingRpcRequest::response_tx` を `Option` 化し `Drop` で `timeout_handle.abort()` する
+- 単体テスト追加
+
+### 修正ファイル
+- `src/connection.rs`
