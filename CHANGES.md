@@ -10,6 +10,9 @@
   - バグ修正
 
 ## develop
+- [CHANGE] `ParsedProxyInfo` のフィールド可視性を `pub(crate)` に統一し accessor を追加する
+  - `host()` / `port()` / `username()` / `password()` / `user_agent()` の 5 件の accessor を追加し、フィールド直接アクセスは不可になる
+  - @voluntas
 - [CHANGE] `TlsConfig` のフィールドを `pub` から `pub(crate)` に変更し、builder メソッド (`new()` / `insecure()` / `client_cert()` / `ca_cert()`) を追加する
   - `TlsConfig { insecure: true, .. }` による構築は不可になり、`TlsConfig::new().insecure(true)` に移行する
   - @voluntas

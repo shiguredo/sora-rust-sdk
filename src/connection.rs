@@ -58,7 +58,7 @@ use shiguredo_webrtc::{rtc_log_error, rtc_log_info, rtc_log_warning};
 /// use sora_sdk::TlsConfig;
 /// let config = TlsConfig::new().insecure(true).ca_cert("<CA_CERT>".to_string());
 /// ```
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct TlsConfig {
     /// サーバー証明書の検証をスキップする。
     pub(crate) insecure: bool,
@@ -749,11 +749,11 @@ impl SoraConnection {
             deps.set_proxy(
                 network_manager,
                 socket_factory,
-                &proxy.host,
-                proxy.port,
-                proxy.username.as_deref().unwrap_or(""),
-                proxy.password.as_deref().unwrap_or(""),
-                &proxy.user_agent,
+                proxy.host(),
+                proxy.port(),
+                proxy.username().unwrap_or(""),
+                proxy.password().unwrap_or(""),
+                proxy.user_agent(),
             );
         }
         let mut rtc_config = PeerConnectionRtcConfiguration::new();
@@ -1972,17 +1972,38 @@ struct SignalingTarget {
 /// `ProxyInfo` を解析し、HTTP プロキシ接続に必要な情報に正規化した結果。
 ///
 /// PBT 等の検証目的を主用途として公開している型のため、通常の利用者がこの型を
-/// 直接構築する必要はなく、`ParsedProxyInfo::parse` 経由で取得する。
+/// フィールド値の取得は accessor メソッド (`host()` / `port()` / `username()` /
+/// `password()` / `user_agent()`) 経由で行う。
 #[derive(Debug, Clone)]
 pub struct ParsedProxyInfo {
-    pub host: String,
-    pub port: u16,
-    username: Option<String>,
-    password: Option<String>,
-    user_agent: String,
+    pub(crate) host: String,
+    pub(crate) port: u16,
+    pub(crate) username: Option<String>,
+    pub(crate) password: Option<String>,
+    pub(crate) user_agent: String,
 }
 
 impl ParsedProxyInfo {
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub fn username(&self) -> Option<&str> {
+        self.username.as_deref()
+    }
+
+    pub fn password(&self) -> Option<&str> {
+        self.password.as_deref()
+    }
+
+    pub fn user_agent(&self) -> &str {
+        &self.user_agent
+    }
+
     /// `ProxyInfo` を解析し、検証済みのプロキシ接続情報を返す。
     ///
     /// 受理するのは `http://host[:port]` 形式のみで、`https://` / `socks*://` や
@@ -2314,10 +2335,10 @@ async fn connect_websocket(
     if let Some(proxy) = proxy {
         rtc_log_info!(
             "HTTP Proxy 経由で接続します: {}:{}",
-            format_bracketed_host(&proxy.host),
+            format_bracketed_host(proxy.host()),
             proxy.port
         );
-        let tcp_stream = connect_tcp(&proxy.host, proxy.port, deadline).await?;
+        let tcp_stream = connect_tcp(proxy.host(), proxy.port(), deadline).await?;
         let mut stream = ClientStream::new_plain(tcp_stream);
         connect_http_proxy_tunnel(&mut stream, target, proxy).await?;
         if target.tls {
@@ -2397,10 +2418,10 @@ fn build_proxy_connect_request(
     let authority = format!("{}:{}", format_bracketed_host(&target.host), target.port);
     let mut request = Request::new("CONNECT", &authority)?
         .header("Host", &authority)?
-        .header("User-Agent", &proxy.user_agent)?;
-    if proxy.username.is_some() || proxy.password.is_some() {
-        let username = proxy.username.as_deref().unwrap_or("");
-        let password = proxy.password.as_deref().unwrap_or("");
+        .header("User-Agent", proxy.user_agent())?;
+    if proxy.username().is_some() || proxy.password().is_some() {
+        let username = proxy.username().unwrap_or("");
+        let password = proxy.password().unwrap_or("");
         let auth = BasicAuth::new(username, password)?;
         let header = auth.to_header_value();
         request = request.header("Proxy-Authorization", &header)?;
@@ -2625,7 +2646,7 @@ mod tests {
     fn parse_proxy_info_uses_default_user_agent_when_absent() {
         let proxy = proxy_info_with_url("http://proxy.example.com:8080".to_string());
         let parsed = ParsedProxyInfo::parse(&proxy).expect("proxy URL の解析に失敗しました");
-        assert_eq!(parsed.user_agent, crate::version::get_sora_client_name());
+        assert_eq!(parsed.user_agent(), crate::version::get_sora_client_name());
     }
 
     #[test]
@@ -2636,7 +2657,7 @@ mod tests {
             ..Default::default()
         };
         let parsed = ParsedProxyInfo::parse(&proxy).expect("proxy URL の解析に失敗しました");
-        assert_eq!(parsed.user_agent, "");
+        assert_eq!(parsed.user_agent(), "");
     }
 
     #[test]
