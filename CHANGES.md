@@ -11,6 +11,11 @@
 
 ## develop
 - [CHANGE] `ParsedProxyInfo` のフィールド可視性を `pub(crate)` に統一し accessor を追加する
+- [CHANGE] `TlsConfig` / `ParsedProxyInfo` / `ProxyInfo` の `Debug` 実装を手書き化し、秘密情報をマスクする
+  - `client_key` / `username` / `password` は `<redacted>` でマスクする
+  - `client_cert` / `ca_cert` は `<present>` で表記する
+  - `ProxyInfo.url` の userinfo 部は `<redacted>@` でマスクする
+  - @voluntas
   - `host()` / `port()` / `username()` / `password()` / `user_agent()` の 5 件の accessor を追加し、フィールド直接アクセスは不可になる
   - @voluntas
 - [CHANGE] `TlsConfig` のフィールドを `pub` から `pub(crate)` に変更し、builder メソッド (`new()` / `insecure()` / `client_cert()` / `ca_cert()`) を追加する
