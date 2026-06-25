@@ -552,8 +552,14 @@ pub struct SoraConnection {
 }
 
 struct PendingRpcRequest {
-    response_tx: oneshot::Sender<Result<Option<RpcResponse>>>,
+    response_tx: Option<oneshot::Sender<Result<Option<RpcResponse>>>>,
     timeout_handle: JoinHandle<()>,
+}
+
+impl Drop for PendingRpcRequest {
+    fn drop(&mut self) {
+        self.timeout_handle.abort();
+    }
 }
 
 enum SoraEvent {
@@ -914,8 +920,8 @@ impl SoraConnection {
                             self.handle_datachannel_state(&label, &on_data_channel_open, &on_data_channel_close, &mut opened_datachannels, &mut use_datachannel_signaling);
                         }
                         SoraEvent::RpcTimeout { id } => {
-                            if let Some(pending) = self.pending_rpc_responses.remove(&id) {
-                                let _ = pending.response_tx.send(Err(Error::RpcTimeout));
+                            if let Some(mut pending) = self.pending_rpc_responses.remove(&id) {
+                                let _ = pending.response_tx.take().unwrap().send(Err(Error::RpcTimeout));
                             }
                         }
                         SoraEvent::DataChannelStateChange(label) => {
@@ -962,7 +968,7 @@ impl SoraConnection {
                                             let _ = event_tx.send(SoraEvent::RpcTimeout { id });
                                         });
                                         self.pending_rpc_responses.insert(id, PendingRpcRequest {
-                                            response_tx,
+                                            response_tx: Some(response_tx),
                                             timeout_handle,
                                         });
                                     }
@@ -1815,10 +1821,10 @@ impl SoraConnection {
                 rtc_log_info!("Received RPC message via DataChannel");
                 let (id, response) = RpcResponse::parse(&text)?;
                 if let Some(id) = id
-                    && let Some(pending) = self.pending_rpc_responses.remove(&id)
+                    && let Some(mut pending) = self.pending_rpc_responses.remove(&id)
                 {
                     pending.timeout_handle.abort();
-                    let _ = pending.response_tx.send(Ok(Some(response)));
+                    let _ = pending.response_tx.take().unwrap().send(Ok(Some(response)));
                 }
             }
             // # で始まるラベルはユーザー定義メッセージとして処理
@@ -2122,6 +2128,20 @@ impl TimerManager {
         };
         if let Some(handle) = handle.take() {
             handle.abort();
+        }
+    }
+}
+
+impl Drop for TimerManager {
+    fn drop(&mut self) {
+        if let Some(h) = self.ping.take() {
+            h.abort();
+        }
+        if let Some(h) = self.pong_timeout.take() {
+            h.abort();
+        }
+        if let Some(h) = self.close_timeout.take() {
+            h.abort();
         }
     }
 }
@@ -2699,5 +2719,77 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn timer_manager_drop_aborts_all_timers() {
+        let (timer_tx, mut timer_rx) = mpsc::channel::<TimerId>(16);
+        let mut timers = TimerManager::new(timer_tx);
+        timers.set_timer(TimerId::Ping, 50);
+        timers.set_timer(TimerId::PongTimeout, 50);
+        timers.set_timer(TimerId::CloseTimeout, 50);
+        drop(timers);
+        let mut received = Vec::new();
+        while let Ok(Some(id)) =
+            tokio::time::timeout(std::time::Duration::from_millis(150), timer_rx.recv()).await
+        {
+            received.push(id);
+        }
+        assert!(
+            received.len() < 3,
+            "全タイマーがメッセージを送信した場合、abort されていないことを示す: {} 件",
+            received.len()
+        );
+    }
+
+    #[test]
+    fn timer_manager_drop_with_no_timers_does_not_panic() {
+        let (timer_tx, _timer_rx) = mpsc::channel::<TimerId>(16);
+        let timers = TimerManager::new(timer_tx);
+        drop(timers);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn timer_manager_clear_timer_then_drop_does_not_panic() {
+        let (timer_tx, _timer_rx) = mpsc::channel::<TimerId>(16);
+        let mut timers = TimerManager::new(timer_tx);
+        timers.set_timer(TimerId::Ping, 1000);
+        timers.set_timer(TimerId::PongTimeout, 1000);
+        timers.set_timer(TimerId::CloseTimeout, 1000);
+        timers.clear_timer(TimerId::Ping);
+        timers.clear_timer(TimerId::PongTimeout);
+        timers.clear_timer(TimerId::CloseTimeout);
+        drop(timers);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn timer_manager_zero_duration_timer_does_not_panic_on_drop() {
+        let (timer_tx, _timer_rx) = mpsc::channel::<TimerId>(16);
+        let mut timers = TimerManager::new(timer_tx);
+        timers.set_timer(TimerId::Ping, 0);
+        timers.set_timer(TimerId::PongTimeout, 0);
+        timers.set_timer(TimerId::CloseTimeout, 0);
+        tokio::task::yield_now().await;
+        drop(timers);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pending_rpc_request_drop_aborts_timeout_handle() {
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SoraEvent>();
+        let (response_tx, _response_rx) = oneshot::channel();
+        let timeout_handle = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _ = event_tx.send(SoraEvent::RpcTimeout { id: 42 });
+        });
+        let pending = PendingRpcRequest {
+            response_tx: Some(response_tx),
+            timeout_handle,
+        };
+        drop(pending);
+        if let Ok(Some(SoraEvent::RpcTimeout { id: 42 })) =
+            tokio::time::timeout(std::time::Duration::from_millis(150), event_rx.recv()).await
+        {
+            panic!("RpcTimeout が届いた。timeout_handle が abort されていない");
+        }
     }
 }
