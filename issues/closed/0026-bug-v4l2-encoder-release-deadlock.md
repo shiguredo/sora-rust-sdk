@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-06-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-06-25
 - Model: Opus 4.7
 - Branch: feature/fix-v4l2-encoder-release-deadlock
 - Polished: 2026-06-25
@@ -164,3 +164,14 @@ fn release(&mut self) -> VideoCodecStatus {
 
 - `src/video_codecs/vpl.rs:522-531`: 同種問題の解決実装 (コメント付き)
 - `src/video_codecs/v4l2.rs:890-897`: V4L2 デコーダー側の解決実装
+
+## 解決方法
+
+`V4l2VideoEncoder::release()` で `shared_state.encoder` を `Option::take()` で Mutex 内から取り出し、Mutex 解放後に drop するよう修正。
+
+- `shared_state.callback = None` を先に設定し、encoder drop 時の drain がコールバックを発火させても早期 return する
+- VPL エンコーダー (`vpl.rs`) と同等の日本語コメントを付与
+
+### 修正ファイル
+- `src/video_codecs/v4l2.rs`: `release()` の修正
+- `CHANGES.md`: [FIX] エントリ追加
