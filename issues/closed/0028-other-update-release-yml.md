@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-06-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-06-25
 - Model: Opus 4.7
 - Branch: feature/update-release-yml
 - Polished: {YYYY-MM-DD}
@@ -180,3 +180,19 @@ jobs:
 - 関連参考: `.github/workflows/ci.yml` (Linux 依存インストール / download-openh264 / OPENH264_PATH 設定 / timeout-minutes の参照元)
 - `Cargo.toml:122` (`default = ["openh264"]`)
 - `Cargo.toml:97` (`shiguredo_webrtc.workspace = true` 標準依存)
+
+## 解決方法
+
+対応する価値が無いため closed にする。
+
+各指摘の評価:
+
+1. publish ジョブに Linux ビルド依存の `apt-get install` が無い点は、example のビルドや実行に必要な依存でありリリースビルドには不要であるため対応不要。
+2. OpenH264 のダウンロードと `OPENH264_PATH` 設定が無い点は、テストに必要な依存であり `cargo publish` の verify ビルドには不要であるため対応不要。
+3. `cargo publish` のパッケージ未指定・`--locked` 未指定はあっても良いが、必須ではない。
+4. prerelease 判定が `contains(VERSION, 'canary')` のみである点は、時雨堂において canary 以外のプレリリースタグを使わないため実用上十分である。
+5. `concurrency:` ブロックは、記述する意味を見出せないため対応不要。
+6. 各ジョブの `timeout-minutes` はあっても良いが、無くても困らないため対応不要。
+7. `ci.yml` への `cargo publish --dry-run` 検証ジョブ追加は、CI 実行時間を延ばすデメリットの方が大きいため対応不要。
+
+結果として対応の価値がほとんど無く、issue を close する。
