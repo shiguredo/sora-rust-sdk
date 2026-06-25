@@ -10,6 +10,9 @@
   - バグ修正
 
 ## develop
+- [CHANGE] `TlsConfig` のフィールドを `pub` から `pub(crate)` に変更し、builder メソッド (`new()` / `insecure()` / `client_cert()` / `ca_cert()`) を追加する
+  - `TlsConfig { insecure: true, .. }` による構築は不可になり、`TlsConfig::new().insecure(true)` に移行する
+  - @voluntas
 
 - [CHANGE] `validate_video_codec_preference` の `capabilities` 引数を `&Vec<Box<dyn VideoCodecCapability>>` から `&[Box<dyn VideoCodecCapability>]` に変更する
   - @melpon

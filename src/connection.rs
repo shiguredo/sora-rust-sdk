@@ -51,16 +51,45 @@ use shiguredo_webrtc::{rtc_log_error, rtc_log_info, rtc_log_warning};
 /// WebSocket (シグナリング接続) の TLS 設定。
 ///
 /// TURN-TLS の TLS 設定は `SoraConnectionBuilder::turn_tls_insecure()` / `turn_tls_ca_cert()` で行う。
+///
+/// # 構築例
+///
+/// ```
+/// use sora_sdk::TlsConfig;
+/// let config = TlsConfig::new().insecure(true).ca_cert("<CA_CERT>".to_string());
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct TlsConfig {
     /// サーバー証明書の検証をスキップする。
-    pub insecure: bool,
+    pub(crate) insecure: bool,
     /// クライアント証明書 (PEM 形式)。
-    pub client_cert: Option<String>,
+    pub(crate) client_cert: Option<String>,
     /// クライアント秘密鍵 (PEM 形式)。
-    pub client_key: Option<String>,
+    pub(crate) client_key: Option<String>,
     /// CA 証明書 (PEM 形式)。
-    pub ca_cert: Option<String>,
+    pub(crate) ca_cert: Option<String>,
+}
+
+impl TlsConfig {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insecure(mut self, value: bool) -> Self {
+        self.insecure = value;
+        self
+    }
+
+    pub fn client_cert(mut self, cert: String, key: String) -> Self {
+        self.client_cert = Some(cert);
+        self.client_key = Some(key);
+        self
+    }
+
+    pub fn ca_cert(mut self, cert: String) -> Self {
+        self.ca_cert = Some(cert);
+        self
+    }
 }
 
 type IceServerUrlConfigurer = dyn Fn(&mut IceServer, &[String]) + Send + Sync;
@@ -397,20 +426,19 @@ impl SoraConnectionBuilder {
 
     /// サーバー証明書の検証をスキップする。
     pub fn insecure(mut self, value: bool) -> Self {
-        self.tls_config.insecure = value;
+        self.tls_config = self.tls_config.insecure(value);
         self
     }
 
     /// クライアント証明書と秘密鍵を設定する (PEM 形式)。
     pub fn client_cert(mut self, cert: String, key: String) -> Self {
-        self.tls_config.client_cert = Some(cert);
-        self.tls_config.client_key = Some(key);
+        self.tls_config = self.tls_config.client_cert(cert, key);
         self
     }
 
     /// CA 証明書を設定する (PEM 形式)。
     pub fn ca_cert(mut self, cert: String) -> Self {
-        self.tls_config.ca_cert = Some(cert);
+        self.tls_config = self.tls_config.ca_cert(cert);
         self
     }
 
@@ -2828,5 +2856,32 @@ mod tests {
     fn now_returns_ok_timestamp() {
         let result = super::now();
         assert!(result.is_ok(), "now() は Ok を返す必要があります");
+    }
+
+    #[test]
+    fn tls_config_new_all_fields_are_default() {
+        let config = TlsConfig::new();
+        assert!(!config.insecure);
+        assert!(config.client_cert.is_none());
+        assert!(config.client_key.is_none());
+        assert!(config.ca_cert.is_none());
+    }
+
+    #[test]
+    fn tls_config_builder_chain_sets_all_fields() {
+        let config = TlsConfig::new()
+            .insecure(true)
+            .client_cert("cert".to_string(), "key".to_string())
+            .ca_cert("ca".to_string());
+        assert!(config.insecure);
+        assert_eq!(config.client_cert.as_deref(), Some("cert"));
+        assert_eq!(config.client_key.as_deref(), Some("key"));
+        assert_eq!(config.ca_cert.as_deref(), Some("ca"));
+    }
+
+    #[test]
+    fn tls_config_builder_overwrites_on_multiple_calls() {
+        let config = TlsConfig::new().insecure(true).insecure(false);
+        assert!(!config.insecure);
     }
 }
