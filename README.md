@@ -80,7 +80,7 @@ MP4 ファイルに含まれる音声・映像トラックをデコード/エン
 [dependencies]
 sora_sdk = "<version>"
 shiguredo_webrtc = "<version>"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
 ```
 
 `shiguredo_webrtc` は `VideoTrack` や `AudioTrack`、`RtpTransceiver` など sora_sdk の公開 API で必要な型を提供します。
