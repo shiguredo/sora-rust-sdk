@@ -178,10 +178,9 @@ impl TlsConfig {
 
 ## 解決方法
 
-- TlsConfig の全フィールドを pub(crate) 化し builder pattern に一本化
-- TlsConfig に builder メソッド追加、SoraConnectionBuilder 側の実装を TlsConfig builder 呼び出しに置換
-- doc に使用例追加、単体テスト追加
+- TlsConfig の全フィールドを pub(crate) 化。構造体リテラルによる直接構築は不可。
+- 設定は SoraConnectionBuilder の既存メソッド経由で行う。
 
 ### 修正ファイル
-- `src/connection.rs`
-- `CHANGES.md`
+- src/connection.rs
+- CHANGES.md

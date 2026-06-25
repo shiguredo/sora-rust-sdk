@@ -18,8 +18,8 @@
   - `client_cert` / `ca_cert` は `<present>` で表記する
   - `ProxyInfo.url` の userinfo 部は `<redacted>@` でマスクする
   - @melpon
-- [CHANGE] `TlsConfig` のフィールドを `pub` から `pub(crate)` に変更し、builder メソッド (`new()` / `insecure()` / `client_cert()` / `ca_cert()`) を追加する
-  - `TlsConfig { insecure: true, .. }` による構築は不可になり、`TlsConfig::new().insecure(true)` に移行する
+- [CHANGE] `TlsConfig` のフィールドを `pub` から `pub(crate)` に変更する
+  - 構造体リテラルによる直接構築は不可になり、`SoraConnectionBuilder` のメソッド経由で設定する
   - @melpon
 
 - [CHANGE] `validate_video_codec_preference` の `capabilities` 引数を `&Vec<Box<dyn VideoCodecCapability>>` から `&[Box<dyn VideoCodecCapability>]` に変更する
