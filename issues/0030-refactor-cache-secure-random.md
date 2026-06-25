@@ -1,33 +1,34 @@
-# `SecureRandom` を毎フレーム初期化せずに保持し、masking_key / nonce の `expect()` panic 経路を廃止する
+# `SecureRandom` を構造体に変更して `SystemRandom` を保持し、`expect()` メッセージを精緻化する
 
 - Priority: Medium
 - Created: 2026-06-23
 - Completed: {YYYY-MM-DD}
 - Model: Opus 4.7
-- Branch: feature/cache-secure-random-and-fix-panic-paths
-- Polished: {YYYY-MM-DD}
+- Branch: feature/refactor-cache-secure-random-and-improve-expect-messages
+- Polished: 2026-06-25
 
 親 issue: [`0020-other-prepare-stable-release-2026-1-0.md`](./0020-other-prepare-stable-release-2026-1-0.md) の Should 派生 issue S3 (公開 API 設計の追加修正) のうち「`SecureRandom` 毎フレーム初期化と panic 経路」分。
 
 ## 目的
 
-`src/connection.rs:1852-1870` の `SecureRandom` は `RandomSource` トレイトの `masking_key()` / `nonce()` 実装で WebSocket フレームを送出するたびに `aws_lc_rs::rand::SystemRandom::new()` を生成・破棄している。さらに `fill()` の失敗を `expect("failed to generate masking key")` / `expect("failed to generate nonce")` で panic 化しているため、シグナリングメッセージ送出 1 回ぶんの RNG 取得失敗で WebSocket スレッドごと落ちる。
+`src/connection.rs:1852-1870` の `SecureRandom` は現在 ZST（単位構造体）であり、`RandomSource` トレイトの `masking_key()` / `nonce()` 実装のたびに内部で `aws_lc_rs::rand::SystemRandom::new()` を呼んでいる。`SystemRandom` 自体は ZST だが、毎フレームの関数呼び出しは不要である。
 
-本 issue では (1) `SystemRandom` を `SoraConnection` (もしくは `WebSocketStream` を所有する箇所) で 1 回だけ生成して保持する、(2) `fill()` 失敗時の `expect()` を `panic` させない経路に置き換える、の 2 点を行う。
+また `fill()` の失敗時に `expect("failed to generate masking key")` / `expect("failed to generate nonce")` で panic するが、エラーメッセージが貧弱で原因特定が困難である。
+
+本 issue では (1) `SecureRandom` を `SystemRandom` をフィールドに持つ構造体に変更して `masking_key()` / `nonce()` 内での `SystemRandom::new()` 呼び出しをなくす、(2) `expect()` メッセージを精緻化して失敗原因の特定を容易にする。
 
 ## 優先度根拠
 
 Medium。
 
-- `SystemRandom::new()` は `aws-lc-rs` 上は実質ゼロコストに近いが、毎フレーム呼ぶ意味は無く、設計上の汚れ
-- `fill()` 失敗は `aws-lc-rs` の `getrandom` 呼び出しが失敗するケースで、Linux/macOS の通常環境では起こらないが、組み込み Linux や jailed 環境では `EAGAIN` などで失敗する可能性がある
-- WebSocket フレーム送出側 (`shiguredo_websocket` の `RandomSource`) で panic すると SDK のシグナリングスレッドが死に、利用側からは復旧不能になる
-- 修正は数行で、API 互換性も維持される
-- 致命度は低い (実環境ではほぼ発火しない) が、正式リリース 2026.1.0 の段階で「`expect()` で落ちる経路がパケットごとに残っている」状態は望ましくない
+- `SystemRandom::new()` は ZST の定数相当で実質ゼロコストだが、毎フレームの呼び出しは設計上の無駄である
+- `fill()` 失敗は通常環境では発生しないが、組み込み Linux や jailed 環境では `EAGAIN` で失敗する可能性がある。URL シャッフル側の `fill()` 失敗は #0032 で対応不要と判断されたが、WebSocket フレーム送出はホットパスであり、パケット送出ごとにパニックする経路が残るのは望ましくない（`masking_key()` はフレーム送信のたびに、`nonce()` は接続確立時の 1 回だけ呼ばれる）
+- `shiguredo_websocket::RandomSource` トレイトは `masking_key() -> [u8; 4]` / `nonce() -> [u8; 16]` と Result 非対応の API であるため、`fill()` 失敗時に panic 以外の復旧経路は取れない（上流改修は本 issue のスコープ外）
+- 修正は `SecureRandom` の型変更 + `Clone` derive + 呼び出し側の変更 + `expect()` メッセージ変更の数行で、公開 API に影響しない
 
 ## 現状
 
-`src/connection.rs:1852-1870`:
+### `SecureRandom` 定義 (`src/connection.rs:1852-1870`)
 
 ```rust
 struct SecureRandom;
@@ -51,19 +52,25 @@ impl RandomSource for SecureRandom {
 }
 ```
 
-- `SecureRandom` は ZST (zero-sized type) で、毎メソッド呼び出し時に `SystemRandom::new()` を作っている
-- WebSocket フレームを送るたびに RNG オブジェクトを生成・破棄しているため、ホットパスでメモリアロケーションやスレッドローカル状態の再初期化が起こる可能性 (`aws-lc-rs` の実装依存) がある
-- `fill()` 失敗時の挙動は「panic」: 復旧の余地が無い
+`SecureRandom` は ZST。`SystemRandom` 自体も ZST かつ `#[derive(Clone)]` であり、`SystemRandom::new()` はコンパイル時定数を返す。`masking_key()` / `nonce()` 内で毎回 `SystemRandom::new()` を呼ぶのは無駄であり、フィールドとして保持すべき。
 
-`SecureRandom` は `shiguredo_websocket` (もしくは `noflate`) の `RandomSource` トレイトを実装した型として `WebSocket` ハンドシェイクに渡されている。シグネチャ上 `&mut self` を取れるため、状態を保持して良い。
+### SecureRandom の使用箇所
+
+- `connection.rs:840`: `let mut ws = WebSocketClientConnection::new(options, SecureRandom);` （初期接続用 WebSocket）
+- `connection.rs:1184`: `ws = WebSocketClientConnection::new(options, SecureRandom);` （リダイレクト先 WebSocket）
+
+`WebSocketClientConnection::new(options, R)` は `R` を値で受け取るため、同一インスタンスの共有は不可能。リダイレクト時には新しい `SecureRandom` が必要だが、`SystemRandom` が ZST かつ `Clone` であるため、`SecureRandom` に `#[derive(Clone)]` を付与すればクローンは実質ゼロコストである。
+
+### `RandomSource` トレイトの制約
+
+`shiguredo_websocket::RandomSource` は `masking_key(&mut self) -> [u8; 4]` / `nonce(&mut self) -> [u8; 16]` と Result 非対応。`fill()` 失敗時に panic 以外の選択肢はなく、`expect()` メッセージの精緻化が現実的な対応となる。
 
 ## 設計方針
 
-### `SystemRandom` を保持する
-
-`SecureRandom` を以下のように変更する:
+### `SecureRandom` の構造体化
 
 ```rust
+#[derive(Clone)]
 struct SecureRandom {
     rng: SystemRandom,
 }
@@ -73,40 +80,59 @@ impl SecureRandom {
         Self { rng: SystemRandom::new() }
     }
 }
+
+impl RandomSource for SecureRandom {
+    fn masking_key(&mut self) -> [u8; 4] {
+        let mut key = [0u8; 4];
+        self.rng.fill(&mut key).expect("failed to generate masking key: aws-lc-rs SystemRandom::fill failed, OS RNG may be unavailable or exhausted");
+        key
+    }
+
+    fn nonce(&mut self) -> [u8; 16] {
+        let mut nonce = [0u8; 16];
+        self.rng.fill(&mut nonce).expect("failed to generate nonce: aws-lc-rs SystemRandom::fill failed, OS RNG may be unavailable or exhausted");
+        nonce
+    }
+}
 ```
 
-`SoraConnection` (もしくは WebSocket を生成する箇所) で `SecureRandom::new()` を 1 回だけ呼んで保持する。
+- `SystemRandom` は ZST（`pub struct SystemRandom(())`）かつ `#[derive(Clone)]` であり、フィールド保持のコストはゼロ
+- `#[derive(Clone)]` により `SecureRandom` のクローンが可能。`WebSocketClientConnection::new` が `R` を値で取るため、初期接続用とリダイレクト用の 2 回の WebSocket 生成でそれぞれクローンを渡す（クローンのコストは実質ゼロ）
+- `masking_key()` / `nonce()` は `self.rng.fill()` を呼ぶだけになり、`SystemRandom::new()` の呼び出しがなくなる
 
-### `fill()` 失敗時の挙動
+### `expect()` メッセージの精緻化
 
-`RandomSource` トレイトは `masking_key() -> [u8; 4]` / `nonce() -> [u8; 16]` のように Result を返さない API になっている (`shiguredo_websocket` の定義に従う)。そのため失敗時は何らかの値を返すか panic するかの二択しかない。
+`shiguredo_websocket::RandomSource` トレイトは Result 非対応であり、最新バージョンでもシグネチャに変更はないため、`fill()` 失敗時の選択肢は panic のみである。この前提で、デバッガビリティ向上のために以下を行う:
 
-選択肢:
+- 各 `expect()` メッセージを操作名 + 原因 + コンテキストを含む英語メッセージに変更する
+- `masking_key` と `nonce` でメッセージを使い分け、panic 時にどちらの操作で失敗したかが分かるようにする
 
-1. **`expect()` を残すが、メッセージで `aws-lc-rs` の挙動を明示する**
-   - 現状とほぼ同じだが、メッセージで「`aws-lc-rs` の `SystemRandom::fill` が失敗した。通常起きないが OS の `getrandom` が利用不能の可能性」と明記する
-2. **失敗時はゼロ埋めバッファを返してログ警告を出す**
-   - WebSocket masking key がゼロの場合、サーバー側で復号できないため接続自体が壊れる。事実上は接続が落ちるが、SDK 全体は生存できる
-3. **`shiguredo_websocket` の `RandomSource` トレイトを Result 返却に変更する (上流改修)**
-   - 上流クレートの API 変更が必要で、本 issue のスコープを超える
-
-選択肢 1 で「`expect()` の理由を明記する」が最も現実的。選択肢 2 は WebSocket プロトコル上は仕様違反 (RFC 6455 では XOR mask の値に制約はないが、ゼロマスクは事実上「マスクしていない」扱い) であり、復旧経路としてもまともに機能しないため避ける。選択肢 3 は別 issue として上流に提案する。
-
-実装フェーズで `shiguredo_websocket::RandomSource` のシグネチャを再確認し、Result を返せる版があれば移行する。無ければ選択肢 1 で `expect()` メッセージを精緻化する。
+（ゼロ埋めフォールバックは WebSocket フレームのマスキングの実質的な無効化に繋がるため採用しない。上流 API 変更は別 issue として検討する。）
 
 ## 完了条件
 
-- `SecureRandom` が `SystemRandom` を 1 回だけ保持し、`SoraConnection` 側でこのインスタンスを使い回している
-- `aws_lc_rs::rand::SystemRandom::new()` が WebSocket フレーム送出ごとに呼ばれなくなっている
-- `fill()` 失敗時の `expect()` メッセージが「`aws-lc-rs` の `SystemRandom::fill` 失敗」「OS RNG が枯渇 / 不在の可能性」を明示している (`shiguredo_websocket` API が Result を返せない前提の場合)
-- 上流 (`shiguredo_websocket`) で `RandomSource` を Result 返却版に変更できる場合は、そちらに移行する
+- `SecureRandom` が `{ rng: SystemRandom }` 構造体に変更され、`#[derive(Clone)]` が付与されている
+- `masking_key()` / `nonce()` 内で `SystemRandom::new()` が呼ばれず、代わりに `self.rng.fill()` が使われている
+- `expect()` メッセージが操作名と `aws-lc-rs SystemRandom::fill` 失敗の旨を含む具体的内容に変更されている
 - `cargo +nightly fmt` / `cargo clippy --all-targets --all-features -- -D warnings` が通る
+- 以下の単体テストが `src/connection.rs` の `#[cfg(test)] mod tests` 内に追加され、すべて通過すること（モック / スタブ禁止）:
+  - `SecureRandom::new()` で生成したインスタンスの `masking_key()` を複数回呼んでも panic しないこと
+  - `nonce()` を複数回呼んでも panic しないこと
+  - 乱数性の簡易チェックとして、連続 2 回の呼び出しで異なる値が返ることの確認（衝突確率は無視できるほど低い。最初の 1 バイトが 0 でないことの確認は確率的に偽陰性が発生しうるため非推奨）
 
 ## 解決方法
 
-1. `src/connection.rs:1852-1870` の `SecureRandom` を `{ rng: SystemRandom }` 構造に変更し、`new()` を追加する
-2. `SoraConnection` を構築する箇所で `SecureRandom::new()` を 1 回だけ呼び、保持する (現状 `SecureRandom` を渡している箇所を grep して特定する)
-3. `masking_key()` / `nonce()` は `self.rng.fill(&mut buf)` を呼ぶように変更する
-4. `expect()` メッセージを「`aws-lc-rs SystemRandom::fill failed; OS RNG unavailable or exhausted`」のような英語メッセージに統一する (AGENTS.md「ログメッセージは全て英語にすること」)
-5. `shiguredo_websocket::RandomSource` の最新シグネチャを確認し、Result 返却版があれば API を切り替える
-6. テストでは `SecureRandom` を直接 `RandomSource` として使い、`masking_key()` / `nonce()` が呼ばれるたびに `SystemRandom::new()` を作らないことをコードリーディングで確認する (副作用の不在を直接テストするのは困難なので、コードレビューで担保)
+1. `src/connection.rs:1852` の `struct SecureRandom;` を `#[derive(Clone)] struct SecureRandom { rng: SystemRandom }` に変更し、`impl SecureRandom { fn new() -> Self { Self { rng: SystemRandom::new() } } }` を追加する
+2. `connection.rs:1854-1870` の `impl RandomSource for SecureRandom` の `masking_key()` / `nonce()` を、`SystemRandom::new().fill(...)` → `self.rng.fill(...)` に変更する
+3. `masking_key()` の `expect()` メッセージを `"failed to generate masking key: aws-lc-rs SystemRandom::fill failed, OS RNG may be unavailable or exhausted"` に変更する（`nonce()` も同様に `"failed to generate nonce: ..."` に変更。操作名の区別を残す）
+4. `src/connection.rs` の `use aws_lc_rs::rand::{SecureRandom as AwsSecureRandom, SystemRandom};` の import は現状維持で問題ない（`SystemRandom` を `SecureRandom` のフィールド型として使うため）
+5. `connection.rs:838-839` 付近（`let (timer_tx, mut timer_rx) = ...` の後、`let mut ws = WebSocketClientConnection::new(options, SecureRandom);` の前）に `let secure_random = SecureRandom::new();` を追加する（`connection.rs:791` に URL シャッフル用の `let rng = SystemRandom::new();` が既に存在するため、変数名の衝突を避ける）
+6. `connection.rs:840` の `WebSocketClientConnection::new(options, SecureRandom)` を `WebSocketClientConnection::new(options, secure_random.clone())` に変更する
+7. `connection.rs:1184` の `WebSocketClientConnection::new(options, SecureRandom)` を `WebSocketClientConnection::new(options, secure_random.clone())` に変更する
+8. `src/connection.rs` の `#[cfg(test)] mod tests` 内（`connection.rs:2490` 付近の既存テスト群の後に追加）に、完了条件に記載されたテストケースを実装する。AGENTS.md「テストはコメントを重視すること」「テストのログメッセージは全て日本語にすること」「モックやスタブは絶対に利用しないこと」を遵守する
+
+### テスト戦略
+
+- **単体テスト**: `masking_key()` / `nonce()` が panic せず非ゼロの乱数を返すことを検証。テストは `src/connection.rs` の `#[cfg(test)] mod tests` に追加する
+- **PBT**: 適用しない。乱数生成の検証は確定的な property を持たない
+- **Fuzzing**: 適用しない。任意入力を受け付ける経路ではない
