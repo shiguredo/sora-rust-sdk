@@ -146,6 +146,8 @@
   - AGENTS.md「ログメッセージは全て英語にすること」に違反していた日本語ログを全て英語に書き換える
   - 対象は `src/connection.rs` (26 件) と `examples/sumomo/src/main.rs` (17 件)
   - @voluntas
+- [FIX] libcamera の `acquire()` 後の早期 return で `release()` / `stop()` が漏れる問題を修正する
+  - @voluntas
 
 ### misc
 

@@ -376,7 +376,7 @@ enum CapturedFrameBuffers {
 }
 
 fn run_libcamera_loop(
-    mut source: AdaptedVideoTrackSource,
+    source: AdaptedVideoTrackSource,
     camera_index: u32,
     width: i32,
     height: i32,
@@ -404,6 +404,35 @@ fn run_libcamera_loop(
 
     camera.acquire()?;
 
+    let result = run_libcamera_loop_inner(
+        &mut camera,
+        source,
+        width,
+        height,
+        native_frame_output,
+        controls,
+        stop,
+    );
+
+    let _ = camera.stop();
+    if let Err(err) = camera.release() {
+        rtc_log_error!("failed to release camera: err={}", err);
+    }
+
+    rtc_log_info!("libcamera capture stopped");
+
+    result
+}
+
+fn run_libcamera_loop_inner(
+    camera: &mut Camera,
+    mut source: AdaptedVideoTrackSource,
+    width: i32,
+    height: i32,
+    native_frame_output: bool,
+    controls: Vec<(String, String)>,
+    stop: Arc<AtomicBool>,
+) -> Result<()> {
     let mut requests: Vec<shiguredo_libcamera::Request> = Vec::new();
     let mut camera_config = camera.generate_configuration(&[StreamRole::VideoRecording])?;
 
@@ -658,11 +687,6 @@ fn run_libcamera_loop(
             }
         }
     }
-
-    let _ = camera.stop();
-    let _ = camera.release();
-
-    rtc_log_info!("libcamera capture stopped");
 
     Ok(())
 }
