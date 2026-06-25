@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-06-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-06-25
 - Model: Opus 4.7
 - Branch: feature/refactor-cache-secure-random-and-improve-expect-messages
 - Polished: 2026-06-25
@@ -136,3 +136,13 @@ impl RandomSource for SecureRandom {
 - **単体テスト**: `masking_key()` / `nonce()` が panic せず非ゼロの乱数を返すことを検証。テストは `src/connection.rs` の `#[cfg(test)] mod tests` に追加する
 - **PBT**: 適用しない。乱数生成の検証は確定的な property を持たない
 - **Fuzzing**: 適用しない。任意入力を受け付ける経路ではない
+
+## 解決方法
+
+- `SecureRandom` を `{ rng: SystemRandom }` 構造体に変更
+- `masking_key()` / `nonce()` で `self.rng.fill()` を使用し `SystemRandom::new()` の毎回呼び出しを廃止
+- `expect()` メッセージを精緻化
+- WebSocket 生成箇所 2 ヶ所で `SecureRandom::new()` → `secure_random.clone()` を渡す
+
+### 修正ファイル
+- `src/connection.rs`
