@@ -502,4 +502,17 @@ impl From<std::time::SystemTimeError> for Error {
     }
 }
 
+/// SDK のエラー型 [`Error`] をエラーパラメータに持つ `std::result::Result` の 1 引数エイリアス。
+///
+/// 通常の利用では `use sora_sdk::Result;` でインポートする。
+/// 標準ライブラリの `Result<T, E>` と名前が衝突する場合は
+/// `use std::result::Result as StdResult;` で回避する。
+///
+/// ```
+/// use sora_sdk::Result;
+///
+/// fn example() -> Result<()> {
+///     Ok(())
+/// }
+/// ```
 pub type Result<T> = std::result::Result<T, Error>;
