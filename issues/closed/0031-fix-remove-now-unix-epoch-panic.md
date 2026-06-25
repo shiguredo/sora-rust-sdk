@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-06-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-06-25
 - Model: Opus 4.7
 - Branch: feature/fix-remove-now-unix-epoch-panic
 - Polished: 2026-06-25
@@ -142,3 +142,13 @@ impl From<std::time::SystemTimeError> for Error {
 - 本 issue 対応により `0020` の S7 (`.unwrap()` 47 件の `.expect("MESSAGE")` 化) の作業対象から `now()` の `unwrap()` 1 件が外れる。実装時に `0020` issue に完了コメントを残し、S7 担当者にメンションすること
 
 (End of file - total 128 lines)
+
+## 解決方法
+
+- `now()` の戻り値型を `Result<Timestamp>` に変更し `?` でエラー伝播
+- `Error::InvalidSystemTime` バリアントを追加し Display/source/From 実装
+- 呼び出し元 2 箇所を `now()?` に変更
+
+### 修正ファイル
+- `src/connection.rs`
+- `src/error.rs`
