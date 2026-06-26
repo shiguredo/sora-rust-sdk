@@ -5,7 +5,7 @@ use std::thread;
 use std::time::Duration;
 
 use shiguredo_libcamera::{
-    CameraManager, ConfigStatus, ControlId, ControlType, Direction, FrameBufferAllocator,
+    Camera, CameraManager, ConfigStatus, ControlId, ControlType, Direction, FrameBufferAllocator,
     FrameStatus, PixelFormat, Rectangle, RequestStatus, Size, StreamRole, core, draft, rpi,
 };
 use shiguredo_webrtc::{
@@ -414,7 +414,6 @@ fn run_libcamera_loop(
         stop,
     );
 
-    let _ = camera.stop();
     if let Err(err) = camera.release() {
         rtc_log_error!("failed to release camera: err={}", err);
     }
@@ -498,7 +497,7 @@ fn run_libcamera_loop_inner(
             })?
     };
 
-    let allocator = FrameBufferAllocator::new(&camera);
+    let allocator = FrameBufferAllocator::new(camera);
     let buffer_count = allocator.allocate(&stream)?;
 
     let (tx, rx) = std::sync::mpsc::channel::<(u64, Option<i64>)>();
@@ -556,7 +555,53 @@ fn run_libcamera_loop_inner(
 
     camera.start()?;
 
-    for request in &requests {
+    let result = run_capture_loop(
+        camera,
+        &requests,
+        &captured_frame_buffers,
+        &mut source,
+        width,
+        height,
+        stride_i32,
+        frame_pixel_format,
+        &parsed_controls,
+        rx,
+        delayed_requeue_rx,
+        &delayed_requeue_tx,
+        stop,
+        buffer_count,
+        stride,
+    );
+
+    // リソース（allocator, requests, captured_frame_buffers など）を
+    // drop する前に camera.stop() を呼ぶ。
+    // camera.stop() より先にこれらのリソースが drop されると、
+    // libcamera の CameraManager スレッドが解放済みの FrameBuffer に
+    // アクセスして SIGSEGV が発生する。
+    let _ = camera.stop();
+
+    result
+}
+
+#[expect(clippy::too_many_arguments)]
+fn run_capture_loop(
+    camera: &shiguredo_libcamera::Camera,
+    requests: &[shiguredo_libcamera::Request],
+    captured_frame_buffers: &CapturedFrameBuffers,
+    source: &mut AdaptedVideoTrackSource,
+    width: i32,
+    height: i32,
+    stride_i32: i32,
+    frame_pixel_format: FramePixelFormat,
+    parsed_controls: &[ParsedControl],
+    rx: std::sync::mpsc::Receiver<(u64, Option<i64>)>,
+    delayed_requeue_rx: std::sync::mpsc::Receiver<u64>,
+    delayed_requeue_tx: &std::sync::mpsc::Sender<u64>,
+    stop: Arc<AtomicBool>,
+    buffer_count: usize,
+    stride: usize,
+) -> Result<()> {
+    for request in requests {
         camera.queue_request(request)?;
     }
 
@@ -578,7 +623,7 @@ fn run_libcamera_loop_inner(
 
         // 破棄されたネイティブフレームがあったら再キューイングする
         while let Ok(cookie) = delayed_requeue_rx.try_recv() {
-            requeue_request(&camera, &requests, cookie, &parsed_controls);
+            requeue_request(camera, requests, cookie, parsed_controls);
         }
 
         let recv_result = rx.recv_timeout(Duration::from_millis(100));
@@ -593,13 +638,13 @@ fn run_libcamera_loop_inner(
                 "frame is not successful and will be requeued: cookie={}",
                 cookie
             );
-            requeue_request(&camera, &requests, cookie, &parsed_controls);
+            requeue_request(camera, requests, cookie, parsed_controls);
             continue;
         };
 
         let AdaptFrameResult { applied, size } = source.adapt_frame(width, height, timestamp_us);
         if !applied {
-            requeue_request(&camera, &requests, cookie, &parsed_controls);
+            requeue_request(camera, requests, cookie, parsed_controls);
             continue;
         }
 
@@ -611,12 +656,12 @@ fn run_libcamera_loop_inner(
                         cookie,
                         native_infos.len()
                     );
-                    requeue_request(&camera, &requests, cookie, &parsed_controls);
+                    requeue_request(camera, requests, cookie, parsed_controls);
                     continue;
                 };
 
                 on_native_frame_buffer(
-                    &mut source,
+                    source,
                     &mut aligner,
                     NativeFrameDispatchConfig {
                         raw_width: width,
@@ -629,7 +674,7 @@ fn run_libcamera_loop_inner(
                         stride: stride_i32,
                         cookie,
                     },
-                    &delayed_requeue_tx,
+                    delayed_requeue_tx,
                 );
                 // ネイティブフレームが破棄された後に requeue する必要があるので、ここでは requeue_request は呼ばない
             }
@@ -640,7 +685,7 @@ fn run_libcamera_loop_inner(
                         cookie,
                         mapped_buffers.len()
                     );
-                    requeue_request(&camera, &requests, cookie, &parsed_controls);
+                    requeue_request(camera, requests, cookie, parsed_controls);
                     continue;
                 };
 
@@ -666,13 +711,13 @@ fn run_libcamera_loop_inner(
                             mapped_planes.len(),
                             err
                         );
-                        requeue_request(&camera, &requests, cookie, &parsed_controls);
+                        requeue_request(camera, requests, cookie, parsed_controls);
                         continue;
                     }
                 };
 
                 on_frame_buffer(
-                    &mut source,
+                    source,
                     &mut aligner,
                     buffer,
                     FrameDispatchConfig {
@@ -683,7 +728,7 @@ fn run_libcamera_loop_inner(
                         timestamp_us,
                     },
                 );
-                requeue_request(&camera, &requests, cookie, &parsed_controls);
+                requeue_request(camera, requests, cookie, parsed_controls);
             }
         }
     }
