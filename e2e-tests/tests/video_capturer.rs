@@ -7,6 +7,8 @@ use shiguredo_video_device::{
     PixelFormat, VideoCapture, VideoCaptureConfig, VideoDeviceList, VideoFrame,
 };
 
+use e2e_tests::is_running_on_ci;
+
 /// テスト用: 最初のデバイスの対応フォーマットに基づくキャプチャ設定を取得する。
 /// デバイスがない、またはフォーマットが取得できない場合は None を返す。
 fn first_device_capture_config() -> Option<VideoCaptureConfig> {
@@ -156,6 +158,11 @@ fn test_video_device_formats() {
 #[test]
 #[serial]
 fn test_video_capture_session_create() {
+    if is_running_on_ci() {
+        println!("CI 環境のためスキップ");
+        return;
+    }
+
     let config = match first_device_capture_config() {
         Some(c) => c,
         None => {
@@ -184,6 +191,11 @@ fn test_video_capture_session_create() {
 #[test]
 #[serial]
 fn test_video_capture_start_stop() {
+    if is_running_on_ci() {
+        println!("CI 環境のためスキップ");
+        return;
+    }
+
     let config = match first_device_capture_config() {
         Some(c) => c,
         None => {
@@ -217,6 +229,11 @@ fn test_video_capture_start_stop() {
 #[test]
 #[serial]
 fn test_video_capture_frame_received() {
+    if is_running_on_ci() {
+        println!("CI 環境のためスキップ");
+        return;
+    }
+
     let config = match first_device_capture_config() {
         Some(c) => c,
         None => {

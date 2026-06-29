@@ -15,6 +15,12 @@ use crate::stats::{
     RtcSentRtpStreamStatsTrait, RtcStatsTrait, WebRtcStat, WebRtcStatsReport,
 };
 
+/// CI 環境 (GitHub Actions) で実行されているかどうかを返す。
+pub fn is_running_on_ci() -> bool {
+    env::var("CI").is_ok_and(|v| v == "true")
+        || env::var("GITHUB_ACTIONS").is_ok_and(|v| v == "true")
+}
+
 /// .env ファイルを読み込んで環境変数に設定する。
 ///
 /// 既存の環境変数は上書きしない。
