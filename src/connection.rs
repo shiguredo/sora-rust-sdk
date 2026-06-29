@@ -51,16 +51,16 @@ use shiguredo_webrtc::{rtc_log_error, rtc_log_info, rtc_log_warning};
 /// WebSocket (シグナリング接続) の TLS 設定。
 ///
 /// TURN-TLS の TLS 設定は `SoraConnectionBuilder::turn_tls_insecure()` / `turn_tls_ca_cert()` で行う。
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct TlsConfig {
     /// サーバー証明書の検証をスキップする。
-    pub insecure: bool,
+    pub(crate) insecure: bool,
     /// クライアント証明書 (PEM 形式)。
-    pub client_cert: Option<String>,
+    pub(crate) client_cert: Option<String>,
     /// クライアント秘密鍵 (PEM 形式)。
-    pub client_key: Option<String>,
+    pub(crate) client_key: Option<String>,
     /// CA 証明書 (PEM 形式)。
-    pub ca_cert: Option<String>,
+    pub(crate) ca_cert: Option<String>,
 }
 
 type IceServerUrlConfigurer = dyn Fn(&mut IceServer, &[String]) + Send + Sync;
@@ -552,8 +552,14 @@ pub struct SoraConnection {
 }
 
 struct PendingRpcRequest {
-    response_tx: oneshot::Sender<Result<Option<RpcResponse>>>,
+    response_tx: Option<oneshot::Sender<Result<Option<RpcResponse>>>>,
     timeout_handle: JoinHandle<()>,
+}
+
+impl Drop for PendingRpcRequest {
+    fn drop(&mut self) {
+        self.timeout_handle.abort();
+    }
 }
 
 enum SoraEvent {
@@ -715,11 +721,11 @@ impl SoraConnection {
             deps.set_proxy(
                 network_manager,
                 socket_factory,
-                &proxy.host,
-                proxy.port,
-                proxy.username.as_deref().unwrap_or(""),
-                proxy.password.as_deref().unwrap_or(""),
-                &proxy.user_agent,
+                proxy.host(),
+                proxy.port(),
+                proxy.username().unwrap_or(""),
+                proxy.password().unwrap_or(""),
+                proxy.user_agent(),
             );
         }
         let mut rtc_config = PeerConnectionRtcConfiguration::new();
@@ -837,7 +843,8 @@ impl SoraConnection {
             .header("User-Agent", &user_agent);
         let (timer_tx, mut timer_rx) = mpsc::channel::<TimerId>(16);
         let mut timers = TimerManager::new(timer_tx);
-        let mut ws = WebSocketClientConnection::new(options, SecureRandom);
+        let secure_random = SecureRandom::new();
+        let mut ws = WebSocketClientConnection::new(options, secure_random.clone());
         ws.connect()?;
         if flush_ws_output(&mut ws, &mut stream, &mut timers).await? {
             return Ok(());
@@ -875,7 +882,7 @@ impl SoraConnection {
                             break;
                         }
                     } else {
-                        ws.feed_recv_buf(&buf[..n], now())?;
+                        ws.feed_recv_buf(&buf[..n], now()?)?;
                     }
                 }
                 Some(timer_id) = timer_rx.recv() => {
@@ -914,8 +921,8 @@ impl SoraConnection {
                             self.handle_datachannel_state(&label, &on_data_channel_open, &on_data_channel_close, &mut opened_datachannels, &mut use_datachannel_signaling);
                         }
                         SoraEvent::RpcTimeout { id } => {
-                            if let Some(pending) = self.pending_rpc_responses.remove(&id) {
-                                let _ = pending.response_tx.send(Err(Error::RpcTimeout));
+                            if let Some(mut pending) = self.pending_rpc_responses.remove(&id) {
+                                let _ = pending.response_tx.take().expect("response_tx は必ず存在する").send(Err(Error::RpcTimeout));
                             }
                         }
                         SoraEvent::DataChannelStateChange(label) => {
@@ -962,7 +969,7 @@ impl SoraConnection {
                                             let _ = event_tx.send(SoraEvent::RpcTimeout { id });
                                         });
                                         self.pending_rpc_responses.insert(id, PendingRpcRequest {
-                                            response_tx,
+                                            response_tx: Some(response_tx),
                                             timeout_handle,
                                         });
                                     }
@@ -1181,7 +1188,7 @@ impl SoraConnection {
                 let (new_timer_tx, new_timer_rx) = mpsc::channel::<TimerId>(16);
                 timers = TimerManager::new(new_timer_tx);
                 timer_rx = new_timer_rx;
-                ws = WebSocketClientConnection::new(options, SecureRandom);
+                ws = WebSocketClientConnection::new(options, secure_random.clone());
                 ws.connect()?;
                 websocket_closed = false;
                 redirect = true;
@@ -1284,7 +1291,7 @@ impl SoraConnection {
                     if n == 0 {
                         return Ok(());
                     }
-                    ws.feed_recv_buf(&buf[..n], now())?;
+                    ws.feed_recv_buf(&buf[..n], now()?)?;
                     while let Some(_event) = ws.poll_event() {}
                     if ws.state() == ConnectionState::Closed {
                         return Ok(());
@@ -1815,10 +1822,14 @@ impl SoraConnection {
                 rtc_log_info!("Received RPC message via DataChannel");
                 let (id, response) = RpcResponse::parse(&text)?;
                 if let Some(id) = id
-                    && let Some(pending) = self.pending_rpc_responses.remove(&id)
+                    && let Some(mut pending) = self.pending_rpc_responses.remove(&id)
                 {
                     pending.timeout_handle.abort();
-                    let _ = pending.response_tx.send(Ok(Some(response)));
+                    let _ = pending
+                        .response_tx
+                        .take()
+                        .expect("response_tx は必ず存在する")
+                        .send(Ok(Some(response)));
                 }
             }
             // # で始まるラベルはユーザー定義メッセージとして処理
@@ -1849,32 +1860,40 @@ struct ManagedDataChannel {
 const DEFAULT_TLS_PORT: u16 = 443;
 const DEFAULT_PLAIN_PORT: u16 = 80;
 
-struct SecureRandom;
+#[derive(Clone)]
+struct SecureRandom {
+    rng: SystemRandom,
+}
+
+impl SecureRandom {
+    fn new() -> Self {
+        Self {
+            rng: SystemRandom::new(),
+        }
+    }
+}
 
 impl RandomSource for SecureRandom {
     fn masking_key(&mut self) -> [u8; 4] {
         let mut key = [0u8; 4];
-        SystemRandom::new()
+        self.rng
             .fill(&mut key)
-            .expect("failed to generate masking key");
+            .expect("failed to generate masking key: aws-lc-rs SystemRandom::fill failed, OS RNG may be unavailable or exhausted");
         key
     }
 
     fn nonce(&mut self) -> [u8; 16] {
         let mut nonce = [0u8; 16];
-        SystemRandom::new()
+        self.rng
             .fill(&mut nonce)
-            .expect("failed to generate nonce");
+            .expect("failed to generate nonce: aws-lc-rs SystemRandom::fill failed, OS RNG may be unavailable or exhausted");
         nonce
     }
 }
 
-fn now() -> Timestamp {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
-    Timestamp::from_millis(millis)
+fn now() -> Result<Timestamp> {
+    let millis = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
+    Ok(Timestamp::from_millis(millis))
 }
 
 fn default_port(tls: bool) -> u16 {
@@ -1929,17 +1948,38 @@ struct SignalingTarget {
 /// `ProxyInfo` を解析し、HTTP プロキシ接続に必要な情報に正規化した結果。
 ///
 /// PBT 等の検証目的を主用途として公開している型のため、通常の利用者がこの型を
-/// 直接構築する必要はなく、`ParsedProxyInfo::parse` 経由で取得する。
+/// フィールド値の取得は accessor メソッド (`host()` / `port()` / `username()` /
+/// `password()` / `user_agent()`) 経由で行う。
 #[derive(Debug, Clone)]
 pub struct ParsedProxyInfo {
-    pub host: String,
-    pub port: u16,
-    username: Option<String>,
-    password: Option<String>,
-    user_agent: String,
+    pub(crate) host: String,
+    pub(crate) port: u16,
+    pub(crate) username: Option<String>,
+    pub(crate) password: Option<String>,
+    pub(crate) user_agent: String,
 }
 
 impl ParsedProxyInfo {
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub fn username(&self) -> Option<&str> {
+        self.username.as_deref()
+    }
+
+    pub fn password(&self) -> Option<&str> {
+        self.password.as_deref()
+    }
+
+    pub fn user_agent(&self) -> &str {
+        &self.user_agent
+    }
+
     /// `ProxyInfo` を解析し、検証済みのプロキシ接続情報を返す。
     ///
     /// 受理するのは `http://host[:port]` 形式のみで、`https://` / `socks*://` や
@@ -2126,6 +2166,20 @@ impl TimerManager {
     }
 }
 
+impl Drop for TimerManager {
+    fn drop(&mut self) {
+        if let Some(h) = self.ping.take() {
+            h.abort();
+        }
+        if let Some(h) = self.pong_timeout.take() {
+            h.abort();
+        }
+        if let Some(h) = self.close_timeout.take() {
+            h.abort();
+        }
+    }
+}
+
 /// insecure モード用の証明書検証器。全ての証明書を受け入れる。
 #[derive(Debug)]
 struct NoServerCertVerifier;
@@ -2257,10 +2311,10 @@ async fn connect_websocket(
     if let Some(proxy) = proxy {
         rtc_log_info!(
             "HTTP Proxy 経由で接続します: {}:{}",
-            format_bracketed_host(&proxy.host),
+            format_bracketed_host(proxy.host()),
             proxy.port
         );
-        let tcp_stream = connect_tcp(&proxy.host, proxy.port, deadline).await?;
+        let tcp_stream = connect_tcp(proxy.host(), proxy.port(), deadline).await?;
         let mut stream = ClientStream::new_plain(tcp_stream);
         connect_http_proxy_tunnel(&mut stream, target, proxy).await?;
         if target.tls {
@@ -2340,10 +2394,10 @@ fn build_proxy_connect_request(
     let authority = format!("{}:{}", format_bracketed_host(&target.host), target.port);
     let mut request = Request::new("CONNECT", &authority)?
         .header("Host", &authority)?
-        .header("User-Agent", &proxy.user_agent)?;
-    if proxy.username.is_some() || proxy.password.is_some() {
-        let username = proxy.username.as_deref().unwrap_or("");
-        let password = proxy.password.as_deref().unwrap_or("");
+        .header("User-Agent", proxy.user_agent())?;
+    if proxy.username().is_some() || proxy.password().is_some() {
+        let username = proxy.username().unwrap_or("");
+        let password = proxy.password().unwrap_or("");
         let auth = BasicAuth::new(username, password)?;
         let header = auth.to_header_value();
         request = request.header("Proxy-Authorization", &header)?;
@@ -2568,7 +2622,7 @@ mod tests {
     fn parse_proxy_info_uses_default_user_agent_when_absent() {
         let proxy = proxy_info_with_url("http://proxy.example.com:8080".to_string());
         let parsed = ParsedProxyInfo::parse(&proxy).expect("proxy URL の解析に失敗しました");
-        assert_eq!(parsed.user_agent, crate::version::get_sora_client_name());
+        assert_eq!(parsed.user_agent(), crate::version::get_sora_client_name());
     }
 
     #[test]
@@ -2579,7 +2633,7 @@ mod tests {
             ..Default::default()
         };
         let parsed = ParsedProxyInfo::parse(&proxy).expect("proxy URL の解析に失敗しました");
-        assert_eq!(parsed.user_agent, "");
+        assert_eq!(parsed.user_agent(), "");
     }
 
     #[test]
@@ -2699,5 +2753,105 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn timer_manager_drop_aborts_all_timers() {
+        let (timer_tx, mut timer_rx) = mpsc::channel::<TimerId>(16);
+        let mut timers = TimerManager::new(timer_tx);
+        timers.set_timer(TimerId::Ping, 50);
+        timers.set_timer(TimerId::PongTimeout, 50);
+        timers.set_timer(TimerId::CloseTimeout, 50);
+        drop(timers);
+        let mut received = Vec::new();
+        while let Ok(Some(id)) =
+            tokio::time::timeout(std::time::Duration::from_millis(150), timer_rx.recv()).await
+        {
+            received.push(id);
+        }
+        assert!(
+            received.len() < 3,
+            "全タイマーがメッセージを送信した場合、abort されていないことを示す: {} 件",
+            received.len()
+        );
+    }
+
+    #[test]
+    fn timer_manager_drop_with_no_timers_does_not_panic() {
+        let (timer_tx, _timer_rx) = mpsc::channel::<TimerId>(16);
+        let timers = TimerManager::new(timer_tx);
+        drop(timers);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn timer_manager_clear_timer_then_drop_does_not_panic() {
+        let (timer_tx, _timer_rx) = mpsc::channel::<TimerId>(16);
+        let mut timers = TimerManager::new(timer_tx);
+        timers.set_timer(TimerId::Ping, 1000);
+        timers.set_timer(TimerId::PongTimeout, 1000);
+        timers.set_timer(TimerId::CloseTimeout, 1000);
+        timers.clear_timer(TimerId::Ping);
+        timers.clear_timer(TimerId::PongTimeout);
+        timers.clear_timer(TimerId::CloseTimeout);
+        drop(timers);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn timer_manager_zero_duration_timer_does_not_panic_on_drop() {
+        let (timer_tx, _timer_rx) = mpsc::channel::<TimerId>(16);
+        let mut timers = TimerManager::new(timer_tx);
+        timers.set_timer(TimerId::Ping, 0);
+        timers.set_timer(TimerId::PongTimeout, 0);
+        timers.set_timer(TimerId::CloseTimeout, 0);
+        tokio::task::yield_now().await;
+        drop(timers);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pending_rpc_request_drop_aborts_timeout_handle() {
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SoraEvent>();
+        let (response_tx, _response_rx) = oneshot::channel();
+        let timeout_handle = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _ = event_tx.send(SoraEvent::RpcTimeout { id: 42 });
+        });
+        let pending = PendingRpcRequest {
+            response_tx: Some(response_tx),
+            timeout_handle,
+        };
+        drop(pending);
+        if let Ok(Some(SoraEvent::RpcTimeout { id: 42 })) =
+            tokio::time::timeout(std::time::Duration::from_millis(150), event_rx.recv()).await
+        {
+            panic!("RpcTimeout が届いた。timeout_handle が abort されていない");
+        }
+    }
+
+    #[test]
+    fn secure_random_masking_key_returns_valid_data() {
+        let mut sr = SecureRandom::new();
+        let key1 = sr.masking_key();
+        let key2 = sr.masking_key();
+        assert_ne!(
+            key1, key2,
+            "masking_key の連続呼び出しで異なる値が返る必要がある"
+        );
+    }
+
+    #[test]
+    fn secure_random_nonce_returns_valid_data() {
+        let mut sr = SecureRandom::new();
+        let nonce1 = sr.nonce();
+        let nonce2 = sr.nonce();
+        assert_ne!(
+            nonce1, nonce2,
+            "nonce の連続呼び出しで異なる値が返る必要がある"
+        );
+    }
+
+    #[test]
+    fn now_returns_ok_timestamp() {
+        let result = super::now();
+        assert!(result.is_ok(), "now() は Ok を返す必要があります");
     }
 }

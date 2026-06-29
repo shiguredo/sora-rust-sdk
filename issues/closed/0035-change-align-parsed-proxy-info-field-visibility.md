@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-06-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-06-25
 - Model: Opus 4.7
 - Branch: feature/change-align-parsed-proxy-info-field-visibility
 - Polished: 2026-06-25
@@ -140,3 +140,15 @@ impl ParsedProxyInfo {
 6. `tests/test_connection.rs` を新規作成し、accessor の単体テストを追加する (全 5 件の正常系 + `username()` / `password()` が `None` を返すケース)
 7. `CHANGES.md` に `[CHANGE]` エントリを追加する
 8. `skills/sora-rust-sdk/SKILL.md` の `ParsedProxyInfo` に関する記述を、フィールド直接アクセス不可・accessor 経由で取得、という内容に更新する
+
+## 解決方法
+
+- 全フィールドを pub(crate) 化し accessor メソッド追加
+- 内部アクセス・pbt・SKILL.md 更新
+
+### 修正ファイル
+- `src/connection.rs`
+- `pbt/tests/prop_connection.rs`
+- `skills/sora-rust-sdk/SKILL.md`
+- `tests/test_connection.rs`
+- `CHANGES.md`

@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-06-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-06-25
 - Model: Opus 4.7
 - Branch: feature/change-redact-secrets-in-debug-impls
 - Polished: 2026-06-25
@@ -193,3 +193,14 @@ fn mask_url_userinfo(url: &str) -> Cow<'_, str> {
    - テストコメント / アサーションメッセージは日本語 (AGENTS.md)
 8. `CHANGES.md` に `[CHANGE] TlsConfig / ParsedProxyInfo / ProxyInfo の Debug 実装を手書き化し秘密情報をマスクする` エントリを追加する
   - @voluntas
+
+## 解決方法
+
+- TlsConfig/ParsedProxyInfo/ProxyInfo の Debug derive を外し手書き実装
+- client_key/username/password を <redacted> でマスク
+- ProxyInfo.url の userinfo 部を mask_url_userinfo でマスク
+
+### 修正ファイル
+- `src/connection.rs`
+- `src/types.rs`
+- `CHANGES.md`

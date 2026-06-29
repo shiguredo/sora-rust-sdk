@@ -653,9 +653,15 @@ impl VideoEncoderHandler for V4l2VideoEncoder {
         }
         self.rebuild_needed = false;
         self.input_mode = EncoderInputMode::MmapI420;
-        let mut shared_state = self.shared_state.lock().unwrap();
-        shared_state.callback = None;
-        shared_state.encoder = None;
+        // shared_state.encoder.take() で所有権を取り出し、ロック外で drop する。
+        // shared_state.encoder の drop 時に drain 処理が走ってコールバックハンドラが
+        // 呼ばれるが、先に callback = None にしているのでコールバックは早期 return する。
+        let encoder = {
+            let mut shared_state = self.shared_state.lock().unwrap();
+            shared_state.callback = None;
+            shared_state.encoder.take()
+        };
+        drop(encoder);
         VideoCodecStatus::Ok
     }
 

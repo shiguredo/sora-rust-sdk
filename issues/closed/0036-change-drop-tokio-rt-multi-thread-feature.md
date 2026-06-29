@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-06-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-06-25
 - Model: Opus 4.7
 - Branch: feature/change-drop-tokio-rt-multi-thread-feature
 - Polished: 2026-06-25
@@ -79,3 +79,12 @@ tokio = {
 3. `cargo test -p sora_sdk --lib` でテストが通過することを確認する
 4. `cargo build --no-default-features` でビルドが通過することを確認する
 5. `README.md` の tokio 依存のサンプルコードを `features = ["rt", "macros", "time"]` に更新し、`rt-multi-thread` が必要な場合は利用者側で追加する旨の説明を追記する
+
+## 解決方法
+
+- Cargo.toml の tokio feature を rt-multi-thread から rt に変更
+- README のサンプルコードを更新
+
+### 修正ファイル
+- `Cargo.toml`
+- `README.md`

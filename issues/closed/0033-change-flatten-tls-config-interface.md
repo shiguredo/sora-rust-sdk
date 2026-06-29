@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-06-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-06-25
 - Model: Opus 4.7
 - Branch: feature/change-flatten-tls-config-interface
 - Polished: 2026-06-25
@@ -175,3 +175,12 @@ impl TlsConfig {
 8. `CHANGES.md` の `## develop` に `[CHANGE]` エントリを追加する
    - `TlsConfig` のフィールドを `pub` → `pub(crate)` に変更し、builder メソッド (`new()` / `insecure()` / `client_cert()` / `ca_cert()`) を追加したことを記載
    - 移行方法: `TlsConfig { insecure: true, .. }` → `TlsConfig::new().insecure(true)` を明記
+
+## 解決方法
+
+- TlsConfig の全フィールドを pub(crate) 化。構造体リテラルによる直接構築は不可。
+- 設定は SoraConnectionBuilder の既存メソッド経由で行う。
+
+### 修正ファイル
+- src/connection.rs
+- CHANGES.md

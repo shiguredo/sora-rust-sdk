@@ -51,12 +51,46 @@ impl Role {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct ProxyInfo {
     pub url: String,
     pub username: Option<String>,
     pub password: Option<String>,
     pub user_agent: Option<String>,
+}
+
+impl std::fmt::Debug for ProxyInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let masked_url = mask_url_userinfo(&self.url);
+        f.debug_struct("ProxyInfo")
+            .field("url", &masked_url)
+            .field("username", &self.username.as_ref().map(|_| "<redacted>"))
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("user_agent", &self.user_agent)
+            .finish()
+    }
+}
+
+fn mask_url_userinfo(url: &str) -> std::borrow::Cow<'_, str> {
+    let Some(after_scheme) = url.find("://") else {
+        return std::borrow::Cow::Borrowed(url);
+    };
+    let after_scheme = after_scheme + 3;
+    let url_after_scheme = &url[after_scheme..];
+    let Some(at_pos) = url_after_scheme.find('@') else {
+        return std::borrow::Cow::Borrowed(url);
+    };
+    if let Some(slash_pos) = url_after_scheme.find('/')
+        && at_pos > slash_pos
+    {
+        return std::borrow::Cow::Borrowed(url);
+    }
+    let masked = format!(
+        "{}<redacted>@{}",
+        &url[..after_scheme],
+        &url[after_scheme + at_pos + 1..]
+    );
+    std::borrow::Cow::Owned(masked)
 }
 
 #[derive(Debug, Clone)]

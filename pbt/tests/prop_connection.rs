@@ -16,8 +16,8 @@ proptest! {
     ) {
         let proxy = proxy_info_with_url(format!("http://{label}:{port}"));
         let parsed = ParsedProxyInfo::parse(&proxy).expect("http proxy URL の解析に失敗しました");
-        prop_assert_eq!(parsed.host, label);
-        prop_assert_eq!(parsed.port, port);
+        prop_assert_eq!(parsed.host(), label);
+        prop_assert_eq!(parsed.port(), port);
     }
 
     #[test]

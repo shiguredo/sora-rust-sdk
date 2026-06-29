@@ -165,6 +165,9 @@ pub enum Error {
     V4l2Message {
         reason: String,
     },
+    InvalidSystemTime {
+        source: std::time::SystemTimeError,
+    },
 }
 
 impl std::fmt::Display for Error {
@@ -339,6 +342,12 @@ impl std::fmt::Display for Error {
             Error::V4l2 { source } => write!(f, "V4L2 error: {source}"),
             #[cfg(feature = "v4l2")]
             Error::V4l2Message { reason } => write!(f, "V4L2 error: {reason}"),
+            Error::InvalidSystemTime { source } => {
+                write!(
+                    f,
+                    "システム時刻が UNIX エポック (1970-01-01) より前です: {source}"
+                )
+            }
         }
     }
 }
@@ -373,6 +382,7 @@ impl std::error::Error for Error {
             Error::CommandResponseMissing { source, .. } => Some(source),
             #[cfg(feature = "v4l2")]
             Error::V4l2 { source } => Some(source),
+            Error::InvalidSystemTime { source } => Some(source),
             _ => None,
         }
     }
@@ -486,4 +496,19 @@ impl From<shiguredo_v4l2::v4l2_m2m::Error> for Error {
     }
 }
 
+impl From<std::time::SystemTimeError> for Error {
+    fn from(err: std::time::SystemTimeError) -> Self {
+        Error::InvalidSystemTime { source: err }
+    }
+}
+
+/// SDK のエラー型 [`Error`] をエラーパラメータに持つ `std::result::Result` の 1 引数エイリアス。
+///
+/// ```
+/// use sora_sdk::Result;
+///
+/// fn example() -> Result<()> {
+///     Ok(())
+/// }
+/// ```
 pub type Result<T> = std::result::Result<T, Error>;

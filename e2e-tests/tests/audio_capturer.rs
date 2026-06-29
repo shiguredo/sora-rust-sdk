@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use e2e_tests::is_running_on_ci;
 use shiguredo_audio_device::{
     AudioCapture, AudioCaptureConfig, AudioDeviceList, AudioFormat, AudioFrame,
 };
@@ -103,6 +104,11 @@ fn test_audio_capture_config_default() {
 
 #[test]
 fn test_audio_capture_session_create() {
+    if cfg!(target_os = "macos") && is_running_on_ci() {
+        println!("CI 環境のためスキップ");
+        return;
+    }
+
     let config = match first_audio_device_config() {
         Some(c) => c,
         None => {
@@ -131,6 +137,11 @@ fn test_audio_capture_session_create() {
 
 #[test]
 fn test_audio_capture_start_stop() {
+    if cfg!(target_os = "macos") && is_running_on_ci() {
+        println!("CI 環境のためスキップ");
+        return;
+    }
+
     let config = match first_audio_device_config() {
         Some(c) => c,
         None => {
@@ -163,6 +174,11 @@ fn test_audio_capture_start_stop() {
 
 #[test]
 fn test_audio_capture_frame_received() {
+    if cfg!(target_os = "macos") && is_running_on_ci() {
+        println!("CI 環境のためスキップ");
+        return;
+    }
+
     let config = match first_audio_device_config() {
         Some(c) => c,
         None => {
@@ -209,6 +225,11 @@ fn test_audio_capture_frame_received() {
 
 #[test]
 fn test_audio_frame_format_conversion() {
+    if cfg!(target_os = "macos") && is_running_on_ci() {
+        println!("CI 環境のためスキップ");
+        return;
+    }
+
     let config = match first_audio_device_config() {
         Some(c) => c,
         None => {

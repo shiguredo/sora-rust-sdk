@@ -209,7 +209,7 @@ H.264 / H.265 の `b_frame: true` は Sora 側の `sora.conf` で対応する設
 | `ForwardingFilter` | `name: Option<String>`, `priority: Option<i32>`, `action: Option<String>`, `rules: Vec<Vec<ForwardingFilterRule>>`, `version: Option<String>`, `metadata: Option<JsonString>` |
 | `ForwardingFilterRule` | `field: String`, `operator: String`, `values: Vec<String>` |
 | `ProxyInfo` | `url: String`, `username: Option<String>`, `password: Option<String>`, `user_agent: Option<String>` |
-| `ParsedProxyInfo` | `ProxyInfo::parse()` で検証済みのプロキシ接続情報を取得する公開型。`host` / `port` は公開、それ以外は非公開。主に PBT 用途で公開されている |
+| `ParsedProxyInfo` | `ProxyInfo::parse()` で検証済みのプロキシ接続情報を取得する公開型。全フィールドは非公開で accessor (`host()` / `port()` / `username()` / `password()` / `user_agent()`) 経由で取得する。主に PBT 用途で公開されている |
 | `JsonString` | `nojson::RawJsonOwned` のラッパー。`str::parse::<JsonString>()` で構築 (不正 JSON は `Error::JsonParse`) |
 | `SignalingType` | `WebSocket`, `DataChannel` |
 | `SignalingDirection` | `Sent`, `Received` |

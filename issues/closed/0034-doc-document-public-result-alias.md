@@ -2,7 +2,7 @@
 
 - Priority: Low
 - Created: 2026-06-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-06-25
 - Model: Opus 4.7
 - Branch: feature/update-public-result-alias
 - Polished: 2026-06-25
@@ -90,3 +90,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 1. `src/error.rs` の `pub type Result<T>` に rustdoc を追加する (上記設計方針の案文を出発点に文言を磨く)
 2. クレートルートのクレートドキュメント (`src/lib.rs`) からのエイリアスへの言及は親 issue M6 で対応する。本 issue では `src/error.rs` 側の rustdoc が `pub use` 経由でクレートルートのドキュメントとしても表示されるため、対応済みとなる
 3. 利用者ドキュメント (rustdoc 例) で `use sora_sdk::Result;` の形を推奨し、コード例も含める
+
+## 解決方法
+
+- `pub type Result<T>` に rustdoc を追加し、import 方法と名前衝突回避策を記載
+
+### 修正ファイル
+- `src/error.rs`

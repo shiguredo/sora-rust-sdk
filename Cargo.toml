@@ -111,7 +111,7 @@ tokio = {
     "io-util",
     "macros",
     "net",
-    "rt-multi-thread",
+    "rt",
     "sync",
     "time",
   ]
