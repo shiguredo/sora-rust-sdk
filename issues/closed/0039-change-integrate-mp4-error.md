@@ -286,16 +286,19 @@ let mp4_capturer = Mp4VideoCapturer::new(reader).map_err(sora_sdk::Error::from)?
 1. `src/video_codecs/mp4.rs:45-57` の `Mp4Error::Display` を日本語化する
 2. `src/video_codecs/mp4.rs:37` の `pub enum Mp4Error` を `pub(crate) enum Mp4Error` に変更する
 3. `src/error.rs` の先頭に `use crate::video_codecs::mp4::Mp4Error;` を追加する
-4. `src/error.rs:10-171` の `Error` 列挙型に `Mp4(Mp4Error)` バリアントを追加する
-5. `src/error.rs` の `Display::fmt()` に `Error::Mp4(err) => write!(f, "MP4 ファイルの処理に失敗しました: {err}")` を追加する
-6. `src/error.rs` の `source()` に `Error::Mp4(err) => Some(err)` を追加する
-7. `src/error.rs` に `impl From<Mp4Error> for Error` を追加する
-8. `src/lib.rs:50-53` の `pub use` から `Mp4Error` を削除する
-9. `examples/sumomo/src/error.rs` の `Mp4Error` 関連コードを削除する
-10. `examples/sumomo/src/main.rs:240,359` の `?` を `.map_err(sora_sdk::Error::from)?` に変更する（全ファイルを一括編集し、Step 2 の `pub(crate)` 化と Step 9-10 の sumomo 修正は同一コミットで行う）
-11. `skills/sora-rust-sdk/SKILL.md:254` の `Mp4Error` を `Error::Mp4` に変更する
-12. `CHANGES.md` の `## develop` に設計方針 10 のエントリを追加する
-13. `cargo +nightly fmt` / `cargo clippy --all-targets --all-features -- -D warnings` / `cargo test` がすべて通ることを確認する
+4. `src/error.rs:10-171` の `Error` 列挙型に `Mp4 { reason: String }` バリアントを追加する
+   - 公開 `Error` 型に `pub(crate)` 型を露出させないため、#0038 と一貫したアプローチとして `Mp4Error` を直接内包せず `String` で保持する
+5. `src/error.rs` の `Display::fmt()` に `Error::Mp4 { reason } => write!(f, "MP4 ファイルの処理に失敗しました: {reason}")` を追加する
+6. `src/error.rs` の `source()` には `Mp4` アームを追加しない（`String` は `std::error::Error` を実装していないため）
+7. `src/error.rs` に `impl From<Mp4Error> for Error` を追加し、`err.to_string()` で `reason` を生成する
+8. `src/video_codecs/mp4.rs` の `Mp4SampleReader::new()` に内部実装用の `new_inner()` を追加し、公開 API の戻り値型を `crate::error::Result<Self>` に変更する
+   - `Mp4VideoCapturer::new()` も同様に戻り値型を `crate::error::Result<Self>` に変更する
+9. `src/lib.rs:50-53` の `pub use` から `Mp4Error` を削除する
+10. `examples/sumomo/src/error.rs` の `Mp4Error` 関連コード（use 文、バリアント、Display アーム、source() アーム、From 実装）を削除する
+11. `examples/sumomo/src/main.rs:240,359` の `Mp4SampleReader::new()` / `Mp4VideoCapturer::new()` は公開 API が `sora_sdk::Result` を返すようになったため、そのまま `?` で AppError に伝播する
+12. `skills/sora-rust-sdk/SKILL.md:254` の `Mp4Error` を `Error::Mp4` に変更する
+13. `CHANGES.md` の `## develop` に `[CHANGE]` エントリを追加する
+14. `cargo +nightly fmt` / `cargo clippy --all-targets -- -D warnings` / `cargo test` がすべて通ることを確認する
 
 ### 修正ファイル
 
