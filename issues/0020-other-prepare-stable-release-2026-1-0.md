@@ -54,12 +54,12 @@
 - [x] M3. 公開 API への `#[non_exhaustive]` 一斉付与（`shiguredo-rust` 規約の `#[non_exhaustive]` 禁止により対応しない）
 - [x] M4. `SoraConnectionCommand` を `pub(crate)` 化（#0038）
 - [x] M5. `shiguredo_webrtc` の公開 API 型を `pub use` で再エクスポート（`shiguredo-rust` 規約の re-export 禁止により対応しない）
-- [ ] M6. 公開 API の rustdoc 拡充（`lib.rs` クレートドキュメント・`types.rs` / `error.rs` / `video_codec*.rs` / `video_codecs/*.rs` のモジュールドキュメントと項目ドキュメント）
+- [ ] M6. 公開 API の rustdoc 拡充（`lib.rs` クレートドキュメント・`types.rs` / `error.rs` / `video_codec*.rs` / `video_codecs/*.rs` のモジュールドキュメントと項目ドキュメント）（#0041）
 - [x] M7. `Mp4Error` を `Error` 系へ統合（`From<Mp4Error> for Error` または `Error::Mp4` バリアント追加 + `Mp4Error::Display` 日本語化）（#0039）
 - [x] M8. 日本語ログメッセージの英語化（`src/connection.rs` 26 件、`examples/sumomo/src/main.rs` 17 件）（#0022）
 - [x] M9. `release.yml` の整備（ビルド依存 `apt-get install` ステップ、`timeout-minutes`、`concurrency`、prerelease 判定の SemVer 対応、`cargo publish --dry-run` 別ジョブ、`-p sora_sdk` 明示、OpenH264 ダウンロード）（#0028）
-- [ ] M10. `CHANGES.md` の整合化とリリース手順整備（エントリ順序、`shiguredo_webrtc` / `shiguredo_nvcodec` / `prek` 等の本文の実態追従、`[ADD] ParsedProxyInfo` の本体移動、表記揺れ、`### misc` 扱いの確定、`## develop` → `## 2026.1.0` リネーム手順の明文化）
-- [ ] M11. `SKILL.md` のバージョン追従ルールと iOS 対応の確定（`canary.X` 手動同期の自動化 or 粗い表記化 / `InternalAppleVideoCodecCapability` の iOS gate 維持か削除か）
+- M10. （欠番。CHANGES.md はリリース時に全削除するため対応不要）
+- [ ] M11. `SKILL.md` のバージョン追従ルールと iOS 対応の確定（`canary.X` 手動同期の自動化 or 粗い表記化 / `InternalAppleVideoCodecCapability` の iOS gate 維持か削除か）（#0042）
 
 ### 派生 issue 一覧（Should）
 
@@ -75,7 +75,7 @@
 
 ## 完了条件
 
-- 上記 Must のチェックボックス（M2 を除く M1 と M3〜M11）がすべて完了している
+- 上記 Must のチェックボックス（M2 と M10 を除く M1 と M3〜M9、M11）がすべて完了している
 - `cargo publish --dry-run` が CI 上で通る
 - `Cargo.toml` の依存が canary を含まず、`shiguredo_webrtc` の完全 pin が外れている
 - `CHANGES.md` の `## develop` が `## 2026.1.0` にリネームされ、リリース日が記載されている
@@ -87,12 +87,12 @@ S1〜S7 の Should グループは正式版リリース後でも段階対応可�
 
 ## 解決方法
 
-1. 本 issue 作成と同時に、Must の M1 と M3〜M11（M2 を除く）を派生 issue として順次起票する
+1. 本 issue 作成と同時に、Must の M1 と M3〜M11（M2 と M10 を除く）を派生 issue として順次起票する
 2. 各派生 issue は `shiguredo-issues` / `shiguredo-git` / `shiguredo-changelog` 規約に従い、1 issue 1 目的 1 ブランチで対応する
 3. 派生 issue を起票するたび、本 issue 内のチェックボックスに issue 番号を追記する（例: `- [ ] M1. ... (#XXXX)`）
 4. 派生 issue が closed になるたび、本 issue 内のチェックボックスにチェックを入れて closed コミットに本 issue 番号を含める
 5. Must がすべて完了したら Should の派生 issue 起票を開始する
-6. 完了条件をすべて満たした時点で本 issue を closed にする。リリース作業（`canary.py` の正式版モード対応 or 別 release スクリプトの実装、`## develop` → `## 2026.1.0` リネーム、タグ作成、`cargo publish`）も M9 / M10 の派生 issue の中で完結させる
+6. 完了条件をすべて満たした時点で本 issue を closed にする。リリース作業も M9 の派生 issue の中で完結させる
 
 ## 派生 issue の起票方針
 
@@ -101,7 +101,8 @@ S1〜S7 の Should グループは正式版リリース後でも段階対応可�
   - M3, M4, M5, M7: `change`（公開 API の互換破壊変更）
   - M6: `doc`
   - M8: `fix`（規約違反の修正なので `fix` がより適切。`change` でも可）
-  - M10, M11: `doc` または `other`
+   - M10: （欠番）
+   - M11: `doc`
   - S1: `test`
   - S2: `bug`（致命的バグ修正）
   - S3: `change` か `refactor`
