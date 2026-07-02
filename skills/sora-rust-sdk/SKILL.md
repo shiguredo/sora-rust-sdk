@@ -63,7 +63,6 @@ WebRTC SFU Sora のクライアントを Rust で実装するための SDK。シ
 |----|------|
 | `SoraConnection` | 接続本体。`run()` でシグナリングからメディア接続までを駆動する |
 | `SoraConnectionBuilder` | ビルダー。ムーブスタイルで連結し `.build()` で `(SoraConnection, SoraConnectionHandle)` を返す |
-| `SoraConnectionCommand` | `SoraConnectionHandle` が内部的に送信するコマンドの enum。通常はユーザーが直接構築しない |
 | `TlsConfig` | WebSocket (シグナリング接続) の TLS 設定。`insecure` / `client_cert` / `client_key` / `ca_cert` を保持。Builder の `insecure` / `client_cert` / `ca_cert` メソッド経由で設定する |
 
 `SoraConnection::builder(context, signaling_urls, channel_id, role) -> SoraConnectionBuilder` で開始。`signaling_urls` は `Vec<String>`、`channel_id` は `String`、`role` は `Role`。

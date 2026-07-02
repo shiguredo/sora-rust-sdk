@@ -10,6 +10,10 @@
   - バグ修正
 
 ## develop
+- [CHANGE] `SoraConnectionCommand` の可視性を `pub` から `pub(crate)` に変更し `Error::CommandSendFailed` の型を変更する
+  - `SoraConnectionCommand` は公開 API から削除され、外部からの参照は不可になる
+  - `Error::CommandSendFailed` の `source` フィールドを `SendError<SoraConnectionCommand>` から `reason: String` に変更し、`std::error::Error::source()` からも除外する
+  - @melpon
 - [CHANGE] `Mp4Error` を `Error` 列挙型に統合し、`pub(crate)` 化する
   - `Error::Mp4 { reason: String }` バリアントを追加し、`From<Mp4Error> for Error` を実装する
   - `Mp4Error` は `pub(crate)` になり、外部から直接参照できなくなる
