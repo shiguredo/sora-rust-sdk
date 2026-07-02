@@ -521,7 +521,10 @@ impl SoraConnectionHandle {
         let (tx, rx) = oneshot::channel();
         self.command_tx
             .send(build(tx))
-            .map_err(|source| Error::CommandSendFailed { source, command })?;
+            .map_err(|e| Error::CommandSendFailed {
+                reason: e.to_string(),
+                command,
+            })?;
         rx.await
             .map_err(|source| Error::CommandResponseMissing { source, command })
     }
@@ -570,7 +573,7 @@ enum SoraEvent {
     RpcTimeout { id: u64 },
 }
 
-pub enum SoraConnectionCommand {
+pub(crate) enum SoraConnectionCommand {
     Disconnect(oneshot::Sender<()>),
     GetStats(oneshot::Sender<Result<JsonString>>),
     GetSelectedSignalingUrl(oneshot::Sender<Option<String>>),

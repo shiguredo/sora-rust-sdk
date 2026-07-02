@@ -3,9 +3,7 @@ use std::io;
 
 use nojson::JsonParseError;
 use shiguredo_http11::{EncodeError, auth::AuthError, uri::UriError};
-use tokio::sync::{mpsc, oneshot};
-
-use crate::connection::SoraConnectionCommand;
+use tokio::sync::oneshot;
 
 #[derive(Debug)]
 pub enum Error {
@@ -100,7 +98,7 @@ pub enum Error {
         message_type: String,
     },
     CommandSendFailed {
-        source: mpsc::error::SendError<SoraConnectionCommand>,
+        reason: String,
         command: &'static str,
     },
     CommandResponseMissing {
@@ -287,8 +285,8 @@ impl std::fmt::Display for Error {
             Error::UnsupportedMessageType { message_type } => {
                 write!(f, "未対応のメッセージを受信しました: {message_type}")
             }
-            Error::CommandSendFailed { command, source } => {
-                write!(f, "コマンドの送信に失敗しました: {command}: {source}")
+            Error::CommandSendFailed { command, reason } => {
+                write!(f, "コマンドの送信に失敗しました: {command}: {reason}")
             }
             Error::CommandResponseMissing { command, source } => {
                 write!(
@@ -378,7 +376,6 @@ impl std::error::Error for Error {
             Error::Vpl { source } => Some(source),
             Error::SimulcastSetParametersFailed { source } => Some(source),
             Error::Utf8DecodeFailed(err) => Some(err),
-            Error::CommandSendFailed { source, .. } => Some(source),
             Error::CommandResponseMissing { source, .. } => Some(source),
             #[cfg(feature = "v4l2")]
             Error::V4l2 { source } => Some(source),
