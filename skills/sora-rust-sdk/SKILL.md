@@ -250,7 +250,7 @@ H.264 / H.265 の `b_frame: true` は Sora 側の `sora.conf` で対応する設
 | `Mp4SampleReader` | 常時 | MP4 ファイルからサンプルを取得 |
 | `Mp4EncodedSample` | 常時 | エンコード済みサンプル |
 | `Mp4VideoCapturer` | 常時 | `VideoTrackSource` 互換のキャプチャ。`Mp4PassthroughVideoCodecCapability` と組で使う |
-| `Mp4Error` | 常時 | MP4 関連のエラー |
+| `Error::Mp4` | 常時 | MP4 関連のエラー |
 | `LibcameraVideoCapturer` | `libcamera` | libcamera 経由の映像入力 |
 | `LibcameraVideoCapturerBuilder` | `libcamera` | 上記のビルダー |
 | `LibcameraNativeFrameBuffer` | `libcamera` | libcamera のフレームバッファ |

@@ -47,8 +47,7 @@ pub use crate::video_codecs::internal::InternalVideoCodecCapability;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub use crate::video_codecs::internal_apple::InternalAppleVideoCodecCapability;
 pub use crate::video_codecs::mp4::{
-    Mp4EncodedSample, Mp4Error, Mp4PassthroughVideoCodecCapability, Mp4SampleReader,
-    Mp4VideoCapturer,
+    Mp4EncodedSample, Mp4PassthroughVideoCodecCapability, Mp4SampleReader, Mp4VideoCapturer,
 };
 #[cfg(feature = "nvcodec")]
 pub use crate::video_codecs::nvcodec::NvCodecVideoCodecCapability;

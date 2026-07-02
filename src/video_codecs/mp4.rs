@@ -34,7 +34,7 @@ use crate::video_codec_capability::{
 };
 
 #[derive(Debug)]
-pub enum Mp4Error {
+pub(crate) enum Mp4Error {
     Io(io::Error),
     Demux(shiguredo_mp4::demux::DemuxError),
     NoVideoTrack,
@@ -45,12 +45,12 @@ pub enum Mp4Error {
 impl std::fmt::Display for Mp4Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Io(err) => write!(f, "failed to read MP4 file: {err}"),
-            Self::Demux(err) => write!(f, "failed to demux MP4 file: {err}"),
-            Self::NoVideoTrack => f.write_str("no video track found in MP4"),
-            Self::NoVideoSamples => f.write_str("no video samples found in MP4"),
+            Self::Io(err) => write!(f, "読み込みに失敗しました: {err}"),
+            Self::Demux(err) => write!(f, "デマルチプレクスに失敗しました: {err}"),
+            Self::NoVideoTrack => f.write_str("映像トラックがありません"),
+            Self::NoVideoSamples => f.write_str("映像サンプルがありません"),
             Self::UnsupportedVideoCodec => {
-                f.write_str("unsupported MP4 video codec: expected H.264, H.265, VP8, VP9, or AV1")
+                f.write_str("映像コーデックが未対応です (H.264, H.265, VP8, VP9, AV1 のみ対応)")
             }
         }
     }
@@ -152,7 +152,11 @@ impl Mp4SampleReader {
     /// MP4 ファイルを読み込み、ビデオトラックの全サンプルを事前解析する。
     ///
     /// ファイル全体をメモリに保持するため、大きなファイルではメモリ使用量に注意。
-    pub fn new(path: &str) -> Result<Self> {
+    pub fn new(path: &str) -> crate::error::Result<Self> {
+        Self::new_inner(path).map_err(crate::error::Error::from)
+    }
+
+    fn new_inner(path: &str) -> Result<Self> {
         use shiguredo_mp4::demux::{Input, Mp4FileDemuxer};
 
         let file_data = std::fs::read(path)?;
@@ -651,7 +655,7 @@ pub struct Mp4VideoCapturer {
 }
 
 impl Mp4VideoCapturer {
-    pub fn new(reader: Mp4SampleReader) -> Result<Self> {
+    pub fn new(reader: Mp4SampleReader) -> crate::error::Result<Self> {
         let width = reader.track_info.width as i32;
         let height = reader.track_info.height as i32;
 

@@ -1,5 +1,3 @@
-use sora_sdk::Mp4Error;
-
 #[derive(Debug)]
 pub(crate) enum AppError {
     Args(noargs::Error),
@@ -11,7 +9,6 @@ pub(crate) enum AppError {
     #[cfg(feature = "raw-player")]
     RawPlayer(raw_player::Error),
     Io(std::io::Error),
-    Mp4(Mp4Error),
     Pem(rustls_pki_types::pem::Error),
 }
 
@@ -27,7 +24,6 @@ impl std::fmt::Display for AppError {
             #[cfg(feature = "raw-player")]
             AppError::RawPlayer(err) => write!(f, "AppError::RawPlayer: {err}"),
             AppError::Io(err) => write!(f, "AppError::Io: {err}"),
-            AppError::Mp4(err) => write!(f, "AppError::Mp4: {err}"),
             AppError::Pem(err) => write!(f, "AppError::Pem: {err}"),
         }
     }
@@ -38,7 +34,6 @@ impl std::error::Error for AppError {
         match self {
             AppError::Sora(err) => Some(err),
             AppError::Io(err) => Some(err),
-            AppError::Mp4(err) => Some(err),
             AppError::Pem(err) => Some(err),
             _ => None,
         }
@@ -66,12 +61,6 @@ impl From<std::io::Error> for AppError {
 impl From<rustls_pki_types::pem::Error> for AppError {
     fn from(err: rustls_pki_types::pem::Error) -> Self {
         AppError::Pem(err)
-    }
-}
-
-impl From<Mp4Error> for AppError {
-    fn from(err: Mp4Error) -> Self {
-        AppError::Mp4(err)
     }
 }
 
