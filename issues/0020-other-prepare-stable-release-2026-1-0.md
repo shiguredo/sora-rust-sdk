@@ -46,18 +46,18 @@
 
 正式リリース前に必ず終わらせる。**SemVer 互換の観点から正式版リリース後では取り戻せない項目**。
 
-- [ ] M1. 時雨堂依存クレートを正式版に切り替える（`shiguredo_amf` / `shiguredo_libcamera` / `shiguredo_nvcodec` / `shiguredo_v4l2` / `shiguredo_vpl` / `shiguredo_webrtc` の canary・完全 pin 解消）（#0021）
+- [x] M1. 時雨堂依存クレートを正式版に切り替える（`shiguredo_amf` / `shiguredo_libcamera` / `shiguredo_nvcodec` / `shiguredo_v4l2` / `shiguredo_vpl` / `shiguredo_webrtc` の canary・完全 pin 解消）（#0021）
   - `shiguredo_libcamera` / `shiguredo_v4l2` は 2026.1 に切り替え済み
   - `shiguredo_webrtc` は 0.150.2 に切り替え済み
   - 残: `shiguredo_amf` / `shiguredo_nvcodec` / `shiguredo_vpl`
 - M2. （欠番。対応しないと判断）
-- [ ] M3. 公開 API への `#[non_exhaustive]` 一斉付与
+- [x] M3. 公開 API への `#[non_exhaustive]` 一斉付与（`shiguredo-rust` 規約の `#[non_exhaustive]` 禁止により対応しない）
 - [ ] M4. `SoraConnectionCommand` を `pub(crate)` 化
-- [ ] M5. `shiguredo_webrtc` の公開 API 型を `pub use` で再エクスポート
+- [x] M5. `shiguredo_webrtc` の公開 API 型を `pub use` で再エクスポート（`shiguredo-rust` 規約の re-export 禁止により対応しない）
 - [ ] M6. 公開 API の rustdoc 拡充（`lib.rs` クレートドキュメント・`types.rs` / `error.rs` / `video_codec*.rs` / `video_codecs/*.rs` のモジュールドキュメントと項目ドキュメント）
 - [ ] M7. `Mp4Error` を `Error` 系へ統合（`From<Mp4Error> for Error` または `Error::Mp4` バリアント追加 + `Mp4Error::Display` 日本語化）
 - [x] M8. 日本語ログメッセージの英語化（`src/connection.rs` 26 件、`examples/sumomo/src/main.rs` 17 件）（#0022）
-- [ ] M9. `release.yml` の整備（ビルド依存 `apt-get install` ステップ、`timeout-minutes`、`concurrency`、prerelease 判定の SemVer 対応、`cargo publish --dry-run` 別ジョブ、`-p sora_sdk` 明示、OpenH264 ダウンロード）（#0028）
+- [x] M9. `release.yml` の整備（ビルド依存 `apt-get install` ステップ、`timeout-minutes`、`concurrency`、prerelease 判定の SemVer 対応、`cargo publish --dry-run` 別ジョブ、`-p sora_sdk` 明示、OpenH264 ダウンロード）（#0028）
 - [ ] M10. `CHANGES.md` の整合化とリリース手順整備（エントリ順序、`shiguredo_webrtc` / `shiguredo_nvcodec` / `prek` 等の本文の実態追従、`[ADD] ParsedProxyInfo` の本体移動、表記揺れ、`### misc` 扱いの確定、`## develop` → `## 2026.1.0` リネーム手順の明文化）
 - [ ] M11. `SKILL.md` のバージョン追従ルールと iOS 対応の確定（`canary.X` 手動同期の自動化 or 粗い表記化 / `InternalAppleVideoCodecCapability` の iOS gate 維持か削除か）
 
@@ -67,7 +67,7 @@
 
 - [ ] S1. テスト戦略強化（PBT 追加 / `IncomingMessage::parse` `RpcResponse::parse` 単体テスト追加 / `parse_stats_lossy` 誤合格修正 / `redirect.rs` 環境変数欠落時の return 修正 / TURN-TLS / `client_cert` / `spotlight` / `forwarding_filters` の e2e 追加）
 - [ ] S2. video codec 層の致命的バグ修正（`v4l2.rs` の callback と encoder 同居デッドロック懸念（#0026） / `libcamera.rs` の `acquire()` 後リソースリーク（#0025） / `v4l2.rs` の stride バッファ計算 / `mp4.rs` の `lengthSizeMinusOne` 無視（#0027） / `mp4.rs` の停止応答遅延 (`Mp4VideoCapturer` の `Drop` 内 `thread::sleep` が割り込み不能) / `amf.rs` のホットパス `assert_eq!`（#0024） / `find_capability` と関連関数（`requested_frame_type` / `supported_formats_for_codec` / `encoder_codec_config` / `decoder_codec` / `target_kbps_from_bps` / `frame_type_from_*`）が `v4l2.rs` / `vpl.rs` / `amf.rs` / `nvcodec.rs` / `openh264.rs` で 4〜5 重複 / ホットパスの `.expect("encoder should exist")` 残存 (`openh264.rs:204,390` / `nvcodec.rs:479,619` / `v4l2.rs:852`) / `amf.rs` の `slice::from_raw_parts` に SAFETY コメント不在 (`amf.rs:153,159,567,597-604`)）
-- [ ] S3. 公開 API 設計の追加修正（`SoraConnection` / `TimerManager` の `Drop` 実装（#0029） / `SecureRandom` 毎フレーム初期化と panic 経路（#0030） / `now()` の panic 経路（#0031） / URL シャッフルの modulo bias（#0032） / `TlsConfig` の二重インターフェース（#0033） / `Result<T>` エイリアスの扱い（#0034） / `ParsedProxyInfo` のフィールド可視性整合（#0035） / `tokio` の `rt-multi-thread` 削除（#0036） / 公開構造体の `Debug` 手書き実装（#0037））
+- [x] S3. 公開 API 設計の追加修正（`SoraConnection` / `TimerManager` の `Drop` 実装（#0029） / `SecureRandom` 毎フレーム初期化と panic 経路（#0030） / `now()` の panic 経路（#0031） / URL シャッフルの modulo bias（#0032） / `TlsConfig` の二重インターフェース（#0033） / `Result<T>` エイリアスの扱い（#0034） / `ParsedProxyInfo` のフィールド可視性整合（#0035） / `tokio` の `rt-multi-thread` 削除（#0036） / 公開構造体の `Debug` 手書き実装（#0037））
 - [ ] S4. CI ワークフロー強化（`macos-15` / `macos-26` マトリクス追加 / MSRV 1.88 検証 / `clippy --all-targets` 追加 / `cargo doc -D warnings` 追加 / nightly 確認 / self-hosted の `--skip` をテスト側 `#[ignore]` へ移動 / `cp .cargo/config.toml.ci` の用途明確化）
 - [ ] S5. README / docs の整備（`README.md` のプレースホルダ修正 / Linux ビルド依存の網羅 / 構成図に `pbt/` `docs/` 追加 / 対応プラットフォームと CI matrix の整合 / Sora 対応上限明示 / 「優先実装」セクション整理 / Copyright 表記見直し / `docs/SORA_CPP_SDK.md` の `HTTP Proxy 未実装` 等の古い記述修正 / `sumomo` README の `libssl-dev` 誤記削除 / CLI オプション一覧追加 / サンプル URL を `example.com` 化 / `examples/sumomo/Cargo.toml` メタデータ追加）
 - [ ] S6. リリース前掃除（`examples/sumomo/src/tests.rs` を `tests/` へ移動 / `VideoCodecPreference` の `find_mut` 等 4 公開 API を `pub(crate)` 化 / `CHANGES.md` の `### misc` セクション削除 / `Makefile` の `fuzzing` / `fuzzing-list` ターゲット削除 / `wait_task_finished` 削除 / `DataChannelConfig::direction` 削除 / `CodecDirection::as_label` 削除 / `src/zlib.rs` 統合 / `#[expect(unused_variables)]` 8 箇所 と各 `#[allow(dead_code)]` の `_` プレフィックス化 / `// ----` 装飾コメント削除 / `connection.rs:728,746` の変数名 `client` を `connection` にリネーム）
