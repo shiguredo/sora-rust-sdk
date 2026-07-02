@@ -169,8 +169,9 @@ pub enum Error {
     InvalidSystemTime {
         source: std::time::SystemTimeError,
     },
-    #[expect(private_interfaces)]
-    Mp4(Mp4Error),
+    Mp4 {
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for Error {
@@ -351,7 +352,7 @@ impl std::fmt::Display for Error {
                     "システム時刻が UNIX エポック (1970-01-01) より前です: {source}"
                 )
             }
-            Error::Mp4(err) => write!(f, "MP4 ファイルの処理に失敗しました: {err}"),
+            Error::Mp4 { reason } => write!(f, "MP4 ファイルの処理に失敗しました: {reason}"),
         }
     }
 }
@@ -387,7 +388,6 @@ impl std::error::Error for Error {
             #[cfg(feature = "v4l2")]
             Error::V4l2 { source } => Some(source),
             Error::InvalidSystemTime { source } => Some(source),
-            Error::Mp4(err) => Some(err),
             _ => None,
         }
     }
@@ -509,7 +509,9 @@ impl From<std::time::SystemTimeError> for Error {
 
 impl From<Mp4Error> for Error {
     fn from(err: Mp4Error) -> Self {
-        Error::Mp4(err)
+        Error::Mp4 {
+            reason: err.to_string(),
+        }
     }
 }
 
