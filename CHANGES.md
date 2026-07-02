@@ -10,6 +10,11 @@
   - バグ修正
 
 ## develop
+- [CHANGE] `Mp4Error` を `Error` 列挙型に統合し、`pub(crate)` 化する
+  - `Error::Mp4(Mp4Error)` バリアントを追加し、`From<Mp4Error> for Error` を実装する
+  - `Mp4Error` は `pub(crate)` になり、外部から直接参照できなくなる
+  - `Mp4Error::Display` を日本語化する
+  - @melpon
 - [CHANGE] `ParsedProxyInfo` のフィールド可視性を `pub(crate)` に統一し accessor を追加する
   - `host()` / `port()` / `username()` / `password()` / `user_agent()` の 5 件の accessor を追加し、フィールド直接アクセスは不可になる
   - @melpon
