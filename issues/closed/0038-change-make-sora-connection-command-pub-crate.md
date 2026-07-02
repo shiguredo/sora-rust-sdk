@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-02
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-02
 - Model: DeepSeek V4 Pro
 - Branch: feature/change-make-sora-connection-command-pub-crate
 - Polished: 2026-07-02
