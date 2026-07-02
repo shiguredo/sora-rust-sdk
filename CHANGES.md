@@ -10,6 +10,10 @@
   - バグ修正
 
 ## develop
+- [CHANGE] `SoraConnectionCommand` の可視性を `pub` から `pub(crate)` に変更し `Error::CommandSendFailed` の型を変更する
+  - `SoraConnectionCommand` は公開 API から削除され、外部からの参照は不可になる
+  - `Error::CommandSendFailed` の `source` フィールドを `SendError<SoraConnectionCommand>` から `reason: String` に変更し、`std::error::Error::source()` からも除外する
+  - @melpon
 - [CHANGE] `ParsedProxyInfo` のフィールド可視性を `pub(crate)` に統一し accessor を追加する
   - `host()` / `port()` / `username()` / `password()` / `user_agent()` の 5 件の accessor を追加し、フィールド直接アクセスは不可になる
   - @melpon
