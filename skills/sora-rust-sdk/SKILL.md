@@ -23,7 +23,7 @@ WebRTC SFU Sora のクライアントを Rust で実装するための SDK。シ
 ## バージョン情報
 
 - crate 名: `sora_sdk`
-- バージョン: 2026.1.0-canary.10
+- バージョン: 2026.1.0
 - Rust Edition: 2024
 - 最小 Rust バージョン: 1.88
 - ライセンス: Apache-2.0
@@ -178,7 +178,7 @@ pub enum Role { SendOnly, RecvOnly, SendRecv }
 | `Audio` | `Bool(bool)`, `Audio { codec_type: Option<AudioCodecType>, bit_rate: Option<u32>, opus_params: Option<AudioOpusParams> }` |
 | `AudioCodecType` | `OPUS` |
 | `AudioOpusParams` | `channels`, `maxplaybackrate`, `minptime`, `ptime`, `stereo`, `sprop_stereo`, `useinbandfec`, `usedtx` (すべて `Option`) |
-| `Video` | `Bool(bool)`, `Video { codec_type, bit_rate, vp9_params, av1_params, h264_params, h265_params }` |
+| `Video` | `Bool(bool)`, `Video { codec_type: Option<VideoCodecType>, bit_rate: Option<u32>, vp9_params: Option<VideoVP9Params>, av1_params: Option<VideoAV1Params>, h264_params: Option<VideoH264Params>, h265_params: Option<VideoH265Params> }` |
 | `VideoCodecType` | `VP8`, `VP9`, `H264`, `H265`, `AV1` |
 | `VideoVP9Params` | `profile_id: Option<u32>` (0..3) |
 | `VideoH264Params` | `profile_level_id: Option<String>`, `b_frame: Option<bool>` |
@@ -208,7 +208,7 @@ H.264 / H.265 の `b_frame: true` は Sora 側の `sora.conf` で対応する設
 | `ForwardingFilter` | `name: Option<String>`, `priority: Option<i32>`, `action: Option<String>`, `rules: Vec<Vec<ForwardingFilterRule>>`, `version: Option<String>`, `metadata: Option<JsonString>` |
 | `ForwardingFilterRule` | `field: String`, `operator: String`, `values: Vec<String>` |
 | `ProxyInfo` | `url: String`, `username: Option<String>`, `password: Option<String>`, `user_agent: Option<String>` |
-| `ParsedProxyInfo` | `ProxyInfo::parse()` で検証済みのプロキシ接続情報を取得する公開型。全フィールドは非公開で accessor (`host()` / `port()` / `username()` / `password()` / `user_agent()`) 経由で取得する。主に PBT 用途で公開されている |
+| `ParsedProxyInfo` | `ParsedProxyInfo::parse(&ProxyInfo)` で検証済みのプロキシ接続情報を取得する公開型。全フィールドは非公開で accessor (`host()` / `port()` / `username()` / `password()` / `user_agent()`) 経由で取得する。主に PBT 用途で公開されている |
 | `JsonString` | `nojson::RawJsonOwned` のラッパー。`str::parse::<JsonString>()` で構築 (不正 JSON は `Error::JsonParse`) |
 | `SignalingType` | `WebSocket`, `DataChannel` |
 | `SignalingDirection` | `Sent`, `Received` |
@@ -495,6 +495,7 @@ if let Some(url) = handle.selected_signaling_url().await? {
 | コーデック | `InvalidVideoCodecCapability`, `InvalidVideoCodecPreference` |
 | 内部コマンド | `CommandSendFailed`, `CommandResponseMissing` |
 | バックエンド固有 (feature 付き) | `Libcamera`, `LibcameraMessage`, `Openh264`, `Amf { source }`, `AmfMessage`, `Vpl { source }`, `VplMessage`, `NvCodec { source }`, `NvCodecMessage`, `V4l2 { source }`, `V4l2Message` |
+| その他 | `Mp4 { reason }`, `InvalidSystemTime { source }` |
 
 エラーメッセージ (`Display`) は日本語。ログメッセージは英語、というプロジェクト方針と分けて扱うこと。
 
