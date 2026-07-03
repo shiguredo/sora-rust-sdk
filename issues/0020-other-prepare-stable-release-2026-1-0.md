@@ -54,7 +54,7 @@
 - [x] M3. 公開 API への `#[non_exhaustive]` 一斉付与（`shiguredo-rust` 規約の `#[non_exhaustive]` 禁止により対応しない）
 - [x] M4. `SoraConnectionCommand` を `pub(crate)` 化（#0038）
 - [x] M5. `shiguredo_webrtc` の公開 API 型を `pub use` で再エクスポート（`shiguredo-rust` 規約の re-export 禁止により対応しない）
-- [ ] M6. 公開 API の rustdoc 拡充（`lib.rs` クレートドキュメント・`types.rs` / `error.rs` / `video_codec*.rs` / `video_codecs/*.rs` のモジュールドキュメントと項目ドキュメント）（#0041）
+- [x] M6. 公開 API の rustdoc 拡充（`lib.rs` クレートドキュメント・`types.rs` / `error.rs` / `video_codec*.rs` / `video_codecs/*.rs` のモジュールドキュメントと項目ドキュメント）（#0041）
 - [x] M7. `Mp4Error` を `Error` 系へ統合（`From<Mp4Error> for Error` または `Error::Mp4` バリアント追加 + `Mp4Error::Display` 日本語化）（#0039）
 - [x] M8. 日本語ログメッセージの英語化（`src/connection.rs` 26 件、`examples/sumomo/src/main.rs` 17 件）（#0022）
 - [x] M9. `release.yml` の整備（ビルド依存 `apt-get install` ステップ、`timeout-minutes`、`concurrency`、prerelease 判定の SemVer 対応、`cargo publish --dry-run` 別ジョブ、`-p sora_sdk` 明示、OpenH264 ダウンロード）（#0028）
