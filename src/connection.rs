@@ -65,6 +65,10 @@ pub struct TlsConfig {
 
 type IceServerUrlConfigurer = dyn Fn(&mut IceServer, &[String]) + Send + Sync;
 
+/// [SoraConnection] を構築するためのビルダー。
+///
+/// [SoraConnection::builder()] で生成し、各種設定メソッドでパラメータを指定した後、
+/// [build()](Self::build) で [SoraConnection] と [SoraConnectionHandle] を生成する。
 pub struct SoraConnectionBuilder {
     signaling_urls: Vec<String>,
     channel_id: String,
@@ -175,6 +179,13 @@ impl SoraConnectionBuilder {
         }
     }
 
+    /// シグナリングメッセージの送受信を監視するコールバックを設定する。
+    ///
+    /// Sora サーバーとの間でやり取りされる JSON メッセージの内容を、
+    /// デバッグやログ記録のために取得できる。
+    /// 第一引数はシグナリング経路（[SignalingType::WebSocket] または [SignalingType::DataChannel]）、
+    /// 第二引数はメッセージの方向（[SignalingDirection::Sent] または [SignalingDirection::Received]）、
+    /// 第三引数は JSON 文字列。
     pub fn on_signaling_message<F>(mut self, handler: F) -> Self
     where
         F: Fn(SignalingType, SignalingDirection, &str) + Send + Sync + 'static,
@@ -183,6 +194,10 @@ impl SoraConnectionBuilder {
         self
     }
 
+    /// シグナリング通知メッセージを受信したときに呼ばれるコールバックを設定する。
+    ///
+    /// 引数には Sora サーバーから送られてきた JSON 文字列が渡される。
+    /// チャネル参加者の接続・切断・メタデータ変更などのイベント情報を受け取れる。
     pub fn on_notify<F>(mut self, handler: F) -> Self
     where
         F: Fn(&str) + Send + Sync + 'static,
@@ -191,6 +206,10 @@ impl SoraConnectionBuilder {
         self
     }
 
+    /// プッシュ通知メッセージを受信したときに呼ばれるコールバックを設定する。
+    ///
+    /// 引数には Sora サーバーから送られてきた JSON 文字列が渡される。
+    /// プッシュ API やシグナリング通知メタデータ拡張から送信された通知を受け取れる。
     pub fn on_push<F>(mut self, handler: F) -> Self
     where
         F: Fn(&str) + Send + Sync + 'static,
@@ -199,6 +218,10 @@ impl SoraConnectionBuilder {
         self
     }
 
+    /// リモート参加者から映像または音声トラックを受信したときに呼ばれるコールバックを設定する。
+    ///
+    /// 引数には受信した [RtpTransceiver] が渡される。
+    /// このトランシーバーからトラックや RTP 統計情報を取得できる。
     pub fn on_track<F>(mut self, handler: F) -> Self
     where
         F: Fn(RtpTransceiver) + Send + Sync + 'static,
@@ -207,6 +230,9 @@ impl SoraConnectionBuilder {
         self
     }
 
+    /// リモート参加者の映像または音声トラックが削除されたときに呼ばれるコールバックを設定する。
+    ///
+    /// 引数には削除されたトラックに対応する [RtpReceiver] が渡される。
     pub fn on_remove_track<F>(mut self, handler: F) -> Self
     where
         F: Fn(RtpReceiver) + Send + Sync + 'static,
@@ -215,6 +241,8 @@ impl SoraConnectionBuilder {
         self
     }
 
+    /// WebSocket シグナリングから DataChannel シグナリングへの切替が
+    /// 完了したときに呼ばれるコールバックを設定する。
     pub fn on_switched<F>(mut self, handler: F) -> Self
     where
         F: Fn() + Send + Sync + 'static,
@@ -223,6 +251,10 @@ impl SoraConnectionBuilder {
         self
     }
 
+    /// WebSocket 接続がクローズされたときに呼ばれるコールバックを設定する。
+    ///
+    /// 第一引数はクローズコード（`Some(u16)`）または `None`（正常クローズ以外）、
+    /// 第二引数はクローズ理由の文字列。
     pub fn on_websocket_close<F>(mut self, handler: F) -> Self
     where
         F: Fn(Option<u16>, &str) + Send + Sync + 'static,
@@ -231,6 +263,12 @@ impl SoraConnectionBuilder {
         self
     }
 
+    /// `#` プレフィックス付きのユーザー定義 DataChannel ラベル経由で
+    /// メッセージを受信したときに呼ばれるコールバックを設定する。
+    ///
+    /// 第一引数は DataChannel のラベル名（`#` プレフィックスを含む）、
+    /// 第二引数は受信したバイナリデータ。
+    /// 任意のアプリケーションデータを DataChannel 経由で送受信するために使う。
     pub fn on_message<F>(mut self, handler: F) -> Self
     where
         F: Fn(&str, &[u8]) + Send + Sync + 'static,
@@ -239,6 +277,9 @@ impl SoraConnectionBuilder {
         self
     }
 
+    /// Sora サーバーから DataChannel が作成されたときに呼ばれるコールバックを設定する。
+    ///
+    /// 引数には作成された DataChannel のラベル名が渡される。
     pub fn on_data_channel<F>(mut self, handler: F) -> Self
     where
         F: Fn(&str) + Send + Sync + 'static,
@@ -247,6 +288,9 @@ impl SoraConnectionBuilder {
         self
     }
 
+    /// DataChannel が開かれたときに呼ばれるコールバックを設定する。
+    ///
+    /// 引数には開かれた DataChannel のラベル名が渡される。
     pub fn on_data_channel_open<F>(mut self, handler: F) -> Self
     where
         F: Fn(&str) + Send + Sync + 'static,
@@ -255,6 +299,9 @@ impl SoraConnectionBuilder {
         self
     }
 
+    /// DataChannel 経由でメッセージを受信したときに呼ばれるコールバックを設定する。
+    ///
+    /// 第一引数は DataChannel のラベル名、第二引数は受信したバイナリデータ。
     pub fn on_data_channel_message<F>(mut self, handler: F) -> Self
     where
         F: Fn(&str, &[u8]) + Send + Sync + 'static,
@@ -263,6 +310,9 @@ impl SoraConnectionBuilder {
         self
     }
 
+    /// DataChannel が閉じられたときに呼ばれるコールバックを設定する。
+    ///
+    /// 引数には閉じられた DataChannel のラベル名が渡される。
     pub fn on_data_channel_close<F>(mut self, handler: F) -> Self
     where
         F: Fn(&str) + Send + Sync + 'static,
@@ -271,102 +321,179 @@ impl SoraConnectionBuilder {
         self
     }
 
+    /// Sora サーバーに送信する映像トラックを設定する。
+    ///
+    /// [SoraConnectionContext::create_video_track] などで生成した
+    /// [VideoTrack] を渡す。
     pub fn sender_video_track(mut self, track: VideoTrack) -> Self {
         self.sender_video_track = Some(track);
         self
     }
 
+    /// Sora サーバーに送信する音声トラックを設定する。
+    ///
+    /// [SoraConnectionContext::create_audio_track] などで生成した
+    /// [AudioTrack] を渡す。
     pub fn sender_audio_track(mut self, track: AudioTrack) -> Self {
         self.sender_audio_track = Some(track);
         self
     }
 
+    /// Sora サーバーに送信するクライアント ID を 1〜255 バイトの任意の文字列で指定する。
+    ///
+    /// 指定しない場合は Sora サーバーによって接続 ID が自動的に割り当てられる。
+    /// 同一セッション内で同じクライアント ID を持つ接続が存在する場合、
+    /// 設定によっては既存の接続が追い出されることがある。
     pub fn client_id(mut self, client_id: String) -> Self {
         self.client_id = Some(client_id);
         self
     }
 
+    /// Sora サーバーに送信するバンドル ID を 1〜255 バイトの任意の文字列で指定する。
+    ///
+    /// マルチストリーム利用時に、同じバンドル ID を持つ接続からの
+    /// 音声・映像・メッセージングを受信しなくなる。
     pub fn bundle_id(mut self, bundle_id: String) -> Self {
         self.bundle_id = Some(bundle_id);
         self
     }
 
+    /// Sora サーバーに送信する認証メタデータを [JsonString] で指定する。
+    ///
+    /// この値は Sora サーバーの認証ウェブフックに渡される。
+    /// 接続の認証やセッション管理に利用できる任意の JSON データを設定する。
     pub fn metadata(mut self, metadata: JsonString) -> Self {
         self.metadata = Some(metadata);
         self
     }
 
+    /// 配信または受信する音声メディアの設定を指定する。
+    ///
+    /// [Audio::new_bool] で単純な有効/無効を、
+    /// [Audio::new_opus] で Opus のビットレートやパラメータを指定できる。
+    /// role が [Role::SendRecv] または [Role::SendOnly] の場合は配信設定として、
+    /// [Role::RecvOnly] の場合は受信設定として扱われる。
     pub fn audio(mut self, audio: Audio) -> Self {
         self.audio = Some(audio);
         self
     }
 
+    /// 配信または受信する映像メディアの設定を指定する。
+    ///
+    /// [Video::new_bool] で単純な有効/無効を、
+    /// [Video::new_vp8] / [Video::new_vp9] / [Video::new_av1] /
+    /// [Video::new_h264] / [Video::new_h265] でコーデックやビットレートを指定できる。
+    /// role が [Role::SendRecv] または [Role::SendOnly] の場合は配信設定として、
+    /// [Role::RecvOnly] の場合は受信設定として扱われる。
     pub fn video(mut self, video: Video) -> Self {
         self.video = Some(video);
         self
     }
 
+    /// WebSocket でのシグナリング確立後に、
+    /// 後続のシグナリングを DataChannel に切り替えるかどうかを指定する。
+    ///
+    /// true にすると、offer/answer 交換以降のシグナリングメッセージが
+    /// WebSocket ではなく DataChannel 経由でやり取りされる。
     pub fn data_channel_signaling(mut self, value: bool) -> Self {
         self.data_channel_signaling = Some(value);
         self
     }
 
+    /// DataChannel シグナリングへの切替後に WebSocket が切断された場合でも、
+    /// DataChannel での通信を継続するかどうかを指定する。
+    ///
+    /// true にすると、WebSocket 接続が切れても
+    /// DataChannel 経由のシグナリングが継続される。
     pub fn ignore_disconnect_websocket(mut self, value: bool) -> Self {
         self.ignore_disconnect_websocket = Some(value);
         self
     }
 
+    /// サイマルキャストを有効にするかどうかを指定する。
+    ///
+    /// true にすると、配信映像が複数の品質（解像度・ビットレート）の
+    /// ストリームに分割され、受信側が自分の帯域に合わせて
+    /// 最適な品質のストリームを選択できるようになる。
     pub fn simulcast(mut self, value: bool) -> Self {
         self.simulcast = Some(value);
         self
     }
 
+    /// サイマルキャスト利用時に受信側として要求する rid を指定する。
+    ///
+    /// rid は受信したい品質レイヤーを識別する文字列で、
+    /// "r0"（低品質）、"r1"（中品質）、"r2"（高品質）などが使われる。
     pub fn simulcast_request_rid(mut self, value: String) -> Self {
         self.simulcast_request_rid = Some(value);
         self
     }
 
+    /// スポットライト機能を有効にするかどうかを指定する。
+    ///
+    /// true にすると、現在話している参加者にフォーカスが当たり、
+    /// フォーカスされた参加者の映像は高画質・音声は高音質で配信され、
+    /// それ以外の参加者の映像は低画質に制限される。
+    /// これにより視聴側の負荷が軽減される。
+    /// [simulcast](Self::simulcast) が有効であることが前提。
     pub fn spotlight(mut self, value: bool) -> Self {
         self.spotlight = Some(value);
         self
     }
 
+    /// スポットライトでフォーカスされた参加者の映像を受信する際の rid を指定する。
+    ///
+    /// この値で指定された品質レイヤーで、フォーカス参加者の映像を受信する。
     pub fn spotlight_focus_rid(mut self, value: String) -> Self {
         self.spotlight_focus_rid = Some(value);
         self
     }
 
+    /// スポットライトでフォーカスされていない参加者の映像を受信する際の rid を指定する。
+    ///
+    /// この値で指定された品質レイヤーで、非フォーカス参加者の映像を受信する。
     pub fn spotlight_unfocus_rid(mut self, value: String) -> Self {
         self.spotlight_unfocus_rid = Some(value);
         self
     }
 
+    /// シグナリング通知メタデータを [JsonString] で指定する。
+    ///
+    /// この値はシグナリング通知に含めてチャネル内の全参加者にブロードキャストされる。
     pub fn signaling_notify_metadata(mut self, value: JsonString) -> Self {
         self.signaling_notify_metadata = Some(value);
         self
     }
 
+    /// 接続時に作成する追加の DataChannel の設定を指定する。
+    ///
+    /// 各 [ConnectDataChannel] でラベル、方向、圧縮の有無などを指定できる。
+    /// ここで指定した DataChannel は WebRTC 接続確立時に自動的に作成される。
     pub fn data_channels(mut self, value: Vec<ConnectDataChannel>) -> Self {
         self.data_channels = Some(value);
         self
     }
 
+    /// 接続時に適用する転送フィルターのリストを指定する。
+    ///
+    /// 転送フィルターを使うと、条件に合致する他参加者の音声や映像の受信を
+    /// ブロックできる。各 [ForwardingFilter] は [ForwardingFilterRule](crate::types::ForwardingFilterRule) の
+    /// リストで構成され、ルールには対象フィールド（kind 等）・
+    /// 演算子（is_in 等）・値を指定する。
+    /// 接続後は [SoraConnectionHandle::send_rpc_request] で
+    /// DataChannel 経由にフィルターを変更することも可能。
     pub fn forwarding_filters(mut self, value: Vec<ForwardingFilter>) -> Self {
         self.forwarding_filters = Some(value);
         self
     }
 
-    pub fn turn_tls_insecure(mut self, value: bool) -> Self {
-        self.turn_tls_insecure = value;
-        self
-    }
-
-    /// TURN-TLS の CA 証明書を DER エンコードで設定する。
-    pub fn turn_tls_ca_cert(mut self, der: Vec<u8>) -> Self {
-        self.turn_tls_ca_cert = Some(der);
-        self
-    }
-
+    /// Sora サーバーから通知された ICE サーバー設定をカスタマイズする
+    /// コールバックを設定する。
+    ///
+    /// コールバックの第一引数は設定対象の [IceServer]、
+    /// 第二引数は Sora から通知された URL のリスト。
+    /// 指定しない場合は通知された全 URL がそのまま ICE サーバーに追加される。
+    /// 特定のプロトコル（TCP/UDP）のみを使うなどのフィルタリングに利用できる。
     pub fn ice_server_url_configurer<F>(mut self, configurer: F) -> Self
     where
         F: Fn(&mut IceServer, &[String]) + Send + Sync + 'static,
@@ -375,53 +502,104 @@ impl SoraConnectionBuilder {
         self
     }
 
+    /// シグナリング接続時に経由する HTTP プロキシを設定する。
+    ///
+    /// HTTP CONNECT メソッドを使ってプロキシサーバー経由で
+    /// Sora サーバーに接続する。プロキシ認証が必要な場合は
+    /// [ProxyInfo] の username / password フィールドで指定する。
     pub fn proxy(mut self, proxy: ProxyInfo) -> Self {
         self.proxy = Some(proxy);
         self
     }
 
+    /// WebSocket 接続が確立するまでの待機時間の上限を設定する。
+    ///
+    /// この時間内に WebSocket 接続が確立できなかった場合、
+    /// 残りのシグナリング URL への接続が試行される。
     pub fn websocket_connection_timeout(mut self, value: Duration) -> Self {
         self.websocket_connection_timeout = value;
         self
     }
 
+    /// 切断時に WebSocket のクローズハンドシェイクを待機する時間の上限を設定する。
+    ///
+    /// この時間を超えると WebSocket のクローズ完了を待たずに処理を打ち切る。
     pub fn websocket_close_timeout(mut self, value: Duration) -> Self {
         self.websocket_close_timeout = value;
         self
     }
 
+    /// 切断時に DataChannel がすべて閉じられるまでの待機時間の上限を設定する。
+    ///
+    /// DataChannel シグナリング利用時に、切断処理の一部として
+    /// 開いている全 DataChannel のクローズを待機する。
     pub fn disconnect_wait_timeout(mut self, value: Duration) -> Self {
         self.disconnect_wait_timeout = value;
         self
     }
 
-    /// サーバー証明書の検証をスキップする。
+    /// シグナリング用 WebSocket（WSS）接続時のサーバー証明書検証を
+    /// スキップするかどうかを指定する。
+    ///
+    /// true にすると、自己署名証明書や検証不能な証明書を使った
+    /// Sora サーバーにも接続できるようになる。
+    /// 本番環境ではセキュリティ上の理由から false のまま使うことを推奨する。
     pub fn insecure(mut self, value: bool) -> Self {
         self.tls_config.insecure = value;
         self
     }
 
-    /// クライアント証明書と秘密鍵を設定する (PEM 形式)。
+    /// TURN-TLS 接続時のサーバー証明書検証をスキップするかどうかを指定する。
+    ///
+    /// true にすると、自己署名証明書や検証不能な証明書を使った
+    /// TURN サーバーにも接続できるようになる。
+    /// 本番環境ではセキュリティ上の理由から false のまま使うことを推奨する。
+    pub fn turn_tls_insecure(mut self, value: bool) -> Self {
+        self.turn_tls_insecure = value;
+        self
+    }
+
+    /// シグナリング用 WebSocket（WSS）接続時に使用する CA 証明書を
+    /// PEM 形式で設定する。
+    ///
+    /// プライベート CA で署名された Sora サーバー証明書を検証するために使う。
+    pub fn ca_cert(mut self, cert: String) -> Self {
+        self.tls_config.ca_cert = Some(cert);
+        self
+    }
+
+    /// TURN-TLS 接続時に使用する CA 証明書を DER エンコードのバイト列で設定する。
+    ///
+    /// プライベート CA で署名された TURN サーバー証明書を検証するために使う。
+    pub fn turn_tls_ca_cert(mut self, der: Vec<u8>) -> Self {
+        self.turn_tls_ca_cert = Some(der);
+        self
+    }
+
+    /// シグナリング用 WebSocket（WSS）接続時に使用する
+    /// クライアント証明書と秘密鍵を PEM 形式で設定する。
+    ///
+    /// クライアント証明書による認証が必要な Sora サーバーに接続する際に使う。
+    /// cert と key は必ず両方を指定する必要がある。
     pub fn client_cert(mut self, cert: String, key: String) -> Self {
         self.tls_config.client_cert = Some(cert);
         self.tls_config.client_key = Some(key);
         self
     }
 
-    /// CA 証明書を設定する (PEM 形式)。
-    pub fn ca_cert(mut self, cert: String) -> Self {
-        self.tls_config.ca_cert = Some(cert);
-        self
-    }
-
-    /// WebSocket 接続時の User-Agent ヘッダを設定する。
+    /// WebSocket 接続時の User-Agent ヘッダ値を設定する。
     ///
-    /// 未設定の場合はデフォルト値 ("Sora Rust SDK {version}") が使用される。
+    /// この値は Sora サーバーのログや認証ウェブフックに記録される。
     pub fn user_agent(mut self, value: String) -> Self {
         self.user_agent = Some(value);
         self
     }
 
+    /// ビルダーを消費して [SoraConnection] と [SoraConnectionHandle] を生成する。
+    ///
+    /// 生成された [SoraConnection] は [run](SoraConnection::run) を
+    /// 別タスクで実行することで接続を開始する。
+    /// [SoraConnectionHandle] は接続の切断や統計情報の取得に使用する。
     pub fn build(self) -> Result<(SoraConnection, SoraConnectionHandle)> {
         SoraConnection::new(self)
     }
@@ -530,6 +708,11 @@ impl SoraConnectionHandle {
     }
 }
 
+/// Sora サーバーとの WebRTC 接続を管理する本体。
+///
+/// [SoraConnectionBuilder] の [build()](SoraConnectionBuilder::build) で生成し、
+/// [run()](Self::run) でメインループを開始する。
+/// 別タスクから [SoraConnectionHandle] 経由で制御する。
 pub struct SoraConnection {
     data_channels: HashMap<String, ManagedDataChannel>,
     data_channel_configs: Vec<DataChannelConfig>,
@@ -633,6 +816,7 @@ impl SSLCertificateVerifierHandler for TurnTlsCaCertVerifier {
 }
 
 impl SoraConnection {
+    /// [SoraConnectionBuilder] を生成する。
     pub fn builder(
         context: Arc<SoraConnectionContext>,
         signaling_urls: Vec<String>,
@@ -755,6 +939,10 @@ impl SoraConnection {
         Ok((client, handle))
     }
 
+    /// メインループを開始する。
+    ///
+    /// シグナリング接続を確立し、WebRTC ネゴシエーションを処理し、受信メッセージを処理する。
+    /// 接続が終了するまでブロックするため、別の非同期タスクで呼び出すこと。
     pub async fn run(mut self) -> Result<()> {
         let signaling_urls = self.config.signaling_urls.clone();
         let channel_id = self.config.channel_id.clone();
@@ -1963,22 +2151,27 @@ pub struct ParsedProxyInfo {
 }
 
 impl ParsedProxyInfo {
+    /// プロキシホスト名を返す。
     pub fn host(&self) -> &str {
         &self.host
     }
 
+    /// プロキシポート番号を返す。
     pub fn port(&self) -> u16 {
         self.port
     }
 
+    /// プロキシユーザー名を返す。
     pub fn username(&self) -> Option<&str> {
         self.username.as_deref()
     }
 
+    /// プロキシパスワードを返す。
     pub fn password(&self) -> Option<&str> {
         self.password.as_deref()
     }
 
+    /// プロキシ接続時の User-Agent ヘッダ値を返す。
     pub fn user_agent(&self) -> &str {
         &self.user_agent
     }

@@ -1,3 +1,6 @@
+//! V4L2 M2M ハードウェアエンコーダー/デコーダー実装。
+//!
+//! `#[cfg(feature = "v4l2")]` でのみコンパイルされる。
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::sync::{Arc, Mutex};
@@ -910,12 +913,17 @@ impl VideoDecoderHandler for V4l2VideoDecoder {
     }
 }
 
+/// V4L2 M2M を使用する [VideoCodecCapability]。
+///
+/// `#[cfg(feature = "v4l2")]` でのみ利用可能。
+/// H.264 エンコード・デコードをサポートする。
 pub struct V4l2VideoCodecCapability {
     decoder_device_path: String,
     simulcast_capability_helper: SimulcastCapabilityHelper,
 }
 
 impl V4l2VideoCodecCapability {
+    /// デフォルトのデバイスパス (`/dev/video11` / `/dev/video10`) で新しい `V4l2VideoCodecCapability` を生成する。
     pub fn new() -> Result<Self> {
         Self::new_with_device_paths("/dev/video11".to_string(), "/dev/video10".to_string(), true)
     }

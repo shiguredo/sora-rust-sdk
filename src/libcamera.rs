@@ -1,3 +1,7 @@
+//! libcamera を利用した映像キャプチャ機能。
+//!
+//! `#[cfg(feature = "libcamera")]` でのみコンパイルされる。
+
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,6 +26,9 @@ const DEFAULT_HEIGHT: i32 = 480;
 const YU12_FOURCC: u32 = u32::from_le_bytes([b'Y', b'U', b'1', b'2']);
 const NV12_FOURCC: u32 = u32::from_le_bytes([b'N', b'V', b'1', b'2']);
 
+/// libcamera 映像キャプチャラのビルダー。
+///
+/// `#[cfg(feature = "libcamera")]` でのみ利用可能。
 pub struct LibcameraVideoCapturerBuilder {
     camera_index: u32,
     width: i32,
@@ -43,36 +50,57 @@ impl Default for LibcameraVideoCapturerBuilder {
 }
 
 impl LibcameraVideoCapturerBuilder {
+    /// カメラインデックスを設定する。
+    ///
+    /// デフォルトは `0`。
     pub fn camera_index(mut self, camera_index: u32) -> Self {
         self.camera_index = camera_index;
         self
     }
 
+    /// 映像の幅を設定する。
+    ///
+    /// デフォルトは `640`。
     pub fn width(mut self, width: i32) -> Self {
         self.width = width;
         self
     }
 
+    /// 映像の高さを設定する。
+    ///
+    /// デフォルトは `480`。
     pub fn height(mut self, height: i32) -> Self {
         self.height = height;
         self
     }
 
+    /// ネイティブフレーム出力を設定する。
+    ///
+    /// `true` の場合、DMA-BUF を経由して [`LibcameraNativeFrameBuffer`] を出力する。
+    ///
+    /// デフォルトは `false`。
     pub fn native_frame_output(mut self, native_frame_output: bool) -> Self {
         self.native_frame_output = native_frame_output;
         self
     }
 
+    /// コントロールを追加で設定する。
+    ///
+    /// デフォルトは空。
     pub fn control(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.controls.push((key.into(), value.into()));
         self
     }
 
+    /// 複数のコントロールを設定する。
+    ///
+    /// デフォルトは空。
     pub fn controls(mut self, controls: Vec<(String, String)>) -> Self {
         self.controls.extend(controls);
         self
     }
 
+    /// [`LibcameraVideoCapturer`] を構築する。
     pub fn build(self) -> Result<LibcameraVideoCapturer> {
         if self.width <= 0 || self.height <= 0 {
             return Err(Error::LibcameraMessage {
@@ -97,6 +125,9 @@ impl LibcameraVideoCapturerBuilder {
     }
 }
 
+/// libcamera の映像をキャプチャし WebRTC の映像ソースとして提供する。
+///
+/// `#[cfg(feature = "libcamera")]` でのみ利用可能。
 pub struct LibcameraVideoCapturer {
     source: AdaptedVideoTrackSource,
     camera_index: u32,
@@ -109,10 +140,12 @@ pub struct LibcameraVideoCapturer {
 }
 
 impl LibcameraVideoCapturer {
+    /// [`LibcameraVideoCapturerBuilder`] を返す。
     pub fn builder() -> LibcameraVideoCapturerBuilder {
         LibcameraVideoCapturerBuilder::default()
     }
 
+    /// キャプチャを開始する。
     pub fn start(&mut self) -> Result<()> {
         if self.thread.is_some() {
             return Ok(());
@@ -148,6 +181,7 @@ impl LibcameraVideoCapturer {
         Ok(())
     }
 
+    /// キャプチャを停止する。
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(handle) = self.thread.take() {
@@ -155,6 +189,7 @@ impl LibcameraVideoCapturer {
         }
     }
 
+    /// WebRTC の [`VideoTrackSource`] を返す。
     pub fn video_source(&self) -> VideoTrackSource {
         self.source.cast_to_video_track_source()
     }
@@ -184,6 +219,9 @@ impl Drop for LibcameraNativeRequeueToken {
     }
 }
 
+/// libcamera から取得したネイティブ DMA-BUF フレームバッファ。
+///
+/// `#[cfg(feature = "libcamera")]` でのみ利用可能。
 #[derive(Debug, Clone)]
 pub struct LibcameraNativeFrameBuffer {
     raw_width: i32,
@@ -225,38 +263,47 @@ impl LibcameraNativeFrameBuffer {
         }
     }
 
+    /// DMA-BUF のファイルディスクリプタを返す。
     pub fn fd(&self) -> i32 {
         self.fd
     }
 
+    /// バッファサイズを返す。
     pub fn size(&self) -> usize {
         self.size
     }
 
+    /// ストライドを返す。
     pub fn stride(&self) -> i32 {
         self.stride
     }
 
+    /// 元の幅を返す。
     pub fn raw_width(&self) -> i32 {
         self.raw_width
     }
 
+    /// 元の高さを返す。
     pub fn raw_height(&self) -> i32 {
         self.raw_height
     }
 
+    /// スケーリング後の幅を返す。
     pub fn scaled_width(&self) -> i32 {
         self.scaled_width
     }
 
+    /// スケーリング後の高さを返す。
     pub fn scaled_height(&self) -> i32 {
         self.scaled_height
     }
 
+    /// I420 形式かどうかを返す。
     pub fn is_i420(&self) -> bool {
         matches!(self.frame_pixel_format, FramePixelFormat::I420)
     }
 
+    /// NV12 形式かどうかを返す。
     pub fn is_nv12(&self) -> bool {
         matches!(self.frame_pixel_format, FramePixelFormat::NV12)
     }

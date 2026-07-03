@@ -1,3 +1,6 @@
+//! Apple プラットフォーム向けのビデオコーデック実装。
+//!
+//! `#[cfg(any(target_os = "macos", target_os = "ios"))]` でのみコンパイルされる。
 use shiguredo_webrtc::{
     EnvironmentRef, SdpVideoFormat, SdpVideoFormatRef, VideoDecoder, VideoDecoderFactory,
     VideoEncoder, VideoEncoderFactory,
@@ -8,6 +11,9 @@ use crate::video_codec_capability::{
     CodecDirection, VideoCodecCapability, VideoCodecImplementation,
 };
 
+/// Apple プラットフォームの ObjC デフォルトビデオコーデックを使用する [VideoCodecCapability]。
+///
+/// `#[cfg(any(target_os = "macos", target_os = "ios"))]` でのみ利用可能。
 pub struct InternalAppleVideoCodecCapability {
     implementation: VideoCodecImplementation,
     simulcast_capability_helper: SimulcastCapabilityHelper,
@@ -15,6 +21,9 @@ pub struct InternalAppleVideoCodecCapability {
 }
 
 impl InternalAppleVideoCodecCapability {
+    /// 新しい `InternalAppleVideoCodecCapability` を生成する。
+    ///
+    /// 利用可能なハードウェアエンコーダー/デコーダーが存在しない場合は `None` を返す。
     pub fn new() -> Option<Self> {
         let encoder_factory = VideoEncoderFactory::from_objc_default()?;
         let decoder_factory = VideoDecoderFactory::from_objc_default()?;

@@ -16,6 +16,7 @@ use crate::video_codecs::internal::InternalVideoCodecCapability;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 use crate::video_codecs::internal_apple::InternalAppleVideoCodecCapability;
 
+/// AudioDeviceModule の設定。
 #[derive(Clone, Default)]
 pub enum AdmConfig {
     /// Dummy の AudioDeviceModule を使用する。
@@ -29,8 +30,20 @@ pub enum AdmConfig {
 
 /// SoraConnectionContext の設定。
 pub struct SoraConnectionContextConfig {
+    /// AudioDeviceModule の設定。デフォルトは [AdmConfig::NoAudioDevice]。
     pub adm_config: AdmConfig,
+    /// コーデックごとに使用する実装を指定する優先設定。
+    ///
+    /// 各エントリ（[PreferenceCodec](crate::video_codec_preference::PreferenceCodec)）は、
+    /// 特定の方向（エンコード/デコード）とコーデック種別（VP8/VP9/H264/H265/AV1）に対して、
+    /// どの [VideoCodecCapability] 実装を使うかを指定する。
+    /// [Default::default()] では [InternalVideoCodecCapability] から自動生成され、
+    /// macOS/iOS ではさらに `InternalAppleVideoCodecCapability` がマージされる。
     pub video_codec_preference: VideoCodecPreference,
+    /// エンコーダー/デコーダーを実際に生成する capability 実装のリスト。
+    ///
+    /// [Default::default()] では [InternalVideoCodecCapability] が含まれ、
+    /// macOS/iOS では `InternalAppleVideoCodecCapability` も追加される。
     pub video_codec_capabilities: Vec<Box<dyn VideoCodecCapability>>,
 }
 
@@ -74,6 +87,9 @@ pub struct SoraConnectionContext {
 }
 
 impl SoraConnectionContext {
+    /// [SoraConnectionContextConfig::default] で [SoraConnectionContext] を生成する。
+    ///
+    /// [SoraConnectionContext::new_with_config] のショートカット。
     pub fn new() -> Result<Arc<Self>> {
         Self::new_with_config(SoraConnectionContextConfig::default())
     }

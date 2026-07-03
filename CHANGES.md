@@ -10,6 +10,12 @@
   - バグ修正
 
 ## develop
+- [ADD] 公開 API に rustdoc を追加する
+  - 全公開型・全 `pub fn`（トレイト実装を除く）・enum バリアント・公開フィールドに `///` を追加する
+  - 全モジュールに `//!` モジュールドキュメントを追加する
+  - `src/lib.rs` にクレート全体の説明を `//!` で追加する
+  - `#![warn(missing_docs)]` を追加する
+  - @melpon
 - [CHANGE] `SoraConnectionCommand` の可視性を `pub` から `pub(crate)` に変更し `Error::CommandSendFailed` の型を変更する
   - `SoraConnectionCommand` は公開 API から削除され、外部からの参照は不可になる
   - `Error::CommandSendFailed` の `source` フィールドを `SendError<SoraConnectionCommand>` から `reason: String` に変更し、`std::error::Error::source()` からも除外する

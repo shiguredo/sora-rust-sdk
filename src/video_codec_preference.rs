@@ -1,3 +1,4 @@
+//! ビデオコーデックの優先順位設定。
 use std::collections::HashSet;
 
 use shiguredo_webrtc::{SdpVideoFormat, VideoCodecType};
@@ -9,6 +10,7 @@ use crate::video_codec_capability::{
     CodecDirection, VideoCodecCapability, VideoCodecImplementation,
 };
 
+/// 特定の方向・コーデック・実装の優先設定。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreferenceCodec {
     direction: CodecDirection,
@@ -16,12 +18,14 @@ pub struct PreferenceCodec {
     implementation: VideoCodecImplementation,
 }
 
+/// ビデオコーデックの優先順位リスト。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VideoCodecPreference {
     codecs: Vec<PreferenceCodec>,
 }
 
 impl PreferenceCodec {
+    /// [PreferenceCodec] を生成する。
     pub fn new(
         direction: CodecDirection,
         codec_type: VideoCodecType,
@@ -34,28 +38,34 @@ impl PreferenceCodec {
         }
     }
 
+    /// [CodecDirection] を返す。
     pub fn direction(&self) -> CodecDirection {
         self.direction
     }
 
+    /// [VideoCodecType] を返す。
     pub fn codec_type(&self) -> VideoCodecType {
         self.codec_type
     }
 
+    /// [VideoCodecImplementation] を返す。
     pub fn implementation(&self) -> &VideoCodecImplementation {
         &self.implementation
     }
 
+    /// [VideoCodecImplementation] を上書きする。
     pub fn set_implementation(&mut self, implementation: VideoCodecImplementation) {
         self.implementation = implementation;
     }
 }
 
 impl VideoCodecPreference {
+    /// [PreferenceCodec] のリストから [VideoCodecPreference] を生成する。
     pub fn new(codecs: Vec<PreferenceCodec>) -> Self {
         Self { codecs }
     }
 
+    /// [VideoCodecCapability] から自動生成した優先設定を返す。
     pub fn new_from_capability(capability: &dyn VideoCodecCapability) -> Self {
         let implementation = capability.get_implementation();
         let mut codecs = Vec::new();
@@ -79,10 +89,12 @@ impl VideoCodecPreference {
         Self::new(codecs)
     }
 
+    /// 全 [PreferenceCodec] を返す。
     pub fn codecs(&self) -> &[PreferenceCodec] {
         &self.codecs
     }
 
+    /// 指定された方向とコーデック種別に合致する [PreferenceCodec] を検索する。
     pub fn find(
         &self,
         direction: CodecDirection,
@@ -93,6 +105,7 @@ impl VideoCodecPreference {
             .find(|codec| codec.direction == direction && codec.codec_type == codec_type)
     }
 
+    /// 指定された方向とコーデック種別に合致する [PreferenceCodec] を可変参照で検索する。
     pub fn find_mut(
         &mut self,
         direction: CodecDirection,
@@ -103,6 +116,7 @@ impl VideoCodecPreference {
             .find(|codec| codec.direction == direction && codec.codec_type == codec_type)
     }
 
+    /// 指定された方向・コーデック・実装のエントリを取得し、なければ追加する。
     pub fn get_or_add(
         &mut self,
         direction: CodecDirection,
@@ -123,12 +137,17 @@ impl VideoCodecPreference {
             .expect("codecs must contain one element after push")
     }
 
+    /// 指定された [VideoCodecImplementation] が含まれているかどうかを返す。
     pub fn has_implementation(&self, implementation: VideoCodecImplementation) -> bool {
         self.codecs
             .iter()
             .any(|codec| codec.implementation == implementation)
     }
 
+    /// 別の [VideoCodecPreference] をマージする。
+    ///
+    /// 既存エントリと方向・コーデックが一致する項目は上書きし、
+    /// 存在しない項目は追加する。
     pub fn merge(&mut self, preference: &VideoCodecPreference) {
         for codec in &preference.codecs {
             if let Some(existing) = self.find_mut(codec.direction, codec.codec_type) {
@@ -183,6 +202,11 @@ impl<'text, 'raw> TryFrom<RawJsonValue<'text, 'raw>> for VideoCodecPreference {
     }
 }
 
+/// [VideoCodecPreference] の妥当性を検証する。
+///
+/// - 同じ方向・コーデック種別の重複がないこと
+/// - 各エントリの実装が `capabilities` に存在すること
+/// - 各エントリの方向・コーデックが実装でサポートされていること
 pub fn validate_video_codec_preference(
     preference: &VideoCodecPreference,
     capabilities: &[Box<dyn VideoCodecCapability>],

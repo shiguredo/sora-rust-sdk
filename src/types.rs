@@ -3,26 +3,39 @@ use nojson::{DisplayJson, JsonFormatter, RawJsonOwned};
 
 use crate::error::{Error, Result};
 
+/// シグナリング接続の方式を表す列挙型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignalingType {
+    /// WebSocket によるシグナリング。
     WebSocket,
+    /// DataChannel によるシグナリング。
     DataChannel,
 }
 
+/// シグナリングメッセージの方向を表す列挙型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignalingDirection {
+    /// 送信方向。
     Sent,
+    /// 受信方向。
     Received,
 }
 
+/// 接続ロールを表す列挙型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
+    /// 送信のみ。
     SendOnly,
+    /// 受信のみ。
     RecvOnly,
+    /// 送受信可能。
     SendRecv,
 }
 
 impl Role {
+    /// 文字列から [`Role`] をパースする。
+    ///
+    /// 有効な値は `"sendonly"`, `"recvonly"`, `"sendrecv"`。
     pub fn parse(value: &str) -> Result<Self> {
         match value {
             "sendonly" => Ok(Self::SendOnly),
@@ -34,6 +47,7 @@ impl Role {
         }
     }
 
+    /// Sora に送信するロール文字列を返す。
     pub fn as_sora_role(self) -> &'static str {
         match self {
             Role::SendOnly => "sendonly",
@@ -42,20 +56,27 @@ impl Role {
         }
     }
 
+    /// 送信を希望しているロールであれば `true` を返す。
     pub fn wants_send(self) -> bool {
         matches!(self, Role::SendOnly | Role::SendRecv)
     }
 
+    /// 受信を希望しているロールであれば `true` を返す。
     pub fn wants_recv(self) -> bool {
         matches!(self, Role::RecvOnly | Role::SendRecv)
     }
 }
 
+/// プロキシの設定情報。
 #[derive(Clone, PartialEq, Eq, Default)]
 pub struct ProxyInfo {
+    /// プロキシサーバーの URL。
     pub url: String,
+    /// プロキシ認証のユーザー名。
     pub username: Option<String>,
+    /// プロキシ認証のパスワード。
     pub password: Option<String>,
+    /// プロキシ接続時に使用する User-Agent ヘッダー。
     pub user_agent: Option<String>,
 }
 
@@ -93,6 +114,9 @@ fn mask_url_userinfo(url: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(masked)
 }
 
+/// JSON 文字列を検証済みの形で保持する型。
+///
+/// `FromStr` により文字列からパース可能。
 #[derive(Debug, Clone)]
 pub struct JsonString {
     raw: RawJsonOwned,
@@ -126,15 +150,24 @@ impl DisplayJson for JsonString {
     }
 }
 
+/// Opus 音声コーデックのパラメータ。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AudioOpusParams {
+    /// チャンネル数。
     pub channels: Option<u32>,
+    /// 最大再生レート (Hz)。
     pub maxplaybackrate: Option<u32>,
+    /// 最小パケット時間 (ms)。
     pub minptime: Option<u32>,
+    /// パケット時間 (ms)。
     pub ptime: Option<u32>,
+    /// ステレオ再生の設定。
     pub stereo: Option<bool>,
+    /// SDP の sprop-stereo パラメータ。
     pub sprop_stereo: Option<bool>,
+    /// 帯域内前方誤り訂正 (in-band FEC) を使用するか。
     pub useinbandfec: Option<bool>,
+    /// DTX (Discontinuous Transmission) を使用するか。
     pub usedtx: Option<bool>,
 }
 
@@ -170,12 +203,18 @@ impl DisplayJson for AudioOpusParams {
     }
 }
 
+/// 映像コーデックの種類を表す列挙型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoCodecType {
+    /// VP8 コーデック。
     VP8,
+    /// VP9 コーデック。
     VP9,
+    /// H.264 コーデック。
     H264,
+    /// H.265 コーデック。
     H265,
+    /// AV1 コーデック。
     AV1,
 }
 
@@ -191,8 +230,10 @@ impl DisplayJson for VideoCodecType {
     }
 }
 
+/// 音声コーデックの種類を表す列挙型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioCodecType {
+    /// Opus コーデック。
     OPUS,
 }
 
@@ -204,20 +245,37 @@ impl DisplayJson for AudioCodecType {
     }
 }
 
+/// connect メッセージの `audio` フィールドに対応する音声設定。
+///
+/// [Audio::Bool] で単純な有効/無効を指定するか、
+/// [Audio::Audio] でコーデックやビットレートの詳細設定を指定できる。
+/// role が [Role::SendRecv] または [Role::SendOnly] の場合は配信設定、
+/// [Role::RecvOnly] の場合は受信設定として扱われる。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Audio {
+    /// 音声の有効 (`true`) / 無効 (`false`)。
+    ///
+    /// `true` の場合は Opus で音声が配信または受信される。
     Bool(bool),
+    /// 音声コーデックの詳細設定。
     Audio {
+        /// 音声コーデックの種類。未指定の場合は Opus。
         codec_type: Option<AudioCodecType>,
+        /// ビットレート (kbps)。6〜510 の範囲。
         bit_rate: Option<u32>,
+        /// Opus 固有のパラメータ。
         opus_params: Option<AudioOpusParams>,
     },
 }
 
 impl Audio {
+    /// Bool バリアントの [Audio] を生成する。
     pub fn new_bool(enabled: bool) -> Self {
         Self::Bool(enabled)
     }
+    /// Audio バリアントの [Audio] を生成する。
+    ///
+    /// コーデックは Opus 固定、`bit_rate` と `opus_params` は任意。
     pub fn new_opus(bit_rate: Option<u32>, opus_params: Option<AudioOpusParams>) -> Self {
         Self::Audio {
             codec_type: Some(AudioCodecType::OPUS),
@@ -251,9 +309,10 @@ impl DisplayJson for Audio {
     }
 }
 
+/// VP9 映像コーデックのパラメータ。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VideoVP9Params {
-    // 0..3
+    /// プロファイル ID (0..3)。
     pub profile_id: Option<u32>,
 }
 
@@ -268,10 +327,13 @@ impl DisplayJson for VideoVP9Params {
     }
 }
 
+/// H.264 映像コーデックのパラメータ。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VideoH264Params {
+    /// プロファイルレベル ID (例: `"42e01f"`)。
     pub profile_level_id: Option<String>,
-    // sora.conf で h264_b_frame = true を設定する必要があります
+    /// B フレームの有効/無効。
+    /// sora.conf で h264_b_frame = true を設定する必要があります
     pub b_frame: Option<bool>,
 }
 
@@ -289,16 +351,19 @@ impl DisplayJson for VideoH264Params {
     }
 }
 
+/// H.265 映像コーデックのパラメータ。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VideoH265Params {
+    /// レベル ID (例: `"120"`)。
     pub level_id: Option<String>,
-    // 0..31
+    /// プロファイル ID (0..31)。
     pub profile_id: Option<u32>,
-    // 0..1
+    /// ティアフラグ (0..1)。
     pub tier_flag: Option<u32>,
-    // "SRST" | "MRST" | "MRMT"
+    /// 送信モード (`"SRST"`, `"MRST"`, `"MRMT"` のいずれか)。
     pub tx_mode: Option<String>,
-    // sora.conf で h265_b_frame = true を設定する必要があります
+    /// B フレームの有効/無効。
+    /// sora.conf で h265_b_frame = true を設定する必要があります
     pub b_frame: Option<bool>,
 }
 
@@ -325,13 +390,14 @@ impl DisplayJson for VideoH265Params {
     }
 }
 
+/// AV1 映像コーデックのパラメータ。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VideoAV1Params {
-    // 0..2
+    /// プロファイル (0..2)。
     pub profile: Option<u32>,
-    // 0..31
+    /// レベルインデックス (0..31)。
     pub level_idx: Option<u32>,
-    // 0..1
+    /// ティア (0..1)。
     pub tier: Option<u32>,
 }
 
@@ -356,15 +422,53 @@ impl DisplayJson for VideoAV1Params {
 // ConnectDataChannel
 // -------------------------
 
+/// リアルタイムメッセージング用の DataChannel 設定。
+///
+/// Sora サーバーとの接続時に `"type": "connect"` メッセージの
+/// `data_channels` フィールドに含めて送信される。
+/// ここで指定するラベルは必ず `#` で始める必要があり、
+/// Sora が内部的に使用するシグナリング用ラベル
+/// （`signaling` / `stats` / `push` / `notify` / `rpc`）は指定できない。
 #[derive(Debug, Clone)]
 pub struct ConnectDataChannel {
+    /// DataChannel のラベル。
+    ///
+    /// 必ず `#` で始まる文字列を指定する。最大 32 文字（`#` を含む）。
     pub label: String,
+    /// メッセージの方向。
+    ///
+    /// クライアントから見た方向を指定する。
+    /// `"sendrecv"` で送受信、`"sendonly"` で送信のみ、
+    /// `"recvonly"` で受信のみ。
     pub direction: String,
+    /// 順序保証を行うかどうか。
+    ///
+    /// `true` の場合、SCTP がメッセージの送信順での配信を保証する。
+    /// `false` の場合、到着が送信順から前後する可能性があるが、
+    /// 順序保証に伴う HoL (Head-of-Line) ブロッキングが発生しない。
     pub ordered: Option<bool>,
+    /// 最大再送時間（ミリ秒）。
+    ///
+    /// `max_retransmits` とは同時に指定できない。
     pub max_packet_life_time: Option<i32>,
+    /// 最大再送回数。
+    ///
+    /// `max_packet_life_time` とは同時に指定できない。
     pub max_retransmits: Option<i32>,
+    /// DataChannel のサブプロトコル。
+    ///
+    /// アプリケーション層のプロトコルを識別する文字列。
     pub protocol: Option<String>,
+    /// メッセージを zlib で圧縮するかどうか。
+    ///
+    /// `true` の場合、送受信時に SDK 内部で
+    /// compress_zlib / decompress_zlib による圧縮・展開が行われる。
     pub compress: Option<bool>,
+    /// Sora サーバーがメッセージに付与するヘッダー。
+    ///
+    /// `{"type": "sender_connection_id"}` を指定すると、
+    /// 受信メッセージの先頭に送信元の接続 ID（26 バイト）が付与される。
+    /// direction が `"sendrecv"` または `"recvonly"` の場合に有効。
     pub header: Option<Vec<JsonString>>,
 }
 
@@ -400,10 +504,18 @@ impl DisplayJson for ConnectDataChannel {
 // ForwardingFilter
 // -------------------------
 
+/// 転送フィルターのルール。
+///
+/// [ForwardingFilter] の `rules` フィールドで使われる。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForwardingFilterRule {
+    /// フィルタ対象のフィールド名。
+    ///
+    /// `"connection_id"` / `"client_id"` / `"kind"` のいずれかを指定する。
     pub field: String,
+    /// 比較演算子。`"is_in"` または `"is_not_in"` を指定する。
     pub operator: String,
+    /// 比較対象の値のリスト。
     pub values: Vec<String>,
 }
 
@@ -417,13 +529,26 @@ impl DisplayJson for ForwardingFilterRule {
     }
 }
 
+/// 転送フィルターの設定。
+///
+/// 接続時に Sora サーバーに送信し、条件に合致する
+/// 他参加者の音声や映像の受信をブロックするために使う。
 #[derive(Debug, Clone)]
 pub struct ForwardingFilter {
+    /// API での識別に使われるフィルターの名前。
     pub name: Option<String>,
+    /// フィルターの優先度。
     pub priority: Option<i32>,
+    /// 条件に合致した場合の動作。`"block"` または `"allow"`。
     pub action: Option<String>,
+    /// 転送フィルターのルール。
+    ///
+    /// 内側の [Vec]\([ForwardingFilterRule]\) は AND 結合され、
+    /// 外側の [Vec] は OR 結合される。
     pub rules: Vec<Vec<ForwardingFilterRule>>,
+    /// API のバージョン文字列。
     pub version: Option<String>,
+    /// 任意のメタデータ（JSON）。
     pub metadata: Option<JsonString>,
 }
 
@@ -451,23 +576,41 @@ impl DisplayJson for ForwardingFilter {
     }
 }
 
+/// connect メッセージの `video` フィールドに対応する映像設定。
+///
+/// [Video::Bool] で単純な有効/無効を指定するか、
+/// [Video::Video] でコーデックやビットレートの詳細設定を指定できる。
+/// role が [Role::SendRecv] または [Role::SendOnly] の場合は配信設定、
+/// [Role::RecvOnly] の場合は受信設定として扱われる。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Video {
+    /// 映像の有効 (`true`) / 無効 (`false`)。
+    ///
+    /// `true` の場合はデフォルトで映像が配信または受信される。
     Bool(bool),
+    /// 映像コーデックの詳細設定。
     Video {
+        /// 映像コーデックの種類。
         codec_type: Option<VideoCodecType>,
+        /// ビットレート (kbps)。1〜50000 の範囲。
         bit_rate: Option<u32>,
+        /// VP9 固有のパラメータ。
         vp9_params: Option<VideoVP9Params>,
+        /// AV1 固有のパラメータ。
         av1_params: Option<VideoAV1Params>,
+        /// H.264 固有のパラメータ。
         h264_params: Option<VideoH264Params>,
+        /// H.265 固有のパラメータ。
         h265_params: Option<VideoH265Params>,
     },
 }
 
 impl Video {
+    /// Bool バリアントの [Video] を生成する。
     pub fn new_bool(enabled: bool) -> Self {
         Self::Bool(enabled)
     }
+    /// Video バリアントの [Video] を生成する。コーデックは VP8。
     pub fn new_vp8(bit_rate: Option<u32>) -> Self {
         Self::Video {
             codec_type: Some(VideoCodecType::VP8),
@@ -478,6 +621,7 @@ impl Video {
             h265_params: None,
         }
     }
+    /// Video バリアントの [Video] を生成する。コーデックは VP9。
     pub fn new_vp9(bit_rate: Option<u32>, vp9_params: Option<VideoVP9Params>) -> Self {
         Self::Video {
             codec_type: Some(VideoCodecType::VP9),
@@ -488,6 +632,7 @@ impl Video {
             h265_params: None,
         }
     }
+    /// Video バリアントの [Video] を生成する。コーデックは AV1。
     pub fn new_av1(bit_rate: Option<u32>, av1_params: Option<VideoAV1Params>) -> Self {
         Self::Video {
             codec_type: Some(VideoCodecType::AV1),
@@ -498,6 +643,7 @@ impl Video {
             h265_params: None,
         }
     }
+    /// Video バリアントの [Video] を生成する。コーデックは H.264。
     pub fn new_h264(bit_rate: Option<u32>, h264_params: Option<VideoH264Params>) -> Self {
         Self::Video {
             codec_type: Some(VideoCodecType::H264),
@@ -508,6 +654,7 @@ impl Video {
             h265_params: None,
         }
     }
+    /// Video バリアントの [Video] を生成する。コーデックは H.265。
     pub fn new_h265(bit_rate: Option<u32>, h265_params: Option<VideoH265Params>) -> Self {
         Self::Video {
             codec_type: Some(VideoCodecType::H265),

@@ -1,3 +1,5 @@
+//! ビデオコーデックのエンコーダー/デコーダーファクトリと、
+//! エンコーダーアダプター、simulcast ヘルパーを提供する。
 use std::sync::{Arc, Mutex};
 
 use shiguredo_webrtc::{
@@ -17,11 +19,13 @@ use crate::video_codec_preference::VideoCodecPreference;
 type VideoCodecCapabilities = Vec<Box<dyn VideoCodecCapability>>;
 type SharedVideoCodecCapabilities = Arc<Mutex<VideoCodecCapabilities>>;
 
+/// [VideoCodecPreference] に基づき、利用可能なビデオエンコーダーを提供するファクトリ。
 pub struct SoraVideoEncoderFactory {
     preference: VideoCodecPreference,
     capabilities: SharedVideoCodecCapabilities,
 }
 
+/// [VideoCodecPreference] に基づき、利用可能なビデオデコーダーを提供するファクトリ。
 pub struct SoraVideoDecoderFactory {
     preference: VideoCodecPreference,
     capabilities: SharedVideoCodecCapabilities,
@@ -207,6 +211,10 @@ pub struct AlignmentEncoderAdapter {
 }
 
 impl AlignmentEncoderAdapter {
+    /// 新しい `AlignmentEncoderAdapter` を生成する。
+    ///
+    /// 指定された水平・垂直アライメント制約に合わせて、
+    /// 下流のエンコーダーに渡すフレームを crop する。
     pub fn new(
         encoder: VideoEncoder,
         codec_type: VideoCodecType,
@@ -325,6 +333,12 @@ impl VideoEncoderHandler for AlignmentEncoderAdapter {
     }
 }
 
+/// Simulcast に対応するエンコーダーを生成するためのヘルパー。
+///
+/// ベースとなる [VideoEncoderFactory] を受け取り、そのファクトリで作成したエンコーダーを
+/// `SimulcastEncoderAdapter` でラップして返す。
+/// これにより、ソフトウェアエンコーダーやハードウェアエンコーダーに対して
+/// simulcast 機能を追加できる。
 pub struct SimulcastCapabilityHelper {
     primary_factory: VideoEncoderFactory,
 }
@@ -356,10 +370,12 @@ where
 }
 
 impl SimulcastCapabilityHelper {
+    /// 既存の [VideoEncoderFactory] から `SimulcastCapabilityHelper` を生成する。
     pub fn new(primary_factory: VideoEncoderFactory) -> Self {
         Self { primary_factory }
     }
 
+    /// クロージャベースで `SimulcastCapabilityHelper` を生成する。
     pub fn new_with_builder<GetSupportedFormats, CreateEncoder>(
         get_supported_formats: GetSupportedFormats,
         create_encoder: CreateEncoder,
@@ -378,10 +394,15 @@ impl SimulcastCapabilityHelper {
         Self { primary_factory }
     }
 
+    /// 内部の [VideoEncoderFactory] がサポートする SDP フォーマット一覧を返す。
     pub fn get_supported_formats(&self) -> Vec<SdpVideoFormat> {
         self.primary_factory.get_supported_formats()
     }
 
+    /// 指定された SDP フォーマットに対応する [VideoEncoder] を生成する。
+    ///
+    /// 生成されたエンコーダーは `SimulcastEncoderAdapter` でラップされているため、
+    /// simulcast に対応する。
     pub fn create_video_encoder(
         &self,
         env: EnvironmentRef<'_>,
@@ -394,6 +415,9 @@ impl SimulcastCapabilityHelper {
     }
 }
 
+/// [SdpVideoFormatRef] から [VideoCodecType] を取得する。
+///
+/// format の name を解析し、対応する `VideoCodecType` があれば返す。
 pub fn codec_type_from_format(format: &SdpVideoFormatRef<'_>) -> Option<VideoCodecType> {
     let format_name = format.name().ok()?;
     VideoCodecType::try_from(format_name.as_str()).ok()
