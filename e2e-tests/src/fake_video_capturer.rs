@@ -142,7 +142,7 @@ impl Drop for FakeVideoCapturer {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn tick_once(
     source: &mut AdaptedVideoTrackSource,
     timestamp_aligner: &mut TimestampAligner,

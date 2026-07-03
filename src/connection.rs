@@ -74,24 +74,24 @@ pub struct SoraConnectionBuilder {
     channel_id: String,
     role: Role,
 
-    #[allow(clippy::type_complexity)]
+    #[expect(clippy::type_complexity)]
     on_signaling_message: Arc<dyn Fn(SignalingType, SignalingDirection, &str) + Send + Sync>,
     on_notify: Arc<dyn Fn(&str) + Send + Sync>,
     on_push: Arc<dyn Fn(&str) + Send + Sync>,
     on_track: Arc<dyn Fn(RtpTransceiver) + Send + Sync>,
     on_remove_track: Arc<dyn Fn(RtpReceiver) + Send + Sync>,
     on_switched: Arc<dyn Fn() + Send + Sync>,
-    #[allow(clippy::type_complexity)]
+    #[expect(clippy::type_complexity)]
     on_websocket_close: Arc<dyn Fn(Option<u16>, &str) + Send + Sync>,
 
     // メッセージングレイヤー
-    #[allow(clippy::type_complexity)]
+    #[expect(clippy::type_complexity)]
     on_message: Arc<dyn Fn(&str, &[u8]) + Send + Sync>,
 
     // DataChannel API レイヤー
     on_data_channel: Arc<dyn Fn(&str) + Send + Sync>,
     on_data_channel_open: Arc<dyn Fn(&str) + Send + Sync>,
-    #[allow(clippy::type_complexity)]
+    #[expect(clippy::type_complexity)]
     on_data_channel_message: Arc<dyn Fn(&str, &[u8]) + Send + Sync>,
     on_data_channel_close: Arc<dyn Fn(&str) + Send + Sync>,
     sender_video_track: Option<VideoTrack>,
@@ -731,7 +731,7 @@ pub struct SoraConnection {
     pc: PeerConnection,
     // Observer を保持しておく必要がある (ドロップすると PeerConnection への通知が止まる)。
     // PeerConnection の破棄までは生存させるため、pc の後に保持する。
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pc_observer: PeerConnectionObserver,
     // context を最後に破棄するため、config は最後に保持する。
     config: SoraConnectionBuilder,
@@ -1917,7 +1917,7 @@ impl SoraConnection {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    #[expect(clippy::too_many_arguments, clippy::type_complexity)]
     async fn handle_datachannel_message(
         &mut self,
         label: &str,
@@ -2043,7 +2043,7 @@ impl SoraConnection {
 struct ManagedDataChannel {
     channel: DataChannel,
     // Observer を保持しておく必要がある (ドロップすると DataChannel への通知が止まる)
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     observer: DataChannelObserver,
     compress: bool,
 }

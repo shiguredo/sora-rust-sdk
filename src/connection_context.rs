@@ -153,7 +153,6 @@ impl SoraConnectionContext {
 
         let (factory, connection_context) =
             PeerConnectionFactory::create_modular_with_context(&mut deps)?;
-        #[allow(clippy::arc_with_non_send_sync)]
         Ok(Arc::new(Self {
             factory,
             connection_context,

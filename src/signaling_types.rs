@@ -19,7 +19,7 @@ pub(crate) struct IceServerConfig {
 pub(crate) struct DataChannelConfig {
     pub(crate) label: String,
     pub(crate) compress: bool,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub(crate) direction: String,
 }
 
@@ -308,7 +308,7 @@ impl<'text, 'raw> TryFrom<RawJsonValue<'text, 'raw>> for SimulcastEncodingConfig
     }
 }
 
-#[allow(clippy::large_enum_variant)]
+#[expect(clippy::large_enum_variant)]
 pub(crate) enum OutgoingMessage {
     Connect {
         channel_id: String,
@@ -460,7 +460,7 @@ impl DisplayJson for OutgoingMessage {
 }
 
 impl OutgoingMessage {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub(crate) fn new_connect(
         channel_id: &str,
         role: Role,
