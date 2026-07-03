@@ -1,3 +1,4 @@
+//! ビデオコーデックの実装情報と capability トレイト。
 use shiguredo_webrtc::{
     EnvironmentRef, SdpVideoFormat, SdpVideoFormatRef, VideoCodecType, VideoDecoder, VideoEncoder,
     fuzzy_match_sdp_video_format,
@@ -5,6 +6,10 @@ use shiguredo_webrtc::{
 
 use nojson::{DisplayJson, JsonFormatter, JsonParseError, RawJsonValue};
 
+/// ビデオコーデックの実装情報。
+///
+/// `name` は `VideoCodecPreference` との突き合わせに利用される識別子で、
+/// 実装ごとに一意である必要がある。
 #[derive(Debug, Clone, Eq)]
 pub struct VideoCodecImplementation {
     name: String,
@@ -12,6 +17,7 @@ pub struct VideoCodecImplementation {
 }
 
 impl VideoCodecImplementation {
+    /// 新しい `VideoCodecImplementation` を生成する。
     pub fn new(name: &'static str, description: &'static str) -> Self {
         Self {
             name: name.to_string(),
@@ -23,10 +29,12 @@ impl VideoCodecImplementation {
         Self { name, description }
     }
 
+    /// 実装名を返す。
     pub fn name(&self) -> &str {
         self.name.as_str()
     }
 
+    /// 実装の説明文を返す。
     pub fn description(&self) -> &str {
         self.description.as_str()
     }
@@ -38,13 +46,17 @@ impl PartialEq for VideoCodecImplementation {
     }
 }
 
+/// コーデックの方向 (エンコード/デコード)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodecDirection {
+    /// エンコード方向。
     Encoder,
+    /// デコード方向。
     Decoder,
 }
 
 impl CodecDirection {
+    /// デバッグ表示用の文字列表現 (`"Encoder"` / `"Decoder"`) を返す。
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Encoder => "Encoder",
@@ -52,6 +64,7 @@ impl CodecDirection {
         }
     }
 
+    /// ラベル用の小文字表記 (`"encoder"` / `"decoder"`) を返す。
     pub fn as_label(self) -> &'static str {
         match self {
             Self::Encoder => "encoder",

@@ -89,9 +89,13 @@ pub struct Mp4EncodedSample {
     /// H.264/H.265 の場合は Annex B 形式に変換済み。
     /// VP8/VP9/AV1 の場合は MP4 から抽出したそのまま。
     pub data: Vec<u8>,
+    /// キーフレームかどうか。
     pub is_keyframe: bool,
+    /// 映像の幅。
     pub width: u32,
+    /// 映像の高さ。
     pub height: u32,
+    /// ビデオコーデック種別。
     pub codec_type: VideoCodecType,
 }
 
@@ -590,6 +594,7 @@ pub struct Mp4PassthroughVideoCodecCapability {
 }
 
 impl Mp4PassthroughVideoCodecCapability {
+    /// 指定された [VideoCodecType] で `Mp4PassthroughVideoCodecCapability` を生成する。
     pub fn new(codec_type: VideoCodecType) -> Self {
         Self { codec_type }
     }
@@ -655,6 +660,10 @@ pub struct Mp4VideoCapturer {
 }
 
 impl Mp4VideoCapturer {
+    /// [Mp4SampleReader] から動画データを読み込み、新しい `Mp4VideoCapturer` を生成する。
+    ///
+    /// 生成と同時に専用スレッドを起動し、MP4 のフレームタイミングに従って
+    /// 映像フレームを WebRTC に供給する。動画末尾に達すると先頭に戻りループ再生する。
     pub fn new(reader: Mp4SampleReader) -> crate::error::Result<Self> {
         let width = reader.track_info.width as i32;
         let height = reader.track_info.height as i32;
@@ -718,6 +727,7 @@ impl Mp4VideoCapturer {
         })
     }
 
+    /// WebRTC の [VideoTrackSource] を返す。
     pub fn video_source(&self) -> VideoTrackSource {
         self.video_source.clone()
     }

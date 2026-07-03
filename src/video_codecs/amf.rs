@@ -1,3 +1,6 @@
+//! AMD AMF ハードウェアエンコーダー/デコーダー実装。
+//!
+//! `#[cfg(feature = "amf")]` でのみコンパイルされる。
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -738,6 +741,10 @@ impl VideoDecoderHandler for AmfVideoDecoder {
     }
 }
 
+/// AMD AMF を使用する [VideoCodecCapability]。
+///
+/// `#[cfg(feature = "amf")]` でのみ利用可能。
+/// H.264 / H.265 / AV1 のエンコード・デコードをサポートする。
 pub struct AmfVideoCodecCapability {
     encoder_supported_formats: Vec<SdpVideoFormat>,
     decoder_supported_formats: Vec<SdpVideoFormat>,
@@ -745,6 +752,9 @@ pub struct AmfVideoCodecCapability {
 }
 
 impl AmfVideoCodecCapability {
+    /// 新しい `AmfVideoCodecCapability` を生成する。
+    ///
+    /// 利用可能なエンコーダー/デコーダーが存在しない場合はエラーを返す。
     pub fn new() -> Result<Self> {
         let (encoder_supported_formats, decoder_supported_formats) = collect_supported_formats();
         if encoder_supported_formats.is_empty() && decoder_supported_formats.is_empty() {

@@ -1,3 +1,6 @@
+//! Intel VPL ハードウェアエンコーダー/デコーダー実装。
+//!
+//! `#[cfg(feature = "vpl")]` でのみコンパイルされる。
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -757,6 +760,10 @@ impl VideoDecoderHandler for VplVideoDecoder {
     }
 }
 
+/// Intel VPL を使用する [VideoCodecCapability]。
+///
+/// `#[cfg(feature = "vpl")]` でのみ利用可能。
+/// H.264 / H.265 / VP9 / AV1 のエンコード・デコードをサポートする。
 pub struct VplVideoCodecCapability {
     adapter: AdapterSelector,
     encoder_supported_formats: Vec<SdpVideoFormat>,
@@ -765,6 +772,9 @@ pub struct VplVideoCodecCapability {
 }
 
 impl VplVideoCodecCapability {
+    /// 利用可能な最初の VPL アダプターで新しい `VplVideoCodecCapability` を生成する。
+    ///
+    /// 利用可能なエンコーダー/デコーダーが存在しない場合はエラーを返す。
     pub fn new() -> Result<Self> {
         let adapters = list_adapters()?;
         let adapter_info = adapters.first().ok_or_else(|| crate::Error::VplMessage {

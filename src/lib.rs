@@ -1,4 +1,39 @@
-//! 公開 API の入口。
+//! Sora Rust SDK ― WebRTC SFU Sora の Rust クライアントライブラリ。
+//!
+//! このクレートは、[Sora] サーバーに接続して WebRTC による音声・映像の送受信を
+//! 行うためのクライアント機能を提供する。
+//!
+//! # 主な機能
+//!
+//! - WebSocket 経由のシグナリング
+//! - WebRTC による音声・映像の送受信
+//! - DataChannel 経由のメッセージングと JSON-RPC 2.0
+//! - 複数のハードウェア/ソフトウェアビデオコーデック対応
+//! - MP4 ファイルのパススルー送信
+//! - HTTP プロキシ経由の接続
+//! - libcamera による映像キャプチャ (Linux)
+//!
+//! # 基本的な使い方
+//!
+//! ```ignore
+//! use sora_sdk::{SoraConnection, SoraConnectionContext, Role};
+//!
+//! let context = SoraConnectionContext::new()?;
+//! let (connection, handle) = SoraConnection::builder(
+//!     context,
+//!     vec!["wss://sora.example.com/signaling".to_string()],
+//!     "your-channel-id".to_string(),
+//!     Role::SendRecv,
+//! ).build()?;
+//!
+//! // connection.run() を別タスクで実行
+//! tokio::spawn(async move {
+//!     connection.run().await
+//! });
+//! ```
+//!
+//! [Sora]: https://sora.shiguredo.jp/
+#![warn(missing_docs)]
 mod connection;
 mod connection_context;
 mod error;

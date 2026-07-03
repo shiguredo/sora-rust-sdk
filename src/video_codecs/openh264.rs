@@ -1,3 +1,6 @@
+//! OpenH264 ソフトウェアエンコーダー/デコーダー実装。
+//!
+//! `#[cfg(feature = "openh264")]` でのみコンパイルされる。
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -476,12 +479,17 @@ impl VideoDecoderHandler for Openh264VideoDecoder {
     }
 }
 
+/// OpenH264 を使用する [VideoCodecCapability]。
+///
+/// `#[cfg(feature = "openh264")]` でのみ利用可能。
+/// H.264 のエンコード・デコードのみをサポートする。
 pub struct Openh264VideoCodecCapability {
     library: Openh264Library,
     simulcast_capability_helper: SimulcastCapabilityHelper,
 }
 
 impl Openh264VideoCodecCapability {
+    /// OpenH264 ライブラリを読み込み、新しい `Openh264VideoCodecCapability` を生成する。
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
         let library = Openh264Library::load(path)?;
         let info = library.supported_codecs();

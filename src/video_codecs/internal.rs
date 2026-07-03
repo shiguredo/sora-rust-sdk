@@ -1,3 +1,4 @@
+//! WebRTC 組み込みのビデオコーデック実装。
 use shiguredo_webrtc::{
     EnvironmentRef, SdpVideoFormat, SdpVideoFormatRef, VideoDecoder, VideoDecoderFactory,
     VideoEncoder, VideoEncoderFactory,
@@ -10,6 +11,7 @@ use crate::video_codec_capability::{
     CodecDirection, VideoCodecCapability, VideoCodecImplementation,
 };
 
+/// WebRTC 組み込みのエンコーダー/デコーダーを使用する [VideoCodecCapability]。
 pub struct InternalVideoCodecCapability {
     implementation: VideoCodecImplementation,
     encoder_factory: VideoEncoderFactory,
@@ -17,6 +19,7 @@ pub struct InternalVideoCodecCapability {
 }
 
 impl InternalVideoCodecCapability {
+    /// 新しい `InternalVideoCodecCapability` を生成する。
     pub fn new() -> Self {
         Self {
             implementation: VideoCodecImplementation::new(

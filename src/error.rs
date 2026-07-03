@@ -7,168 +7,286 @@ use tokio::sync::oneshot;
 
 use crate::video_codecs::mp4::Mp4Error;
 
+/// SDK のエラー型。
 #[derive(Debug)]
 pub enum Error {
+    /// `--role` に不正な値が指定された。
     InvalidRole {
+        /// 指定された role 文字列。
         value: String,
     },
+    /// ホストが空。
     HostEmpty,
+    /// ホストの指定形式が不正。
     HostInvalidFormat,
+    /// URL の解析に失敗した。内部エラーとして [`UriError`] を保持する。
     UriParse(UriError),
+    /// URL にスキームがない。
     UrlMissingScheme,
+    /// URL のスキームが未対応（`ws://` または `wss://` のみ対応）。
     UrlUnsupportedScheme {
+        /// 指定されたスキーム文字列。
         scheme: String,
     },
+    /// URL に userinfo が含まれている（未対応）。
     UrlUserinfoNotSupported,
+    /// URL にフラグメントが含まれている（許可されない）。
     UrlFragmentNotAllowed,
+    /// URL にホストがない。
     UrlMissingHost,
+    /// プロキシ URL のスキームが未対応（`http://` のみ対応）。
     ProxyUrlUnsupportedScheme {
+        /// 指定されたスキーム文字列。
         scheme: String,
     },
+    /// プロキシ URL に userinfo が含まれている（未対応）。
     ProxyUrlUserinfoNotSupported,
+    /// プロキシ URL にフラグメントが含まれている（許可されない）。
     ProxyUrlFragmentNotAllowed,
+    /// プロキシ URL にホストがない。
     ProxyUrlMissingHost,
+    /// プロキシ URL にパスが含まれている（`/` のみ許可）。
     ProxyUrlPathNotAllowed {
+        /// 指定されたパス文字列。
         path: String,
     },
+    /// プロキシ URL にクエリが含まれている（許可されない）。
     ProxyUrlQueryNotAllowed,
+    /// プロキシ CONNECT レスポンスの解析に失敗した。内部エラーとして [`shiguredo_http11::Error`] を保持する。
     ProxyConnectDecode(shiguredo_http11::Error),
+    /// プロキシ CONNECT リクエストの生成に失敗した。内部エラーとして [`EncodeError`] を保持する。
     ProxyConnectEncode(EncodeError),
+    /// プロキシ CONNECT の応答を受信できなかった。
     ProxyConnectResponseMissing,
+    /// プロキシ CONNECT が失敗ステータスを返した。
     ProxyConnectStatusNotSuccessful {
+        /// 受信した HTTP ステータスコード。
         status_code: u16,
+        /// 受信した HTTP reason phrase。
         reason_phrase: String,
     },
+    /// プロキシ認証情報の生成に失敗した。内部エラーとして [`AuthError`] を保持する。
     ProxyAuth(AuthError),
+    /// DNS 解決に失敗した。
     DnsResolve {
+        /// 解決を試みたホスト名。
         host: String,
+        /// 発生した IO エラー。
         source: io::Error,
     },
+    /// 指定されたホストとポートに解決されたアドレスが見つからない。
     NoResolvedAddress {
+        /// 解決を試みたホスト名。
         host: String,
+        /// 解決を試みたポート番号。
         port: u16,
     },
+    /// TCP 接続がタイムアウトした。
     TcpConnectTimeout {
+        /// 接続を試みたホスト名。
         host: String,
+        /// 接続を試みたポート番号。
         port: u16,
     },
+    /// TCP 接続に失敗した。
     TcpConnect {
+        /// 接続を試みたホスト名。
         host: String,
+        /// 接続を試みたポート番号。
         port: u16,
+        /// 発生した IO エラー。
         source: io::Error,
     },
+    /// TLS 設定に失敗した。内部エラーとして [`rustls::Error`] を保持する。
     TlsConfig(rustls::Error),
+    /// TLS の ServerName が不正。内部エラーとして [`rustls::pki_types::InvalidDnsNameError`] を保持する。
     InvalidServerName(rustls::pki_types::InvalidDnsNameError),
+    /// TLS 接続がタイムアウトした。
     TlsConnectTimeout {
+        /// 接続を試みたホスト名。
         host: String,
     },
+    /// TLS 接続に失敗した。
     TlsConnect {
+        /// 接続を試みたホスト名。
         host: String,
+        /// 発生した IO エラー。
         source: io::Error,
     },
+    /// WebSocket のエラー。内部エラーとして [`shiguredo_websocket::Error`] を保持する。
     Websocket(shiguredo_websocket::Error),
+    /// IO エラー。内部エラーとして [`std::io::Error`] を保持する。
     Io(io::Error),
+    /// JSON のパースに失敗した。内部エラーとして [`JsonParseError`] を保持する。
     JsonParse(JsonParseError),
+    /// WebRTC のエラー。内部エラーとして [`shiguredo_webrtc::Error`] を保持する。
     Webrtc(shiguredo_webrtc::Error),
+    /// [`PeerConnection`](shiguredo_webrtc::PeerConnection) が存在しない。
     PeerConnectionMissing,
+    /// SetRemoteDescription がタイムアウトした。
     SetRemoteDescriptionTimeout,
+    /// SetRemoteDescription の応答を受信できなかった。
     SetRemoteDescriptionResponseMissing,
+    /// SetRemoteDescription が失敗した。
     SetRemoteDescriptionFailed {
+        /// 失敗理由。
         reason: String,
     },
+    /// Answer の生成がタイムアウトした。
     AnswerTimeout,
+    /// Answer の応答を受信できなかった。
     AnswerResponseMissing,
+    /// Answer の生成に失敗した。
     AnswerFailed {
+        /// 失敗理由。
         reason: String,
     },
+    /// SetLocalDescription がタイムアウトした。
     SetLocalDescriptionTimeout,
+    /// SetLocalDescription の応答を受信できなかった。
     SetLocalDescriptionResponseMissing,
+    /// SetLocalDescription が失敗した。
     SetLocalDescriptionFailed {
+        /// 失敗理由。
         reason: String,
     },
+    /// simulcast に対応する video sender が存在しない。
     SimulcastVideoSenderMissing,
+    /// simulcast の SetParameters が失敗した。内部エラーとして [`shiguredo_webrtc::Error`] を保持する。
     SimulcastSetParametersFailed {
+        /// 発生した WebRTC エラー。
         source: shiguredo_webrtc::Error,
     },
+    /// 指定されたラベルの DataChannel が存在しない。
     DataChannelMissing {
+        /// 見つからなかった DataChannel のラベル名。
         label: String,
     },
+    /// DataChannel への送信に失敗した。
     DataChannelSendFailed,
+    /// UTF-8 デコードに失敗した。内部エラーとして [`std::string::FromUtf8Error`] を保持する。
     Utf8DecodeFailed(std::string::FromUtf8Error),
+    /// candidate は未対応。
     CandidateNotSupported,
+    /// 未対応のメッセージタイプを受信した。
     UnsupportedMessageType {
+        /// 受信した未対応のメッセージ種別。
         message_type: String,
     },
+    /// コマンドの送信に失敗した。
     CommandSendFailed {
+        /// 失敗理由。
         reason: String,
+        /// 失敗したコマンド名。
         command: &'static str,
     },
+    /// コマンドの応答を受信できなかった。内部エラーとして [`tokio::sync::oneshot::error::RecvError`] を保持する。
     CommandResponseMissing {
+        /// oneshot 受信エラー。
         source: oneshot::error::RecvError,
+        /// 失敗したコマンド名。
         command: &'static str,
     },
+    /// ビデオコーデックの capability 指定が不正。
     InvalidVideoCodecCapability {
+        /// 失敗理由。
         reason: String,
     },
+    /// ビデオコーデックの preference 指定が不正。
     InvalidVideoCodecPreference {
+        /// 失敗理由。
         reason: String,
     },
+    /// libcamera からのエラーメッセージ（`feature = "libcamera"` 時のみ有効）。
     #[cfg(feature = "libcamera")]
     LibcameraMessage {
+        /// エラーメッセージ。
         message: String,
     },
+    /// libcamera のエラー（`feature = "libcamera"` 時のみ有効）。内部エラーとして [`shiguredo_libcamera::Error`] を保持する。
     #[cfg(feature = "libcamera")]
     Libcamera(shiguredo_libcamera::Error),
+    /// OpenH264 のエラー（`feature = "openh264"` 時のみ有効）。内部エラーとして [`shiguredo_openh264::Error`] を保持する。
     #[cfg(feature = "openh264")]
     Openh264(shiguredo_openh264::Error),
+    /// AMF のエラー（`feature = "amf"` 時のみ有効）。内部エラーとして [`shiguredo_amf::Error`] を保持する。
     #[cfg(feature = "amf")]
     Amf {
+        /// 発生した AMF エラー。
         source: shiguredo_amf::Error,
     },
+    /// AMF からのエラーメッセージ（`feature = "amf"` 時のみ有効）。
     #[cfg(feature = "amf")]
     AmfMessage {
+        /// エラーメッセージ。
         reason: String,
     },
+    /// VPL のエラー（`feature = "vpl"` 時のみ有効）。内部エラーとして [`shiguredo_vpl::Error`] を保持する。
     #[cfg(feature = "vpl")]
     Vpl {
+        /// 発生した VPL エラー。
         source: shiguredo_vpl::Error,
     },
+    /// VPL からのエラーメッセージ（`feature = "vpl"` 時のみ有効）。
     #[cfg(feature = "vpl")]
     VplMessage {
+        /// エラーメッセージ。
         reason: String,
     },
+    /// RPC の応答がタイムアウトした。
     RpcTimeout,
+    /// シグナリング URL が空。
     SignalingUrlsEmpty,
+    /// すべてのシグナリング URL への接続が失敗した。
     AllSignalingUrlsFailed {
+        /// 各シグナリング URL とそのエラーメッセージのリスト。
         errors: Vec<(String, String)>,
     },
+    /// TURN-TLS CA 証明書が不正。
     TurnTlsCaCert {
+        /// エラーメッセージ。
         message: String,
     },
+    /// クライアント証明書の PEM パースに失敗した。
     ClientCertParse,
+    /// クライアント秘密鍵の PEM パースに失敗した。
     ClientKeyParse,
+    /// CA 証明書の PEM パースに失敗した。
     CaCertParse,
+    /// `client_cert` と `client_key` の指定が不完全（両方を指定する必要がある）。
     ClientCertKeyIncomplete,
+    /// NVCodec のエラー（`feature = "nvcodec"` 時のみ有効）。内部エラーとして [`shiguredo_nvcodec::Error`] を保持する。
     #[cfg(feature = "nvcodec")]
     NvCodec {
+        /// 発生した NvCodec エラー。
         source: shiguredo_nvcodec::Error,
     },
+    /// NVCodec からのエラーメッセージ（`feature = "nvcodec"` 時のみ有効）。
     #[cfg(feature = "nvcodec")]
     NvCodecMessage {
+        /// エラーメッセージ。
         reason: String,
     },
+    /// V4L2 のエラー（`feature = "v4l2"` 時のみ有効）。内部エラーとして [`shiguredo_v4l2::v4l2_m2m::Error`] を保持する。
     #[cfg(feature = "v4l2")]
     V4l2 {
+        /// 発生した V4L2 エラー。
         source: shiguredo_v4l2::v4l2_m2m::Error,
     },
+    /// V4L2 からのエラーメッセージ（`feature = "v4l2"` 時のみ有効）。
     #[cfg(feature = "v4l2")]
     V4l2Message {
+        /// エラーメッセージ。
         reason: String,
     },
+    /// システム時刻が不正（UNIX エポック以前など）。内部エラーとして [`std::time::SystemTimeError`] を保持する。
     InvalidSystemTime {
+        /// 発生した時刻エラー。
         source: std::time::SystemTimeError,
     },
+    /// MP4 ファイルの処理に失敗した。
     Mp4 {
+        /// エラーメッセージ。
         reason: String,
     },
 }

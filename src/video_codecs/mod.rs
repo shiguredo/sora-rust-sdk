@@ -1,3 +1,7 @@
+//! ビデオコーデックの実装モジュール。
+//!
+//! 各プラットフォーム・ハードウェア向けの
+//! [VideoCodecCapability] 実装を提供する。
 #[cfg(feature = "amf")]
 pub mod amf;
 pub mod internal;

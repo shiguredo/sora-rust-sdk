@@ -1,3 +1,6 @@
+//! NVIDIA Video Codec SDK を使用したハードウェアエンコーダー/デコーダー実装。
+//!
+//! `#[cfg(feature = "nvcodec")]` でのみコンパイルされる。
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -649,6 +652,11 @@ impl VideoDecoderHandler for NvCodecVideoDecoder {
     }
 }
 
+/// NVIDIA NVENC/NVDEC を使用する [VideoCodecCapability]。
+///
+/// `#[cfg(feature = "nvcodec")]` でのみ利用可能。
+/// エンコードは H.264 / H.265 / AV1、
+/// デコードは H.264 / H.265 / AV1 / VP8 / VP9 をサポートする。
 pub struct NvCodecVideoCodecCapability {
     device_id: i32,
     encoder_supported_formats: Vec<SdpVideoFormat>,
@@ -657,10 +665,12 @@ pub struct NvCodecVideoCodecCapability {
 }
 
 impl NvCodecVideoCodecCapability {
+    /// デフォルトデバイス (device_id=0) で新しい `NvCodecVideoCodecCapability` を生成する。
     pub fn new() -> Result<Self> {
         Self::new_with_device_id(0)
     }
 
+    /// 指定されたデバイス ID で新しい `NvCodecVideoCodecCapability` を生成する。
     pub fn new_with_device_id(device_id: i32) -> Result<Self> {
         let (encoder_supported_formats, decoder_supported_formats) =
             collect_supported_formats(device_id)?;
