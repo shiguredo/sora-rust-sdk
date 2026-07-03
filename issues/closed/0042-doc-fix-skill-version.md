@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-03
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-03
 - Model: DeepSeek V4 Pro
 - Branch: feature/update-skill-version
 - Polished: 2026-07-03
@@ -43,8 +43,12 @@
 
 ## 解決方法
 
-1. `skills/sora-rust-sdk/SKILL.md:26` の `2026.1.0-canary.10` を `2026.1.0-canary` に変更する
-2. SKILL.md 内を正規表現 `-canary\.\d+` で全文検索し、他に canary バージョン番号がハードコードされていないか確認する
+1. `skills/sora-rust-sdk/SKILL.md:26` のバージョン表記を `2026.1.0` に変更した（canary 番号を除去）
+2. SKILL.md 内を正規表現 `-canary\.\d+` で全文検索し、他に canary バージョン番号がハードコードされていないことを確認した
+3. 実際のコードと SKILL.md の記述を照合し、以下の乖離を修正した:
+   - `ParsedProxyInfo` の `parse` 関数の所属型を `ProxyInfo` → `ParsedProxyInfo` に修正
+   - `Video` バリアントのフィールドに型注釈を追加
+   - エラー表に `Error::Mp4` と `Error::InvalidSystemTime` を追加
 
 ## 親 issue
 
