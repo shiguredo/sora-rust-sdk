@@ -73,7 +73,7 @@ enum AppEvent {
     OnRemoveTrack(shiguredo_webrtc::RtpReceiver),
 }
 
-trait AppEventSender: Clone + Send + Sync + 'static {
+trait AppEventSender: Clone + Send + 'static {
     fn send_event(&self, event: AppEvent);
 }
 

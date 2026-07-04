@@ -172,7 +172,7 @@ impl SoraTestConnectionBuilder {
 
     pub fn ice_server_url_configurer<F>(mut self, configurer: F) -> Self
     where
-        F: Fn(&mut IceServer, &[String]) + Send + Sync + 'static,
+        F: Fn(&mut IceServer, &[String]) + Send + 'static,
     {
         self.inner = self.inner.ice_server_url_configurer(configurer);
         self

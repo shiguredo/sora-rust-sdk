@@ -36,6 +36,11 @@
 - [CHANGE] `TlsConfig` のフィールドを `pub` から `pub(crate)` に変更する
   - 構造体リテラルによる直接構築は不可になり、`SoraConnectionBuilder` のメソッド経由で設定する
   - @melpon
+- [CHANGE] コールバック関数から Sync トレイト境界を除去する
+  - `SoraConnectionBuilder` の全セッターメソッドの where 節から `Sync` を除去する
+  - コールバックの内部保持型を `Arc<dyn Fn + Send + Sync>` から `Box<dyn Fn + Send>` に変更する
+  - `sumomo` の `AppEventSender` トレイトから `Sync` 境界を除去する
+  - @melpon
 
 - [CHANGE] `validate_video_codec_preference` の `capabilities` 引数を `&Vec<Box<dyn VideoCodecCapability>>` から `&[Box<dyn VideoCodecCapability>]` に変更する
   - @melpon
