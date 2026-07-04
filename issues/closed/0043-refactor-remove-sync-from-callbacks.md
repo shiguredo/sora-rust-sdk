@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-07-03
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-04
 - Model: DeepSeek-V4 Pro
 - Branch: feature/refactor-remove-sync-from-callbacks
 - Polished: 2026-07-03
@@ -200,3 +200,19 @@ take で取り出したコールバックの格納先は以下の方針とする
 26. コールバッククロージャを複数の `SoraConnection` で共有するパターンは、`Box` 化後は不可能になるが、このユースケースは想定されていない
 27. 本変更は feature-gated ではないため、全 feature 組合せでのビルド確認が可能である
 28. `run()` ローカル変数に take されたコールバックは `run()` が `mut self` を取るため、`self`（とその内部の `config`）がドロップされるより前に take が実行され、`run()` のスコープ全体で生存する
+
+## 解決方法
+
+- `IceServerUrlConfigurer` 型エイリアスから `Sync` を除去する
+- `SoraConnectionBuilder` の全コールバックフィールド (12 件) を `Arc<dyn Fn + Send + Sync>` から `Option<Box<dyn Fn + Send>>` に変更し、`ice_server_url_configurer` を `Option<Arc<...>>` から `Option<Box<...>>` に変更する
+- フィールド型・`DataChannelMessageCallbacks` 構造体の clippy `type_complexity` 警告に対処するため、全コールバックに個別の型エイリアス (`OnSignalingMessageCallback` 等 12 種) を追加し、`#[expect(clippy::type_complexity)]` 4 件を削除する
+- 全 13 セッターメソッドの `where` 節から `Sync` を除去し、`Arc::new` を `Some(Box::new)` に変更する
+- `SoraConnection::new()` で `config` を `mut` に変更し、`on_track` / `on_remove_track` を `clone()` から `take().expect()` に変更する
+- `PcObserverHandler` のフィールドを `Arc<dyn Fn + Send + Sync>` から `Box<dyn Fn + Send>` に変更する
+- `run()` 内の 10 個のコールバックで `clone()` を `take().expect()` に置き換え、再代入が必要な 5 変数を `let mut` に変更する
+- `handle_datachannel_state` の引数型を `&Arc<dyn Fn + Send + Sync>` から `&(dyn Fn + Send)` に変更する
+- `handle_datachannel_message` は async 関数のため `.await` 越えに `&dyn Fn + Send` を保持できず、`DataChannelMessageCallbacks` 構造体で値渡しに変更する
+- `configure_ice_server_urls` の引数型を `Option<&Arc<...>>` から `Option<&IceServerUrlConfigurer>` に変更し、呼び出し側を `.as_deref()` に変更する
+- `e2e-tests/src/test_connection.rs` の `ice_server_url_configurer` セッターの where 節から `Sync` を除去する
+- `examples/sumomo/src/main.rs` の `AppEventSender` トレイトから `Sync` を除去する
+- `CHANGES.md` の `## develop` に `[CHANGE]` エントリを追記する
