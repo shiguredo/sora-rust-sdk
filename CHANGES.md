@@ -10,6 +10,11 @@
   - バグ修正
 
 ## develop
+- [CHANGE] `SoraConnection` のコールバックをトレイト化する
+  - 12 個の個別コールバック setter（`on_signaling_message`, `on_notify`, `on_push`, `on_track`, `on_remove_track`, `on_switched`, `on_websocket_close`, `on_message`, `on_data_channel`, `on_data_channel_open`, `on_data_channel_message`, `on_data_channel_close`）を削除する
+  - `SoraConnection::builder()` に第 5 引数 `event_handler: impl SoraConnectionEventHandler + Send + 'static` を追加する
+  - `src/connection_event_handler.rs` に `SoraConnectionEventHandler` トレイトを追加する
+  - @melpon
 - [ADD] 公開 API に rustdoc を追加する
   - 全公開型・全 `pub fn`（トレイト実装を除く）・enum バリアント・公開フィールドに `///` を追加する
   - 全モジュールに `//!` モジュールドキュメントを追加する

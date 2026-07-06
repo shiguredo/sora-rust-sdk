@@ -35,6 +35,7 @@ use tokio::task::JoinHandle;
 use tokio_rustls::{TlsConnector, client::TlsStream};
 
 use crate::connection_context::SoraConnectionContext;
+use crate::connection_event_handler::SoraConnectionEventHandler;
 use crate::error::{Error, Result};
 use crate::rpc::{self, RpcRequestOptions, RpcResponse};
 use crate::signaling_types::{
@@ -65,44 +66,18 @@ pub struct TlsConfig {
 
 type IceServerUrlConfigurer = dyn Fn(&mut IceServer, &[String]) + Send;
 
-type OnSignalingMessageCallback = Box<dyn Fn(SignalingType, SignalingDirection, &str) + Send>;
-type OnNotifyCallback = Box<dyn Fn(&str) + Send>;
-type OnPushCallback = Box<dyn Fn(&str) + Send>;
-type OnTrackCallback = Box<dyn Fn(RtpTransceiver) + Send>;
-type OnRemoveTrackCallback = Box<dyn Fn(RtpReceiver) + Send>;
-type OnSwitchedCallback = Box<dyn Fn() + Send>;
-type OnWebsocketCloseCallback = Box<dyn Fn(Option<u16>, &str) + Send>;
-type OnMessageCallback = Box<dyn Fn(&str, &[u8]) + Send>;
-type OnDataChannelCallback = Box<dyn Fn(&str) + Send>;
-type OnDataChannelOpenCallback = Box<dyn Fn(&str) + Send>;
-type OnDataChannelMessageCallback = Box<dyn Fn(&str, &[u8]) + Send>;
-type OnDataChannelCloseCallback = Box<dyn Fn(&str) + Send>;
-
 /// [SoraConnection] を構築するためのビルダー。
 ///
 /// [SoraConnection::builder()] で生成し、各種設定メソッドでパラメータを指定した後、
 /// [build()](Self::build) で [SoraConnection] と [SoraConnectionHandle] を生成する。
+/// イベントハンドラは [SoraConnection::builder()] の第 5 引数として
+/// [SoraConnectionEventHandler] 実装を渡す。
 pub struct SoraConnectionBuilder {
     signaling_urls: Vec<String>,
     channel_id: String,
     role: Role,
 
-    on_signaling_message: Option<OnSignalingMessageCallback>,
-    on_notify: Option<OnNotifyCallback>,
-    on_push: Option<OnPushCallback>,
-    on_track: Option<OnTrackCallback>,
-    on_remove_track: Option<OnRemoveTrackCallback>,
-    on_switched: Option<OnSwitchedCallback>,
-    on_websocket_close: Option<OnWebsocketCloseCallback>,
-
-    // メッセージングレイヤー
-    on_message: Option<OnMessageCallback>,
-
-    // DataChannel API レイヤー
-    on_data_channel: Option<OnDataChannelCallback>,
-    on_data_channel_open: Option<OnDataChannelOpenCallback>,
-    on_data_channel_message: Option<OnDataChannelMessageCallback>,
-    on_data_channel_close: Option<OnDataChannelCloseCallback>,
+    event_handler: Option<Box<dyn SoraConnectionEventHandler + Send>>,
     sender_video_track: Option<VideoTrack>,
     sender_audio_track: Option<AudioTrack>,
 
@@ -141,23 +116,13 @@ impl SoraConnectionBuilder {
         signaling_urls: Vec<String>,
         channel_id: String,
         role: Role,
+        event_handler: Box<dyn SoraConnectionEventHandler + Send>,
     ) -> Self {
         Self {
             signaling_urls,
             channel_id,
             role,
-            on_signaling_message: Some(Box::new(|_, _, _| {})),
-            on_notify: Some(Box::new(|_| {})),
-            on_push: Some(Box::new(|_| {})),
-            on_track: Some(Box::new(|_| {})),
-            on_remove_track: Some(Box::new(|_| {})),
-            on_switched: Some(Box::new(|| {})),
-            on_websocket_close: Some(Box::new(|_, _| {})),
-            on_message: Some(Box::new(|_, _| {})),
-            on_data_channel: Some(Box::new(|_| {})),
-            on_data_channel_open: Some(Box::new(|_| {})),
-            on_data_channel_message: Some(Box::new(|_, _| {})),
-            on_data_channel_close: Some(Box::new(|_| {})),
+            event_handler: Some(event_handler),
             sender_video_track: None,
             sender_audio_track: None,
             client_id: None,
@@ -186,148 +151,6 @@ impl SoraConnectionBuilder {
             user_agent: None,
             context,
         }
-    }
-
-    /// シグナリングメッセージの送受信を監視するコールバックを設定する。
-    ///
-    /// Sora サーバーとの間でやり取りされる JSON メッセージの内容を、
-    /// デバッグやログ記録のために取得できる。
-    /// 第一引数はシグナリング経路（[SignalingType::WebSocket] または [SignalingType::DataChannel]）、
-    /// 第二引数はメッセージの方向（[SignalingDirection::Sent] または [SignalingDirection::Received]）、
-    /// 第三引数は JSON 文字列。
-    pub fn on_signaling_message<F>(mut self, handler: F) -> Self
-    where
-        F: Fn(SignalingType, SignalingDirection, &str) + Send + 'static,
-    {
-        self.on_signaling_message = Some(Box::new(handler));
-        self
-    }
-
-    /// シグナリング通知メッセージを受信したときに呼ばれるコールバックを設定する。
-    ///
-    /// 引数には Sora サーバーから送られてきた JSON 文字列が渡される。
-    /// チャネル参加者の接続・切断・メタデータ変更などのイベント情報を受け取れる。
-    pub fn on_notify<F>(mut self, handler: F) -> Self
-    where
-        F: Fn(&str) + Send + 'static,
-    {
-        self.on_notify = Some(Box::new(handler));
-        self
-    }
-
-    /// プッシュ通知メッセージを受信したときに呼ばれるコールバックを設定する。
-    ///
-    /// 引数には Sora サーバーから送られてきた JSON 文字列が渡される。
-    /// プッシュ API やシグナリング通知メタデータ拡張から送信された通知を受け取れる。
-    pub fn on_push<F>(mut self, handler: F) -> Self
-    where
-        F: Fn(&str) + Send + 'static,
-    {
-        self.on_push = Some(Box::new(handler));
-        self
-    }
-
-    /// リモート参加者から映像または音声トラックを受信したときに呼ばれるコールバックを設定する。
-    ///
-    /// 引数には受信した [RtpTransceiver] が渡される。
-    /// このトランシーバーからトラックや RTP 統計情報を取得できる。
-    pub fn on_track<F>(mut self, handler: F) -> Self
-    where
-        F: Fn(RtpTransceiver) + Send + 'static,
-    {
-        self.on_track = Some(Box::new(handler));
-        self
-    }
-
-    /// リモート参加者の映像または音声トラックが削除されたときに呼ばれるコールバックを設定する。
-    ///
-    /// 引数には削除されたトラックに対応する [RtpReceiver] が渡される。
-    pub fn on_remove_track<F>(mut self, handler: F) -> Self
-    where
-        F: Fn(RtpReceiver) + Send + 'static,
-    {
-        self.on_remove_track = Some(Box::new(handler));
-        self
-    }
-
-    /// WebSocket シグナリングから DataChannel シグナリングへの切替が
-    /// 完了したときに呼ばれるコールバックを設定する。
-    pub fn on_switched<F>(mut self, handler: F) -> Self
-    where
-        F: Fn() + Send + 'static,
-    {
-        self.on_switched = Some(Box::new(handler));
-        self
-    }
-
-    /// WebSocket 接続がクローズされたときに呼ばれるコールバックを設定する。
-    ///
-    /// 第一引数はクローズコード（`Some(u16)`）または `None`（正常クローズ以外）、
-    /// 第二引数はクローズ理由の文字列。
-    pub fn on_websocket_close<F>(mut self, handler: F) -> Self
-    where
-        F: Fn(Option<u16>, &str) + Send + 'static,
-    {
-        self.on_websocket_close = Some(Box::new(handler));
-        self
-    }
-
-    /// `#` プレフィックス付きのユーザー定義 DataChannel ラベル経由で
-    /// メッセージを受信したときに呼ばれるコールバックを設定する。
-    ///
-    /// 第一引数は DataChannel のラベル名（`#` プレフィックスを含む）、
-    /// 第二引数は受信したバイナリデータ。
-    /// 任意のアプリケーションデータを DataChannel 経由で送受信するために使う。
-    pub fn on_message<F>(mut self, handler: F) -> Self
-    where
-        F: Fn(&str, &[u8]) + Send + 'static,
-    {
-        self.on_message = Some(Box::new(handler));
-        self
-    }
-
-    /// Sora サーバーから DataChannel が作成されたときに呼ばれるコールバックを設定する。
-    ///
-    /// 引数には作成された DataChannel のラベル名が渡される。
-    pub fn on_data_channel<F>(mut self, handler: F) -> Self
-    where
-        F: Fn(&str) + Send + 'static,
-    {
-        self.on_data_channel = Some(Box::new(handler));
-        self
-    }
-
-    /// DataChannel が開かれたときに呼ばれるコールバックを設定する。
-    ///
-    /// 引数には開かれた DataChannel のラベル名が渡される。
-    pub fn on_data_channel_open<F>(mut self, handler: F) -> Self
-    where
-        F: Fn(&str) + Send + 'static,
-    {
-        self.on_data_channel_open = Some(Box::new(handler));
-        self
-    }
-
-    /// DataChannel 経由でメッセージを受信したときに呼ばれるコールバックを設定する。
-    ///
-    /// 第一引数は DataChannel のラベル名、第二引数は受信したバイナリデータ。
-    pub fn on_data_channel_message<F>(mut self, handler: F) -> Self
-    where
-        F: Fn(&str, &[u8]) + Send + 'static,
-    {
-        self.on_data_channel_message = Some(Box::new(handler));
-        self
-    }
-
-    /// DataChannel が閉じられたときに呼ばれるコールバックを設定する。
-    ///
-    /// 引数には閉じられた DataChannel のラベル名が渡される。
-    pub fn on_data_channel_close<F>(mut self, handler: F) -> Self
-    where
-        F: Fn(&str) + Send + 'static,
-    {
-        self.on_data_channel_close = Some(Box::new(handler));
-        self
     }
 
     /// Sora サーバーに送信する映像トラックを設定する。
@@ -743,6 +566,7 @@ pub struct SoraConnection {
     #[expect(dead_code)]
     pc_observer: PeerConnectionObserver,
     // context を最後に破棄するため、config は最後に保持する。
+    event_handler: Option<Box<dyn SoraConnectionEventHandler + Send>>,
     config: SoraConnectionBuilder,
 }
 
@@ -758,6 +582,8 @@ impl Drop for PendingRpcRequest {
 }
 
 enum SoraEvent {
+    Track(RtpTransceiver),
+    RemoveTrack(RtpReceiver),
     SignalingMessage(String),
     DataChannelMessage { label: String, data: Vec<u8> },
     DataChannelRegister(DataChannel),
@@ -824,24 +650,26 @@ impl SSLCertificateVerifierHandler for TurnTlsCaCertVerifier {
     }
 }
 
-/// DataChannel メッセージ処理で使うコールバック群。async 関数内で参照を .await 越えに保持しないよう Box で受け渡す。
-struct DataChannelMessageCallbacks {
-    on_signaling_message: OnSignalingMessageCallback,
-    on_notify: OnNotifyCallback,
-    on_push: OnPushCallback,
-    on_message: OnMessageCallback,
-    on_data_channel_message: OnDataChannelMessageCallback,
-}
-
 impl SoraConnection {
     /// [SoraConnectionBuilder] を生成する。
+    ///
+    /// `event_handler` には [SoraConnectionEventHandler] トレイトを実装した型のインスタンスを渡す。
+    /// トレイトの全メソッドにデフォルトの空実装が用意されているため、
+    /// 必要なメソッドのみオーバーライドすればよい。
     pub fn builder(
         context: Arc<SoraConnectionContext>,
         signaling_urls: Vec<String>,
         channel_id: String,
         role: Role,
+        event_handler: impl SoraConnectionEventHandler + 'static,
     ) -> SoraConnectionBuilder {
-        SoraConnectionBuilder::new(context, signaling_urls, channel_id, role)
+        SoraConnectionBuilder::new(
+            context,
+            signaling_urls,
+            channel_id,
+            role,
+            Box::new(event_handler),
+        )
     }
 
     fn new(mut config: SoraConnectionBuilder) -> Result<(Self, SoraConnectionHandle)> {
@@ -851,19 +679,11 @@ impl SoraConnection {
         let (event_tx, event_rx) = mpsc::unbounded_channel::<SoraEvent>();
         let pc_factory = config.context.factory();
         let connection_context = config.context.connection_context();
-        let on_track = config
-            .on_track
-            .take()
-            .expect("on_track は new() でデフォルト値が設定されている");
-        let on_remove_track = config
-            .on_remove_track
-            .take()
-            .expect("on_remove_track は new() でデフォルト値が設定されている");
         let event_tx_for_candidate = event_tx.clone();
         let event_tx_for_channel = event_tx.clone();
+        let event_tx_for_track = event_tx.clone();
         struct PcObserverHandler {
-            on_track: Box<dyn Fn(RtpTransceiver) + Send>,
-            on_remove_track: Box<dyn Fn(RtpReceiver) + Send>,
+            event_tx_for_track: mpsc::UnboundedSender<SoraEvent>,
             event_tx_for_candidate: mpsc::UnboundedSender<SoraEvent>,
             event_tx_for_channel: mpsc::UnboundedSender<SoraEvent>,
         }
@@ -874,11 +694,13 @@ impl SoraConnection {
             }
 
             fn on_track(&mut self, transceiver: RtpTransceiver) {
-                (self.on_track)(transceiver);
+                let _ = self.event_tx_for_track.send(SoraEvent::Track(transceiver));
             }
 
             fn on_remove_track(&mut self, receiver: RtpReceiver) {
-                (self.on_remove_track)(receiver);
+                let _ = self
+                    .event_tx_for_track
+                    .send(SoraEvent::RemoveTrack(receiver));
             }
 
             fn on_ice_candidate(&mut self, candidate: IceCandidateRef<'_>) {
@@ -901,8 +723,7 @@ impl SoraConnection {
         }
 
         let observer = PeerConnectionObserver::new_with_handler(Box::new(PcObserverHandler {
-            on_track,
-            on_remove_track,
+            event_tx_for_track,
             event_tx_for_candidate,
             event_tx_for_channel,
         }));
@@ -942,6 +763,11 @@ impl SoraConnection {
         let mut rtc_config = PeerConnectionRtcConfiguration::new();
         let pc = PeerConnection::create(pc_factory, &mut rtc_config, &mut deps)?;
 
+        let event_handler = config
+            .event_handler
+            .take()
+            .expect("event_handler は new() でデフォルト値が設定されている");
+
         let client = Self {
             data_channels: HashMap::new(),
             data_channel_configs: Vec::new(),
@@ -958,6 +784,7 @@ impl SoraConnection {
             connected_signaling_url: None,
             pc,
             pc_observer: observer,
+            event_handler: Some(event_handler),
             config,
         };
         Ok((client, handle))
@@ -990,56 +817,10 @@ impl SoraConnection {
         let tls_config = Arc::new(self.config.tls_config.clone());
         let audio = self.config.audio.clone();
         let video = self.config.video.clone();
-        let mut on_signaling_message = self
-            .config
-            .on_signaling_message
+        let mut handler = self
+            .event_handler
             .take()
-            .expect("on_signaling_message は new() でデフォルト値が設定されている");
-        let mut on_notify = self
-            .config
-            .on_notify
-            .take()
-            .expect("on_notify は new() でデフォルト値が設定されている");
-        let mut on_push = self
-            .config
-            .on_push
-            .take()
-            .expect("on_push は new() でデフォルト値が設定されている");
-        let on_switched = self
-            .config
-            .on_switched
-            .take()
-            .expect("on_switched は new() でデフォルト値が設定されている");
-        let on_websocket_close = self
-            .config
-            .on_websocket_close
-            .take()
-            .expect("on_websocket_close は new() でデフォルト値が設定されている");
-        let mut on_message = self
-            .config
-            .on_message
-            .take()
-            .expect("on_message は new() でデフォルト値が設定されている");
-        let on_data_channel = self
-            .config
-            .on_data_channel
-            .take()
-            .expect("on_data_channel は new() でデフォルト値が設定されている");
-        let on_data_channel_open = self
-            .config
-            .on_data_channel_open
-            .take()
-            .expect("on_data_channel_open は new() でデフォルト値が設定されている");
-        let mut on_data_channel_message = self
-            .config
-            .on_data_channel_message
-            .take()
-            .expect("on_data_channel_message は new() でデフォルト値が設定されている");
-        let on_data_channel_close = self
-            .config
-            .on_data_channel_close
-            .take()
-            .expect("on_data_channel_close は new() でデフォルト値が設定されている");
+            .expect("event_handler は new() で設定されている");
         let proxy = self.proxy.clone();
 
         if signaling_urls.is_empty() {
@@ -1147,38 +928,32 @@ impl SoraConnection {
                     match event {
                         SoraEvent::SignalingMessage(message) => {
                             if use_datachannel_signaling {
-                                on_signaling_message(SignalingType::DataChannel, SignalingDirection::Sent, &message);
+                                handler.on_signaling_message(SignalingType::DataChannel, SignalingDirection::Sent, &message);
                                 self.send_signaling_message(&message)?;
                             } else if ws.state() == ConnectionState::Connected {
-                                on_signaling_message(SignalingType::WebSocket, SignalingDirection::Sent, &message);
+                                handler.on_signaling_message(SignalingType::WebSocket, SignalingDirection::Sent, &message);
                                 send_text(&mut ws, &message)?;
                             }
                         }
                         SoraEvent::DataChannelMessage { label, data } => {
-                            let callbacks = DataChannelMessageCallbacks {
-                                on_signaling_message,
-                                on_notify,
-                                on_push,
-                                on_message,
-                                on_data_channel_message,
-                            };
-                            let callbacks = self
-                                .handle_datachannel_message(&label, &data, callbacks)
+                            handler = self
+                                .handle_datachannel_message(&label, &data, handler)
                                 .await?;
-                            on_signaling_message = callbacks.on_signaling_message;
-                            on_notify = callbacks.on_notify;
-                            on_push = callbacks.on_push;
-                            on_message = callbacks.on_message;
-                            on_data_channel_message = callbacks.on_data_channel_message;
+                        }
+                        SoraEvent::Track(transceiver) => {
+                            handler.on_track(transceiver);
+                        }
+                        SoraEvent::RemoveTrack(receiver) => {
+                            handler.on_remove_track(receiver);
                         }
                         SoraEvent::DataChannelRegister(channel) => {
                             let Ok(label) = channel.label() else {
                                 continue;
                             };
                             rtc_log_info!("Registered DataChannel '{}'", label);
-                            on_data_channel(&label);
+                            handler.on_data_channel(&label);
                             self.register_data_channel(channel, &event_tx);
-                            self.handle_datachannel_state(&label, on_data_channel_open.as_ref(), on_data_channel_close.as_ref(), &mut opened_datachannels, &mut use_datachannel_signaling);
+                            self.handle_datachannel_state(&mut *handler, &label, &mut opened_datachannels, &mut use_datachannel_signaling);
                         }
                         SoraEvent::RpcTimeout { id } => {
                             if let Some(mut pending) = self.pending_rpc_responses.remove(&id) {
@@ -1186,7 +961,7 @@ impl SoraConnection {
                             }
                         }
                         SoraEvent::DataChannelStateChange(label) => {
-                            self.handle_datachannel_state(&label, on_data_channel_open.as_ref(), on_data_channel_close.as_ref(), &mut opened_datachannels, &mut use_datachannel_signaling);
+                            self.handle_datachannel_state(&mut *handler, &label, &mut opened_datachannels, &mut use_datachannel_signaling);
                         }
                     }
                 }
@@ -1198,7 +973,7 @@ impl SoraConnection {
                             // オープン中の DataChannel に対して close コールバックを呼ぶ
                             for label in &opened_datachannels {
                                 rtc_log_info!("DataChannel '{}' closed", label);
-                                on_data_channel_close(label);
+                                handler.on_data_channel_close(label);
                             }
                             opened_datachannels.clear();
                             let _ = ack_tx.send(());
@@ -1284,7 +1059,7 @@ impl SoraConnection {
                             video.clone(),
                         );
                         let connect_text = Json(connect_message).to_string();
-                        on_signaling_message(
+                        handler.on_signaling_message(
                             SignalingType::WebSocket,
                             SignalingDirection::Sent,
                             &connect_text,
@@ -1308,7 +1083,7 @@ impl SoraConnection {
                                 simulcast,
                                 encodings,
                             } => {
-                                on_signaling_message(
+                                handler.on_signaling_message(
                                     SignalingType::WebSocket,
                                     SignalingDirection::Received,
                                     &text,
@@ -1319,7 +1094,7 @@ impl SoraConnection {
                                 let answer_sdp = self.handle_offer(&sdp, &ice_servers).await?;
                                 let answer_message = OutgoingMessage::new_answer(&answer_sdp);
                                 let answer_text = Json(answer_message).to_string();
-                                on_signaling_message(
+                                handler.on_signaling_message(
                                     SignalingType::WebSocket,
                                     SignalingDirection::Sent,
                                     &answer_text,
@@ -1327,7 +1102,7 @@ impl SoraConnection {
                                 send_text(&mut ws, &answer_text)?;
                             }
                             IncomingMessageData::ReOffer { sdp, ice_servers } => {
-                                on_signaling_message(
+                                handler.on_signaling_message(
                                     SignalingType::WebSocket,
                                     SignalingDirection::Received,
                                     &text,
@@ -1335,7 +1110,7 @@ impl SoraConnection {
                                 let answer_sdp = self.handle_offer(&sdp, &ice_servers).await?;
                                 let reanswer_message = OutgoingMessage::new_reanswer(&answer_sdp);
                                 let reanswer_text = Json(reanswer_message).to_string();
-                                on_signaling_message(
+                                handler.on_signaling_message(
                                     SignalingType::WebSocket,
                                     SignalingDirection::Sent,
                                     &reanswer_text,
@@ -1357,20 +1132,20 @@ impl SoraConnection {
                                 self.request_stats_response(&event_tx);
                             }
                             IncomingMessageData::Notify {} => {
-                                on_notify(&message.message);
+                                handler.on_notify(&message.message);
                             }
                             IncomingMessageData::Push {} => {
-                                on_push(&message.message);
+                                handler.on_push(&message.message);
                             }
                             IncomingMessageData::Switched {
                                 ignore_disconnect_websocket: iws,
                             } => {
                                 switched_received = true;
                                 switched_ignore_disconnect_websocket = iws;
-                                on_switched();
+                                handler.on_switched();
                             }
                             IncomingMessageData::Redirect { location } => {
-                                on_signaling_message(
+                                handler.on_signaling_message(
                                     SignalingType::WebSocket,
                                     SignalingDirection::Received,
                                     &text,
@@ -1399,7 +1174,7 @@ impl SoraConnection {
                     }
                     ConnectionEvent::Close { code, reason } => {
                         rtc_log_info!("[WebSocket] Received Close: {:?} {}", code, reason);
-                        on_websocket_close(code.map(|c| c.0), &reason);
+                        handler.on_websocket_close(code.map(|c| c.0), &reason);
                         break;
                     }
                     ConnectionEvent::StateChanged(state) => {
@@ -1525,7 +1300,7 @@ impl SoraConnection {
                     Ok(label) if !label.is_empty() => {
                         if opened_datachannels.remove(&label) {
                             rtc_log_info!("DataChannel '{}' closed", label);
-                            on_data_channel_close(&label);
+                            handler.on_data_channel_close(&label);
                         }
                     }
                     _ => {
@@ -1910,23 +1685,22 @@ impl SoraConnection {
 
     fn handle_datachannel_state(
         &self,
+        handler: &mut dyn SoraConnectionEventHandler,
         label: &str,
-        on_data_channel_open: &(dyn Fn(&str) + Send),
-        on_data_channel_close: &(dyn Fn(&str) + Send),
         opened_datachannels: &mut HashSet<String>,
         use_datachannel_signaling: &mut bool,
     ) {
         if self.is_datachannel_open(label) && !opened_datachannels.contains(label) {
             rtc_log_info!("DataChannel '{}' opened", label);
             opened_datachannels.insert(label.to_string());
-            on_data_channel_open(label);
+            handler.on_data_channel_open(label);
             if opened_datachannels.len() == self.data_channel_configs.len() {
                 *use_datachannel_signaling = true;
             }
         } else if self.is_datachannel_closed(label) && opened_datachannels.contains(label) {
             rtc_log_info!("DataChannel '{}' closed", label);
             opened_datachannels.remove(label);
-            on_data_channel_close(label);
+            handler.on_data_channel_close(label);
         }
     }
 
@@ -1990,8 +1764,8 @@ impl SoraConnection {
         &mut self,
         label: &str,
         data: &[u8],
-        callbacks: DataChannelMessageCallbacks,
-    ) -> Result<DataChannelMessageCallbacks> {
+        mut handler: Box<dyn SoraConnectionEventHandler + Send>,
+    ) -> Result<Box<dyn SoraConnectionEventHandler + Send>> {
         // DataChannel の設定を検索
         let managed = self.data_channels.get(label);
         let compress = managed.is_some_and(|m| m.compress);
@@ -2010,7 +1784,7 @@ impl SoraConnection {
         );
 
         // DataChannel API コールバック (全ラベル)
-        (callbacks.on_data_channel_message)(label, &message_bytes);
+        handler.on_data_channel_message(label, &message_bytes);
 
         match label {
             // signaling, stats, push, notify ラベルの場合はシグナリングメッセージとして処理
@@ -2018,7 +1792,7 @@ impl SoraConnection {
                 let text = String::from_utf8(message_bytes)?;
                 // signaling ラベルのみ on_signaling_message を呼ぶ
                 if label == "signaling" {
-                    (callbacks.on_signaling_message)(
+                    handler.on_signaling_message(
                         SignalingType::DataChannel,
                         SignalingDirection::Received,
                         &text,
@@ -2031,7 +1805,7 @@ impl SoraConnection {
                         let answer_sdp = self.handle_offer(&sdp, &ice_servers).await?;
                         let reanswer_message = OutgoingMessage::new_reanswer(&answer_sdp);
                         let reanswer_text = Json(reanswer_message).to_string();
-                        (callbacks.on_signaling_message)(
+                        handler.on_signaling_message(
                             SignalingType::DataChannel,
                             SignalingDirection::Sent,
                             &reanswer_text,
@@ -2046,7 +1820,7 @@ impl SoraConnection {
                             OutgoingMessage::new_pong(None)
                         };
                         let pong_text = Json(pong).to_string();
-                        (callbacks.on_signaling_message)(
+                        handler.on_signaling_message(
                             SignalingType::DataChannel,
                             SignalingDirection::Sent,
                             &pong_text,
@@ -2062,10 +1836,10 @@ impl SoraConnection {
                         }
                     }
                     IncomingMessageData::Notify {} => {
-                        (callbacks.on_notify)(&text);
+                        handler.on_notify(&text);
                     }
                     IncomingMessageData::Push {} => {
-                        (callbacks.on_push)(&text);
+                        handler.on_push(&text);
                     }
                     _ => {
                         rtc_log_warning!("Received unsupported message via DataChannel");
@@ -2089,14 +1863,14 @@ impl SoraConnection {
             }
             // # で始まるラベルはユーザー定義メッセージとして処理
             label if label.starts_with('#') => {
-                (callbacks.on_message)(label, &message_bytes);
+                handler.on_message(label, &message_bytes);
             }
             _ => {
                 rtc_log_warning!("Received unsupported label via DataChannel: {}", label);
             }
         }
 
-        Ok(callbacks)
+        Ok(handler)
     }
 }
 
