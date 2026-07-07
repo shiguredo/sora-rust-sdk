@@ -566,7 +566,6 @@ pub struct SoraConnection {
     #[expect(dead_code)]
     pc_observer: PeerConnectionObserver,
     // context を最後に破棄するため、config は最後に保持する。
-    event_handler: Option<Box<dyn SoraConnectionEventHandler + Send>>,
     config: SoraConnectionBuilder,
 }
 
@@ -672,7 +671,7 @@ impl SoraConnection {
         )
     }
 
-    fn new(mut config: SoraConnectionBuilder) -> Result<(Self, SoraConnectionHandle)> {
+    fn new(config: SoraConnectionBuilder) -> Result<(Self, SoraConnectionHandle)> {
         let (command_tx, command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
         let handle = SoraConnectionHandle { command_tx };
 
@@ -763,11 +762,6 @@ impl SoraConnection {
         let mut rtc_config = PeerConnectionRtcConfiguration::new();
         let pc = PeerConnection::create(pc_factory, &mut rtc_config, &mut deps)?;
 
-        let event_handler = config
-            .event_handler
-            .take()
-            .expect("event_handler は new() でデフォルト値が設定されている");
-
         let client = Self {
             data_channels: HashMap::new(),
             data_channel_configs: Vec::new(),
@@ -784,7 +778,6 @@ impl SoraConnection {
             connected_signaling_url: None,
             pc,
             pc_observer: observer,
-            event_handler: Some(event_handler),
             config,
         };
         Ok((client, handle))
@@ -818,6 +811,7 @@ impl SoraConnection {
         let audio = self.config.audio.clone();
         let video = self.config.video.clone();
         let mut handler = self
+            .config
             .event_handler
             .take()
             .expect("event_handler は new() で設定されている");
