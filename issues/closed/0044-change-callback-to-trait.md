@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-07-06
-- Completed: YYYY-MM-DD
+- Completed: 2026-07-08
 - Model: DeepSeek V4 Pro
 - Branch: feature/change-callback-to-trait
 - Polished: 2026-07-06
@@ -498,4 +498,9 @@ let builder = SoraConnection::builder(
 
 ## 解決方法
 
-（実装時に記述）
+- `src/connection_event_handler.rs` を新規作成し、全 12 メソッドにデフォルト空実装を持つ `SoraConnectionEventHandler` トレイトを定義した
+- `src/connection.rs` から 12 個の callback 型エイリアス・フィールド・setter を削除し、`SoraConnection::builder()` に第 5 引数 `event_handler` を追加した
+- `PcObserverHandler` から `on_track` / `on_remove_track` の直接呼び出しを廃止し、`SoraEvent::Track` / `RemoveTrack` バリアント経由でメインループに委譲した
+- `DataChannelMessageCallbacks` を削除し、`handle_datachannel_message` / `handle_datachannel_state` を `&mut dyn SoraConnectionEventHandler` 参照で統一した
+- `event_handler` は `SoraConnection` の独立フィールドにせず `config` に保持し `run()` で直接 `take()` する形にした
+- sumomo / e2e テスト / README / CHANGES を移行した
