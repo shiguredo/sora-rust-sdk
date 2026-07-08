@@ -90,7 +90,18 @@ tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
 映像・音声を送受信する例です。
 
 ```rust
-use sora_sdk::{Role, SoraConnection, SoraConnectionContext};
+use sora_sdk::{Role, SoraConnection, SoraConnectionContext, SoraConnectionEventHandler};
+
+struct MyEventHandler;
+
+impl SoraConnectionEventHandler for MyEventHandler {
+    fn on_notify(&mut self, text: &str) {
+        println!("notify: {text}");
+    }
+    fn on_track(&mut self, transceiver: shiguredo_webrtc::RtpTransceiver) {
+        println!("track added: {:?}", transceiver.mid());
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), sora_sdk::Error> {
@@ -107,20 +118,16 @@ async fn main() -> Result<(), sora_sdk::Error> {
     // (FakeVideoCapturer や AdaptedVideoTrackSource など)
 
     // 3. SoraConnection::builder() で接続設定を組み立てる
+    //    第 5 引数に SoraConnectionEventHandler 実装を渡す
     let (connection, _handle) = SoraConnection::builder(
         context,
         vec!["wss://sora.example.com/signaling".to_string()],
         "your-channel-id".to_string(),
         Role::SendRecv,
+        MyEventHandler,
     )
     .sender_audio_track(audio_track)
     // .sender_video_track(video_track)
-    .on_notify(|text| {
-        println!("notify: {text}");
-    })
-    .on_track(|transceiver| {
-        println!("track added: {:?}", transceiver.mid());
-    })
     .build()?;
 
     // 4. connection.run() で Sora に接続する
@@ -171,7 +178,15 @@ async fn main() -> Result<(), sora_sdk::Error> {
 映像・音声を受信する例です。
 
 ```rust
-use sora_sdk::{Role, SoraConnection, SoraConnectionContext};
+use sora_sdk::{Role, SoraConnection, SoraConnectionContext, SoraConnectionEventHandler};
+
+struct MyEventHandler;
+
+impl SoraConnectionEventHandler for MyEventHandler {
+    fn on_notify(&mut self, text: &str) {
+        println!("notify: {text}");
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), sora_sdk::Error> {
@@ -182,10 +197,8 @@ async fn main() -> Result<(), sora_sdk::Error> {
         vec!["wss://sora.example.com/signaling".to_string()],
         "your-channel-id".to_string(),
         Role::RecvOnly,
+        MyEventHandler,
     )
-    .on_notify(|text| {
-        println!("notify: {text}");
-    })
     .build()?;
 
     connection.run().await?;
@@ -197,24 +210,29 @@ async fn main() -> Result<(), sora_sdk::Error> {
 ### SoraConnection::builder() の設定
 
 `SoraConnection::builder()` では以下の設定が可能です。
+イベントハンドラは第 5 引数として `SoraConnectionEventHandler` トレイトを実装した型のインスタンスを渡します。
+トレイトの全メソッドにデフォルトの空実装が用意されているため、必要なメソッドのみオーバーライドすればよいです。
 
 ```rust
-let (connection, handle) = SoraConnection::builder(context, signaling_urls, channel_id, role)
-    // コールバック
-    .on_signaling_message(|type_, direction, text| { /* シグナリングメッセージ送受信時 */ })
-    .on_notify(|text| { /* notify メッセージ受信時 */ })
-    .on_push(|text| { /* push メッセージ受信時 */ })
-    .on_track(|transceiver| { /* トラック追加時 */ })
-    .on_remove_track(|receiver| { /* トラック削除時 */ })
-    .on_switched(|| { /* DataChannel に切り替わった時 */ })
-    .on_websocket_close(|code, reason| { /* WebSocket 切断時 */ })
-    // メッセージング
-    .on_message(|label, data| { /* メッセージ受信時 */ })
-    // DataChannel
-    .on_data_channel(|label| { /* DataChannel 作成時 */ })
-    .on_data_channel_open(|label| { /* DataChannel オープン時 */ })
-    .on_data_channel_message(|label, data| { /* DataChannel メッセージ受信時 */ })
-    .on_data_channel_close(|label| { /* DataChannel クローズ時 */ })
+struct MyEventHandler;
+
+impl SoraConnectionEventHandler for MyEventHandler {
+    // 必要なメソッドのみオーバーライドする
+    fn on_notify(&mut self, text: &str) { /* notify メッセージ受信時 */ }
+    fn on_push(&mut self, text: &str) { /* push メッセージ受信時 */ }
+    fn on_track(&mut self, transceiver: RtpTransceiver) { /* トラック追加時 */ }
+    fn on_remove_track(&mut self, receiver: RtpReceiver) { /* トラック削除時 */ }
+    fn on_switched(&mut self) { /* DataChannel に切り替わった時 */ }
+    fn on_websocket_close(&mut self, code: Option<u16>, reason: &str) { /* WebSocket 切断時 */ }
+    fn on_message(&mut self, label: &str, data: &[u8]) { /* メッセージ受信時 */ }
+    fn on_data_channel(&mut self, label: &str) { /* DataChannel 作成時 */ }
+    fn on_data_channel_open(&mut self, label: &str) { /* DataChannel オープン時 */ }
+    fn on_data_channel_message(&mut self, label: &str, data: &[u8]) { /* DataChannel メッセージ受信時 */ }
+    fn on_data_channel_close(&mut self, label: &str) { /* DataChannel クローズ時 */ }
+    fn on_signaling_message(&mut self, type_: SignalingType, direction: SignalingDirection, text: &str) { /* シグナリングメッセージ送受信時 */ }
+}
+
+let (connection, handle) = SoraConnection::builder(context, signaling_urls, channel_id, role, MyEventHandler)
     // 送信トラック
     .sender_video_track(video_track)
     .sender_audio_track(audio_track)
@@ -278,12 +296,14 @@ let connected = handle.connected_signaling_url().await?;
 
 ### メッセージ受信
 
-`SoraConnection::builder()` の `on_message` コールバックで `#` プレフィックス付きラベルのユーザー定義 DataChannel からメッセージを受信できます。
+`SoraConnectionEventHandler::on_message` メソッドをオーバーライドすることで、`#` プレフィックス付きラベルのユーザー定義 DataChannel からメッセージを受信できます。
 
 ```rust
-.on_message(|label, data| {
-    println!("received on {label}: {} bytes", data.len());
-})
+impl SoraConnectionEventHandler for MyEventHandler {
+    fn on_message(&mut self, label: &str, data: &[u8]) {
+        println!("received on {label}: {} bytes", data.len());
+    }
+}
 ```
 
 ### メッセージ送信
@@ -351,6 +371,9 @@ let response = handle.send_rpc_request(
 ```rust
 let context = SoraConnectionContext::new()?;
 
+struct EmptyHandler;
+impl SoraConnectionEventHandler for EmptyHandler {}
+
 for i in 0..5 {
     let ctx = context.clone();
     let channel_id = format!("channel-{i}");
@@ -360,6 +383,7 @@ for i in 0..5 {
             vec!["wss://sora.example.com/signaling".to_string()],
             channel_id,
             Role::RecvOnly,
+            EmptyHandler,
         )
         .build()
         .unwrap();

@@ -16,7 +16,15 @@
 //! # 基本的な使い方
 //!
 //! ```ignore
-//! use sora_sdk::{SoraConnection, SoraConnectionContext, Role};
+//! use sora_sdk::{SoraConnection, SoraConnectionContext, SoraConnectionEventHandler, Role};
+//!
+//! struct MyEventHandler;
+//!
+//! impl SoraConnectionEventHandler for MyEventHandler {
+//!     fn on_notify(&mut self, text: &str) {
+//!         println!("notify: {text}");
+//!     }
+//! }
 //!
 //! let context = SoraConnectionContext::new()?;
 //! let (connection, handle) = SoraConnection::builder(
@@ -24,6 +32,7 @@
 //!     vec!["wss://sora.example.com/signaling".to_string()],
 //!     "your-channel-id".to_string(),
 //!     Role::SendRecv,
+//!     MyEventHandler,
 //! ).build()?;
 //!
 //! // connection.run() を別タスクで実行
@@ -36,6 +45,7 @@
 #![warn(missing_docs)]
 mod connection;
 mod connection_context;
+mod connection_event_handler;
 mod error;
 #[cfg(feature = "libcamera")]
 mod libcamera;
@@ -55,6 +65,7 @@ pub use crate::connection::{
 pub use crate::connection_context::{
     AdmConfig, SoraConnectionContext, SoraConnectionContextConfig,
 };
+pub use crate::connection_event_handler::SoraConnectionEventHandler;
 pub use crate::error::{Error, Result};
 #[cfg(feature = "libcamera")]
 pub use crate::libcamera::{

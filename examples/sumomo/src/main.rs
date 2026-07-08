@@ -53,7 +53,8 @@ use sora_sdk::VplVideoCodecCapability;
 use sora_sdk::{
     InternalVideoCodecCapability, Mp4PassthroughVideoCodecCapability, Mp4SampleReader,
     Mp4VideoCapturer, Openh264VideoCodecCapability, SoraConnection, SoraConnectionBuilder,
-    SoraConnectionContext, SoraConnectionContextConfig, VideoCodecCapability, VideoCodecPreference,
+    SoraConnectionContext, SoraConnectionContextConfig, SoraConnectionEventHandler,
+    VideoCodecCapability, VideoCodecPreference,
 };
 use tokio::sync::mpsc;
 use video_codec_list::run_video_codec_list;
@@ -311,6 +312,28 @@ fn apply_common_builder_options(
     Ok(builder)
 }
 
+struct AppEventHandler<T: AppEventSender> {
+    event_tx: T,
+}
+
+impl<T: AppEventSender> SoraConnectionEventHandler for AppEventHandler<T> {
+    fn on_notify(&mut self, text: &str) {
+        self.event_tx.send_event(AppEvent::Notify(text.to_string()));
+    }
+
+    fn on_push(&mut self, text: &str) {
+        self.event_tx.send_event(AppEvent::Push(text.to_string()));
+    }
+
+    fn on_track(&mut self, transceiver: shiguredo_webrtc::RtpTransceiver) {
+        self.event_tx.send_event(AppEvent::OnTrack(transceiver));
+    }
+
+    fn on_remove_track(&mut self, receiver: shiguredo_webrtc::RtpReceiver) {
+        self.event_tx.send_event(AppEvent::OnRemoveTrack(receiver));
+    }
+}
+
 fn build_connection_builder<T>(
     context: Arc<SoraConnectionContext>,
     args: &Args,
@@ -324,30 +347,8 @@ where
         args.signaling_urls.clone(),
         args.channel_id.clone(),
         args.role,
-    )
-    .on_notify({
-        let event_tx = event_tx.clone();
-        move |text| {
-            event_tx.send_event(AppEvent::Notify(text.to_string()));
-        }
-    })
-    .on_push({
-        let event_tx = event_tx.clone();
-        move |text| {
-            event_tx.send_event(AppEvent::Push(text.to_string()));
-        }
-    })
-    .on_track({
-        let event_tx = event_tx.clone();
-        move |transceiver| {
-            event_tx.send_event(AppEvent::OnTrack(transceiver));
-        }
-    })
-    .on_remove_track({
-        move |receiver| {
-            event_tx.send_event(AppEvent::OnRemoveTrack(receiver));
-        }
-    });
+        AppEventHandler { event_tx },
+    );
     apply_common_builder_options(builder, args)
 }
 

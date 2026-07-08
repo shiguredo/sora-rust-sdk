@@ -6,7 +6,8 @@ use shiguredo_webrtc::{AudioTrack, IceServer, VideoTrack};
 use sora_sdk::{
     Audio, ConnectDataChannel, ForwardingFilter, JsonString, ProxyInfo, Result, Role,
     RpcRequestOptions, RpcResponse, SignalingDirection, SignalingType, SoraConnection,
-    SoraConnectionBuilder, SoraConnectionContext, SoraConnectionHandle, Video,
+    SoraConnectionBuilder, SoraConnectionContext, SoraConnectionEventHandler, SoraConnectionHandle,
+    Video,
 };
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
@@ -61,12 +62,87 @@ pub enum SoraTestEvent {
     },
 }
 
+/// `SoraConnection` のイベントを `SoraTestEvent` に変換する内部ハンドラ。
+struct SoraTestEventHandler {
+    event_tx: UnboundedSender<SoraTestEvent>,
+}
+
+impl SoraConnectionEventHandler for SoraTestEventHandler {
+    fn on_signaling_message(
+        &mut self,
+        signaling_type: SignalingType,
+        direction: SignalingDirection,
+        text: &str,
+    ) {
+        let _ = self.event_tx.send(SoraTestEvent::SignalingMessage {
+            signaling_type,
+            direction,
+            text: text.to_string(),
+        });
+    }
+    fn on_notify(&mut self, message: &str) {
+        let _ = self.event_tx.send(SoraTestEvent::Notify {
+            message: message.to_string(),
+        });
+    }
+    fn on_push(&mut self, message: &str) {
+        let _ = self.event_tx.send(SoraTestEvent::Push {
+            message: message.to_string(),
+        });
+    }
+    fn on_track(&mut self, transceiver: shiguredo_webrtc::RtpTransceiver) {
+        let kind = transceiver.receiver().track().kind().ok();
+        let _ = self.event_tx.send(SoraTestEvent::Track { kind });
+    }
+    fn on_remove_track(&mut self, receiver: shiguredo_webrtc::RtpReceiver) {
+        let kind = receiver.track().kind().ok();
+        let _ = self.event_tx.send(SoraTestEvent::RemoveTrack { kind });
+    }
+    fn on_switched(&mut self) {
+        let _ = self.event_tx.send(SoraTestEvent::Switched);
+    }
+    fn on_websocket_close(&mut self, code: Option<u16>, reason: &str) {
+        let _ = self.event_tx.send(SoraTestEvent::WebsocketClose {
+            code,
+            reason: reason.to_string(),
+        });
+    }
+    fn on_message(&mut self, label: &str, data: &[u8]) {
+        let _ = self.event_tx.send(SoraTestEvent::Message {
+            label: label.to_string(),
+            data: data.to_vec(),
+        });
+    }
+    fn on_data_channel(&mut self, label: &str) {
+        let _ = self.event_tx.send(SoraTestEvent::DataChannel {
+            label: label.to_string(),
+        });
+    }
+    fn on_data_channel_open(&mut self, label: &str) {
+        let _ = self.event_tx.send(SoraTestEvent::DataChannelOpen {
+            label: label.to_string(),
+        });
+    }
+    fn on_data_channel_message(&mut self, label: &str, data: &[u8]) {
+        let _ = self.event_tx.send(SoraTestEvent::DataChannelMessage {
+            label: label.to_string(),
+            data: data.to_vec(),
+        });
+    }
+    fn on_data_channel_close(&mut self, label: &str) {
+        let _ = self.event_tx.send(SoraTestEvent::DataChannelClose {
+            label: label.to_string(),
+        });
+    }
+}
+
 /// `SoraConnectionBuilder` をテスト向けに包むビルダー。
 ///
 /// production API とほぼ同じ設定項目を公開しつつ、`connect()` 時に
-/// callback を `SoraTestEvent` へ集約する。
+/// イベントを `SoraTestEvent` へ集約する。
 pub struct SoraTestConnectionBuilder {
     inner: SoraConnectionBuilder,
+    event_rx: UnboundedReceiver<SoraTestEvent>,
 }
 
 impl SoraTestConnectionBuilder {
@@ -215,124 +291,21 @@ impl SoraTestConnectionBuilder {
 
     /// 接続を開始し、run ループをバックグラウンド task で起動する。
     pub fn connect(self) -> Result<SoraTestConnection> {
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
-        let builder = self.with_callbacks(event_tx);
-        let (connection, handle) = builder.build()?;
+        let (connection, handle) = self.inner.build()?;
         let run_task = tokio::spawn(async move { connection.run().await });
 
         Ok(SoraTestConnection {
             handle,
-            event_rx,
+            event_rx: self.event_rx,
             event_log: Vec::new(),
             run_task,
         })
-    }
-
-    /// SDK callback を `SoraTestEvent` に変換して channel へ流す。
-    ///
-    /// callback 内では重い処理を行わず、イベント転送だけに限定する。
-    fn with_callbacks(self, event_tx: UnboundedSender<SoraTestEvent>) -> SoraConnectionBuilder {
-        self.inner
-            .on_signaling_message({
-                let event_tx = event_tx.clone();
-                move |signaling_type, direction, text| {
-                    let _ = event_tx.send(SoraTestEvent::SignalingMessage {
-                        signaling_type,
-                        direction,
-                        text: text.to_string(),
-                    });
-                }
-            })
-            .on_notify({
-                let event_tx = event_tx.clone();
-                move |message| {
-                    let _ = event_tx.send(SoraTestEvent::Notify {
-                        message: message.to_string(),
-                    });
-                }
-            })
-            .on_push({
-                let event_tx = event_tx.clone();
-                move |message| {
-                    let _ = event_tx.send(SoraTestEvent::Push {
-                        message: message.to_string(),
-                    });
-                }
-            })
-            .on_track({
-                let event_tx = event_tx.clone();
-                move |transceiver| {
-                    let kind = transceiver.receiver().track().kind().ok();
-                    let _ = event_tx.send(SoraTestEvent::Track { kind });
-                }
-            })
-            .on_remove_track({
-                let event_tx = event_tx.clone();
-                move |receiver| {
-                    let kind = receiver.track().kind().ok();
-                    let _ = event_tx.send(SoraTestEvent::RemoveTrack { kind });
-                }
-            })
-            .on_switched({
-                let event_tx = event_tx.clone();
-                move || {
-                    let _ = event_tx.send(SoraTestEvent::Switched);
-                }
-            })
-            .on_websocket_close({
-                let event_tx = event_tx.clone();
-                move |code, reason| {
-                    let _ = event_tx.send(SoraTestEvent::WebsocketClose {
-                        code,
-                        reason: reason.to_string(),
-                    });
-                }
-            })
-            .on_message({
-                let event_tx = event_tx.clone();
-                move |label, data| {
-                    let _ = event_tx.send(SoraTestEvent::Message {
-                        label: label.to_string(),
-                        data: data.to_vec(),
-                    });
-                }
-            })
-            .on_data_channel({
-                let event_tx = event_tx.clone();
-                move |label| {
-                    let _ = event_tx.send(SoraTestEvent::DataChannel {
-                        label: label.to_string(),
-                    });
-                }
-            })
-            .on_data_channel_open({
-                let event_tx = event_tx.clone();
-                move |label| {
-                    let _ = event_tx.send(SoraTestEvent::DataChannelOpen {
-                        label: label.to_string(),
-                    });
-                }
-            })
-            .on_data_channel_message({
-                let event_tx = event_tx.clone();
-                move |label, data| {
-                    let _ = event_tx.send(SoraTestEvent::DataChannelMessage {
-                        label: label.to_string(),
-                        data: data.to_vec(),
-                    });
-                }
-            })
-            .on_data_channel_close(move |label| {
-                let _ = event_tx.send(SoraTestEvent::DataChannelClose {
-                    label: label.to_string(),
-                });
-            })
     }
 }
 
 /// e2e テスト用の接続ラッパー。
 ///
-/// - `event_rx` / `event_log` で callback 履歴を保持
+/// - `event_rx` / `event_log` でイベント履歴を保持
 /// - `wait_for_*` 系 API で過去ログ + 新規受信の両方を判定
 /// - `run_task` の終了待機まで含めて接続ライフサイクルを管理
 pub struct SoraTestConnection {
@@ -344,15 +317,20 @@ pub struct SoraTestConnection {
 
 impl SoraTestConnection {
     /// `SoraTestConnectionBuilder` を生成する。
+    ///
+    /// 内部で `SoraTestEventHandler` を生成し、
+    /// `SoraConnection::builder()` の第 5 引数として渡す。
     pub fn builder(
         context: Arc<SoraConnectionContext>,
         signaling_urls: Vec<String>,
         channel_id: String,
         role: Role,
     ) -> SoraTestConnectionBuilder {
-        SoraTestConnectionBuilder {
-            inner: SoraConnection::builder(context, signaling_urls, channel_id, role),
-        }
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let event_handler = SoraTestEventHandler { event_tx };
+        let inner =
+            SoraConnection::builder(context, signaling_urls, channel_id, role, event_handler);
+        SoraTestConnectionBuilder { inner, event_rx }
     }
 
     pub async fn selected_signaling_url(&self) -> Result<Option<String>> {
