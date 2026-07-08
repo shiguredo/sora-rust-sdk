@@ -930,8 +930,8 @@ impl SoraConnection {
                             }
                         }
                         SoraEvent::DataChannelMessage { label, data } => {
-                            handler = self
-                                .handle_datachannel_message(&label, &data, handler)
+                            self
+                                .handle_datachannel_message(&mut *handler, &label, &data)
                                 .await?;
                         }
                         SoraEvent::Track(transceiver) => {
@@ -1756,10 +1756,10 @@ impl SoraConnection {
 
     async fn handle_datachannel_message(
         &mut self,
+        handler: &mut dyn SoraConnectionEventHandler,
         label: &str,
         data: &[u8],
-        mut handler: Box<dyn SoraConnectionEventHandler + Send>,
-    ) -> Result<Box<dyn SoraConnectionEventHandler + Send>> {
+    ) -> Result<()> {
         // DataChannel の設定を検索
         let managed = self.data_channels.get(label);
         let compress = managed.is_some_and(|m| m.compress);
@@ -1864,7 +1864,7 @@ impl SoraConnection {
             }
         }
 
-        Ok(handler)
+        Ok(())
     }
 }
 
