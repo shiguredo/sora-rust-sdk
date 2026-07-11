@@ -79,8 +79,29 @@ impl Default for SoraConnectionContextConfig {
 
 /// PeerConnectionFactory と関連リソースをまとめて管理する。
 pub struct SoraConnectionContext {
-    factory: PeerConnectionFactory,
+    // フィールドの宣言順には依存関係があるため、変更してはならない:
+    //
+    // 1. ConnectionContext::~ConnectionContext() は DCHECK(signaling_thread_IsCurrent()) になっており
+    //    シグナリングスレッド以外のスレッドから呼び出すと SIGABRT する。
+    //
+    // 2. `factory` の実体はメンバーに ConnectionContext を保持している。
+    //
+    // 3. `factory` (PeerConnectionFactory) の実体は C ラッパー側で PeerConnectionFactoryProxy に
+    //    ラップされており、Proxy デストラクタは実体の PeerConnectionFactory の破棄を
+    //    signaling スレッドへの BlockingCall で行うようになっている。
+    //
+    // 4. 2, 3 の理由によって、factory 経由で ConnectionContext を破棄すれば 1 の問題は発生しない。
+    //
+    // 5. しかし SoraConnectionContext のメンバーとして connection_context を factory より後に
+    //    配置すると、factory 破棄時に参照が残ることになるため、Rust 側のスレッド上で
+    //    ConnectionContext::~ConnectionContext() が呼ばれ、DCHECK(signaling_thread_->IsCurrent())
+    //    に失敗して SIGABRT する。
+    //
+    // したがって connection_context を factory より前に配置し、
+    // Rust 側の参照を先に手放すことで、factory 破棄時の signaling スレッド上での
+    // 解放が ConnectionContext の最後の C++ 参照になるようにしている。
     connection_context: ConnectionContext,
+    factory: PeerConnectionFactory,
     _network: Thread,
     _worker: Thread,
     _signaling: Thread,
