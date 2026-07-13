@@ -23,8 +23,8 @@ use crate::error::{Error, Result};
 const DEFAULT_CAMERA_INDEX: u32 = 0;
 const DEFAULT_WIDTH: i32 = 640;
 const DEFAULT_HEIGHT: i32 = 480;
-const YU12_FOURCC: u32 = u32::from_le_bytes([b'Y', b'U', b'1', b'2']);
-const NV12_FOURCC: u32 = u32::from_le_bytes([b'N', b'V', b'1', b'2']);
+const YU12_FOURCC: u32 = u32::from_le_bytes(*b"YU12");
+const NV12_FOURCC: u32 = u32::from_le_bytes(*b"NV12");
 
 /// libcamera 映像キャプチャラのビルダー。
 ///
