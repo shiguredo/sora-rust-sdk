@@ -10,3 +10,6 @@
   - バグ修正
 
 ## develop
+
+- [UPDATE] `shiguredo_webrtc` を 0.150.3 に上げ、Ubuntu 26.04 LTS に対応する
+  - @voluntas
