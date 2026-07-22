@@ -2,6 +2,8 @@
 
 Sora C++ SDK に対する Sora Rust SDK の実装状況をまとめる。
 
+比較対象の C++ SDK は安定版 `2026.1.2` を基準とし、develop のみの差分は備考に明記する。
+
 ## connect メッセージのフィールド
 
 | フィールド | C++ SDK | Rust SDK | 備考 |
@@ -39,7 +41,7 @@ Sora C++ SDK に対する Sora Rust SDK の実装状況をまとめる。
 |---|---|---|---|
 | WebSocket シグナリング | o | o | |
 | DataChannel シグナリング | o | o | |
-| zlib 圧縮 | o | o | DataChannel メッセージの圧縮・展開 |
+| zlib 圧縮 | o | o | DataChannel メッセージの圧縮 / 展開 |
 | offer / answer | o | o | |
 | re-offer / re-answer | o | o | |
 | ping / pong | o | o | |
@@ -48,21 +50,22 @@ Sora C++ SDK に対する Sora Rust SDK の実装状況をまとめる。
 | push コールバック | o | o | |
 | on_track コールバック | o | o | |
 | on_remove_track コールバック | o | o | |
-| switched コールバック | o | o | |
+| switched コールバック | o | o | C++ SDK は JSON 全文を引数に受け取る / Rust SDK は引数なし |
 | DataChannel メッセージコールバック | o | o | |
 | disconnect | o | o | |
 | get_stats | o | o | |
 | simulcast encodings 適用 | o | o | サーバーからの encodings 設定を適用 |
-| 複数シグナリング URL | o | o | 並列接続・ランダマイズ |
+| 複数シグナリング URL | o | o | 並列接続 / ランダマイズ |
 | DataChannel からのユーザーメッセージ送信 | o | o | SendDataChannel |
-| 接続状態の取得 | o | 一部実装 | GetSelectedSignalingURL, GetConnectedSignalingURL は実装済み / GetConnectionID は未実装 |
+| 接続状態の取得 | o | 一部実装 | 後述 |
 | Rpc 送信 | o | o | C++ SDK: Rpc (コールバック方式) / Rust SDK: send_rpc_request (async/await 方式) |
 | OnSignalingMessage コールバック | o | o | シグナリングメッセージ監視 (後述) |
 | OnWsClose コールバック | o | o | WebSocket Close 受信時の通知 (後述) |
 | OnDataChannel コールバック | o | o | C++ SDK は DataChannel の状態をまとめて通知 |
 | OnDataChannelOpen コールバック | - | o | Rust SDK は open を個別通知 |
 | OnDataChannelClose コールバック | - | o | Rust SDK は close を個別通知 |
-| candidate 対応 | o | 未実装 | ICE candidate の送受信 |
+| candidate 送信 | o | o | ICE candidate の送信。C++ SDK は WebSocket 固定 / Rust SDK は切替後は DataChannel 経由も可 |
+| candidate 受信 | - | - | 両 SDK とも `AddIceCandidate` 相当は未実装 |
 
 ## 複数シグナリング URL
 
@@ -79,10 +82,13 @@ C++ SDK の複数シグナリング URL に準拠した設計。
 
 ### 接続状態の取得
 
-| メソッド | 説明 |
-|---|---|
-| `SoraConnectionHandle::selected_signaling_url()` | 最初に接続が成功した URL を返す |
-| `SoraConnectionHandle::connected_signaling_url()` | 現在接続中の URL を返す (リダイレクト後はリダイレクト先) |
+| メソッド | C++ SDK | Rust SDK | 説明 |
+|---|---|---|---|
+| `GetSelectedSignalingURL()` / `selected_signaling_url()` | o | o | 最初に接続が成功した URL を返す |
+| `GetConnectedSignalingURL()` / `connected_signaling_url()` | o | o | 現在接続中の URL を返す (リダイレクト後はリダイレクト先) |
+| `GetConnectionID()` | o | 未実装 | offer 受信時の `connection_id` |
+| `IsConnectedDataChannel()` | o | 未実装 | DataChannel シグナリング接続中かどうか |
+| `IsConnectedWebsocket()` | o | 未実装 | WebSocket シグナリング接続中かどうか |
 
 ### C++ SDK との比較
 
@@ -190,11 +196,11 @@ pub async fn send_rpc_request(
 |---|---|---|---|
 | TLS 接続 (wss://) | o | o | |
 | 非 TLS 接続 (ws://) | o | o | |
-| HTTP Proxy | o | 未実装 | |
+| HTTP Proxy | o | o | C++ SDK: `proxy_url` / `proxy_username` / `proxy_password` / `proxy_agent` / Rust SDK: `ProxyInfo` |
 | WebSocket insecure モード | o | o | WebSocket の SSL 検証スキップ |
 | TURN-TLS insecure モード | o | o | TURN-TLS の SSL 検証スキップ |
 | WebSocket クライアント証明書 | o | o | WebSocket の client_cert / client_key |
-| TURN-TLS クライアント証明書 | o | 未実装 | TURN-TLS の client_cert / client_key (webrtc-rs へのパッチが必要) |
+| TURN-TLS クライアント証明書 | develop のみ | 未実装 | C++ SDK 2026.1.2 には未収録。develop で client_cert / client_key を TURN-TLS にも適用 |
 | WebSocket CA 証明書指定 | o | o | WebSocket の CA 証明書 |
 | TURN-TLS CA 証明書指定 | o | o | TURN-TLS の CA 証明書 |
 | User-Agent カスタマイズ | o | o | デフォルト "Sora Rust SDK {version}" |
@@ -204,3 +210,4 @@ pub async fn send_rpc_request(
 | 切断待機タイムアウト | o | o | デフォルト 5 秒 |
 | degradation_preference | o | 未実装 | |
 | cpu_adaptation | o | 未実装 | |
+| disable_signaling_url_randomization | o | 未実装 | 複数 URL のランダム化無効化 |
