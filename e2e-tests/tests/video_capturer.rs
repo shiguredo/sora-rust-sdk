@@ -17,7 +17,7 @@ fn first_device_capture_config() -> Option<VideoCaptureConfig> {
         return None;
     }
 
-    let device = &device_list.devices()[0];
+    let device = &device_list.as_slice()[0];
     let device_id = device.unique_id().ok();
     let formats = device.formats();
 
@@ -50,7 +50,7 @@ fn test_video_device_enumerate() {
     let device_list = result.unwrap();
     println!("検出されたビデオデバイス数: {}", device_list.len());
 
-    for device in device_list.devices() {
+    for device in &device_list {
         if let Ok(name) = device.name() {
             println!("  デバイス名: {}", name);
         }
@@ -75,7 +75,7 @@ fn test_video_device_info() {
         return;
     }
 
-    let device = &device_list.devices()[0];
+    let device = &device_list.as_slice()[0];
 
     let name = device.name();
     assert!(name.is_ok(), "デバイス名の取得に失敗: {:?}", name.err());
@@ -118,7 +118,7 @@ fn test_video_device_formats() {
         return;
     }
 
-    let device = &device_list.devices()[0];
+    let device = &device_list.as_slice()[0];
     let formats = device.formats();
 
     println!("デバイス: {}", device.name().unwrap_or_default());
@@ -145,7 +145,7 @@ fn test_video_device_formats() {
         assert!(
             matches!(
                 format.pixel_format,
-                PixelFormat::Nv12 | PixelFormat::Yuy2 | PixelFormat::I420
+                PixelFormat::Nv12 | PixelFormat::Yuy2 | PixelFormat::I420 | PixelFormat::Mjpeg
             ),
             "不明なピクセルフォーマット"
         );

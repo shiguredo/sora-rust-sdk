@@ -11,7 +11,7 @@ base64ct = "1.8"
 nojson.workspace = true
 raden = "2026.1"
 shiguredo_http11.workspace = true
-shiguredo_video_device = "2026.1"
+shiguredo_video_device = "2026.2"
 shiguredo_webrtc.workspace = true
 sora_sdk.workspace = true
 tokio = { workspace = true, features = ["full"] }
@@ -20,7 +20,7 @@ tokio = { workspace = true, features = ["full"] }
 serial_test = "3.5"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-shiguredo_audio_device = "2026.1"
+shiguredo_audio_device = "2026.2"
 
 [features]
 default = []

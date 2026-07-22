@@ -18,7 +18,7 @@ fn first_audio_device_config() -> Option<AudioCaptureConfig> {
         return None;
     }
 
-    let device = &device_list.devices()[0];
+    let device = &device_list.as_slice()[0];
     let device_id = device.unique_id().ok();
 
     Some(AudioCaptureConfig {
@@ -36,7 +36,7 @@ fn test_audio_device_enumerate() {
     let device_list = result.unwrap();
     println!("検出されたオーディオデバイス数: {}", device_list.len());
 
-    for device in device_list.devices() {
+    for device in &device_list {
         if let Ok(name) = device.name() {
             println!("  デバイス名: {}", name);
         }
@@ -66,7 +66,7 @@ fn test_audio_device_info() {
         return;
     }
 
-    let device = &device_list.devices()[0];
+    let device = &device_list.as_slice()[0];
 
     let name = device.name();
     assert!(name.is_ok(), "デバイス名の取得に失敗: {:?}", name.err());

@@ -18,7 +18,7 @@ pub(crate) fn list_devices() -> Result<()> {
             f.member(
                 "video_devices",
                 nojson::array(|f| {
-                    for device in video_device_list.devices() {
+                    for device in &video_device_list {
                         let name = device.name().unwrap_or_else(|_| String::new());
                         let unique_id = device.unique_id().unwrap_or_else(|_| String::new());
                         let formats = device.formats();
@@ -48,7 +48,7 @@ pub(crate) fn list_devices() -> Result<()> {
             f.member(
                 "audio_devices",
                 nojson::array(|f| {
-                    for device in audio_device_list.devices() {
+                    for device in &audio_device_list {
                         let name = device.name().unwrap_or_else(|_| String::new());
                         let unique_id = device.unique_id().unwrap_or_else(|_| String::new());
                         let channels = device.channels();

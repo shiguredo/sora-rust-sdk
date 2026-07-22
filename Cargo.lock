@@ -1243,9 +1243,9 @@ dependencies = [
 
 [[package]]
 name = "shiguredo_audio_device"
-version = "2026.1.0"
+version = "2026.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c684258d83d7d994b88b2c1daf8f54735a6f0cac052f8962126d7f672d45f60"
+checksum = "3ec3ed86e05d96913cda53dc56cd6ee7745d2a88bb170d643c639c15d6c91f7a"
 dependencies = [
  "bindgen",
  "cc",
@@ -1323,9 +1323,9 @@ dependencies = [
 
 [[package]]
 name = "shiguredo_video_device"
-version = "2026.1.0"
+version = "2026.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79fc6bed758f11d7413d108650edf83aa8345de7f578eca7fca4750add71f4f2"
+checksum = "01ed5335c8ede0aeed43699813b3191b464ab116484f562b81c501900a979f45"
 dependencies = [
  "bindgen",
  "cc",
