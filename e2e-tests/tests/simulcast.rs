@@ -28,6 +28,11 @@ use sora_sdk::{
     SoraConnectionContextConfig, Video, VideoCodecCapability, VideoCodecPreference,
 };
 
+/// simulcast 3 レイヤー (720p) を安定して送るための映像ビットレート (kbps)。
+///
+/// ラボ既定の 500 kbps では最高レイヤー r2 が枯渇し、outbound stats 待ちがタイムアウトしやすい。
+const SIMULCAST_VIDEO_BIT_RATE_KBPS: u32 = 2500;
+
 fn test_channel_id(suffix: &str) -> String {
     format!("{}-{}", generate_channel_id(), suffix)
 }
@@ -144,12 +149,13 @@ async fn run_sendonly_simulcast_outbound_layers(
 }
 
 #[tokio::test]
+#[serial]
 async fn test_sendonly_simulcast_outbound_layers() {
     load_env();
     let context = SoraConnectionContext::new().expect("コンテキスト作成失敗");
     run_sendonly_simulcast_outbound_layers(
         context,
-        Some(Video::new_vp8(None)),
+        Some(Video::new_vp8(Some(SIMULCAST_VIDEO_BIT_RATE_KBPS))),
         "simulcast-sendonly",
         // libvpx は EncoderInfo::supports_simulcast == true であるため、
         // SimulcastEncoderAdapter を使用していてもバイパスモードになって単一のエンコーダーとして扱われる
@@ -173,7 +179,7 @@ async fn test_sendonly_simulcast_outbound_layers_openh264() {
     let context = create_non_builtin_context(capability).expect("コンテキスト作成失敗");
     run_sendonly_simulcast_outbound_layers(
         context,
-        Some(Video::new_h264(None, None)),
+        Some(Video::new_h264(Some(SIMULCAST_VIDEO_BIT_RATE_KBPS), None)),
         "simulcast-sendonly-openh264",
         &["SimulcastEncoderAdapter", "OpenH264"],
     )
@@ -191,7 +197,7 @@ async fn test_sendonly_simulcast_outbound_layers_nvcodec() {
     let context = create_non_builtin_context(capability).expect("コンテキスト作成失敗");
     run_sendonly_simulcast_outbound_layers(
         context,
-        Some(Video::new_h264(None, None)),
+        Some(Video::new_h264(Some(SIMULCAST_VIDEO_BIT_RATE_KBPS), None)),
         "simulcast-sendonly-nvcodec",
         &["SimulcastEncoderAdapter", "NvCodec"],
     )
@@ -215,7 +221,7 @@ async fn test_sendonly_simulcast_outbound_layers_v4l2() {
     let context = create_non_builtin_context(capability).expect("コンテキスト作成失敗");
     run_sendonly_simulcast_outbound_layers(
         context,
-        Some(Video::new_h264(None, None)),
+        Some(Video::new_h264(Some(SIMULCAST_VIDEO_BIT_RATE_KBPS), None)),
         "simulcast-sendonly-v4l2",
         &["SimulcastEncoderAdapter", "V4L2"],
     )
@@ -261,9 +267,18 @@ async fn test_sendonly_simulcast_outbound_layers_amf() {
 
     for codec_type in codec_types {
         let (video, codec_label) = match codec_type {
-            VideoCodecType::H264 => (Video::new_h264(None, None), "h264"),
-            VideoCodecType::H265 => (Video::new_h265(None, None), "h265"),
-            VideoCodecType::Av1 => (Video::new_av1(None, None), "av1"),
+            VideoCodecType::H264 => (
+                Video::new_h264(Some(SIMULCAST_VIDEO_BIT_RATE_KBPS), None),
+                "h264",
+            ),
+            VideoCodecType::H265 => (
+                Video::new_h265(Some(SIMULCAST_VIDEO_BIT_RATE_KBPS), None),
+                "h265",
+            ),
+            VideoCodecType::Av1 => (
+                Video::new_av1(Some(SIMULCAST_VIDEO_BIT_RATE_KBPS), None),
+                "av1",
+            ),
             _ => continue,
         };
 
@@ -321,10 +336,22 @@ async fn test_sendonly_simulcast_outbound_layers_vpl() {
 
     for codec_type in codec_types {
         let (video, codec_label) = match codec_type {
-            VideoCodecType::H264 => (Video::new_h264(None, None), "h264"),
-            VideoCodecType::H265 => (Video::new_h265(None, None), "h265"),
-            VideoCodecType::Vp9 => (Video::new_vp9(None, None), "vp9"),
-            VideoCodecType::Av1 => (Video::new_av1(None, None), "av1"),
+            VideoCodecType::H264 => (
+                Video::new_h264(Some(SIMULCAST_VIDEO_BIT_RATE_KBPS), None),
+                "h264",
+            ),
+            VideoCodecType::H265 => (
+                Video::new_h265(Some(SIMULCAST_VIDEO_BIT_RATE_KBPS), None),
+                "h265",
+            ),
+            VideoCodecType::Vp9 => (
+                Video::new_vp9(Some(SIMULCAST_VIDEO_BIT_RATE_KBPS), None),
+                "vp9",
+            ),
+            VideoCodecType::Av1 => (
+                Video::new_av1(Some(SIMULCAST_VIDEO_BIT_RATE_KBPS), None),
+                "av1",
+            ),
             _ => continue,
         };
 
@@ -344,6 +371,7 @@ async fn test_sendonly_simulcast_outbound_layers_vpl() {
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 #[tokio::test]
+#[serial]
 async fn test_sendonly_simulcast_outbound_layers_internal_apple() {
     load_env();
     let Some(capability) = InternalAppleVideoCodecCapability::new() else {
@@ -354,7 +382,7 @@ async fn test_sendonly_simulcast_outbound_layers_internal_apple() {
     let context = create_non_builtin_context(capability).expect("コンテキスト作成失敗");
     run_sendonly_simulcast_outbound_layers(
         context,
-        Some(Video::new_h264(None, None)),
+        Some(Video::new_h264(Some(SIMULCAST_VIDEO_BIT_RATE_KBPS), None)),
         "simulcast-sendonly-internal-apple",
         &["SimulcastEncoderAdapter", "VideoToolbox"],
     )
@@ -362,6 +390,7 @@ async fn test_sendonly_simulcast_outbound_layers_internal_apple() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_sendrecv_simulcast_persists_after_reoffer() {
     load_env();
 
@@ -379,6 +408,7 @@ async fn test_sendrecv_simulcast_persists_after_reoffer() {
         SoraTestConnection::builder(context_a, urls.clone(), channel_id.clone(), Role::SendOnly)
             .sender_video_track(video_track_a)
             .sender_audio_track(audio_track_a)
+            .video(Video::new_vp8(Some(SIMULCAST_VIDEO_BIT_RATE_KBPS)))
             .simulcast(true)
             .disconnect_wait_timeout(Duration::from_secs(1));
 
