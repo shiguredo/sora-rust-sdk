@@ -74,7 +74,7 @@ rustls-webpki = {
   ]
 }
 # SDK 全体の非同期処理を支える非同期ランタイム
-tokio = "1.52"
+tokio = "1.53"
 # tokio 上で rustls を利用するためのアダプタ
 tokio-rustls = {
   version = "0.26",

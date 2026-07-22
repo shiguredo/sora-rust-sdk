@@ -17,7 +17,7 @@ sora_sdk.workspace = true
 tokio = { workspace = true, features = ["full"] }
 
 [dev-dependencies]
-serial_test = "3.4"
+serial_test = "3.5"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 shiguredo_audio_device = "2026.1"
