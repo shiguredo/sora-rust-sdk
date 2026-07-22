@@ -14,14 +14,17 @@ shiguredo_audio_device = { version = "2026.1", optional = true }
 shiguredo_video_device = { version = "2026.1", optional = true }
 shiguredo_webrtc.workspace = true
 sora_sdk.workspace = true
-tokio = { workspace = true, features = [
-  "io-util",
-  "macros",
-  "net",
-  "rt-multi-thread",
-  "sync",
-  "time",
-] }
+tokio = {
+  workspace = true,
+  features = [
+    "io-util",
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "sync",
+    "time",
+  ]
+}
 
 [dev-dependencies]
 serial_test = "3.5"

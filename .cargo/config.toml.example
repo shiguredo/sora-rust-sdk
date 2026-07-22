@@ -1,4 +1,4 @@
-﻿[patch.crates-io]
+[patch.crates-io]
 shiguredo_webrtc = { path = "../webrtc-rs" }
 
 [env]
