@@ -57,7 +57,7 @@ pub enum CodecDirection {
 
 impl CodecDirection {
     /// デバッグ表示用の文字列表現 (`"Encoder"` / `"Decoder"`) を返す。
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Encoder => "Encoder",
             Self::Decoder => "Decoder",
@@ -65,7 +65,7 @@ impl CodecDirection {
     }
 
     /// ラベル用の小文字表記 (`"encoder"` / `"decoder"`) を返す。
-    pub fn as_label(self) -> &'static str {
+    pub(crate) fn as_label(self) -> &'static str {
         match self {
             Self::Encoder => "encoder",
             Self::Decoder => "decoder",

@@ -217,11 +217,11 @@ H.264 / H.265 の `b_frame: true` は Sora 側の `sora.conf` で対応する設
 
 | 型 | 説明 |
 |----|------|
-| `VideoCodecPreference` | コーデック選好。`default()` で空。`new(Vec<PreferenceCodec>)` / `new_from_capability(&dyn VideoCodecCapability)` で生成。`codecs()` / `find(direction, codec_type)` / `find_mut(...)` / `get_or_add(...)` / `has_implementation(impl)` / `merge(&other)` を提供 |
-| `PreferenceCodec` | preference 内のコーデックエントリ。`new(direction, codec_type, implementation)` で生成。`direction()` / `codec_type()` / `implementation()` / `set_implementation(impl)` を提供 |
+| `VideoCodecPreference` | コーデック選好。`default()` で空。`new(Vec<PreferenceCodec>)` / `new_from_capability(&dyn VideoCodecCapability)` で生成。`codecs()` / `find(direction, codec_type)` / `merge(&other)` を提供 |
+| `PreferenceCodec` | preference 内のコーデックエントリ。`new(direction, codec_type, implementation)` で生成。`direction()` / `codec_type()` / `implementation()` を提供 |
 | `VideoCodecCapability` | トレイト (`: Send`)。各バックエンドが実装する。`SoraConnectionContextConfig::video_codec_capabilities` に `Box<dyn VideoCodecCapability>` を積む。必須メソッドは `get_implementation()` と `get_supported_formats(direction)`。デフォルト実装つきメソッドは `is_supported(direction, codec_type)` / `resolve_sdp_format(direction, format)` / `create_video_encoder(env, format) -> Option<VideoEncoder>` / `create_video_decoder(env, format) -> Option<VideoDecoder>` |
 | `VideoCodecImplementation` | 実装識別。`new(name, description)` で生成。`name()` / `description()` を提供 |
-| `CodecDirection` | encoder / decoder の方向。`as_str()` (`"Encoder"` / `"Decoder"`) / `as_label()` (`"encoder"` / `"decoder"`) を提供 |
+| `CodecDirection` | encoder / decoder の方向 (`Encoder` / `Decoder`) |
 | `validate_video_codec_preference(&preference, &[Box<dyn VideoCodecCapability>])` | `new_with_config` 内部でも呼ばれる整合性チェック。preference と capabilities が一致しない場合 `Error::InvalidVideoCodecPreference` |
 | `SoraVideoEncoderFactory` / `SoraVideoDecoderFactory` | 内部で利用される factory (通常はユーザーが直接触らない) |
 | `AlignmentEncoderAdapter` | エンコーダーのアライメント補正アダプタ |

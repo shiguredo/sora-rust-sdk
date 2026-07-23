@@ -52,11 +52,6 @@ impl PreferenceCodec {
     pub fn implementation(&self) -> &VideoCodecImplementation {
         &self.implementation
     }
-
-    /// [VideoCodecImplementation] を上書きする。
-    pub fn set_implementation(&mut self, implementation: VideoCodecImplementation) {
-        self.implementation = implementation;
-    }
 }
 
 impl VideoCodecPreference {
@@ -106,7 +101,7 @@ impl VideoCodecPreference {
     }
 
     /// 指定された方向とコーデック種別に合致する [PreferenceCodec] を可変参照で検索する。
-    pub fn find_mut(
+    fn find_mut(
         &mut self,
         direction: CodecDirection,
         codec_type: VideoCodecType,
@@ -114,34 +109,6 @@ impl VideoCodecPreference {
         self.codecs
             .iter_mut()
             .find(|codec| codec.direction == direction && codec.codec_type == codec_type)
-    }
-
-    /// 指定された方向・コーデック・実装のエントリを取得し、なければ追加する。
-    pub fn get_or_add(
-        &mut self,
-        direction: CodecDirection,
-        codec_type: VideoCodecType,
-        implementation: VideoCodecImplementation,
-    ) -> &mut PreferenceCodec {
-        if let Some(index) = self
-            .codecs
-            .iter()
-            .position(|codec| codec.direction == direction && codec.codec_type == codec_type)
-        {
-            return &mut self.codecs[index];
-        }
-        self.codecs
-            .push(PreferenceCodec::new(direction, codec_type, implementation));
-        self.codecs
-            .last_mut()
-            .expect("codecs must contain one element after push")
-    }
-
-    /// 指定された [VideoCodecImplementation] が含まれているかどうかを返す。
-    pub fn has_implementation(&self, implementation: VideoCodecImplementation) -> bool {
-        self.codecs
-            .iter()
-            .any(|codec| codec.implementation == implementation)
     }
 
     /// 別の [VideoCodecPreference] をマージする。
@@ -762,22 +729,14 @@ mod tests {
         }
     }
 
+    // merge が既存エントリを上書きし、未登録エントリを追加することを確認する
     #[test]
-    fn get_or_add_has_implementation_and_merge_work() {
-        let mut preference = VideoCodecPreference::default();
-        let codec = preference.get_or_add(
+    fn merge_overwrites_matching_and_appends_missing() {
+        let mut preference = VideoCodecPreference::new(vec![default_preference_codec(
             CodecDirection::Encoder,
             VideoCodecType::H264,
             VideoCodecImplementation::new("nvcodec", "NVIDIA NVENC/NVDEC"),
-        );
-        codec.set_implementation(VideoCodecImplementation::new(
-            "nvcodec",
-            "NVIDIA NVENC/NVDEC",
-        ));
-        assert!(preference.has_implementation(VideoCodecImplementation::new(
-            "nvcodec",
-            "NVIDIA NVENC/NVDEC"
-        )));
+        )]);
 
         let merged = VideoCodecPreference::new(vec![
             default_preference_codec(
@@ -794,11 +753,11 @@ mod tests {
         preference.merge(&merged);
         let h264_encoder = preference
             .find(CodecDirection::Encoder, VideoCodecType::H264)
-            .expect("h264 encoder must exist after merge");
+            .expect("マージ後に H264 エンコーダが存在する");
         assert_eq!(h264_encoder.implementation().name(), "vpl");
         let h264_decoder = preference
             .find(CodecDirection::Decoder, VideoCodecType::H264)
-            .expect("h264 decoder must exist after merge");
+            .expect("マージ後に H264 デコーダが存在する");
         assert_eq!(h264_decoder.implementation().name(), "nvcodec");
     }
 }
