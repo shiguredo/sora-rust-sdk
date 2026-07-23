@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-23
 - Model: Composer
 - Branch: feature/change-narrow-video-codec-public-api
 - Polished: 2026-07-23
@@ -92,8 +92,13 @@ High。
 
 ## 解決方法
 
-1. `src/video_codec_preference.rs`: `find_mut` / `get_or_add` / `has_implementation` / `set_implementation` から `pub` を外す
-2. `src/video_codec_capability.rs`: `as_label` / `as_str` を `pub(crate)` にする
-3. `skills/sora-rust-sdk/SKILL.md`: 狭めた API を公開表から削除する
-4. `CHANGES.md`: 完了条件のコードブロックどおり `[CHANGE]` を追記する
-5. 完了条件のコマンドを実行する
+対応する価値が無いため closed にする。PR `#42` も取り下げた。
+
+再評価の結果:
+
+1. `#0038` (`SoraConnectionCommand`) や `#0033` (`TlsConfig` フィールド) と異なり、ユーザーが触るべきでない内部型の露出・構築経路の二重化・バグ是正ではない
+2. crate 外 (examples / e2e) からの参照は狭め候補メソッドについて 0 件だが、それは「今すぐ `pub` を外す必然」にはならない。preference 構築ヘルパーとして `pub` のまま残す判断も妥当
+3. 親 `#0020` S6 は Should の予防的掃除であり、Must の SemVer ブロッカーではない
+4. 実施しても実害の除去にならず、破壊的変更 (`[CHANGE]`) だけが増える
+
+結果として可視性変更は行わず、コードは現状維持とする。非破壊掃除は `#0054` で継続する。
