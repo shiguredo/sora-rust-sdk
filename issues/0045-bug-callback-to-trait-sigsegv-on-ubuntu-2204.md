@@ -1,8 +1,8 @@
-# 0044 SoraConnection のコールバックをトレイト化する で ubuntu-22.04 の proxy_sendrecv テストが SIGSEGV でクラッシュする
+# 0045 SoraConnection のコールバックトレイト化で Ubuntu 22.04 の proxy_sendrecv テストが SIGSEGV でクラッシュする
 
 - Priority: High
 - Created: 2026-07-06
-- Completed: YYYY-MM-DD
+- Completed: 2026-07-23
 - Model: DeepSeek V4 Pro
 - Branch: feature/fix-callback-to-trait-sigsegv
 - Polished: YYYY-MM-DD
@@ -85,4 +85,15 @@ Caused by:
 
 ## 解決方法
 
-(調査後に記述)
+初回失敗後、0044 の実装で次の変更を行った。
+
+- `a9b145772835ccd9ed64bccb040aa334e22be884` で `event_handler` を `SoraConnection` の独立フィールドから削除し、`SoraConnectionBuilder` に保持したまま `run()` で取り出す構造へ変更した
+- `14c2dd751cb044895d10fb36c50c384acfdbadec` で `handle_datachannel_message()` による `event_handler` の `Box` 値渡しをやめ、`&mut dyn SoraConnectionEventHandler` の参照渡しへ変更した
+
+変更後の CI run [28908427305](https://github.com/shiguredo/sora-rust-sdk/actions/runs/28908427305) では、Ubuntu 22.04 を含む全 10 ジョブが成功した。
+0044 は PR [#41](https://github.com/shiguredo/sora-rust-sdk/pull/41) により `377cf26e9a92c95fdc052229dfb54886d1f9a41a` として develop へマージされた。
+マージ後も Ubuntu 22.04 の `cargo test --workspace` は 10 回連続で成功しており、`proxy_sendrecv` の終了処理を含む経路で SIGSEGV は再発していない。
+
+SIGSEGV の根本原因と上記変更との因果関係は特定できておらず、初回失敗が低頻度の intermittent failure だった可能性は排除できない。
+ただし、0044 のマージを阻害していた状態は解消され、本 issue の完了条件を満たしたため closed とする。
+再発した場合は本 issue を reopened にし、coredump またはスタックトレースと再現条件を追加して原因調査を再開する。
