@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-06-22
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-23
 - Model: Opus 4.7
 - Branch: develop
 - Polished: {YYYY-MM-DD}
@@ -105,6 +105,8 @@ S1〜S7 の Should グループは正式版リリース後でも段階対応可�
 4. 派生 issue が closed になるたび、本 issue 内のチェックボックスにチェックを入れて closed コミットに本 issue 番号を含める
 5. Must は完了済み。Should 派生は #0046〜#0053 を起票済み。正式リリース後でも段階対応可能
 6. 完了条件をすべて満たした時点で本 issue を closed にする。リリース作業はタグ push と `release.yml`（#0028 で現状維持と判断）で行う。Should が残っていても、明示的に「正式リリース後対応」として open / pending のまま親を closed にしてよい
+
+Must（M1, M3〜M9, M11）はすべて完了し、Should（S1〜S7）は #0046〜#0053 に切り出し済みである。正式版 `2026.1.0` のタグ push / crates.io 公開 / `CHANGES.md` 見出し整備はメンテナーが別途行うため、本 issue での追跡は不要と判断した。タスク管理の親としての役目は終わったので、本 issue を closed にする。
 
 ## 派生 issue の起票方針
 
