@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-23
 - Model: Composer
 - Branch: feature/change-narrow-video-codec-public-api
 - Polished: 2026-07-23
@@ -92,8 +92,11 @@ High。
 
 ## 解決方法
 
-1. `src/video_codec_preference.rs`: `find_mut` / `get_or_add` / `has_implementation` / `set_implementation` から `pub` を外す
-2. `src/video_codec_capability.rs`: `as_label` / `as_str` を `pub(crate)` にする
-3. `skills/sora-rust-sdk/SKILL.md`: 狭めた API を公開表から削除する
-4. `CHANGES.md`: 完了条件のコードブロックどおり `[CHANGE]` を追記する
-5. 完了条件のコマンドを実行する
+1. `src/video_codec_preference.rs`:
+   - `find_mut` を非 `pub` にした (`merge` からのみ利用)
+   - クレート内本番コードから未使用だった `get_or_add` / `has_implementation` / `PreferenceCodec::set_implementation` は削除した (非 `pub` 化すると `dead_code` になるため)
+   - 単体テスト `merge_overwrites_matching_and_appends_missing` を公開 API (`new` / `merge` / `find`) で書き直した
+2. `src/video_codec_capability.rs`: `as_label` / `as_str` を `pub(crate)` にした (エラー文言・テスト期待値は変更なし)
+3. `skills/sora-rust-sdk/SKILL.md`: 狭めた API を公開表から削除した
+4. `CHANGES.md` の `## develop` に `[CHANGE]` を追記した
+5. `cargo fmt` / `clippy --workspace -D warnings` / `cargo test -p sora_sdk` / `cargo test -p sumomo` が通過した
