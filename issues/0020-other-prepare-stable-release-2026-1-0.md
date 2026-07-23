@@ -32,8 +32,9 @@
 - `release.yml` は #0028 で「対応不要」と判断して closed。ワークフロー本体は `cargo publish` 中心の現状維持
 - `CHANGES.md` は `213eba4` で本文を削除済み。現在は凡例 + `## develop` に UPDATE 1 件。リリース時に `## 2026.1.0` へのリネーム（または M10 方針に沿った削除）が残作業
 - 日本語ログメッセージは #0022 で英語化済み（`src/` のログマクロに日本語は残っていない）。`examples/sumomo` の日本語 `expect` は S7 側の残作業
-- Should: S3（#0029〜#0037）はすべて closed。S2 の派生 #0024〜#0027 は closed だが S2 残項目あり。S1 / S4 / S5 / S6 / S7 の派生 issue は未起票
-- 本 issue 以外の open issue は `#0023`（AMF simulcast SIGSEGV）のみ。本 issue の派生一覧には含めていない（親リンクも無し）
+- Should: S3（#0029〜#0037）はすべて closed。S2 の派生 #0024〜#0027 は closed。S2 残は #0047〜#0049 を起票済み。S1 / S4 / S5 / S6 / S7 は #0046 / #0050〜#0053 を起票済み
+- 本 issue 以外の open issue は `#0023`（AMF simulcast SIGSEGV）と Should 派生 #0046〜#0053。`#0023` は本 issue の派生一覧には含めていない（親リンクも無し）
+- Should から切り出さなかった軽微項目: `examples/sumomo` の日本語 `expect` 3 箇所、`amf.rs` の SAFETY コメント、ホットパス `.expect("encoder should exist")`、`issues/pending/0003` / `0007` の旧名更新。必要なら直接修正する
 
 `/review-code` の指摘詳細は本リポジトリのレビューレポートを参照。本 issue では派生 issue として個別に追跡する。
 
@@ -45,7 +46,7 @@
 - 派生 issue は `shiguredo-issues` 規約に従う（1 issue = 1 目的 1 カテゴリ、命名規則、メタデータ）
 - 派生 issue 起票時は本 issue のチェックボックスに issue 番号を追記して進捗管理する
 - Must 10 件（正式リリースのブロッカー）は起票・対応済み
-- Should は Must 完了後も残っているため、未起票グループ（S1 / S4〜S7）と S2 残項目の起票を進める
+- Should の派生 issue は起票済み（#0046〜#0053）。対応は正式リリース後でも可
 - M2 は対応しない（メタデータ整備は不要との判断）。番号は欠番として残す（M3 以降の参照を維持するため）
 
 ### 派生 issue 一覧（Must）
@@ -70,17 +71,20 @@
 
 技術的負債だが正式リリース後でも段階対応可能。Must 完了後に順次起票する。
 
-- [ ] S1. テスト戦略強化（PBT 追加 / `IncomingMessage::parse` `RpcResponse::parse` 単体テスト追加 / `parse_stats_lossy` 誤合格修正 / `redirect.rs` 環境変数欠落時の return 修正 / TURN-TLS / `client_cert` / `spotlight` / `forwarding_filters` の e2e 追加）
-- [ ] S2. video codec 層の残課題（派生 #0024〜#0027 は closed。残: `v4l2.rs` の stride バッファ計算 / `mp4.rs` の停止応答遅延（`Mp4VideoCapturer` の `Drop` は `stop` + `join` のみだが、ワーカー内 `thread::sleep` 完了まで `join` がブロックしうる。`stop` 確認は sleep 前のみ） / 関連ヘルパー（`requested_frame_type` / `supported_formats_for_codec` / `encoder_codec_config` / `decoder_codec` / `target_kbps_from_bps` / `frame_type_from_*`）が `v4l2.rs` / `vpl.rs` / `amf.rs` / `nvcodec.rs` / `openh264.rs` で重複 / ホットパスの `.expect("encoder should exist")` 等残存 (`openh264.rs:207` / `nvcodec.rs:482`、decoder 側は `openh264.rs:393` / `nvcodec.rs:622` / `v4l2.rs:861` / `vpl.rs:727`) / `amf.rs` の `slice::from_raw_parts*` に SAFETY コメント不在 (`amf.rs:162,425,429,570-571`)）
+- [ ] S1. テスト戦略強化（#0046）
+- [ ] S2. video codec 層の残課題
   - 完了・対応不要で closed: AMF ホットパス `assert_eq!`（#0024） / `libcamera.rs` の `acquire()` 後リソースリーク（#0025） / `v4l2.rs` の callback と encoder 同居デッドロック懸念（#0026） / `mp4.rs` の `lengthSizeMinusOne` 無視（#0027）
+  - 残の派生: V4L2 stride バッファ不整合（#0047） / MP4 停止遅延（#0048） / codec ヘルパー重複（#0049）
+  - 切り出し対象外（軽微・直接対応可）: ホットパス `.expect("encoder should exist")` / `amf.rs` の SAFETY コメント不在
 - [x] S3. 公開 API 設計の追加修正（`SoraConnection` / `TimerManager` の `Drop` 実装（#0029） / `SecureRandom` 毎フレーム初期化と panic 経路（#0030） / `now()` の panic 経路（#0031） / URL シャッフルの modulo bias（#0032） / `TlsConfig` の二重インターフェース（#0033） / `Result<T>` エイリアスの扱い（#0034） / `ParsedProxyInfo` のフィールド可視性整合（#0035） / `tokio` の `rt-multi-thread` 削除（#0036） / 公開構造体の `Debug` 手書き実装（#0037））
   - 派生 #0029〜#0037 はすべて closed
-- [ ] S4. CI ワークフロー強化（`macos-15` / `macos-26` マトリクス追加 / MSRV 1.88 検証 / `clippy --all-targets` 追加 / `cargo doc -D warnings` 追加 / nightly 確認 / self-hosted の `--skip` をテスト側 `#[ignore]` へ移動 / `cp .cargo/config.toml.ci` の用途明確化）
-- [ ] S5. README / docs の整備（`README.md` のプレースホルダ修正 / Linux ビルド依存の網羅 / 構成図に `pbt/` `docs/` 追加 / 対応プラットフォームと CI matrix の整合 / Sora 対応上限明示 / 「優先実装」セクション整理 / Copyright 表記見直し / `docs/SORA_CPP_SDK.md` の古い記述修正 / `sumomo` README の `libssl-dev` 誤記削除 / CLI オプション一覧追加 / サンプル URL を `example.com` 化 / `examples/sumomo/Cargo.toml` メタデータ追加）
-- [ ] S6. リリース前掃除（`examples/sumomo/src/tests.rs` を `tests/` へ移動 / `VideoCodecPreference` の `find_mut` 等 4 公開 API を `pub(crate)` 化 / `Makefile` の `fuzzing` / `fuzzing-list` ターゲット削除 / `e2e-tests` の `wait_task_finished` 削除 / `DataChannelConfig::direction` 削除 / `CodecDirection::as_label` 削除 / `src/zlib.rs` 統合 / `#[expect(unused_variables)]` 8 箇所の `_` プレフィックス化 / `// ----` 装飾コメント削除 / `connection.rs:765` の変数名 `client` を `connection` にリネーム）
+- [ ] S4. CI ワークフロー強化（#0050。MSRV / `rust-toolchain.toml` も含む）
+- [ ] S5. README / docs の整備（#0051。`CODEBASE.md` も含む）
+- [ ] S6. リリース前掃除（#0052）
   - 完了済み: `CHANGES.md` の `### misc` セクション削除 / `src/` 内 `#[allow(dead_code)]` は 0 件（当該 TODO は解消）
-- [ ] S7. 規約遵守（`src/` 内 `.unwrap()` 約 46〜47 件を `.expect("MESSAGE")` 化 / `examples/sumomo/src/main.rs` の日本語 `expect` 英語化（`:512` `Tokio ランタイムの作成に失敗しました` / `:544,:702` `BUG: external_adm が None です`） / `rust-toolchain.toml` を `1.88.0` 固定 or MSRV 検証 CI ジョブ追加 / `CODEBASE.md` の中身整備（ファイル自体は存在。本文はタイトルのみ） / `issues/pending/0003` 本文の `SoraClient` 系旧名を新名に更新 / `issues/pending/0007:21` の `client.rs:1031-1045` を `connection.rs` の新参照に更新）
+- [ ] S7. 規約遵守（`src/` の `.unwrap()` → `.expect` は #0053。MSRV は #0050、`CODEBASE.md` は #0051）
   - 完了済み: `.cargo/config.toml.example` の UTF-8 BOM 削除
+  - 切り出し対象外（軽微・直接対応可）: sumomo 日本語 `expect` 3 箇所 / `issues/pending/0003` / `0007` の旧名更新
 
 ## 完了条件
 
@@ -99,8 +103,8 @@ S1〜S7 の Should グループは正式版リリース後でも段階対応可�
 2. 各派生 issue は `shiguredo-issues` / `shiguredo-git` / `shiguredo-changelog` 規約に従い、1 issue 1 目的 1 ブランチで対応する
 3. 派生 issue を起票するたび、本 issue 内のチェックボックスに issue 番号を追記する（例: `- [ ] M1. ... (#XXXX)`）
 4. 派生 issue が closed になるたび、本 issue 内のチェックボックスにチェックを入れて closed コミットに本 issue 番号を含める
-5. Must は完了済み。Should は S2 / S3 を先行起票済み（S3 完了、S2 は #0024〜#0027 完了後も残項目あり）。未起票の S1 / S4〜S7 と S2 残項目の派生 issue 起票を進める
-6. 完了条件をすべて満たした時点で本 issue を closed にする。リリース作業はタグ push と `release.yml`（#0028 で現状維持と判断）で行う
+5. Must は完了済み。Should 派生は #0046〜#0053 を起票済み。正式リリース後でも段階対応可能
+6. 完了条件をすべて満たした時点で本 issue を closed にする。リリース作業はタグ push と `release.yml`（#0028 で現状維持と判断）で行う。Should が残っていても、明示的に「正式リリース後対応」として open / pending のまま親を closed にしてよい
 
 ## 派生 issue の起票方針
 
