@@ -11,7 +11,7 @@
 
 ## develop
 
-- [CHANGE] `VideoCodecPreference` の `find_mut` を非公開にし、`get_or_add` / `has_implementation` と `PreferenceCodec` の `set_implementation` を削除し、`CodecDirection` の `as_label` / `as_str` を `pub(crate)` にする
+- [CHANGE] `VideoCodecPreference` の `find_mut` / `get_or_add` / `has_implementation`、`PreferenceCodec` の `set_implementation`、`CodecDirection` の `as_label` / `as_str` をクレート外から呼べなくする
   - @voluntas
 - [UPDATE] `shiguredo_webrtc` を 0.150.3 に上げ、Ubuntu 26.04 LTS に対応する
   - @voluntas

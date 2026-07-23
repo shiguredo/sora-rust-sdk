@@ -93,9 +93,9 @@ High。
 ## 解決方法
 
 1. `src/video_codec_preference.rs`:
-   - `find_mut` を非 `pub` にした (`merge` からのみ利用)
-   - クレート内本番コードから未使用だった `get_or_add` / `has_implementation` / `PreferenceCodec::set_implementation` は削除した (非 `pub` 化すると `dead_code` になるため)
-   - 単体テスト `merge_overwrites_matching_and_appends_missing` を公開 API (`new` / `merge` / `find`) で書き直した
+   - `find_mut` / `get_or_add` / `has_implementation` / `PreferenceCodec::set_implementation` を非 `pub` にした (削除しない。インポート由来の preference 構築・照会ヘルパー)
+   - `merge` はフィールド直代入ではなく `set_implementation` を使うようにした
+   - 本番経路から未参照の `get_or_add` / `has_implementation` には `#[cfg_attr(not(test), expect(dead_code))]` を付け、単体テストからの利用を維持した
 2. `src/video_codec_capability.rs`: `as_label` / `as_str` を `pub(crate)` にした (エラー文言・テスト期待値は変更なし)
 3. `skills/sora-rust-sdk/SKILL.md`: 狭めた API を公開表から削除した
 4. `CHANGES.md` の `## develop` に `[CHANGE]` を追記した
