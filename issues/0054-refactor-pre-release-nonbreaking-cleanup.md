@@ -8,7 +8,7 @@
 - Polished: {YYYY-MM-DD}
 
 親 issue: [`0020-other-prepare-stable-release-2026-1-0.md`](./closed/0020-other-prepare-stable-release-2026-1-0.md) の Should 派生 issue S6 のうち、非破壊掃除側。
-公開 API の可視性縮小は [`0052-change-narrow-video-codec-public-api.md`](./0052-change-narrow-video-codec-public-api.md) で扱う。本 issue は SemVer 非影響の掃除のみ。
+公開 API の可視性縮小 (`#0052`) は対応不要として closed にした。本 issue は SemVer 非影響の掃除のみ。
 
 ## 目的
 
@@ -39,7 +39,7 @@ Medium。
 
 | 項目 | 理由 |
 |---|---|
-| 公開 API の可視性変更 | `#0052` 側 |
+| 公開 API の可視性変更 | `#0052` で対応不要と判断済み |
 | `src/zlib.rs` の統合 | 既に `pub(crate)`。`connection.rs` からのみ利用 (10 行)。独立のまま維持 |
 | `examples/sumomo/src/tests.rs` の配置変更 | binary-only の private 試験。`src/` 内 `#[cfg(test)]` が正しい |
 | `DataChannelConfig::direction` | ワイヤ必須を `.required()` パース済み。`#[expect(dead_code)]` で保持 |
