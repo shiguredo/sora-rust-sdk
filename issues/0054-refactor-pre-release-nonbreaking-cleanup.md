@@ -8,7 +8,7 @@
 - Polished: {YYYY-MM-DD}
 
 親 issue: [`0020-other-prepare-stable-release-2026-1-0.md`](./closed/0020-other-prepare-stable-release-2026-1-0.md) の Should 派生 issue S6 のうち、非破壊掃除側。
-公開 API の可視性縮小は [`0052-change-narrow-video-codec-public-api.md`](./0052-change-narrow-video-codec-public-api.md) で扱う。本 issue は SemVer 非影響の掃除のみ。
+公開 API の可視性縮小は [`0052-change-narrow-video-codec-public-api.md`](./closed/0052-change-narrow-video-codec-public-api.md) で扱う。本 issue は SemVer 非影響の掃除のみ。
 
 ## 目的
 
