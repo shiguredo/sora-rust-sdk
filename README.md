@@ -144,7 +144,15 @@ async fn main() -> Result<(), sora_sdk::Error> {
 映像・音声を送信する例です。
 
 ```rust
-use sora_sdk::{Role, SoraConnection, SoraConnectionContext};
+use sora_sdk::{Role, SoraConnection, SoraConnectionContext, SoraConnectionEventHandler};
+
+struct MyEventHandler;
+
+impl SoraConnectionEventHandler for MyEventHandler {
+    fn on_notify(&mut self, text: &str) {
+        println!("notify: {text}");
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), sora_sdk::Error> {
@@ -162,6 +170,7 @@ async fn main() -> Result<(), sora_sdk::Error> {
         vec!["wss://sora.example.com/signaling".to_string()],
         "your-channel-id".to_string(),
         Role::SendOnly,
+        MyEventHandler,
     )
     .sender_audio_track(audio_track)
     // .sender_video_track(video_track)
