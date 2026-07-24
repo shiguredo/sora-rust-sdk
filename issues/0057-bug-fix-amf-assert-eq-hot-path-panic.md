@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-24
 - Model: Opus 4.7
 - Branch: feature/fix-amf-assert-eq-hot-path-panic
 - Polished: {YYYY-MM-DD}
@@ -49,3 +49,15 @@ let Some(y_size) = (y_stride as usize).checked_mul(surface_height as usize) else
 - `src/video_codecs/amf.rs:414` の `assert_eq!` が除去されている。
 - `surface_height < frame_height` になる異常ケースで、プロセスがクラッシュせず `VideoCodecStatus::Error` を返す。
 - `cargo clippy --workspace --all-features -- -D warnings` と `cargo test --workspace` が通る。
+
+## 解決方法
+
+本 issue は既にクローズ済みの `closed/0024-bug-amf-encoder-hot-path-panic.md` と対象箇所・修正方針が完全に重複していた。0024 は同一の `assert_eq!(surface_height as u32, frame_height);` について、AMF SDK のヘッダ・API リファレンス・公式サンプルコード (`RawStreamReader.cpp`) を調査した結果、以下を確認したうえで **コード変更不要** として closed になっている。
+
+- `AMFPlane::GetHeight()` は crop region の高さ（未設定時は surface 全体の高さ）を返し、アライメントによるパディングは含まない
+- パディングを含むスキャンライン数は `AMFPlane::GetVPitch()` が返す
+- 公式サンプルでも要求高さと `GetVPitch()` は明確に区別されている
+
+したがって `surface_height` と `frame_height` は仕様上常に一致し、`assert_eq!` は不変条件を表明する妥当な記述である。0057 の「AMF の `alloc_surface()` はアライン up して返す可能性がある」という優先度根拠は、AMF が返す `GetHeight()` の実際の挙動を誤解したものだった。
+
+本 issue は 0024 の重複として closed にする。0024 の調査結論を疑って再検証する場合は、AV1 / HEVC + 特定 GPU / 特定ドライバでの実機検証を伴う別 issue として起票する。
