@@ -148,9 +148,10 @@ triage 時の誤選別（`Priority: Medium` で選別すると blocker が埋も
 
 ### 別 issue の起票（本 issue 着手時に必ず実施）
 
-- **SKILL.md drift 全面追随の別 issue を起票する**（`Priority: High`、sendonly blocker と同格）。sendonly / SKILL.md drift のうち SKILL.md 側は範囲が広いため独立させる。drift の起源は `#0044`（callback trait 化、2026-07-08 completed）で `SKILL.md` 側の追随が漏れている（`#0042` は canary バージョン表記を扱った issue で drift とは無関係。誤引用しないこと）。起票する別 issue には現状節「High 相当 blocker」で列挙した具体箇所（4 引数呼び出し 3 箇所 + Builder 誤扱いのコールバック API 12 個）を素材として引き継ぐ
-- **未確定事項 3 で決めた「動作確認済み Sora バージョン列挙運用」の別 issue** を起票する
-- 起票した別 issue の番号は、本 issue のマージ用 PR 本文冒頭に「起票済み: #XXXX (SKILL.md drift), #YYYY (Sora 動作確認バージョン運用)」の形式で記録する
+- **README sendonly サンプル修正の別 issue を起票する**（`Priority: High`、正式リリース blocker）→ **#0055 起票済み（2026-07-24, `issues/0055-fix-readme-sendonly-sample-compile.md`）**
+- **SKILL.md drift 全面追随の別 issue を起票する**（`Priority: High`、sendonly blocker と同格）。sendonly / SKILL.md drift のうち SKILL.md 側は範囲が広いため独立させる。drift の起源は `#0044`（callback trait 化、2026-07-08 completed）で `SKILL.md` 側の追随が漏れている（`#0042` は canary バージョン表記を扱った issue で drift とは無関係。誤引用しないこと）。起票する別 issue には現状節「High 相当 blocker」で列挙した具体箇所（4 引数呼び出し 3 箇所 + Builder 誤扱いのコールバック API 12 個）を素材として引き継ぐ → **#0056 起票済み（2026-07-24, `issues/0056-doc-fix-skill-md-callback-trait-drift.md`）**
+- **未確定事項 3 で決めた「動作確認済み Sora バージョン列挙運用」の別 issue** を起票する（未起票）
+- 起票した別 issue の番号は、本 issue のマージ用 PR 本文冒頭に「起票済み: #0055 (README sendonly blocker), #0056 (SKILL.md drift), #YYYY (Sora 動作確認バージョン運用)」の形式で記録する
 
 ### grep 判定（issue ファイル自身を除外するため対象パスを絞る）
 
