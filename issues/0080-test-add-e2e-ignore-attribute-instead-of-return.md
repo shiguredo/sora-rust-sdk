@@ -6,6 +6,7 @@
 - Model: Opus 4.7
 - Branch: feature/test-add-e2e-ignore-attribute-instead-of-return
 - Polished: {YYYY-MM-DD}
+- Updated: 2026-07-24
 
 ## 目的
 
@@ -17,16 +18,24 @@ High。「CI が緑」の信頼性が損なわれる。実際には環境依存�
 
 ## 現状
 
-該当箇所 (代表例):
+該当箇所 (代表例。行番号は 2026-07-24 の実測値)。skip 経路は「(a) テスト本体で `let Some(...) else { return; };` が発火する行 = 誤合格の直接原因」と「(b) helper が `return None;` を返す行 = (a) の入力側」を区別して列挙する。
 
-- `e2e-tests/tests/redirect.rs:16-24` — `TEST_SECRET_KEY` / URL 数不足で return
+- `e2e-tests/tests/redirect.rs:16-24` — `TEST_SECRET_KEY` / URL 数不足で return (テスト本体)
 - `e2e-tests/tests/audio_capturer.rs` / `video_capturer.rs` — デバイス列挙失敗で return (15+ 件)
 - `e2e-tests/tests/openh264_video_codec.rs:44-48, 139-143` — `OPENH264_PATH` 未設定で return
-- `e2e-tests/tests/nvcodec_video_codec.rs:87, 108, 346, 385` — capability 生成失敗で return
-- `e2e-tests/tests/amf_video_codec.rs:67, 85` — 同上
-- `e2e-tests/tests/vpl_video_codec.rs:70, 93, 117, 141, 387, 426, 462` — 同上
-- `e2e-tests/tests/simulcast.rs:171-174, 215-218, 236-239, 304-307` — 同上
+- `e2e-tests/tests/nvcodec_video_codec.rs`:
+  - (a) テスト本体の skip 経路 `:330,367,380` (`let Some(codec_types) = nvcodec_*() else { return; };`)
+  - (b) helper の `return None;`: `nvcodec_fully_supported_codecs` `:87`、`nvcodec_decoder_supported_only_codecs` `:108`
+  - ループ内 skip (誤合格ではないが方針検討対象): `:389 continue` (encoder unsupported)
+- `e2e-tests/tests/amf_video_codec.rs:67, 85` — 同上パターン (要精査。skip 経路と helper の分離は未確認)
+- `e2e-tests/tests/vpl_video_codec.rs`:
+  - (a) テスト本体の skip 経路 `:371,408,457` (`let Some(codec_types) = vpl_*() else { return; };`)
+  - (b) helper の `return None;` / eprintln + Err 経路: `vpl_capability` `:70` (eprintln)、`vpl_fully_supported_codecs` `:93`、`vpl_decoder_supported_only_codecs` `:117`、`vpl_encoder_supported_only_codecs` `:141`
+  - ループ内 skip: `:421,466 return`、`:430,466 continue` (要精査)
+- `e2e-tests/tests/simulcast.rs:171-174, 215-218, 236-239, 304-307` — 同上パターン
 - `src/video_codecs/openh264.rs:613-676, 727-748` — `OPENH264_PATH` 未設定で return
+
+`#[ignore]` 化の第一対象は各テストの (a) 側 (テスト本体の skip 経路)。helper 側の `return None;` は (a) が `#[ignore]` 化されれば呼び出し元が消えるため、そのまま残してよいか (a) と一緒に整理するかは実装時に判断する。
 
 ## 設計方針
 
