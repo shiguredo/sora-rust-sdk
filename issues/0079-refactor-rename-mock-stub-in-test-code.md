@@ -6,6 +6,7 @@
 - Model: Opus 4.7
 - Branch: feature/refactor-rename-mock-stub-in-test-code
 - Polished: {YYYY-MM-DD}
+- Updated: 2026-07-24
 
 ## 目的
 
@@ -17,11 +18,11 @@ High。プロジェクト規約 (AGENTS.md) の明示的違反。正式リリー
 
 ## 現状
 
-該当箇所:
+該当箇所 (宣言 / impl / 使用位置は 2026-07-24 の実測値):
 
-- `src/video_codec_capability.rs:178-222` — `StubVideoEncoder`, `StubVideoDecoder`, `MockCapability`
-- `src/video_codec.rs:449-641` — `MockCapability`, `StubVideoEncoder`, `StubVideoDecoder`, `StubVideoEncoderWithInfoName`
-- `src/video_codec_preference.rs:369-470` — `MockVideoCodecCapability`, `StubVideoEncoder`, `StubVideoDecoder`
+- `src/video_codec_capability.rs`: 宣言 + impl は `:178-222`、使用は `:235` — `StubVideoEncoder` / `StubVideoDecoder` / `MockCapability`
+- `src/video_codec.rs`: 宣言 + impl は `:434-599` (Stub 系 `:434,437,440`、`MockCapability` の struct と impl は `:449-599`)、使用は `:602,618,640,645,668,702,713,738,759,893` — `StubVideoEncoder` / `StubVideoDecoder` / `StubVideoEncoderWithInfoName` / `MockCapability`
+- `src/video_codec_preference.rs`: 宣言 + impl は `:369-470` (Stub 系 `:369,372`、`MockVideoCodecCapability` の struct と impl は `:375-469`)、使用は `:449,465,481,510,719,724` — `StubVideoEncoder` / `StubVideoDecoder` / `MockVideoCodecCapability`
 
 いずれも `#[cfg(test)]` 内で `VideoCodecCapability` / `VideoEncoderHandler` / `VideoDecoderHandler` の trait を実装し、テスト用の最小限のダミー実装として利用している。
 
