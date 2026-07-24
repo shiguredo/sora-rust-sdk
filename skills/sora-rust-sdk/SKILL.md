@@ -65,26 +65,31 @@ WebRTC SFU Sora のクライアントを Rust で実装するための SDK。シ
 | `SoraConnectionBuilder` | ビルダー。ムーブスタイルで連結し `.build()` で `(SoraConnection, SoraConnectionHandle)` を返す |
 | `TlsConfig` | WebSocket (シグナリング接続) の TLS 設定。`insecure` / `client_cert` / `client_key` / `ca_cert` を保持。Builder の `insecure` / `client_cert` / `ca_cert` メソッド経由で設定する |
 
-`SoraConnection::builder(context, signaling_urls, channel_id, role) -> SoraConnectionBuilder` で開始。`signaling_urls` は `Vec<String>`、`channel_id` は `String`、`role` は `Role`。
+`SoraConnection::builder(context, signaling_urls, channel_id, role, event_handler) -> SoraConnectionBuilder` で開始。`signaling_urls` は `Vec<String>`、`channel_id` は `String`、`role` は `Role`、`event_handler` は `SoraConnectionEventHandler` トレイトを実装した任意の型のインスタンス（`impl SoraConnectionEventHandler + 'static`）。
 
-#### コールバック設定
+#### イベントハンドラ (`SoraConnectionEventHandler` トレイト)
 
-| メソッド | クロージャ署名 | 説明 |
-|----------|---------------|------|
-| `on_signaling_message` | `Fn(SignalingType, SignalingDirection, &str)` | シグナリングメッセージ送受信時 |
-| `on_notify` | `Fn(&str)` | notify メッセージ受信時 |
-| `on_push` | `Fn(&str)` | push メッセージ受信時 |
-| `on_track` | `Fn(RtpTransceiver)` | トラック追加時 |
-| `on_remove_track` | `Fn(RtpReceiver)` | トラック削除時 |
-| `on_switched` | `Fn()` | DataChannel シグナリングに切り替わった時 |
-| `on_websocket_close` | `Fn(Option<u16>, &str)` | WebSocket 切断時 |
-| `on_message` | `Fn(&str, &[u8])` | `#` プレフィックス DataChannel 受信時 |
-| `on_data_channel` | `Fn(&str)` | DataChannel 作成時 |
-| `on_data_channel_open` | `Fn(&str)` | DataChannel オープン時 |
-| `on_data_channel_message` | `Fn(&str, &[u8])` | DataChannel メッセージ受信時 |
-| `on_data_channel_close` | `Fn(&str)` | DataChannel クローズ時 |
+イベント通知は Builder のチェーンメソッドではなく、`SoraConnectionEventHandler` トレイトを実装したユーザー定義型で受け取る。実装型のインスタンスを `SoraConnection::builder(...)` の第 5 引数に渡す。
 
-全コールバックは `Fn + Send + Sync + 'static`。内部タスクから呼ばれるためブロックさせないこと。重い処理はチャンネルで自分のタスクへ転送する。
+- トレイトは `Send`（`Sync` は不要。各コールバックは単一タスクから直列に呼ばれるため）
+- 全メソッドにデフォルト空実装が用意されているため、必要なメソッドだけオーバーライドすればよい
+- コールバックは内部タスクから直列に呼ばれるためブロックさせないこと。重い処理はチャンネルで自分のタスクへ転送する
+- ユーザー定義 struct に状態を持たせ `&mut self` で共有できる
+
+| トレイトメソッド | シグネチャ | 説明 |
+|----------------|-----------|------|
+| `on_signaling_message` | `fn on_signaling_message(&mut self, signaling_type: SignalingType, direction: SignalingDirection, text: &str)` | シグナリングメッセージ送受信時 |
+| `on_notify` | `fn on_notify(&mut self, text: &str)` | notify メッセージ受信時 |
+| `on_push` | `fn on_push(&mut self, text: &str)` | push メッセージ受信時 |
+| `on_track` | `fn on_track(&mut self, transceiver: RtpTransceiver)` | トラック追加時 |
+| `on_remove_track` | `fn on_remove_track(&mut self, receiver: RtpReceiver)` | トラック削除時 |
+| `on_switched` | `fn on_switched(&mut self)` | DataChannel シグナリングに切り替わった時 |
+| `on_websocket_close` | `fn on_websocket_close(&mut self, code: Option<u16>, reason: &str)` | WebSocket 切断時 |
+| `on_message` | `fn on_message(&mut self, label: &str, data: &[u8])` | `#` プレフィックス DataChannel 受信時 |
+| `on_data_channel` | `fn on_data_channel(&mut self, label: &str)` | DataChannel 作成時 |
+| `on_data_channel_open` | `fn on_data_channel_open(&mut self, label: &str)` | DataChannel オープン時 |
+| `on_data_channel_message` | `fn on_data_channel_message(&mut self, label: &str, data: &[u8])` | DataChannel メッセージ受信時 |
+| `on_data_channel_close` | `fn on_data_channel_close(&mut self, label: &str)` | DataChannel クローズ時 |
 
 #### 送信トラック
 
@@ -260,7 +265,7 @@ H.264 / H.265 の `b_frame: true` は Sora 側の `sora.conf` で対応する設
 | 動作 | API |
 |------|-----|
 | ユーザー定義 DataChannel をシグナリング時に宣言 | `SoraConnectionBuilder::data_channels(Vec<ConnectDataChannel>)` |
-| 受信ハンドラ | `SoraConnectionBuilder::on_message(Fn(&str, &[u8]))` (ラベルは `#` 始まり) |
+| 受信ハンドラ | `SoraConnectionEventHandler::on_message(&mut self, label: &str, data: &[u8])` (ラベルは `#` 始まり。トレイトメソッドなのでユーザー定義 struct に実装する) |
 | 送信 | `SoraConnectionHandle::send_message(label, data)` |
 
 JSON-RPC 2.0 は SDK 側で `{ "jsonrpc": "2.0", "method": ..., "params": ..., "id": ... }` を組み立てる。利用側は内側の `params` を `Option<JsonString>` で渡すだけ (パラメータ不要なら `None`)。
@@ -278,7 +283,19 @@ JSON-RPC 2.0 は SDK 側で `{ "jsonrpc": "2.0", "method": ..., "params": ..., "
 ### sendrecv で接続する
 
 ```rust
-use sora_sdk::{Role, SoraConnection, SoraConnectionContext};
+use shiguredo_webrtc::RtpTransceiver;
+use sora_sdk::{Role, SoraConnection, SoraConnectionContext, SoraConnectionEventHandler};
+
+struct MyEventHandler;
+
+impl SoraConnectionEventHandler for MyEventHandler {
+    fn on_notify(&mut self, text: &str) {
+        println!("notify: {text}");
+    }
+    fn on_track(&mut self, transceiver: RtpTransceiver) {
+        println!("track: {:?}", transceiver.mid());
+    }
+}
 
 let context = SoraConnectionContext::new()?;
 
@@ -294,10 +311,9 @@ let (connection, handle) = SoraConnection::builder(
     vec!["wss://sora.example.com/signaling".to_string()],
     "channel-id".to_string(),
     Role::SendRecv,
+    MyEventHandler,
 )
 .sender_audio_track(audio_track)
-.on_notify(|text| println!("notify: {text}"))
-.on_track(|transceiver| println!("track: {:?}", transceiver.mid()))
 .build()?;
 
 tokio::spawn(async move {
@@ -357,10 +373,18 @@ builder = builder.audio(audio).video(video);
 ### DataChannel メッセージング
 
 ```rust
-let (_conn, handle) = SoraConnection::builder(/* ... */)
-    .on_message(|label, data| {
+use sora_sdk::SoraConnectionEventHandler;
+
+struct MyEventHandler;
+
+impl SoraConnectionEventHandler for MyEventHandler {
+    fn on_message(&mut self, label: &str, data: &[u8]) {
         println!("recv {label}: {} bytes", data.len());
-    })
+    }
+}
+
+// SoraConnection::builder(context, urls, channel_id, role, MyEventHandler)
+let (_conn, handle) = SoraConnection::builder(/* ... 5 引数、末尾に MyEventHandler ... */)
     .build()?;
 
 handle.send_message("#chat", b"hello").await?;
@@ -422,6 +446,11 @@ tokio::spawn(async move {
 ### 複数クライアントを 1 コンテキストで実行する
 
 ```rust
+use sora_sdk::SoraConnectionEventHandler;
+
+struct MyEventHandler;
+impl SoraConnectionEventHandler for MyEventHandler {}
+
 let context = SoraConnectionContext::new()?;
 let urls = vec!["wss://sora.example.com/signaling".to_string()];
 
@@ -434,6 +463,7 @@ for i in 0..5 {
             urls,
             format!("channel-{i}"),
             sora_sdk::Role::RecvOnly,
+            MyEventHandler,
         )
         .build()?;
         conn.run().await
@@ -461,13 +491,18 @@ builder = builder
 ### 複数シグナリング URL のレース
 
 ```rust
+use sora_sdk::SoraConnectionEventHandler;
+
+struct MyEventHandler;
+impl SoraConnectionEventHandler for MyEventHandler {}
+
 let urls = vec![
     "wss://sora1.example.com/signaling".to_string(),
     "wss://sora2.example.com/signaling".to_string(),
 ];
 
 let (conn, handle) = SoraConnection::builder(
-    context, urls, "channel-id".into(), Role::SendRecv,
+    context, urls, "channel-id".into(), Role::SendRecv, MyEventHandler,
 ).build()?;
 
 tokio::spawn(async move { let _ = conn.run().await; });
