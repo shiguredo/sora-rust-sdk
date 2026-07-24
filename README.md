@@ -513,3 +513,21 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ```
+
+## OpenH264
+
+<https://www.openh264.org/BINARY_LICENSE.txt>
+
+```text
+"OpenH264 Video Codec provided by Cisco Systems, Inc."
+```
+
+## NVIDIA Video Codec SDK
+
+<https://docs.nvidia.com/video-technologies/video-codec-sdk/13.0/index.html>
+
+<https://docs.nvidia.com/video-technologies/video-codec-sdk/13.0/license/index.html>
+
+```text
+“This software contains source code provided by NVIDIA Corporation.”
+```
