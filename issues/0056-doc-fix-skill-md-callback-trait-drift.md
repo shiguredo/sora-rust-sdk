@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-24
 - Model: Opus 4.7
 - Branch: feature/fix-skill-md-callback-trait-drift
 - Polished: {YYYY-MM-DD}
@@ -69,23 +69,24 @@ drift の起源: `#0044`（`issues/closed/0044-change-callback-to-trait.md`, 202
   - `SKILL.md:70-87` の 12 コールバック表が「`SoraConnectionEventHandler` トレイトのメソッド」として位置付けられている
 - 修正後、`grep` で `SoraConnection::builder` の全出現が 5 引数呼び出しか省略記法（`(/* ... */)` 等）のいずれかであることを確認する（4 引数呼び出しがゼロ）
 - `grep` で `\.on_notify\|\.on_track\|\.on_message\|\.on_push\|\.on_signaling_message\|\.on_switched\|\.on_websocket_close\|\.on_data_channel` の Builder チェーン誤用が SKILL.md 内にゼロ、または全てトレイト実装ブロック内の記述（`impl SoraConnectionEventHandler for ...` の中）に限定されている
-- `#0051` の完了条件を満たすため、本 issue の PR 本文冒頭または #0051 の PR 本文冒頭に「起票済み: #0055 (README sendonly blocker), #0056 (SKILL.md drift)」の形式で参照が入る
-- `CHANGES.md` の扱いは `shiguredo-changelog` に従い、`## develop` 節に 1 行足す（`- [FIX]` 相当）。SKILL.md はエージェント向けリファレンスなので、変更履歴に含めるのは妥当
+- `#0051` の完了条件を満たすため、本 issue の番号は `#0051` の子 issue 欄に明示的に反映されている（`issues/0051-doc-prepare-readme-and-docs.md:152`）
+- `CHANGES.md` への追記は不要（`shiguredo-changelog` 規約で `.md` 変更は変更履歴に反映しない）
 
 ## 解決方法
 
-1. `develop` から `feature/fix-skill-md-callback-trait-drift` を切る（ユーザーが「develop 直接コミット可」と明示した場合はこの限りでない）
-2. `grep` で drift の全出現を機械的に洗い出し、修正計画表を作る
-3. 型シグネチャ記述（`SKILL.md:68`）と 12 コールバック表（`SKILL.md:70-87`）の節構成を先に直す
-4. 各サンプル（sendrecv / DataChannel / 複数クライアント / 複数 URL）を順に修正する
-5. 修正後に再度 `grep` で drift ゼロを確認する
-6. `CHANGES.md` の `## develop` に 1 行追記
-7. コミット → PR（あるいは直接 push）。PR 本文冒頭で親 issue #0051 と兄弟 issue #0055 を参照する
+1. `grep -nE "SoraConnection::builder|SoraConnectionBuilder::on_|\.on_[a-z_]+\(|SoraConnectionEventHandler|SoraConnectionBuilder" skills/sora-rust-sdk/SKILL.md` で drift の全出現を洗い出し、修正対象を確定した
+2. `SKILL.md:68` の型シグネチャ記述を 5 引数（`context, signaling_urls, channel_id, role, event_handler`）に修正し、`event_handler` の型（`impl SoraConnectionEventHandler + 'static`）を明示した
+3. `SKILL.md:70-87` の 12 コールバック表を「`SoraConnectionEventHandler` トレイト」の節に置き換えた。節見出しを `#### イベントハンドラ (SoraConnectionEventHandler トレイト)` に改め、表の列を「トレイトメソッド」「シグネチャ」「説明」に変更し、実際のトレイトメソッド署名（`fn on_*(&mut self, ...)` 形式）に合わせた。`Send`（`Sync` 不要）である旨と、実装型のインスタンスを Builder 第 5 引数に渡す旨をイントロに追加した
+4. `SKILL.md:263` の `SoraConnectionBuilder::on_message` 誤扱いを `SoraConnectionEventHandler::on_message` に修正した
+5. sendrecv 例（`SKILL.md:280-`）、DataChannel メッセージング例（`SKILL.md:359-`）、複数クライアント例（`SKILL.md:424-`）、複数 URL レース例（`SKILL.md:469-`）の 4 例をすべて `struct MyEventHandler;` + `impl SoraConnectionEventHandler for MyEventHandler { ... }` パターンに書き直し、`SoraConnection::builder(...)` 呼び出しを 5 引数化した
+6. 修正後に `grep -nE "^\s*\.on_" skills/sora-rust-sdk/SKILL.md` で Builder チェーンとしての `.on_*` 誤用が 0 件になっていることを確認した
+7. `cargo check --workspace` を実行し、SKILL.md 変更が周辺コードのコンパイルに影響を与えていないことを確認した（22.66s、エラーなし）
+8. `CHANGES.md` への追記は不要と判断した（`shiguredo-changelog` 規約で `.md` 変更は変更履歴に反映しない）
+9. ユーザーの明示的許可のもと、`feature/fix-skill-md-callback-trait-drift` ブランチは切らず `develop` に直接コミットした
 
 ## 対象ファイル
 
 - `skills/sora-rust-sdk/SKILL.md`
-- `CHANGES.md`（`## develop` 節）
 
 ## 対象外
 
