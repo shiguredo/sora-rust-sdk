@@ -6,6 +6,7 @@
 - Model: Composer
 - Branch: feature/update-readme-and-docs
 - Polished: 2026-07-23
+- Updated: 2026-07-24
 
 親 issue: [`0020-other-prepare-stable-release-2026-1-0.md`](./closed/0020-other-prepare-stable-release-2026-1-0.md) の Should 派生 issue S5。親 issue は 2026-07-23 に closed 済みで、本 issue は「正式リリース後でも段階対応可能」と位置付けられている（`issues/closed/0020-...md:82,98`）。S7 の `CODEBASE.md` 整備も本 issue に含める。
 
@@ -15,12 +16,7 @@
 
 ## 優先度根拠
 
-Medium。ただし内訳が 2 種類混在するため、着手時は次の 2 段構えで扱う。
-
-- **High 相当（正式リリース blocker）**: `README.md:160-165` sendonly サンプルコードのコンパイル不能状態（詳細は「現状」）。crates.io 到着直後の利用者を導入初日にブロックする。単独で最小 PR を先行させる。SKILL.md drift（後述）も同格の blocker で、別 issue として即時起票して並行で解決する
-- **Medium（正式リリース後でも段階対応可能）**: 上記以外の全項目。親 issue #0020 の Should 分類に従う
-
-triage 時の誤選別（`Priority: Medium` で選別すると blocker が埋もれる）を避けるため、本 issue の完了条件で「sendonly / SKILL.md drift を別 issue に切り出し、番号を本 issue に記録する」ことを担保する。
+Medium。当初は「High 相当（正式リリース blocker）: sendonly サンプルコードのコンパイル不能状態と SKILL.md drift」と「Medium（正式リリース後でも段階対応可能）: それ以外」の 2 種類が混在していたが、High 相当分は本 issue の切り出しにより #0055（README sendonly）と #0056（SKILL.md drift）で 2026-07-24 に解決済み。本 issue に残っているのは Medium 相当のみで、親 issue #0020 の Should 分類（正式リリース後でも段階対応可能）に従う。
 
 ## 対象ファイル
 
@@ -42,23 +38,16 @@ triage 時の誤選別（`Priority: Medium` で選別すると blocker が埋も
 
 調査日: 2026-07-23。事実として確定した項目のみを載せる。未確定な方針判断は「未確定事項」節に分ける。
 
-### High 相当 blocker
+### 過去に存在した High 相当 blocker（すべて解消済み）
 
-- `README.md:147-173` の sendonly サンプルコードが以下 3 点で破綻している
-  - `use` 節（L147）に `SoraConnectionEventHandler` が含まれていない
-  - `struct MyEventHandler;` と `impl SoraConnectionEventHandler for MyEventHandler {}` の定義が存在しない
-  - `SoraConnection::builder(...)` が 4 引数呼び出しで、`src/connection.rs:658-664` の第 5 引数 `event_handler: impl SoraConnectionEventHandler + 'static` が抜けている
-  - `sendrecv`（`README.md:122-128`）と `recvonly`（`README.md:195-201`）は 5 引数で正しい。sendonly だけ追従漏れ
-- `skills/sora-rust-sdk/SKILL.md` に massive な API drift（後述の別 issue で扱うため本 issue では書き換えないが、実態は現状として記録する）
-  - `SKILL.md:68` 型シグネチャ記述が 4 引数（`SoraConnection::builder(context, signaling_urls, channel_id, role)`）で `event_handler` が抜け
-  - `SKILL.md:292-297` sendrecv 例、`SKILL.md:432-437` 複数クライアント例、`SKILL.md:469-471` 複数 URL 例がすべて 4 引数呼び出し
-  - `SKILL.md:263` `SoraConnectionBuilder::on_message(Fn(&str, &[u8]))` として書かれているが、`on_message` は `SoraConnectionEventHandler` トレイトのメソッド（`src/connection.rs:1860` で `handler.on_message(label, &message_bytes)` として呼ばれる）で `SoraConnectionBuilder` には無い
-  - `SKILL.md:300` `.on_track(|transceiver| ...)`、`SKILL.md:361` `.on_message(|label, data| ...)` も同じく Builder メソッドとして書かれているが実際はトレイトメソッド
-  - `SKILL.md:70-87` の 12 個のコールバック表全体が「Builder メソッド」として書かれているが実装はすべてトレイトメソッド
+本 issue から切り出した以下 2 件は 2026-07-24 に closed となった。歴史的経緯として残す。
+
+- `README.md:147-173` の sendonly サンプルコードのコンパイル不能状態（`use` 節の `SoraConnectionEventHandler` 欠落、`struct MyEventHandler` 未定義、4 引数 `SoraConnection::builder(...)`）→ **#0055 で対応完了** (`issues/closed/0055-fix-readme-sendonly-sample-compile.md`、commit `2d6884f` + `b5e831a`、2026-07-24)
+- `skills/sora-rust-sdk/SKILL.md` の callback trait 化（#0044）追随漏れ（4 引数呼び出し 3 箇所 + Builder メソッド誤扱いのコールバック 12 個）→ **#0056 で対応完了** (`issues/closed/0056-doc-fix-skill-md-callback-trait-drift.md`、commit `a8ef355` + `362efd7`、2026-07-24)
 
 ### 実装・CI とドキュメントの確定した齟齬
 
-- `README.md:420-424`「前提条件」は `Rust 1.88 以上` / `libclang` / `Python 3` の 3 項目のみで、`.github/workflows/ci.yml:41-47` が Linux で apt install している以下のパッケージ群がすべて未掲載
+- `README.md:429-433`「前提条件」は `Rust 1.88 以上` / `libclang` / `Python 3` の 3 項目のみで、`.github/workflows/ci.yml:41-47` が Linux で apt install している以下のパッケージ群がすべて未掲載
   - `build-essential`
   - X11 系: `libx11-dev` `libxext-dev` `libxrandr-dev` `libxi-dev` `libxfixes-dev` `libxcursor-dev` `libxss-dev` `libxtst-dev`
   - Wayland/入力: `libwayland-dev` `libxkbcommon-dev`
@@ -67,11 +56,11 @@ triage 時の誤選別（`Priority: Medium` で選別すると blocker が埋も
   - システム: `libdbus-1-dev` `libudev-dev`
   - Rust bindgen: `libclang-dev`（README 側の `libclang` はこれの略記）
   - CI は「github-hosted で全 feature をカバーする保守的スーパーセット」を install しており、`sora_sdk` の default features（`openh264` のみ）で使う場合の必須集合とは異なる。README では default 用と feature 別追加分を分けて書く
-- `README.md:438-447`「対応プラットフォーム」と `.github/workflows/ci.yml:24-31, 76-85` の具体差分
+- `README.md:445-456`「対応プラットフォーム」と `.github/workflows/ci.yml:24-31, 76-85` の具体差分
   - README にあるが CI（github-hosted）に無い: `macOS Tahoe 26 arm64` / `macOS Sequoia 15 arm64` / `Windows 11 x86_64`
-  - `Windows Server 2025 x86_64`（README:447）は CI の `windows-2025-vs2026`（Visual Studio 2026 プレビュー環境）で回している。README ではその点が読み取れない
-  - `ci-self-hosted:84` に `Raspberry-Pi (arm64)` があり、README の「特徴」節（`README.md:47-48`）や「対応コーデック」表（`README.md:64`）でも Raspberry Pi サポートを謳っているにもかかわらず、「対応プラットフォーム」節（`README.md:438-447`）に Raspberry Pi の行がない
-- `README.md:397-403` の構成図は `src/` / `examples/sumomo/` / `e2e-tests/` の 3 つのみで、`pbt/`（`Cargo.toml:14` に登録済みのワークスペースメンバー）と `docs/` `tests/` が抜けている。粒度は未確定事項 5 参照
+  - `Windows Server 2025 x86_64`（README:456 付近）は CI の `windows-2025-vs2026`（Visual Studio 2026 プレビュー環境）で回している。README ではその点が読み取れない
+  - `ci-self-hosted:84` に `Raspberry-Pi (arm64)` があり、README の「特徴」節（`README.md:47-48`）や「対応コーデック」表（`README.md:64`）でも Raspberry Pi サポートを謳っているにもかかわらず、「対応プラットフォーム」節（`README.md:445-456`）に Raspberry Pi の行がない
+- `README.md:406-412` の構成図は `src/` / `examples/sumomo/` / `e2e-tests/` の 3 つのみで、`pbt/`（`Cargo.toml:14` に登録済みのワークスペースメンバー）と `docs/` `tests/` が抜けている。粒度は未確定事項 5 参照
 - `README.md:66-71`「MP4 無変換送信」節に「音声は無視される」制約（`docs/INPUT_MP4.md:17` に記載）が反映されていない
 
 ### sumomo 側の確定した齟齬
@@ -79,7 +68,7 @@ triage 時の誤選別（`Priority: Medium` で選別すると blocker が埋も
 - `examples/sumomo/README.md:10` の `sudo apt install libssl-dev pkg-config` は `libssl-dev` が不要。ワークスペースは `rustls` + `rustls-platform-verifier` + `aws-lc-rs` 構成で、`Cargo.toml` / `Cargo.lock` に `openssl-sys` / `native-tls` / `libssl-*` 系は存在しない。`.github/workflows/ci.yml:41-47` の apt install にも `libssl-dev` は含まれていない
 - `pkg-config`（Debian パッケージ）は `Cargo.lock` 上で `shiguredo_audio_device` / `shiguredo_libcamera` / `shiguredo_video_device` の build.rs が pkg-config クレート経由で使うため、`media-device` / `libcamera` feature を有効化する場合は間接的に必要（github-hosted runner にはデフォルト同梱されているため CI では明示 install していない）。したがって「default features では不要、`media-device` / `libcamera` feature では必要」と分岐して案内する
 - 同じ `libssl-dev` コメントが `examples/sumomo/Cargo.toml:5-6` にも残存
-- `examples/sumomo/README.md:8-11` の「ビルドには」文脈に、runtime パッケージ `pipewire-pulse`（L14）と dev headers `libpulse-dev` / `libpipewire-0.3-dev` 相当が混在。build 依存と runtime 依存の分離が必要
+- `examples/sumomo/README.md:8-11` の「ビルドには」文脈に、runtime パッケージ `pipewire-pulse`（L16 で apt install、L25 で runtime 起動注記）と dev headers `libpulse-dev` / `libpipewire-0.3-dev` 相当が混在。build 依存と runtime 依存の分離が必要
 - `examples/sumomo/README.md:76,86,100,109,122,134,168,182,197,209` に `wss://sora-test.shiguredo.co.jp/signaling` が 10 箇所残存。ルート `README.md` / `docs/INPUT_MP4.md` は `sora.example.com` に統一済みだが、sumomo は 1 箇所も置換されていない。`shiguredo-no-secrets` 規約上も「内部エンドポイントのホスト名」の除去対象になり得るので、方針は「10 箇所すべて `sora.example.com` に統一」で確定する
 - `examples/sumomo/README.md:33-56` のオプション表に、`examples/sumomo/src/args.rs` に定義されている以下の 8 オプションが載っていない
   - `--video-bit-rate`（`args.rs:290-297`）
@@ -111,8 +100,8 @@ triage 時の誤選別（`Priority: Medium` で選別すると blocker が埋も
 デフォルト方針でよければそのまま採用し、異なる方針を採る場合は着手前に issue に追記して確定させる。
 
 1. **README「対応プラットフォーム」節の扱い**: `#0050`（CI 強化）が逆方向で「GitHub-hosted の macOS 行列を CI に追加する」を志向している（`0050-other-strengthen-ci-workflows.md:20-22, 38-39`）。本 issue で先に README を CI 実態まで縮めると、`#0050` 完了後に元の記述に戻す手戻りが発生する。**デフォルト方針: `#0050` の完了を待って本 issue はプラットフォーム節に触らない。ただし Raspberry Pi 行の追加だけは `#0050` 対象外なので本 issue で先行して追加する。追加書式は他の対応プラットフォーム行に合わせて `- Raspberry Pi OS <codename> arm64` の 3 要素形式（例: Bookworm なら `- Raspberry Pi OS Bookworm arm64`）。`<codename>` は self-hosted runner 上で `lsb_release -c` を実行して実測する**
-2. **README「優先実装」節（L461-469）の扱い**: 現状「Windows arm64 対応」1 項目のみ。**デフォルト方針: 「維持（Windows arm64 対応の予告として残す。削除すると『対応しない』の意思表示になり混乱する）」**
-3. **README「Sora 対応上限」の扱い**: 現状「Sora 2025.1.0 以降」（`README.md:434`）と下限のみ。動作確認済み Sora バージョンは `TEST_SIGNALING_URLS` secret 環境依存でリポジトリからは不可視のため、「実装/CI を正とする」設計方針の例外扱いとなる。**デフォルト方針: 「本 issue では下限のみに縮退して現状維持。動作確認済みバージョンの列挙運用は別 issue で決める（本 issue の完了時に別 issue 番号を記録する）」**
+2. **README「優先実装」節（L470-478）の扱い**: 現状「Windows arm64 対応」1 項目のみ。**デフォルト方針: 「維持（Windows arm64 対応の予告として残す。削除すると『対応しない』の意思表示になり混乱する）」**
+3. **README「Sora 対応上限」の扱い**: 現状「Sora 2025.1.0 以降」（`README.md:443`）と下限のみ。動作確認済み Sora バージョンは `TEST_SIGNALING_URLS` secret 環境依存でリポジトリからは不可視のため、「実装/CI を正とする」設計方針の例外扱いとなる。**デフォルト方針: 「本 issue では下限のみに縮退して現状維持。動作確認済みバージョンの列挙運用は別 issue で決める（本 issue の完了時に別 issue 番号を記録する）」**
 4. **`docs/SORA_CPP_SDK.md` の develop 追随スコープ**: 現状 `SORA_CPP_SDK.md:203` の 1 項目のみ develop 追随している中途半端な状態。(a) develop 追随を完全撤去して基準バージョン `2026.1.2` に対する比較に統一 (b) 「develop 追随項目リスト」節を新設して継続運用にする。**デフォルト方針: 「(a) 撤去して基準バージョン比較に統一。develop の変化を継続追随する運用コストを避ける」**
 5. **構成図の粒度**: `pbt/` `docs/` `tests/` は追記確定。**デフォルト方針: 「ワークスペースメンバー（`src/` / `examples/sumomo/` / `e2e-tests/` / `pbt/`）+ 主要ドキュメント（`README.md` / `CHANGES.md` / `LICENSE` / `THIRD_PARTY_LICENSES.md` / `AGENTS.md` / `CODEBASE.md` / `docs/`）+ ビルド設定（`Cargo.toml` / `Cargo.lock` / `Makefile` / `prek.toml` / `rust-toolchain.toml`）+ トップレベル integration test（`tests/`）を載せ、`.github/` / `.cargo/` / `issues/` / `skills/` / `target/` / `canary.py` / `.markdownlint.jsonc` / `.gitignore` は省略」。CODEBASE.md で説明する項目は構成図にも載せる原則を採る**
 6. **`shiguredo_webrtc` / `sora_sdk` バージョン記法**: `README.md:81-82` は両方 `"<version>"` プレースホルダで、crates.io ページの利用者がそのままコピペするとビルド失敗する。**デフォルト方針: 「実バージョンを直書きする（例: `sora_sdk = "2026.1.0"`, `shiguredo_webrtc = "~0.150"`）。リリース毎に更新する運用は `CODEBASE.md` のリリースフロー節に明記する」**
@@ -148,10 +137,10 @@ triage 時の誤選別（`Priority: Medium` で選別すると blocker が埋も
 
 ### 別 issue の起票（本 issue 着手時に必ず実施）
 
-- **README sendonly サンプル修正の別 issue を起票する**（`Priority: High`、正式リリース blocker）→ **#0055 起票済み（2026-07-24, `issues/0055-fix-readme-sendonly-sample-compile.md`）**
-- **SKILL.md drift 全面追随の別 issue を起票する**（`Priority: High`、sendonly blocker と同格）。sendonly / SKILL.md drift のうち SKILL.md 側は範囲が広いため独立させる。drift の起源は `#0044`（callback trait 化、2026-07-08 completed）で `SKILL.md` 側の追随が漏れている（`#0042` は canary バージョン表記を扱った issue で drift とは無関係。誤引用しないこと）。起票する別 issue には現状節「High 相当 blocker」で列挙した具体箇所（4 引数呼び出し 3 箇所 + Builder 誤扱いのコールバック API 12 個）を素材として引き継ぐ → **#0056 起票済み（2026-07-24, `issues/0056-doc-fix-skill-md-callback-trait-drift.md`）**
+- **README sendonly サンプル修正の別 issue を起票する**（`Priority: High`、正式リリース blocker）→ **#0055 起票 → completed（2026-07-24, `issues/closed/0055-fix-readme-sendonly-sample-compile.md`）**
+- **SKILL.md drift 全面追随の別 issue を起票する**（`Priority: High`、sendonly blocker と同格）。sendonly / SKILL.md drift のうち SKILL.md 側は範囲が広いため独立させる。drift の起源は `#0044`（callback trait 化、2026-07-08 completed）で `SKILL.md` 側の追随が漏れている（`#0042` は canary バージョン表記を扱った issue で drift とは無関係。誤引用しないこと）。起票する別 issue には現状節「High 相当 blocker」で列挙した具体箇所（4 引数呼び出し 3 箇所 + Builder 誤扱いのコールバック API 12 個）を素材として引き継ぐ → **#0056 起票 → completed（2026-07-24, `issues/closed/0056-doc-fix-skill-md-callback-trait-drift.md`）**
 - **未確定事項 3 で決めた「動作確認済み Sora バージョン列挙運用」の別 issue** を起票する（未起票）
-- 起票した別 issue の番号は、本 issue のマージ用 PR 本文冒頭に「起票済み: #0055 (README sendonly blocker), #0056 (SKILL.md drift), #YYYY (Sora 動作確認バージョン運用)」の形式で記録する
+- 起票した別 issue の番号は、本 issue のマージ用 PR 本文冒頭に「起票済み: #0055 (README sendonly blocker、completed), #0056 (SKILL.md drift、completed), #YYYY (Sora 動作確認バージョン運用)」の形式で記録する
 
 ### grep 判定（issue ファイル自身を除外するため対象パスを絞る）
 
@@ -178,8 +167,8 @@ diff <(sort -u /tmp/args.txt) <(grep -vE '^(version|help)$' /tmp/readme.txt | so
 README の Builder メソッド例と実装の突合（対象範囲を絞って false positive を減らす）:
 
 ```sh
-# README 側: Builder 例セクション (L235-272) だけを対象にメソッド名を抽出
-sed -n '235,272p' README.md | grep -oE '\.[a-z_]+\(' | tr -d '.(' | sort -u > /tmp/readme_builder.txt
+# README 側: Builder 例セクション (L244-281) だけを対象にメソッド名を抽出
+sed -n '244,281p' README.md | grep -oE '\.[a-z_]+\(' | tr -d '.(' | sort -u > /tmp/readme_builder.txt
 # 実装側: SoraConnectionBuilder の impl block だけを対象に pub fn を抽出
 awk '/^impl SoraConnectionBuilder/,/^impl [^S]|^}/' src/connection.rs \
   | grep -oE 'pub fn [a-z_]+' | awk '{print $3}' | sort -u > /tmp/impl_builder.txt
@@ -201,7 +190,7 @@ README / `src/lib.rs //!` のコード例 3 種（sendrecv / sendonly / recvonly
 ### 構造的な整備
 
 - `examples/sumomo/Cargo.toml` に `publish = false` / `description` / `license` が追加されている
-- `README.md:397-403` の構成図が未確定事項 5 で確定した粒度どおりの内容になっている
+- `README.md:406-412` の構成図が未確定事項 5 で確定した粒度どおりの内容になっている
 - `CODEBASE.md` に「CODEBASE.md に入れる最小セクション」で列挙した 9 節がすべて存在する
 
 ### docs.rs 側の確認
@@ -220,15 +209,12 @@ README / `src/lib.rs //!` のコード例 3 種（sendrecv / sendonly / recvonly
 3. `CODEBASE.md` を先に整備する（本 issue の他の判断のよりどころになるため）。上記「CODEBASE.md に入れる最小セクション」の 9 節を追加
 4. `README.md` を更新する
    - `L81-82` `sora_sdk` / `shiguredo_webrtc` のバージョン記法を未確定事項 6 の方針で書き換える
-   - `L147` sendonly 例の `use` 節に `SoraConnectionEventHandler` を追加
-   - `L149` の周辺に `struct MyEventHandler;` と `impl SoraConnectionEventHandler for MyEventHandler {}` を追加
-   - `L160-165` sendonly 例の `SoraConnection::builder(...)` に第 5 引数 `MyEventHandler` を追加
-   - `L235-272` Builder 例の 28 メソッドが `src/connection.rs:160-425` の `pub fn` と一致することを完了条件の突合スクリプトで確認（2026-07-23 時点では乖離なし）
+   - `L244-281` Builder 例の 28 メソッドが `src/connection.rs:160-425` の `pub fn` と一致することを完了条件の突合スクリプトで確認（sendonly / SKILL.md drift 修正後の位置。2026-07-23 時点では乖離なし）
    - `L66-71` MP4 無変換送信節に「音声は無視される（映像のみ送信）」制約を追記
-   - `L397-403` 構成図を未確定事項 5 の方針で書き換える
-   - `L420-424` 前提条件に Linux 用 apt パッケージ一覧を追加（default features 用の必須集合 + feature 別追加集合の 2 段構成）
-   - `L438-447` 対応プラットフォームは未確定事項 1 の方針で処理（デフォルトなら self-hosted runner 上で `lsb_release -c` を実行して codename を実測し、Raspberry Pi 行のみ `- Raspberry Pi OS <codename> arm64` の 3 要素形式で追加）
-5. `src/lib.rs:18-42` の `//!` sendrecv 最小例を、README の書き換えに合わせて公開 API 面（use 節・EventHandler・Builder 引数）を揃える。lib.rs は最小スニペット、README はフル `#[tokio::main]` 例という粒度差は維持する
+   - `L406-412` 構成図を未確定事項 5 の方針で書き換える
+   - `L429-433` 前提条件に Linux 用 apt パッケージ一覧を追加（default features 用の必須集合 + feature 別追加集合の 2 段構成）
+   - `L445-456` 対応プラットフォームは未確定事項 1 の方針で処理（デフォルトなら self-hosted runner 上で `lsb_release -c` を実行して codename を実測し、Raspberry Pi 行のみ `- Raspberry Pi OS <codename> arm64` の 3 要素形式で追加）
+5. `src/lib.rs:18-42` の `//!` sendrecv 最小例は #0044（callback trait 化）時点で既に公開 API 面（use 節・EventHandler・Builder 引数）が現状の実装と一致しているため、本 issue での追加作業なし
 6. `examples/sumomo/README.md` を更新する
    - `L10` の `libssl-dev` を削除。`pkg-config` は default features では不要のため base install から外し、`media-device` / `libcamera` feature 節に移動
    - `L8-14` の「ビルド」文脈と「runtime 起動」の切り分けを整理（`pipewire-pulse` は runtime、`libpulse-dev` / `libpipewire-0.3-dev` は build）
