@@ -6,6 +6,7 @@
 - Model: Opus 4.7
 - Branch: feature/fix-parsed-proxy-info-debug-leak
 - Polished: {YYYY-MM-DD}
+- Updated: 2026-07-24
 
 ## 目的
 
@@ -13,7 +14,7 @@
 
 ## 優先度根拠
 
-High (セキュリティ致命)。issue 0037 は Completed 判定されているのに実装が抜けており、「秘密情報は Debug に出さない」というプロジェクトポリシーと実装が矛盾している。`TlsConfig` と `ProxyInfo` は手書き Debug 実装済みだが、`ParsedProxyInfo` だけ derive のまま残っている。公開型なのでユーザー側のログ経路で機密が漏洩する。
+High (セキュリティ致命)。issue 0037 は Completed 判定されているのに実装が抜けており、「秘密情報は Debug に出さない」というプロジェクトポリシーと実装が矛盾している。`ProxyInfo` は手書き Debug 実装済みだが、`ParsedProxyInfo` は derive のまま残っている (公開型のためユーザー側のログ経路で機密が漏洩する)。なお `TlsConfig` は Debug 自体を実装していない (`#[derive(Clone, Default)]` のみ) ため実際の漏洩は起きないが、issue 0037 が要求した「`impl std::fmt::Debug for TlsConfig` を追加してマスクする」自体は同様に未達である。
 
 ## 現状
 
@@ -32,7 +33,7 @@ pub struct ParsedProxyInfo {
 
 `grep "impl.*Debug.*ParsedProxyInfo" src/` の結果は 0 件で、手書き Debug は存在しない。ParsedProxyInfo は `lib.rs` から `pub` で再エクスポートされている。
 
-一方、issue 0037 の解決方法として実装された `types.rs::ProxyInfo` (types.rs:83 付近) と `TlsConfig` は手書き `impl Debug` で `<redacted>` にマスクされている。
+一方、issue 0037 の解決方法として実装された `types.rs::ProxyInfo` (types.rs:83 付近) は手書き `impl Debug` で `<redacted>` にマスクされている。`TlsConfig` (src/connection.rs:55) は `#[derive(Clone, Default)]` のままで Debug 自体を実装していない (`grep 'impl.*Debug.*TlsConfig' src/` は 0 件)。漏洩は起きないが、issue 0037 の完了条件 (`impl std::fmt::Debug for TlsConfig` を追加してマスクする) は未達のままである。本 issue のスコープ (`ParsedProxyInfo`) と重ならないため `TlsConfig` の Debug 追加は本 issue では扱わないが、issue 0037 の追加漏れとして別途対応を検討する必要がある。
 
 ## 設計方針
 
