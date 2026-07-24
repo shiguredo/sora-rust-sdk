@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-24
 - Model: Opus 4.7
 - Branch: feature/fix-readme-sendonly-sample-compile
 - Polished: {YYYY-MM-DD}
@@ -68,21 +68,19 @@ drift の起源は `#0044`（`issues/closed/0044-change-callback-to-trait.md`、
 
 - `README.md` の sendonly サンプル節（現行 `L142-174`）が、`src/connection.rs:658-664` の 5 引数 `builder` に整合する形に修正されている
 - サンプル節をそのままローカルの `main.rs` に貼り付けて `cargo check` が通ることを、手元で 1 度検証する
-- `#0051` の完了条件を満たすため、本 issue の PR 本文冒頭または #0051 の PR 本文冒頭に「起票済み: #0055 (README sendonly blocker), #0056 (SKILL.md drift)」の形式で参照が入る
-- `CHANGES.md` の扱いは `shiguredo-changelog` に従う。今回の修正は「crates.io 公開前のドキュメント修正」であり、`## develop` 節に `- [FIX]` として 1 行足すのが素直（最終判断は実装時に `shiguredo-changelog` スキルを再読して決める）
+- `#0051` の完了条件を満たすため、本 issue の番号は `#0051` の子 issue 欄に明示的に反映されている（`issues/0051-doc-prepare-readme-and-docs.md:151`）
+- `CHANGES.md` への追記は不要（`shiguredo-changelog` 規約で `.md` 変更は変更履歴に反映しない）
 
 ## 解決方法
 
-1. `develop` から `feature/fix-readme-sendonly-sample-compile` を切る
-2. `README.md` sendonly 節を上記「設計方針」に沿って修正する。差分は最小に保つ
-3. サンプルを手元の使い捨てプロジェクトに貼り付けて `cargo check` が通ることを確認する
-4. `CHANGES.md` の `## develop` 節に 1 行追加する（`shiguredo-changelog` 規約に従う）
-5. コミット → PR。PR 本文冒頭で親 issue #0051 と兄弟 issue #0056 を明示的に参照する
+1. `README.md:142-174` の sendonly 節を、`recvonly` 節と同じスタイル（`use` 節に `SoraConnectionEventHandler` を追加、`struct MyEventHandler;` + `impl SoraConnectionEventHandler for MyEventHandler { fn on_notify(&mut self, text: &str) { println!("notify: {text}"); } }`、`SoraConnection::builder(...)` 呼び出しに第 5 引数 `MyEventHandler` を追加）に修正した
+2. 修正後のサンプルを scratch プロジェクトにそのまま貼り付け、`sora_sdk` を path 依存で参照した状態で `cargo check` がクリーンに通ることを確認した（24.94s、警告・エラーなし）
+3. `CHANGES.md` への追記は不要と判断した。`shiguredo-changelog` 規約に「`.rst` / `.md` ファイルの変更は変更履歴に反映しないこと」と明記されており、本 issue の変更は `README.md` のみのため対象外
+4. ユーザーの明示的許可のもと、`feature/fix-readme-sendonly-sample-compile` ブランチは切らず `develop` に直接コミットした
 
 ## 対象ファイル
 
 - `README.md`（sendonly 節のみ）
-- `CHANGES.md`（`## develop` 節に 1 行追加）
 
 ## 対象外
 
