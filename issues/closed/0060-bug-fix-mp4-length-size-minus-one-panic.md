@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-27
 - Model: Opus 4.7
 - Branch: feature/fix-mp4-length-size-minus-one-panic
 - Polished: 2026-07-27
@@ -43,3 +43,17 @@ fn length_prefixed_nalu_to_annex_b(data: &[u8], nal_length_size: u8) -> Vec<u8> 
 - `length_prefixed_nalu_to_annex_b` の `assert!` が `debug_assert!` に降格されている。
 - `cargo test --workspace` に「不正 `length_size_minus_one` のフィクスチャで `Mp4SampleReader::new` が Err を返す」単体テストが追加されている。
 - `cargo clippy --workspace --all-features -- -D warnings` が通る。
+
+## 解決方法
+
+1. `Mp4Error` に `InvalidNalLengthSize(u8)` variant を追加し、`Display` と `Error::source` の match arm を追加した。
+2. `extract_track_info` の `Avc1` / `Hev1` / `Hvc1` 各分岐で `validated_nal_length_size` ヘルパーを呼び出し、`length_size_minus_one` が 0/1/3 以外の場合は `Err(Mp4Error::InvalidNalLengthSize)` を返すようにした。
+3. `length_prefixed_nalu_to_annex_b` の `assert!` を `debug_assert!` に降格した。
+4. 単体テスト 3 件を追加した:
+   - `validated_nal_length_size_accepts_valid_values`: 有効値 0/1/3 の検証
+   - `validated_nal_length_size_rejects_reserved_value`: reserved 値 2 の拒否
+   - `sample_reader_rejects_invalid_length_size_minus_one`: フィクスチャのパッチによる統合テスト
+
+### 修正ファイル
+- `src/video_codecs/mp4.rs`
+- `CHANGES.md`

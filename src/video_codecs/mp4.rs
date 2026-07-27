@@ -40,6 +40,9 @@ pub(crate) enum Mp4Error {
     NoVideoTrack,
     NoVideoSamples,
     UnsupportedVideoCodec,
+    /// NAL 長プレフィックスのバイト数が不正。
+    /// ISO/IEC 14496-15 では nal_length_size は 1/2/4 のみ有効 (lengthSizeMinusOne 0/1/3)。
+    InvalidNalLengthSize(u8),
 }
 
 impl std::fmt::Display for Mp4Error {
@@ -52,6 +55,12 @@ impl std::fmt::Display for Mp4Error {
             Self::UnsupportedVideoCodec => {
                 f.write_str("映像コーデックが未対応です (H.264, H.265, VP8, VP9, AV1 のみ対応)")
             }
+            Self::InvalidNalLengthSize(size) => {
+                write!(
+                    f,
+                    "NAL 長プレフィックスのバイト数が不正です: {size} (1, 2, 4 のみ有効)"
+                )
+            }
         }
     }
 }
@@ -61,7 +70,10 @@ impl std::error::Error for Mp4Error {
         match self {
             Self::Io(err) => Some(err),
             Self::Demux(err) => Some(err),
-            Self::NoVideoTrack | Self::NoVideoSamples | Self::UnsupportedVideoCodec => None,
+            Self::NoVideoTrack
+            | Self::NoVideoSamples
+            | Self::UnsupportedVideoCodec
+            | Self::InvalidNalLengthSize(_) => None,
         }
     }
 }
@@ -274,13 +286,15 @@ impl Mp4SampleReader {
                     parameter_sets.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
                     parameter_sets.extend_from_slice(pps);
                 }
+                let nal_length_size =
+                    Self::validated_nal_length_size(avc1.avcc_box.length_size_minus_one.get())?;
                 Ok(Mp4VideoTrackInfo {
                     codec_type: VideoCodecType::H264,
                     width,
                     height,
                     timescale,
                     parameter_sets: Some(parameter_sets),
-                    nal_length_size: avc1.avcc_box.length_size_minus_one.get() + 1,
+                    nal_length_size,
                 })
             }
             // H.265 には hev1 と hvc1 の 2 種類の SampleEntry がある。
@@ -290,25 +304,29 @@ impl Mp4SampleReader {
             SampleEntry::Hev1(hev1) => {
                 let (width, height) = (hev1.visual.width, hev1.visual.height);
                 let parameter_sets = Self::extract_hevc_parameter_sets(&hev1.hvcc_box);
+                let nal_length_size =
+                    Self::validated_nal_length_size(hev1.hvcc_box.length_size_minus_one.get())?;
                 Ok(Mp4VideoTrackInfo {
                     codec_type: VideoCodecType::H265,
                     width,
                     height,
                     timescale,
                     parameter_sets: Some(parameter_sets),
-                    nal_length_size: hev1.hvcc_box.length_size_minus_one.get() + 1,
+                    nal_length_size,
                 })
             }
             SampleEntry::Hvc1(hvc1) => {
                 let (width, height) = (hvc1.visual.width, hvc1.visual.height);
                 let parameter_sets = Self::extract_hevc_parameter_sets(&hvc1.hvcc_box);
+                let nal_length_size =
+                    Self::validated_nal_length_size(hvc1.hvcc_box.length_size_minus_one.get())?;
                 Ok(Mp4VideoTrackInfo {
                     codec_type: VideoCodecType::H265,
                     width,
                     height,
                     timescale,
                     parameter_sets: Some(parameter_sets),
-                    nal_length_size: hvc1.hvcc_box.length_size_minus_one.get() + 1,
+                    nal_length_size,
                 })
             }
             SampleEntry::Vp08(vp08) => Ok(Mp4VideoTrackInfo {
@@ -353,6 +371,21 @@ impl Mp4SampleReader {
             }
         }
         parameter_sets
+    }
+
+    /// length_size_minus_one から NAL 長プレフィックスのバイト数を検証付きで取得する。
+    ///
+    /// ISO/IEC 14496-15 では lengthSizeMinusOne は 0/1/3 (nal_length_size 1/2/4) のみ有効。
+    /// 値 2 は reserved であり、nal_length_size=3 となるため拒否する。
+    fn validated_nal_length_size(length_size_minus_one: u8) -> Result<u8> {
+        match length_size_minus_one {
+            0 => Ok(1),
+            1 => Ok(2),
+            3 => Ok(4),
+            _ => Err(Mp4Error::InvalidNalLengthSize(
+                length_size_minus_one.saturating_add(1),
+            )),
+        }
     }
 
     /// サンプル数を返す。
@@ -423,9 +456,10 @@ impl Mp4SampleReader {
 ///   [0x00 0x00 0x00 0x01][NAL データ][0x00 0x00 0x00 0x01][NAL データ]...
 ///
 /// `nal_length_size` は NAL 長プレフィックスのバイト数 (1/2/4)。
-/// 1/2/4 以外の値では panic する。
+/// 呼び出し元 (`extract_track_info`) で検証済みのため、
+/// 1/2/4 以外の値は debug ビルドでのみ panic する。
 fn length_prefixed_nalu_to_annex_b(data: &[u8], nal_length_size: u8) -> Vec<u8> {
-    assert!(
+    debug_assert!(
         nal_length_size == 1 || nal_length_size == 2 || nal_length_size == 4,
         "nal_length_size must be 1, 2, or 4"
     );
@@ -888,5 +922,74 @@ mod tests {
         let sample = reader.get_sample(0);
         assert!(sample.data.len() >= 4);
         assert_eq!(&sample.data[0..4], &[0x00, 0x00, 0x00, 0x01]);
+    }
+
+    // validated_nal_length_size が有効な length_size_minus_one (0/1/3) を
+    // それぞれ nal_length_size 1/2/4 に変換することを確認する。
+    #[test]
+    fn validated_nal_length_size_accepts_valid_values() {
+        assert_eq!(Mp4SampleReader::validated_nal_length_size(0).unwrap(), 1);
+        assert_eq!(Mp4SampleReader::validated_nal_length_size(1).unwrap(), 2);
+        assert_eq!(Mp4SampleReader::validated_nal_length_size(3).unwrap(), 4);
+    }
+
+    // validated_nal_length_size が reserved 値 (length_size_minus_one=2) を
+    // 拒否して InvalidNalLengthSize エラーを返すことを確認する。
+    #[test]
+    fn validated_nal_length_size_rejects_reserved_value() {
+        let result = Mp4SampleReader::validated_nal_length_size(2);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            Mp4Error::InvalidNalLengthSize(3)
+        ));
+    }
+
+    // 不正な length_size_minus_one (reserved 値 2) を持つ MP4 を入力した場合に
+    // Mp4SampleReader::new が panic せず Err を返すことを確認する。
+    // 既存の H.264 フィクスチャの avcC ボックス内 lengthSizeMinusOne バイトを
+    // 0xFF (値 3) から 0xFE (値 2) に書き換えて不正な MP4 を作成する。
+    #[test]
+    fn sample_reader_rejects_invalid_length_size_minus_one() {
+        let fixture = include_bytes!("testdata/archive-red-320x320-h264.mp4");
+        let mut patched = fixture.to_vec();
+
+        // avcC ボックスの lengthSizeMinusOne バイト (オフセット 0x6ea) を
+        // 0xFF (lengthSizeMinusOne=3, nal_length_size=4) から
+        // 0xFE (lengthSizeMinusOne=2, nal_length_size=3 = reserved) に書き換える。
+        // フィクスチャ差し替え時にオフセットがズレていないことを確認する。
+        assert_eq!(
+            patched[0x6ea], 0xFF,
+            "fixture's lengthSizeMinusOne byte has moved"
+        );
+        patched[0x6ea] = 0xFE;
+
+        let tmp_name = format!(
+            "sora-sdk-mp4-test-invalid-nal-{}-{}.mp4",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after UNIX_EPOCH")
+                .as_nanos()
+        );
+        let tmp_path = std::env::temp_dir().join(tmp_name);
+
+        std::fs::write(&tmp_path, &patched).expect("failed to write temporary fixture");
+
+        let result = Mp4SampleReader::new(tmp_path.to_str().expect("path should be valid utf-8"));
+
+        let _ = std::fs::remove_file(&tmp_path);
+
+        match result {
+            Err(crate::error::Error::Mp4 { reason }) => {
+                // InvalidNalLengthSize 経路のエラーメッセージであることを確認する。
+                assert!(
+                    reason.contains("NAL"),
+                    "expected NAL length size error, got: {reason}"
+                );
+            }
+            Err(e) => panic!("expected Mp4 error, got: {e}"),
+            Ok(_) => panic!("expected Err, got Ok"),
+        }
     }
 }
