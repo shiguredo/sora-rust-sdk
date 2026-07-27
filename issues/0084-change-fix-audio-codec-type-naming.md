@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-27
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-28
 - Model: Opus 4.7
 - Branch: feature/change-fix-audio-codec-type-naming
 - Polished: 2026-07-27
@@ -33,6 +33,13 @@ High。**公開 API 破壊的変更のため canary 期間中に確定必須**�
 - `sora-rust-sdk/SKILL.md` の `AudioCodecType` 列挙テーブルを更新
 
 [0075](0075-change-split-video-codec-params-by-variant.md) が `Audio` 列挙型の `codec_type` フィールドを削除する場合、本 issue の `Audio::new_opus()` 内のバリアント名更新は対象を失う。本 issue を 0075 より先に実装するか、同時に対応する場合は 0075 の `DisplayJson for Audio` 実装時に `AudioCodecType::Opus` を使用すること。
+
+## 解決方法
+
+`AudioCodecType::OPUS` を `AudioCodecType::Opus` にリネームし、Rust 命名規約 (UpperCamelCase) に矯正した。
+- `DisplayJson` 実装のマッチアームを更新（JSON 出力文字列 `"OPUS"` は維持）。
+- `Audio::new_opus()` コンストラクタ内のバリアント名を更新した。
+- SKILL.md の `AudioCodecType` 列挙テーブルを更新した。
 
 ## 完了条件
 
