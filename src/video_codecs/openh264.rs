@@ -538,9 +538,10 @@ impl VideoCodecCapability for Openh264VideoCodecCapability {
             .create_video_encoder(env, format)
     }
 
+    #[expect(unused_variables)]
     fn create_video_decoder(
         &self,
-        _env: shiguredo_webrtc::EnvironmentRef<'_>,
+        env: shiguredo_webrtc::EnvironmentRef<'_>,
         format: SdpVideoFormatRef<'_>,
     ) -> Option<VideoDecoder> {
         let codec_type = codec_type_from_format(&format)?;
