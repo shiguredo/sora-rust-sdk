@@ -5,7 +5,7 @@
 - Completed: {YYYY-MM-DD}
 - Model: Opus 4.7
 - Branch: feature/refactor-remove-redundant-null-check-from-amf-encode-callback
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-07-27
 
 ## 目的
 
@@ -40,10 +40,10 @@ let data = unsafe { std::slice::from_raw_parts(ptr, size) };
 
 ## 設計方針
 
-1. `amf.rs:158-161` の `if ptr.is_null() || size == 0 { ... return; }` ブロックを削除する。
+1. `amf.rs:158-161` の `if ptr.is_null() || size == 0 { ... return; }` ブロックを削除する。`Ok(EncodedFrame)` に到達した時点で `Buffer` のポインタ非 null・サイズ非 0 は `extract_encoded_output()` によって検証済みであり、同一オブジェクトに対する再チェックは不要である。
 2. 後続の `std::slice::from_raw_parts(ptr, size)` はそのまま残す（`ptr` / `size` の取得は残す）。
 
 ## 完了条件
 
 - `amf.rs:158-161` の null / size 0 チェックブロックが除去されている。
-- `cargo clippy --workspace --all-features -- -D warnings` と `cargo test --workspace` が通る。
+- `cargo clippy --workspace --all-features -- -D warnings` と `cargo test --workspace --all-features` が通る。
