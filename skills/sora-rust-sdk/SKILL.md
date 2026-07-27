@@ -25,7 +25,7 @@ WebRTC SFU Sora のクライアントを Rust で実装するための SDK。シ
 - crate 名: `sora_sdk`
 - バージョン: 2026.1.0
 - Rust Edition: 2024
-- 最小 Rust バージョン: 1.88
+- 最小 Rust バージョン: 1.93
 - ライセンス: Apache-2.0
 - 対応 Sora: 2025.1.0 以降
 - 対応プラットフォーム: Ubuntu 22.04 / 24.04 (x86_64, arm64), macOS 15 / 26 (arm64), Windows 11 / Server 2025 (x86_64)

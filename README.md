@@ -428,7 +428,7 @@ cargo run -p sumomo -- \
 
 ### 前提条件
 
-- Rust 1.88 以上
+- Rust 1.93 以上
 - libclang (bindgen 用)
 - Python 3 (webrtc ビルド用)
 
