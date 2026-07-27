@@ -5,7 +5,7 @@
 - Completed: {YYYY-MM-DD}
 - Model: Opus 4.7
 - Branch: feature/fix-mp4-length-size-minus-one-panic
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-07-27
 
 ## 目的
 
@@ -33,7 +33,7 @@ fn length_prefixed_nalu_to_annex_b(data: &[u8], nal_length_size: u8) -> Vec<u8> 
 
 ## 設計方針
 
-1. `extract_track_info` の段階で `length_size_minus_one` の値を検証し、`0` / `1` / `3` (=nal_length_size 1/2/4) 以外は `Mp4Error::UnsupportedVideoCodec` (もしくは新たに `Mp4Error::InvalidNalLengthSize`) を返す。
+1. `extract_track_info` の段階で `length_size_minus_one` の値を検証し、`0` / `1` / `3` (=nal_length_size 1/2/4) 以外は新たに追加する `Mp4Error::InvalidNalLengthSize` を返す。`UnsupportedVideoCodec` はコーデック自体が未対応の場合のエラーであり、NAL 長サイズの不正には意味が合わないため流用しない。新 variant 追加に伴い `Display` 実装と `Error::source` の match arm も追加する。
 2. `length_prefixed_nalu_to_annex_b` 内の `assert!` は `debug_assert!` に降格 (production では前段で弾かれる想定)。
 3. 型として `enum NalLengthSize { One, Two, Four }` に置き換えるのが理想だが、破壊的変更を避けるためスコープからは外す (別 issue 化を検討)。
 
