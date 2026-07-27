@@ -277,7 +277,7 @@ impl DisplayJson for AudioCodecType {
 /// connect メッセージの `audio` フィールドに対応する音声設定。
 ///
 /// [Audio::Bool] で単純な有効/無効を指定するか、
-/// [Audio::Audio] でコーデックやビットレートの詳細設定を指定できる。
+/// コーデック別のバリアントで詳細設定を指定できる。
 /// role が [Role::SendRecv] または [Role::SendOnly] の場合は配信設定、
 /// [Role::RecvOnly] の場合は受信設定として扱われる。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -286,14 +286,12 @@ pub enum Audio {
     ///
     /// `true` の場合は Opus で音声が配信または受信される。
     Bool(bool),
-    /// 音声コーデックの詳細設定。
-    Audio {
-        /// 音声コーデックの種類。未指定の場合は Opus。
-        codec_type: Option<AudioCodecType>,
+    /// Opus コーデックの詳細設定。
+    Opus {
         /// ビットレート (kbps)。6〜510 の範囲。
         bit_rate: Option<u32>,
         /// Opus 固有のパラメータ。
-        opus_params: Option<AudioOpusParams>,
+        params: Option<AudioOpusParams>,
     },
 }
 
@@ -302,15 +300,9 @@ impl Audio {
     pub fn new_bool(enabled: bool) -> Self {
         Self::Bool(enabled)
     }
-    /// Audio バリアントの [Audio] を生成する。
-    ///
-    /// コーデックは Opus 固定、`bit_rate` と `opus_params` は任意。
-    pub fn new_opus(bit_rate: Option<u32>, opus_params: Option<AudioOpusParams>) -> Self {
-        Self::Audio {
-            codec_type: Some(AudioCodecType::Opus),
-            bit_rate,
-            opus_params,
-        }
+    /// Opus バリアントの [Audio] を生成する。
+    pub fn new_opus(bit_rate: Option<u32>, params: Option<AudioOpusParams>) -> Self {
+        Self::Opus { bit_rate, params }
     }
 }
 
@@ -318,19 +310,13 @@ impl DisplayJson for Audio {
     fn fmt(&self, f: &mut JsonFormatter<'_, '_>) -> std::fmt::Result {
         match self {
             Audio::Bool(b) => f.value(*b),
-            Audio::Audio {
-                codec_type,
-                bit_rate,
-                opus_params,
-            } => f.object(|f| {
-                if let Some(codec_type) = codec_type {
-                    f.member("codec_type", codec_type)?;
-                }
+            Audio::Opus { bit_rate, params } => f.object(|f| {
+                f.member("codec_type", AudioCodecType::Opus)?;
                 if let Some(bit_rate) = bit_rate {
                     f.member("bit_rate", bit_rate)?;
                 }
-                if let Some(opus_params) = opus_params {
-                    f.member("opus_params", opus_params)?;
+                if let Some(params) = params {
+                    f.member("opus_params", params)?;
                 }
                 Ok(())
             }),
@@ -608,7 +594,7 @@ impl DisplayJson for ForwardingFilter {
 /// connect メッセージの `video` フィールドに対応する映像設定。
 ///
 /// [Video::Bool] で単純な有効/無効を指定するか、
-/// [Video::Video] でコーデックやビットレートの詳細設定を指定できる。
+/// コーデック別のバリアントで詳細設定を指定できる。
 /// role が [Role::SendRecv] または [Role::SendOnly] の場合は配信設定、
 /// [Role::RecvOnly] の場合は受信設定として扱われる。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -617,20 +603,38 @@ pub enum Video {
     ///
     /// `true` の場合はデフォルトで映像が配信または受信される。
     Bool(bool),
-    /// 映像コーデックの詳細設定。
-    Video {
-        /// 映像コーデックの種類。
-        codec_type: Option<VideoCodecType>,
+    /// VP8 コーデックの詳細設定。
+    Vp8 {
+        /// ビットレート (kbps)。1〜50000 の範囲。
+        bit_rate: Option<u32>,
+    },
+    /// VP9 コーデックの詳細設定。
+    Vp9 {
         /// ビットレート (kbps)。1〜50000 の範囲。
         bit_rate: Option<u32>,
         /// VP9 固有のパラメータ。
-        vp9_params: Option<VideoVP9Params>,
-        /// AV1 固有のパラメータ。
-        av1_params: Option<VideoAV1Params>,
+        params: Option<VideoVP9Params>,
+    },
+    /// H.264 コーデックの詳細設定。
+    H264 {
+        /// ビットレート (kbps)。1〜50000 の範囲。
+        bit_rate: Option<u32>,
         /// H.264 固有のパラメータ。
-        h264_params: Option<VideoH264Params>,
+        params: Option<VideoH264Params>,
+    },
+    /// H.265 コーデックの詳細設定。
+    H265 {
+        /// ビットレート (kbps)。1〜50000 の範囲。
+        bit_rate: Option<u32>,
         /// H.265 固有のパラメータ。
-        h265_params: Option<VideoH265Params>,
+        params: Option<VideoH265Params>,
+    },
+    /// AV1 コーデックの詳細設定。
+    Av1 {
+        /// ビットレート (kbps)。1〜50000 の範囲。
+        bit_rate: Option<u32>,
+        /// AV1 固有のパラメータ。
+        params: Option<VideoAV1Params>,
     },
 }
 
@@ -639,60 +643,25 @@ impl Video {
     pub fn new_bool(enabled: bool) -> Self {
         Self::Bool(enabled)
     }
-    /// Video バリアントの [Video] を生成する。コーデックは VP8。
+    /// H.264 バリアントの [Video] を生成する。
     pub fn new_vp8(bit_rate: Option<u32>) -> Self {
-        Self::Video {
-            codec_type: Some(VideoCodecType::Vp8),
-            bit_rate,
-            vp9_params: None,
-            av1_params: None,
-            h264_params: None,
-            h265_params: None,
-        }
+        Self::Vp8 { bit_rate }
     }
-    /// Video バリアントの [Video] を生成する。コーデックは VP9。
-    pub fn new_vp9(bit_rate: Option<u32>, vp9_params: Option<VideoVP9Params>) -> Self {
-        Self::Video {
-            codec_type: Some(VideoCodecType::Vp9),
-            bit_rate,
-            vp9_params,
-            av1_params: None,
-            h264_params: None,
-            h265_params: None,
-        }
+    /// VP9 バリアントの [Video] を生成する。
+    pub fn new_vp9(bit_rate: Option<u32>, params: Option<VideoVP9Params>) -> Self {
+        Self::Vp9 { bit_rate, params }
     }
-    /// Video バリアントの [Video] を生成する。コーデックは AV1。
-    pub fn new_av1(bit_rate: Option<u32>, av1_params: Option<VideoAV1Params>) -> Self {
-        Self::Video {
-            codec_type: Some(VideoCodecType::Av1),
-            bit_rate,
-            vp9_params: None,
-            av1_params,
-            h264_params: None,
-            h265_params: None,
-        }
+    /// AV1 バリアントの [Video] を生成する。
+    pub fn new_av1(bit_rate: Option<u32>, params: Option<VideoAV1Params>) -> Self {
+        Self::Av1 { bit_rate, params }
     }
-    /// Video バリアントの [Video] を生成する。コーデックは H.264。
-    pub fn new_h264(bit_rate: Option<u32>, h264_params: Option<VideoH264Params>) -> Self {
-        Self::Video {
-            codec_type: Some(VideoCodecType::H264),
-            bit_rate,
-            vp9_params: None,
-            av1_params: None,
-            h264_params,
-            h265_params: None,
-        }
+    /// H.264 バリアントの [Video] を生成する。
+    pub fn new_h264(bit_rate: Option<u32>, params: Option<VideoH264Params>) -> Self {
+        Self::H264 { bit_rate, params }
     }
-    /// Video バリアントの [Video] を生成する。コーデックは H.265。
-    pub fn new_h265(bit_rate: Option<u32>, h265_params: Option<VideoH265Params>) -> Self {
-        Self::Video {
-            codec_type: Some(VideoCodecType::H265),
-            bit_rate,
-            vp9_params: None,
-            av1_params: None,
-            h264_params: None,
-            h265_params,
-        }
+    /// H.265 バリアントの [Video] を生成する。
+    pub fn new_h265(bit_rate: Option<u32>, params: Option<VideoH265Params>) -> Self {
+        Self::H265 { bit_rate, params }
     }
 }
 
@@ -700,31 +669,50 @@ impl DisplayJson for Video {
     fn fmt(&self, f: &mut JsonFormatter<'_, '_>) -> std::fmt::Result {
         match self {
             Video::Bool(b) => f.value(*b),
-            Video::Video {
-                codec_type,
-                bit_rate,
-                vp9_params,
-                av1_params,
-                h264_params,
-                h265_params,
-            } => f.object(|f| {
-                if let Some(codec_type) = codec_type {
-                    f.member("codec_type", codec_type)?;
-                }
+            Video::Vp8 { bit_rate } => f.object(|f| {
+                f.member("codec_type", VideoCodecType::Vp8)?;
                 if let Some(bit_rate) = bit_rate {
                     f.member("bit_rate", bit_rate)?;
                 }
-                if let Some(vp9_params) = vp9_params {
-                    f.member("vp9_params", vp9_params)?;
+                Ok(())
+            }),
+            Video::Vp9 { bit_rate, params } => f.object(|f| {
+                f.member("codec_type", VideoCodecType::Vp9)?;
+                if let Some(bit_rate) = bit_rate {
+                    f.member("bit_rate", bit_rate)?;
                 }
-                if let Some(av1_params) = av1_params {
-                    f.member("av1_params", av1_params)?;
+                if let Some(params) = params {
+                    f.member("vp9_params", params)?;
                 }
-                if let Some(h264_params) = h264_params {
-                    f.member("h264_params", h264_params)?;
+                Ok(())
+            }),
+            Video::Av1 { bit_rate, params } => f.object(|f| {
+                f.member("codec_type", VideoCodecType::Av1)?;
+                if let Some(bit_rate) = bit_rate {
+                    f.member("bit_rate", bit_rate)?;
                 }
-                if let Some(h265_params) = h265_params {
-                    f.member("h265_params", h265_params)?;
+                if let Some(params) = params {
+                    f.member("av1_params", params)?;
+                }
+                Ok(())
+            }),
+            Video::H264 { bit_rate, params } => f.object(|f| {
+                f.member("codec_type", VideoCodecType::H264)?;
+                if let Some(bit_rate) = bit_rate {
+                    f.member("bit_rate", bit_rate)?;
+                }
+                if let Some(params) = params {
+                    f.member("h264_params", params)?;
+                }
+                Ok(())
+            }),
+            Video::H265 { bit_rate, params } => f.object(|f| {
+                f.member("codec_type", VideoCodecType::H265)?;
+                if let Some(bit_rate) = bit_rate {
+                    f.member("bit_rate", bit_rate)?;
+                }
+                if let Some(params) = params {
+                    f.member("h265_params", params)?;
                 }
                 Ok(())
             }),
