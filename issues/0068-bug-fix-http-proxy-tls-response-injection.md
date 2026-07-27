@@ -5,7 +5,7 @@
 - Completed: {YYYY-MM-DD}
 - Model: Opus 4.7
 - Branch: feature/fix-http-proxy-tls-response-injection
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-07-27
 
 ## 目的
 
@@ -36,15 +36,14 @@ if target.tls {
 
 ## 設計方針
 
-1. TLS ターゲット (`target.tls == true`) の場合、CONNECT 200 応答後に余剰バイトが 1 バイトでもあれば **即エラーで接続を拒否** する。TLS 開始前にサーバー到達バイトが送られるはずがない (ClientHello はクライアントが先に送る) ため、余剰は必ずプロキシによる挿入 or 応答注入。
-2. 新規エラー variant `Error::ProxyConnectUnexpectedTrailingData` (もしくは既存の `ProxyConnectResponseMissing` / `ProxyConnectStatusNotSuccessful` に相当する新規) を追加。
-3. 非 TLS (平文 ws://) の場合のみ、`pending` を `push_pending_read` で受け入れることを許容する (現状の挙動維持)。
+1. TLS ターゲット (`target.tls == true`) の場合、`connect_websocket` 内で `into_plain_parts()` から得た `pending` が空でなければ **即エラー (`Error::ProxyConnectUnexpectedTrailingData`) で接続を拒否** する。TLS 接続では ClientHello をクライアントが先に送るため、TLS 開始前にサーバーからバイトが届くことはありえない。余剰バイトは必ずプロキシによる挿入または応答注入であり、これを拒否する。
+2. 新規エラー variant `Error::ProxyConnectUnexpectedTrailingData` を追加する。
+3. 非 TLS (平文 ws://) の場合のみ、`pending` を `push_pending_read` で受け入れることを許容する。非 TLS では TLS レコード層による完全性保護が存在せず、プロキシが CONNECT 200 応答後に任意バイトを挿入しても暗号境界を侵害しない。また後方互換性の観点から、現状の挙動を維持する。
 4. 単体テストで「TLS ターゲット + CONNECT 200 応答直後に任意バイトが追加された場合に接続が拒否される」ことを検証する。
-5. `SECURITY.md` / README にプロキシ関連のセキュリティ注意を追記するかは別途検討。
 
 ## 完了条件
 
 - TLS ターゲットで CONNECT 200 応答直後に余剰バイトがある場合、`connect_websocket` が Err を返してハンドシェイクが始まらない。
-- 非 TLS ターゲットでは従来通り余剰バイトを受け入れる (もし需要があれば)。
+- 非 TLS ターゲットでは従来通り余剰バイトを `push_pending_read` で受け入れる。
 - 単体テストで応答注入経路が拒否されることを検証している。
-- `cargo test --workspace` と `cargo clippy --workspace --all-features -- -D warnings` が通る。
+- `cargo test --workspace --all-features` と `cargo clippy --workspace --all-features -- -D warnings` が通る。
