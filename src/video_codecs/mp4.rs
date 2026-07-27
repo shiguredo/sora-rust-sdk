@@ -43,6 +43,13 @@ pub(crate) enum Mp4Error {
     /// NAL 長プレフィックスのバイト数が不正。
     /// ISO/IEC 14496-15 では nal_length_size は 1/2/4 のみ有効 (lengthSizeMinusOne 0/1/3)。
     InvalidNalLengthSize(u8),
+    /// デマルチプレクサが要求する入力位置がファイルサイズ範囲外。
+    InputPositionOutOfRange {
+        /// デマルチプレクサが要求したファイル内位置。
+        position: u64,
+        /// 実際のファイルサイズ (バイト単位)。
+        file_size: usize,
+    },
 }
 
 impl std::fmt::Display for Mp4Error {
@@ -61,6 +68,15 @@ impl std::fmt::Display for Mp4Error {
                     "NAL 長プレフィックスのバイト数が不正です: {size} (1, 2, 4 のみ有効)"
                 )
             }
+            Self::InputPositionOutOfRange {
+                position,
+                file_size,
+            } => {
+                write!(
+                    f,
+                    "入力位置がファイルサイズ範囲外です: position={position}, file_size={file_size}"
+                )
+            }
         }
     }
 }
@@ -73,7 +89,8 @@ impl std::error::Error for Mp4Error {
             Self::NoVideoTrack
             | Self::NoVideoSamples
             | Self::UnsupportedVideoCodec
-            | Self::InvalidNalLengthSize(_) => None,
+            | Self::InvalidNalLengthSize(_)
+            | Self::InputPositionOutOfRange { .. } => None,
         }
     }
 }
@@ -184,11 +201,22 @@ impl Mp4SampleReader {
         // ボックス構造の解析が進む。
         while let Some(required) = demuxer.required_input() {
             let start = required.position as usize;
+            if start > file_data.len() {
+                return Err(Mp4Error::InputPositionOutOfRange {
+                    position: required.position,
+                    file_size: file_data.len(),
+                });
+            }
             let end = match required.size {
                 Some(size) => (start + size).min(file_data.len()),
                 None => file_data.len(),
             };
-            let data = &file_data[start..end];
+            let data = file_data
+                .get(start..end)
+                .ok_or(Mp4Error::InputPositionOutOfRange {
+                    position: required.position,
+                    file_size: file_data.len(),
+                })?;
             demuxer.handle_input(Input {
                 position: required.position,
                 data,
@@ -991,5 +1019,31 @@ mod tests {
             Err(e) => panic!("expected Mp4 error, got: {e}"),
             Ok(_) => panic!("expected Err, got Ok"),
         }
+    }
+
+    // 切り詰められた MP4 ファイルを入力した場合に、
+    // Mp4SampleReader::new が panic せず Err を返すことを確認する。
+    #[test]
+    fn sample_reader_rejects_truncated_mp4_with_oversized_input_position() {
+        let fixture = include_bytes!("testdata/archive-red-320x320-h264.mp4");
+        let truncated = &fixture[..128];
+
+        let tmp_name = format!(
+            "sora-sdk-mp4-test-truncated-{}-{}.mp4",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after UNIX_EPOCH")
+                .as_nanos()
+        );
+        let tmp_path = std::env::temp_dir().join(tmp_name);
+
+        std::fs::write(&tmp_path, truncated).expect("failed to write temporary fixture");
+
+        let result = Mp4SampleReader::new(tmp_path.to_str().expect("path should be valid utf-8"));
+
+        let _ = std::fs::remove_file(&tmp_path);
+
+        assert!(result.is_err(), "切り詰め MP4 は Err になるべきです");
     }
 }
