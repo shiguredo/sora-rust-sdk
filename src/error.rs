@@ -65,6 +65,8 @@ pub enum Error {
         /// 受信した HTTP reason phrase。
         reason_phrase: String,
     },
+    /// プロキシ CONNECT 応答後に TLS 開始前の不正な余剰データを受信した。
+    ProxyConnectUnexpectedTrailingData,
     /// プロキシ認証情報の生成に失敗した。内部エラーとして [`AuthError`] を保持する。
     ProxyAuth(AuthError),
     /// DNS 解決に失敗した。
@@ -347,6 +349,9 @@ impl std::fmt::Display for Error {
                 f,
                 "Proxy CONNECT が失敗しました: status={status_code} reason={reason_phrase}"
             ),
+            Error::ProxyConnectUnexpectedTrailingData => {
+                f.write_str("Proxy CONNECT 応答後に不正な余剰データを受信しました")
+            }
             Error::ProxyAuth(err) => write!(f, "Proxy 認証ヘッダーの生成に失敗しました: {err}"),
             Error::DnsResolve { host, source } => {
                 write!(f, "DNS 解決に失敗しました: {host}: {source}")

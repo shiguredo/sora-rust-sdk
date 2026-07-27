@@ -2393,6 +2393,12 @@ async fn connect_websocket(
             let (tcp_stream, pending) = stream
                 .into_plain_parts()
                 .expect("BUG: proxy 接続後は plain stream のはずです");
+            // TLS 接続では ClientHello をクライアントが先に送るため、
+            // CONNECT 200 応答直後にサーバーからバイトが届くことはありえない。
+            // 余剰バイトはプロキシの応答注入であるため接続を拒否する。
+            if !pending.is_empty() {
+                return Err(Error::ProxyConnectUnexpectedTrailingData);
+            }
             let tls_stream = connect_tls(&target.host, tcp_stream, tls_config, deadline).await?;
             let mut stream = ClientStream::new_tls(tls_stream);
             stream.push_pending_read(pending);
