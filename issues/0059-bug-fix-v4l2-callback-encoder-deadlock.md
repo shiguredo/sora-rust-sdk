@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-28
 - Model: DeepSeek V4 Pro
 - Branch: feature/fix-v4l2-callback-encoder-deadlock
 - Polished: 2026-07-27
@@ -246,6 +246,16 @@ take 中は `shared_state.encoder` が `None` になる。この期間に `handl
 - `cargo clippy --workspace --all-features -- -D warnings` と `cargo test --workspace` が通ること
 - `src/video_codecs/v4l2.rs` 内の既存単体テストが修正後もすべて通過すること
 - 各修正箇所に「ロック中に外部呼び出しをしない」「take/put-back を適用可能な条件」を日本語コメントで明示すること
+
+## 解決方法
+
+`Option::take()` パターンを用いて、以下の 3 箇所の `shared_state` ロック範囲を縮小した。
+
+1. `rebuild_mmap_encoder`: `shared_state` ロック中に `encoder.take()` で古い encoder の所有権を取り出し、ロック解放後に Drop する。converter の Drop は encoder assign より先に行う。
+2. `rebuild_native_pipeline`: 同様に take/drop/assign の 3 段階パターンを適用。
+3. `V4l2VideoEncoder::encode()` MMAP パス: `encoder.take()` で encoder を取り出し、ロック外で `encode()` を呼び、put-back する。
+
+`handle_v4l2_convert_callback` は並行実行の競合リスクがあるため take/put-back を適用せず現状維持とした。
 
 ## 関連
 
