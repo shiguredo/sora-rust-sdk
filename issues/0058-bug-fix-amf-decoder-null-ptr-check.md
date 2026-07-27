@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-27
 - Model: Opus 4.7
 - Branch: feature/fix-amf-decoder-null-ptr-check
 - Polished: {YYYY-MM-DD}
@@ -69,3 +69,11 @@ if ptr.is_null() {
 - `src/video_codecs/amf.rs` のデコード側で、`alloc_buffer` の戻り値の `get_native()` に対する null チェックが追加されている。
 - null 時にプロセスがクラッシュせず `VideoCodecStatus::Error` を返す。
 - `cargo clippy --workspace --all-features -- -D warnings` と `cargo test --workspace` が通る。
+
+## 解決方法
+
+null チェックの追加は行わず、現状のままとした。理由は以下の通り：
+
+- `shiguredo_amf::Context::alloc_buffer()` (`shiguredo_amf-2026.3.0/src/amf.rs:654-658`) が `AMFContext::AllocBuffer` 呼び出し後の `*ppBuffer` に対して既に null チェックを実装しており、AMF が `AMF_OK` を返しながら `*ppBuffer` に null を設定した場合でも `Err` として返る。
+- したがって `alloc_buffer` が `Ok(Buffer)` を返した時点で内部の AMFBuffer ポインタは非 null であることが保証されており、後続の `get_native()` に対してデコード側で追加の null チェックは不要。
+- なおエンコード側の `amf.rs:155-161` にある null チェックは `shiguredo_amf` の `extract_encoded_output()` (`encode.rs:1087-1091`) が既に同様のチェックを行っており冗長であるため、別途 issue 0083 で除去する。
