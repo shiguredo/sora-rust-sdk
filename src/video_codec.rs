@@ -150,12 +150,22 @@ fn find_capability<'a>(
         .find(|capability| capability.get_implementation().name() == implementation_name)
 }
 
-fn align_down(value: i32, alignment: i32) -> i32 {
-    if value <= 0 || alignment <= 1 {
-        return value;
+fn align_down(value: i32, alignment: i32) -> Option<i32> {
+    // alignment <= 0 は除算ゼロまたは無効な引数
+    if alignment <= 0 {
+        return None;
+    }
+    // value <= 0 は align 対象として意味をなさない。
+    // alignment == 1 より先に判定することで、負の値を誤って返さない。
+    if value <= 0 {
+        return None;
+    }
+    // alignment == 1 は常に align 可能
+    if alignment == 1 {
+        return Some(value);
     }
     let aligned = value - (value % alignment);
-    if aligned > 0 { aligned } else { value }
+    if aligned > 0 { Some(aligned) } else { None }
 }
 
 fn apply_alignment_to_codec(
@@ -168,11 +178,8 @@ fn apply_alignment_to_codec(
         return None;
     }
 
-    let aligned_codec_width = align_down(codec.width(), horizontal_alignment);
-    let aligned_codec_height = align_down(codec.height(), vertical_alignment);
-    if aligned_codec_width <= 0 || aligned_codec_height <= 0 {
-        return None;
-    }
+    let aligned_codec_width = align_down(codec.width(), horizontal_alignment)?;
+    let aligned_codec_height = align_down(codec.height(), vertical_alignment)?;
 
     codec.set_width(aligned_codec_width);
     codec.set_height(aligned_codec_height);
@@ -181,11 +188,12 @@ fn apply_alignment_to_codec(
         let Some(mut stream) = codec.simulcast_stream(index) else {
             continue;
         };
-        let aligned_stream_width = align_down(stream.width(), horizontal_alignment);
-        let aligned_stream_height = align_down(stream.height(), vertical_alignment);
-        if aligned_stream_width <= 0 || aligned_stream_height <= 0 {
+        let Some(aligned_stream_width) = align_down(stream.width(), horizontal_alignment) else {
             continue;
-        }
+        };
+        let Some(aligned_stream_height) = align_down(stream.height(), vertical_alignment) else {
+            continue;
+        };
         stream.set_width(aligned_stream_width);
         stream.set_height(aligned_stream_height);
     }
@@ -285,6 +293,13 @@ impl VideoEncoderHandler for AlignmentEncoderAdapter {
             self.horizontal_alignment,
             self.vertical_alignment,
         );
+        // アライン不能な場合は下流エンコーダーを初期化せずにエラーを返す。
+        // 後続の encode 呼び出しでも target_size == None により
+        // VideoCodecStatus::Error が返るため、非アライン解像度が下流に
+        // 届く経路は存在しない。
+        if self.target_size.is_none() {
+            return VideoCodecStatus::Error;
+        }
         self.encoder.init_encode(codec_settings.as_ref(), settings)
     }
 
@@ -293,8 +308,12 @@ impl VideoEncoderHandler for AlignmentEncoderAdapter {
         frame: VideoFrameRef<'_>,
         frame_types: Option<VideoFrameTypeVectorRef<'_>>,
     ) -> VideoCodecStatus {
+        // target_size が None の場合:
+        // - init_encode で apply_alignment_to_codec が None を返した (アライン不能)
+        // - または codec_type 不一致 (アダプターが対象外のコーデックに適用された)
+        // いずれも下流エンコーダーに非アライン解像度を渡さないよう Error を返す。
         let Some((target_width, target_height)) = self.target_size else {
-            return self.encoder.encode(frame, frame_types);
+            return VideoCodecStatus::Error;
         };
         let Some(aligned_frame) = self.build_aligned_frame(frame, target_width, target_height)
         else {
@@ -792,6 +811,46 @@ mod tests {
         assert!(
             VideoDecoderFactoryHandler::create(&mut factory, env.as_ref(), vp8.as_ref()).is_none()
         );
+    }
+
+    #[test]
+    fn align_down_normal_noop() {
+        assert_eq!(align_down(320, 16), Some(320));
+    }
+
+    #[test]
+    fn align_down_normal_round_down() {
+        assert_eq!(align_down(321, 16), Some(320));
+    }
+
+    #[test]
+    fn align_down_boundary_value_equals_alignment() {
+        assert_eq!(align_down(16, 16), Some(16));
+    }
+
+    #[test]
+    fn align_down_unable_to_align() {
+        assert_eq!(align_down(15, 16), None);
+    }
+
+    #[test]
+    fn align_down_value_zero() {
+        assert_eq!(align_down(0, 16), None);
+    }
+
+    #[test]
+    fn align_down_negative_value() {
+        assert_eq!(align_down(-1, 16), None);
+    }
+
+    #[test]
+    fn align_down_alignment_one_always_alignable() {
+        assert_eq!(align_down(16, 1), Some(16));
+    }
+
+    #[test]
+    fn align_down_alignment_zero_invalid() {
+        assert_eq!(align_down(16, 0), None);
     }
 
     #[test]
