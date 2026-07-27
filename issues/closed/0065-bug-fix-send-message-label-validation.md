@@ -107,12 +107,23 @@ fn send_data_channel_message(&mut self, label: &str, data: &[u8]) -> Result<()> 
 
 ## 解決方法
 
-ラベル検証を `SoraConnectionHandle::send_message` の入口に追加した。
-- `SoraConnectionHandle` に `user_data_channel_labels: HashSet<String>` フィールドを追加し、`SoraConnection::new()` で `config.data_channels` から収集する。
-- `send_message` で `self.user_data_channel_labels.contains(label)` を検査し、未登録ラベルに対して `Error::InvalidDataChannelLabel` を返す。
-- `Error::InvalidDataChannelLabel` バリアントを新設し、`Display` 実装を追加した。
-- SKILL.md の記述を allowlist 方式に合わせて更新した。
-- テストでは `#` プレフィックスで照合する方式を採用し、`SoraConnection` が持つ `data_channel_configs` の `#` プレフィックスを要求するように修正した（後続コミット `bf3c977` で検証を `SoraConnection` 側に移動）。
+以下の 2 段階で実装した。
+
+### 初期実装 (2683127)
+
+- `Error::InvalidDataChannelLabel` バリアントを追加し、`Display` 実装を追加。
+- `SoraConnectionHandle` に `user_data_channel_labels: HashSet<String>` フィールドを追加し、`SoraConnection::new()` で `config.data_channels` から収集。
+- `send_message` 入口で synchronous にラベル検証を行い、未登録ラベルに対して `Error::InvalidDataChannelLabel` を返す。
+- 内部ラベル (`signaling`, `stats`, `push`, `notify`, `rpc`) を拒否する 7 ケースの単体テストを追加。
+
+### 設計変更 (bf3c977)
+
+上記の初期実装を根本的に見直し、検証を `SoraConnection` コマンドハンドラ側に移動した。
+
+- `SoraConnectionHandle` から `user_data_channel_labels` フィールドを削除し、`command_tx` のみに戻した。`send_message` の rustdoc を「SDK 内部用ラベルおよび `#` プレフィックスのないラベル、Offer 応答の `data_channels` に含まれていないラベルを渡すと `Error::InvalidDataChannelLabel` を返す」に更新。
+- `SendMessage` コマンドハンドラ内で `self.data_channel_configs.iter().any(|c| c.label == label) && label.starts_with('#')` により検証。`data_channel_configs` は Offer / re-offer 受信時に更新される動的な値であり、redirect 後のリセットや re-offer による差し替えに追従する。
+- テストを `command_tx + tokio::spawn` 方式に書き換え、コマンドハンドラ相当のロジックで `#` プレフィックスと `data_channel_configs` 照合を再現。
+- SKILL.md の記述を新しい方式に合わせて更新。
 
 ## 完了条件
 
