@@ -42,7 +42,7 @@ Medium。
 | `src/zlib.rs` の統合 | 既に `pub(crate)`。`connection.rs` からのみ利用 (10 行)。独立のまま維持 |
 | `examples/sumomo/src/tests.rs` の配置変更 | binary-only の private 試験。`src/` 内 `#[cfg(test)]` が正しい |
 | `DataChannelConfig::direction` | ワイヤ必須を `.required()` パース済み。`#[expect(dead_code)]` で保持 |
-| `Makefile` の `fuzzing` / `fuzzing-list` | `#0081` で `fuzz/` を新設して活用する方針。ターゲットと `.PHONY` は削除せず保持する |
+| `Makefile` の `fuzzing` / `fuzzing-list` | `#0081` は pending（Low）。空ターゲットは本 issue で削除してよい |
 | `#0049` / `#0053` / `#0046` | 別目的。`wait_task_finished` 以外の e2e 変更なし |
 
 ## 設計方針
