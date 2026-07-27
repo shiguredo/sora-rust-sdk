@@ -457,22 +457,26 @@ mod tests {
     use crate::video_codec_preference::PreferenceCodec;
     use shiguredo_webrtc::{ScalabilityMode, VideoDecoderHandler, VideoEncoderHandler};
 
-    struct StubVideoEncoder;
-    impl VideoEncoderHandler for StubVideoEncoder {}
+    // VideoEncoderHandler を最小限に実装したテスト専用の型。モックやスタブではない
+    struct NoopVideoEncoder;
+    impl VideoEncoderHandler for NoopVideoEncoder {}
 
-    struct StubVideoDecoder;
-    impl VideoDecoderHandler for StubVideoDecoder {}
+    // VideoDecoderHandler を最小限に実装したテスト専用の型。モックやスタブではない
+    struct NoopVideoDecoder;
+    impl VideoDecoderHandler for NoopVideoDecoder {}
 
-    struct StubVideoEncoderWithInfoName;
-    impl VideoEncoderHandler for StubVideoEncoderWithInfoName {
+    // VideoEncoderHandler を最小限に実装したテスト専用の型。モックやスタブではない
+    struct NoopVideoEncoderWithInfoName;
+    impl VideoEncoderHandler for NoopVideoEncoderWithInfoName {
         fn get_encoder_info(&mut self) -> VideoEncoderEncoderInfo {
             let mut info = VideoEncoderEncoderInfo::new();
-            info.set_implementation_name("StubEncoder");
+            info.set_implementation_name("NoopEncoder");
             info
         }
     }
 
-    struct MockCapability {
+    // VideoCodecCapability を本物のコードで実装したテスト専用の型。モックやスタブではない
+    struct TestVideoCodecCapability {
         implementation: VideoCodecImplementation,
         encoder_supported: Vec<VideoCodecType>,
         decoder_supported: Vec<VideoCodecType>,
@@ -480,7 +484,7 @@ mod tests {
         decoder_formats: Option<Vec<VideoCodecType>>,
     }
 
-    impl MockCapability {
+    impl TestVideoCodecCapability {
         fn new(
             implementation: VideoCodecImplementation,
             encoder_supported: Vec<VideoCodecType>,
@@ -508,7 +512,7 @@ mod tests {
         }
     }
 
-    impl VideoCodecCapability for MockCapability {
+    impl VideoCodecCapability for TestVideoCodecCapability {
         fn get_implementation(&self) -> VideoCodecImplementation {
             self.implementation.clone()
         }
@@ -625,7 +629,7 @@ mod tests {
                 .ok()
                 .and_then(|name| VideoCodecType::try_from(name.as_str()).ok())?;
             if self.is_supported(CodecDirection::Encoder, codec_type) {
-                Some(VideoEncoder::new_with_handler(Box::new(StubVideoEncoder)))
+                Some(VideoEncoder::new_with_handler(Box::new(NoopVideoEncoder)))
             } else {
                 None
             }
@@ -641,7 +645,7 @@ mod tests {
                 .ok()
                 .and_then(|name| VideoCodecType::try_from(name.as_str()).ok())?;
             if self.is_supported(CodecDirection::Decoder, codec_type) {
-                Some(VideoDecoder::new_with_handler(Box::new(StubVideoDecoder)))
+                Some(VideoDecoder::new_with_handler(Box::new(NoopVideoDecoder)))
             } else {
                 None
             }
@@ -663,12 +667,12 @@ mod tests {
             ),
         ]);
         let capabilities: Vec<Box<dyn VideoCodecCapability>> = vec![
-            Box::new(MockCapability::new(
+            Box::new(TestVideoCodecCapability::new(
                 VideoCodecImplementation::new("impl-a", "Implementation A"),
                 vec![VideoCodecType::H264],
                 Vec::new(),
             )),
-            Box::new(MockCapability::new(
+            Box::new(TestVideoCodecCapability::new(
                 VideoCodecImplementation::new("impl-b", "Implementation B"),
                 vec![VideoCodecType::Vp8],
                 Vec::new(),
@@ -691,7 +695,7 @@ mod tests {
             VideoCodecImplementation::new("impl-a", "Implementation A"),
         )]);
         let capabilities: Vec<Box<dyn VideoCodecCapability>> = vec![Box::new(
-            MockCapability::new(
+            TestVideoCodecCapability::new(
                 VideoCodecImplementation::new("impl-a", "Implementation A"),
                 vec![VideoCodecType::H264],
                 Vec::new(),
@@ -725,7 +729,7 @@ mod tests {
         ]);
         let capabilities: Vec<Box<dyn VideoCodecCapability>> = vec![
             Box::new(
-                MockCapability::new(
+                TestVideoCodecCapability::new(
                     VideoCodecImplementation::new("impl-a", "Implementation A"),
                     vec![VideoCodecType::Vp8],
                     Vec::new(),
@@ -736,7 +740,7 @@ mod tests {
                 ),
             ),
             Box::new(
-                MockCapability::new(
+                TestVideoCodecCapability::new(
                     VideoCodecImplementation::new("impl-b", "Implementation B"),
                     vec![VideoCodecType::H264],
                     Vec::new(),
@@ -761,7 +765,7 @@ mod tests {
             VideoCodecImplementation::new("impl-a", "Implementation A"),
         )]);
         let capabilities: Vec<Box<dyn VideoCodecCapability>> = vec![Box::new(
-            MockCapability::new(
+            TestVideoCodecCapability::new(
                 VideoCodecImplementation::new("impl-a", "Implementation A"),
                 vec![VideoCodecType::Vp8],
                 Vec::new(),
@@ -782,11 +786,12 @@ mod tests {
             VideoCodecType::H264,
             VideoCodecImplementation::new("impl-a", "Implementation A"),
         )]);
-        let capabilities: Vec<Box<dyn VideoCodecCapability>> = vec![Box::new(MockCapability::new(
-            VideoCodecImplementation::new("impl-a", "Implementation A"),
-            Vec::new(),
-            vec![VideoCodecType::H264],
-        ))];
+        let capabilities: Vec<Box<dyn VideoCodecCapability>> =
+            vec![Box::new(TestVideoCodecCapability::new(
+                VideoCodecImplementation::new("impl-a", "Implementation A"),
+                Vec::new(),
+                vec![VideoCodecType::H264],
+            ))];
 
         let shared = Arc::new(Mutex::new(capabilities));
         let mut factory = SoraVideoDecoderFactory::new(preference, shared);
@@ -991,7 +996,7 @@ mod tests {
 
     #[test]
     fn alignment_encoder_adapter_encoder_info_contains_adapter_name() {
-        let base = VideoEncoder::new_with_handler(Box::new(StubVideoEncoderWithInfoName));
+        let base = VideoEncoder::new_with_handler(Box::new(NoopVideoEncoderWithInfoName));
         let encoder = VideoEncoder::new_with_handler(Box::new(AlignmentEncoderAdapter::new(
             base,
             VideoCodecType::Av1,
@@ -1007,7 +1012,7 @@ mod tests {
             "AlignmentEncoderAdapter を含む実装名が必要: {implementation_name}",
         );
         assert!(
-            implementation_name.contains("StubEncoder"),
+            implementation_name.contains("NoopEncoder"),
             "元の implementation_name を保持する必要があります: {implementation_name}",
         );
     }
