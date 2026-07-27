@@ -5,7 +5,7 @@
 - Completed: {YYYY-MM-DD}
 - Model: Opus 4.7
 - Branch: feature/change-fix-audio-codec-type-naming
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-07-27
 
 ## 目的
 
@@ -21,7 +21,7 @@ High。**公開 API 破壊的変更のため canary 期間中に確定必須**�
 
 - `src/types.rs:235-237` に `pub enum AudioCodecType { OPUS }` (全大文字、命名規約違反)。
 - `src/types.rs:240-245` に `DisplayJson` 実装。JSON 出力文字列は `"OPUS"`。
-- `src/types.rs:249-` の `Audio` 構造体に `codec_type: Option<AudioCodecType>` フィールドがある。
+- `src/types.rs:254-` の `Audio` 列挙型に `codec_type: Option<AudioCodecType>` フィールドがある。
 - `src/lib.rs:76` で `AudioCodecType` が再エクスポートされている。
 
 ## 設計方針
@@ -29,8 +29,10 @@ High。**公開 API 破壊的変更のため canary 期間中に確定必須**�
 - `AudioCodecType::OPUS` を `AudioCodecType::Opus` にリネーム
 - `DisplayJson` 実装のマッチアームを `Opus` に更新 (JSON 出力文字列 `"OPUS"` は維持)
 - `Audio` の `new_opus()` コンストラクタ内のバリアント名を更新
-- `src/types.rs` 内の `#[cfg(test)]` インラインテストでバリアント名を更新 (JSON 期待値は変更しない)
+- `src/types.rs` 内の `#[cfg(test)]` インラインテストに `AudioCodecType::OPUS` の直接参照は存在しないが、`Audio::new_opus()` 経由で間接的に使用されている。JSON 期待値 (`"codec_type":"OPUS"`) は変更不要であり、`new_opus()` の修正によりテスト側は自動追随する。
 - `sora-rust-sdk/SKILL.md` の `AudioCodecType` 列挙テーブルを更新
+
+[0075](0075-change-split-video-codec-params-by-variant.md) が `Audio` 列挙型の `codec_type` フィールドを削除する場合、本 issue の `Audio::new_opus()` 内のバリアント名更新は対象を失う。本 issue を 0075 より先に実装するか、同時に対応する場合は 0075 の `DisplayJson for Audio` 実装時に `AudioCodecType::Opus` を使用すること。
 
 ## 完了条件
 
