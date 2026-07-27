@@ -1124,8 +1124,13 @@ mod tests {
         let _ = std::fs::remove_file(&tmp_path);
 
         assert!(
-            result.is_err(),
-            "不正な stco を持つ MP4 は Err になるべきです"
+            matches!(
+                result,
+                Err(crate::error::Error::Mp4 {
+                    source: Mp4Error::InconsistentSampleTable { .. },
+                })
+            ),
+            "不正な stco を持つ MP4 は InconsistentSampleTable エラーになるべきです"
         );
     }
 }

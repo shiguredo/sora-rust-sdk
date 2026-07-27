@@ -369,7 +369,7 @@ impl V4l2VideoEncoder {
         // Drop 内の poller.stop() → thread.join() がポーラースレッドの
         // handle_v4l2_encode_callback → shared_state.lock() と循環待機し
         // デッドロックする。take() で所有権をロック外に取り出してから
-        // drop することで回避する (#0026 の release() と同じパターン)。
+        // drop することで回避する（release() と同じデッドロック回避パターン）。
         // この間 shared_state.encoder は None になるが、
         // rebuild_mmap_encoder は &mut self で呼ばれるため encode() とは排他。
         // handle_v4l2_convert_callback は encoder が None の場合フレームを

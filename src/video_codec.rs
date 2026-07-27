@@ -165,6 +165,8 @@ fn align_down(value: i32, alignment: i32) -> Option<i32> {
         return Some(value);
     }
     let aligned = value - (value % alignment);
+    // align down の結果が 0 になることは数値演算としては異常ではないが、
+    // このファイルでは幅・高さが 0 のコーデックは不正なため None を返す。
     if aligned > 0 { Some(aligned) } else { None }
 }
 
