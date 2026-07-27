@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-28
 - Model: Opus 4.7
 - Branch: feature/fix-mp4-demuxer-required-input-oob
 - Polished: 2026-07-27
@@ -46,6 +46,14 @@ let data = &file_data[start..end];
    - 上位の `Error::Mp4` への変換は既存の `From<Mp4Error> for Error` 実装が `err.to_string()` で `reason` を生成するため、新規バリアントの追加のみで伝搬する
 5. `get_sample` 側の同種パニックは #0062 で対応する。`required_input` ループと `get_sample` では呼び出し元のコンテキスト（構築時 vs 再生時）とエラー伝搬経路（`Result` return vs panicking thread）が異なるため、独立した issue として扱う。
 6. 呼び出し側で panic には至らないことを、単体テストで担保する。
+
+## 解決方法
+
+`Mp4SampleReader::new_inner` の `required_input()` 結果のスライス操作前に境界チェックを追加した。
+- `start > file_data.len()` の場合、加算を行わず即座に `Mp4Error::InputPositionOutOfRange` を返す。
+- `file_data.get(start..end)` で安全にスライスを取得し、`None` の場合も同様にエラーを返す。
+- `Mp4Error::InputPositionOutOfRange` バリアントを新設し、`Display` と `Error::source()` に対応させた。
+- truncated MP4 フィクスチャを用いた単体テストを追加した。
 
 ## 完了条件
 
