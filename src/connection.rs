@@ -1197,6 +1197,35 @@ impl SoraConnection {
 
             // redirect メッセージを受信した場合、新しい WebSocket に再接続する
             if let Some(location) = redirect_location.take() {
+                // セッション状態をリセットする。
+                // 旧接続の状態が redirect 先に持ち越されると、
+                // switched フラグや DataChannel 状態が不整合を起こす。
+                switched_received = false;
+                switched_ignore_disconnect_websocket = false;
+                use_datachannel_signaling = false;
+                ws_disconnect_delay_start = None;
+
+                // 古い DataChannel の close 通知をユーザーに送る。
+                // クリア前に通知することでハンドラが確実に呼ばれる。
+                for label in &opened_datachannels {
+                    handler.on_data_channel_close(label);
+                }
+                opened_datachannels.clear();
+                self.data_channels.clear();
+                self.data_channel_configs.clear();
+
+                // 旧セッションの RPC リクエストに redirect エラーを通知しクリアする。
+                for (_, mut pending) in self.pending_rpc_responses.drain() {
+                    if let Some(tx) = pending.response_tx.take() {
+                        let _ = tx.send(Err(Error::Redirected));
+                    }
+                }
+                self.rpc_id_counter = 0;
+
+                // 旧セッションの event_rx に滞留したイベントをドレインする。
+                // クリア後の data_channels に旧チャネルが再登録されるのを防ぐ。
+                while self.event_rx.try_recv().is_ok() {}
+
                 // 古い WebSocket をクローズする
                 if ws.state() == ConnectionState::Connected {
                     ws.close(CloseCode::NORMAL, "redirect")?;

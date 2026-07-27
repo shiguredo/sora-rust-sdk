@@ -164,6 +164,8 @@ pub enum Error {
     },
     /// DataChannel への送信に失敗した。
     DataChannelSendFailed,
+    /// リダイレクトが発生し、実行中の RPC レスポンス待機が中断された。
+    Redirected,
     /// シグナリング時に指定されていないラベルで DataChannel にメッセージを送信しようとした。
     InvalidDataChannelLabel {
         /// 指定されたラベル名。
@@ -406,6 +408,7 @@ impl std::fmt::Display for Error {
                 write!(f, "DataChannel がありません: {label}")
             }
             Error::DataChannelSendFailed => f.write_str("DataChannel への送信に失敗しました"),
+            Error::Redirected => f.write_str("リダイレクトが発生したため中断されました"),
             Error::InvalidDataChannelLabel { label } => {
                 write!(f, "シグナリング時に指定されていないラベルです: {label}")
             }
