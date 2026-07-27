@@ -1,7 +1,7 @@
 //! SoraConnection 本体と接続制御の実装。
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aws_lc_rs::rand::{SecureRandom as AwsSecureRandom, SystemRandom};
@@ -569,7 +569,6 @@ pub struct SoraConnection {
     pc_observer: PeerConnectionObserver,
     // context を最後に破棄するため、config は最後に保持する。
     config: SoraConnectionBuilder,
-    allowed_hosts: Option<Arc<Mutex<Vec<String>>>>,
 }
 
 struct PendingRpcRequest {
@@ -614,7 +613,6 @@ pub(crate) enum SoraConnectionCommand {
 
 struct TurnTlsCaCertVerifier {
     trust_anchors: Vec<TrustAnchor<'static>>,
-    allowed_hosts: Arc<Mutex<Vec<String>>>,
 }
 
 impl SSLCertificateVerifierHandler for TurnTlsCaCertVerifier {
@@ -640,34 +638,16 @@ impl SSLCertificateVerifierHandler for TurnTlsCaCertVerifier {
 
         let time = UnixTime::now();
 
-        if ee
-            .verify_for_usage(
-                webpki::ALL_VERIFICATION_ALGS,
-                &self.trust_anchors,
-                &intermediates,
-                time,
-                webpki::KeyUsage::server_auth(),
-                None,
-                None,
-            )
-            .is_err()
-        {
-            return false;
-        }
-
-        let hosts = self
-            .allowed_hosts
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        for host in hosts.iter() {
-            if let Ok(subject_name) = ServerName::try_from(host.to_string())
-                && ee.verify_is_valid_for_subject_name(&subject_name).is_ok()
-            {
-                return true;
-            }
-        }
-        rtc_log_warning!("TURN-TLS SAN verification failed: no matching subject name found");
-        false
+        ee.verify_for_usage(
+            webpki::ALL_VERIFICATION_ALGS,
+            &self.trust_anchors,
+            &intermediates,
+            time,
+            webpki::KeyUsage::server_auth(),
+            None,
+            None,
+        )
+        .is_ok()
     }
 }
 
@@ -750,7 +730,6 @@ impl SoraConnection {
         }));
 
         let mut deps = PeerConnectionDependencies::new(&observer);
-        let mut allowed_hosts: Option<Arc<Mutex<Vec<String>>>> = None;
         if let Some(ca_cert_der) = &config.turn_tls_ca_cert {
             let ca_cert = CertificateDer::from(ca_cert_der.as_slice());
             let anchor = webpki::anchor_from_trusted_cert(&ca_cert)
@@ -758,12 +737,9 @@ impl SoraConnection {
                     message: format!("{}", e),
                 })?
                 .to_owned();
-            let hosts = Arc::new(Mutex::new(Vec::new()));
-            allowed_hosts = Some(hosts.clone());
             let verifier =
                 SSLCertificateVerifier::new_with_handler(Box::new(TurnTlsCaCertVerifier {
                     trust_anchors: vec![anchor],
-                    allowed_hosts: hosts,
                 }));
             deps.set_tls_cert_verifier(verifier);
         }
@@ -805,7 +781,6 @@ impl SoraConnection {
             pc,
             pc_observer: observer,
             config,
-            allowed_hosts,
         };
         Ok((client, handle))
     }
@@ -1478,24 +1453,6 @@ impl SoraConnection {
         if servers.is_empty() {
             return Ok(());
         }
-
-        // TURN-TLS の証明書 SAN 検証用にホスト名を抽出する。
-        if let Some(ref hosts_lock) = self.allowed_hosts {
-            let mut hosts: Vec<String> = Vec::new();
-            for server in servers {
-                for url in &server.urls {
-                    if url.starts_with("turns:")
-                        && let Some(host) = extract_turn_host_from_url(url)
-                    {
-                        hosts.push(host);
-                    }
-                }
-            }
-            if let Ok(mut guard) = hosts_lock.lock() {
-                *guard = hosts;
-            }
-        }
-
         let pc = &mut self.pc;
         let mut config = PeerConnectionRtcConfiguration::new();
         for server in servers {
@@ -2464,30 +2421,6 @@ async fn connect_websocket(
             Ok(ClientStream::new_plain(tcp_stream))
         }
     }
-}
-
-/// `turns:` スキームの URL からホスト名を抽出する。
-///
-/// 例: `turns:host.example.com:443?transport=tcp` → `host.example.com`
-/// IPv6 アドレスはブラケット表記 `[::1]` に対応する。
-fn extract_turn_host_from_url(url: &str) -> Option<String> {
-    let without_scheme = url.strip_prefix("turns:")?;
-    let host_port = if let Some(rest) = without_scheme.strip_prefix('[') {
-        // IPv6: [::1]:port?query または [::1]?query
-        let end = rest.find(']')?;
-        &rest[..end]
-    } else {
-        // IPv4 / hostname
-        #[allow(clippy::manual_pattern_char_comparison)]
-        let end = without_scheme
-            .find(|c: char| c == ':' || c == '?')
-            .unwrap_or(without_scheme.len());
-        &without_scheme[..end]
-    };
-    if host_port.is_empty() {
-        return None;
-    }
-    Some(host_port.to_string())
 }
 
 async fn connect_tcp(host: &str, port: u16, deadline: tokio::time::Instant) -> Result<TcpStream> {
