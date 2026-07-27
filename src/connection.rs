@@ -2642,23 +2642,24 @@ mod tests {
     }
 
     fn is_turn_tcp_or_udp_url(url: &str) -> bool {
-        let lower = url.to_ascii_lowercase();
-        let Some((scheme, _)) = lower.split_once(':') else {
+        let Ok(uri) = Uri::parse(url) else {
             return false;
         };
-        if scheme != "turn" && scheme != "turns" {
+        let Some(scheme) = uri.scheme() else {
+            return false;
+        };
+        if !scheme.eq_ignore_ascii_case("turn") && !scheme.eq_ignore_ascii_case("turns") {
             return false;
         }
-
-        lower
-            .split('?')
-            .nth(1)
+        uri.query()
             .and_then(|query| {
                 query
                     .split('&')
                     .find_map(|param| param.strip_prefix("transport="))
             })
-            .is_some_and(|transport| transport == "tcp" || transport == "udp")
+            .is_some_and(|transport| {
+                transport.eq_ignore_ascii_case("tcp") || transport.eq_ignore_ascii_case("udp")
+            })
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! 公開型と接続設定用の型。
 use nojson::{DisplayJson, JsonFormatter, RawJsonOwned};
+use shiguredo_http11::uri::Uri;
 
 use crate::error::{Error, Result};
 
@@ -93,24 +94,31 @@ impl std::fmt::Debug for ProxyInfo {
 }
 
 fn mask_url_userinfo(url: &str) -> std::borrow::Cow<'_, str> {
-    let Some(after_scheme) = url.find("://") else {
+    let Ok(uri) = Uri::parse(url) else {
         return std::borrow::Cow::Borrowed(url);
     };
-    let after_scheme = after_scheme + 3;
-    let url_after_scheme = &url[after_scheme..];
-    let Some(at_pos) = url_after_scheme.find('@') else {
+    let Some(authority) = uri.authority() else {
         return std::borrow::Cow::Borrowed(url);
     };
-    if let Some(slash_pos) = url_after_scheme.find('/')
-        && at_pos > slash_pos
-    {
+    let Some(at_pos) = authority.rfind('@') else {
         return std::borrow::Cow::Borrowed(url);
+    };
+    let mut masked = String::with_capacity(url.len() + 10);
+    if let Some(scheme) = uri.scheme() {
+        masked.push_str(scheme);
+        masked.push_str("://");
     }
-    let masked = format!(
-        "{}<redacted>@{}",
-        &url[..after_scheme],
-        &url[after_scheme + at_pos + 1..]
-    );
+    masked.push_str("<redacted>@");
+    masked.push_str(&authority[at_pos + 1..]);
+    masked.push_str(uri.path());
+    if let Some(query) = uri.query() {
+        masked.push('?');
+        masked.push_str(query);
+    }
+    if let Some(fragment) = uri.fragment() {
+        masked.push('#');
+        masked.push_str(fragment);
+    }
     std::borrow::Cow::Owned(masked)
 }
 
@@ -807,5 +815,81 @@ mod tests {
             json,
             r#"{"codec_type":"H265","bit_rate":1200000,"h265_params":{"level_id":"120","profile_id":1,"tier_flag":0,"tx_mode":"MRST","b_frame":false}}"#
         );
+    }
+
+    #[test]
+    fn mask_url_userinfo_masks_userinfo() {
+        assert_eq!(
+            mask_url_userinfo("http://user:pass@host"),
+            "http://<redacted>@host"
+        );
+    }
+
+    #[test]
+    fn mask_url_userinfo_masks_userinfo_with_path() {
+        assert_eq!(
+            mask_url_userinfo("http://user:pass@host/path"),
+            "http://<redacted>@host/path"
+        );
+    }
+
+    #[test]
+    fn mask_url_userinfo_no_userinfo() {
+        assert_eq!(mask_url_userinfo("http://host"), "http://host");
+    }
+
+    #[test]
+    fn mask_url_userinfo_query_at_sign_not_masked() {
+        assert_eq!(mask_url_userinfo("http://host?q=x@y"), "http://host?q=x@y");
+    }
+
+    #[test]
+    fn mask_url_userinfo_fragment_at_sign_not_masked() {
+        assert_eq!(
+            mask_url_userinfo("http://host#frag@evil"),
+            "http://host#frag@evil"
+        );
+    }
+
+    #[test]
+    fn mask_url_userinfo_user_only() {
+        assert_eq!(
+            mask_url_userinfo("http://user@host"),
+            "http://<redacted>@host"
+        );
+    }
+
+    #[test]
+    fn mask_url_userinfo_query_bug_case() {
+        assert_eq!(
+            mask_url_userinfo("http://host?token=abc@evil.com"),
+            "http://host?token=abc@evil.com"
+        );
+    }
+
+    #[test]
+    fn mask_url_userinfo_with_port() {
+        assert_eq!(
+            mask_url_userinfo("http://user:pass@host:8080/path"),
+            "http://<redacted>@host:8080/path"
+        );
+    }
+
+    #[test]
+    fn mask_url_userinfo_non_http_scheme() {
+        assert_eq!(
+            mask_url_userinfo("rtsp://admin:12345@camera.example.com:554/stream"),
+            "rtsp://<redacted>@camera.example.com:554/stream"
+        );
+    }
+
+    #[test]
+    fn mask_url_userinfo_no_scheme() {
+        assert_eq!(mask_url_userinfo("no-scheme-url"), "no-scheme-url");
+    }
+
+    #[test]
+    fn mask_url_userinfo_invalid_url() {
+        assert_eq!(mask_url_userinfo("not a valid url"), "not a valid url");
     }
 }
