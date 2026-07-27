@@ -444,6 +444,7 @@ impl SoraConnectionBuilder {
 #[derive(Clone)]
 pub struct SoraConnectionHandle {
     command_tx: mpsc::UnboundedSender<SoraConnectionCommand>,
+    user_data_channel_labels: HashSet<String>,
 }
 
 impl SoraConnectionHandle {
@@ -505,8 +506,14 @@ impl SoraConnectionHandle {
 
     /// DataChannel 経由でメッセージを送信する。
     ///
-    /// `#` プレフィックス付きラベルのユーザー定義 DataChannel にバイナリデータを送信する。
+    /// シグナリング時に `data_channels` で指定したラベルの DataChannel にバイナリデータを送信する。
+    /// 指定されていないラベルを渡すと `Error::InvalidDataChannelLabel` を返す。
     pub async fn send_message(&self, label: &str, data: &[u8]) -> Result<()> {
+        if !self.user_data_channel_labels.contains(label) {
+            return Err(Error::InvalidDataChannelLabel {
+                label: label.to_string(),
+            });
+        }
         self.send_command("send_message", |tx| SoraConnectionCommand::SendMessage {
             label: label.to_string(),
             data: data.to_vec(),
@@ -673,7 +680,15 @@ impl SoraConnection {
 
     fn new(config: SoraConnectionBuilder) -> Result<(Self, SoraConnectionHandle)> {
         let (command_tx, command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
-        let handle = SoraConnectionHandle { command_tx };
+        let user_data_channel_labels = config
+            .data_channels
+            .iter()
+            .flat_map(|dcs| dcs.iter().map(|dc| dc.label.clone()))
+            .collect::<HashSet<String>>();
+        let handle = SoraConnectionHandle {
+            command_tx,
+            user_data_channel_labels,
+        };
 
         let (event_tx, event_rx) = mpsc::unbounded_channel::<SoraEvent>();
         let pc_factory = config.context.factory();
@@ -2714,7 +2729,10 @@ mod tests {
     async fn url_getters_return_send_error_after_run_loop_stops() {
         let (command_tx, command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
         drop(command_rx);
-        let handle = SoraConnectionHandle { command_tx };
+        let handle = SoraConnectionHandle {
+            command_tx,
+            user_data_channel_labels: HashSet::new(),
+        };
 
         let selected_error = handle
             .selected_signaling_url()
@@ -2881,5 +2899,103 @@ mod tests {
     fn now_returns_ok_timestamp() {
         let result = super::now();
         assert!(result.is_ok(), "now() は Ok を返す必要があります");
+    }
+
+    #[tokio::test]
+    async fn send_message_rejects_unknown_label() {
+        let (command_tx, _command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
+        let handle = SoraConnectionHandle {
+            command_tx,
+            user_data_channel_labels: HashSet::new(),
+        };
+        let err = handle
+            .send_message("#unknown", b"data")
+            .await
+            .expect_err("未指定ラベルは InvalidDataChannelLabel になるべき");
+        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label == "#unknown"));
+    }
+
+    #[tokio::test]
+    async fn send_message_rejects_signaling_label() {
+        let (command_tx, _command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
+        let handle = SoraConnectionHandle {
+            command_tx,
+            user_data_channel_labels: HashSet::new(),
+        };
+        let err = handle
+            .send_message("signaling", b"data")
+            .await
+            .expect_err("signaling ラベルは InvalidDataChannelLabel になるべき");
+        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label == "signaling"));
+    }
+
+    #[tokio::test]
+    async fn send_message_rejects_stats_label() {
+        let (command_tx, _command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
+        let handle = SoraConnectionHandle {
+            command_tx,
+            user_data_channel_labels: HashSet::new(),
+        };
+        let err = handle
+            .send_message("stats", b"data")
+            .await
+            .expect_err("stats ラベルは InvalidDataChannelLabel になるべき");
+        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label == "stats"));
+    }
+
+    #[tokio::test]
+    async fn send_message_rejects_push_label() {
+        let (command_tx, _command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
+        let handle = SoraConnectionHandle {
+            command_tx,
+            user_data_channel_labels: HashSet::new(),
+        };
+        let err = handle
+            .send_message("push", b"data")
+            .await
+            .expect_err("push ラベルは InvalidDataChannelLabel になるべき");
+        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label == "push"));
+    }
+
+    #[tokio::test]
+    async fn send_message_rejects_notify_label() {
+        let (command_tx, _command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
+        let handle = SoraConnectionHandle {
+            command_tx,
+            user_data_channel_labels: HashSet::new(),
+        };
+        let err = handle
+            .send_message("notify", b"data")
+            .await
+            .expect_err("notify ラベルは InvalidDataChannelLabel になるべき");
+        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label == "notify"));
+    }
+
+    #[tokio::test]
+    async fn send_message_rejects_rpc_label() {
+        let (command_tx, _command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
+        let handle = SoraConnectionHandle {
+            command_tx,
+            user_data_channel_labels: HashSet::new(),
+        };
+        let err = handle
+            .send_message("rpc", b"data")
+            .await
+            .expect_err("rpc ラベルは InvalidDataChannelLabel になるべき");
+        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label == "rpc"));
+    }
+
+    #[tokio::test]
+    async fn send_message_rejects_empty_label() {
+        let (command_tx, _command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
+        let handle = SoraConnectionHandle {
+            command_tx,
+            user_data_channel_labels: HashSet::new(),
+        };
+        let err = handle
+            .send_message("", b"data")
+            .await
+            .expect_err("空ラベルは InvalidDataChannelLabel になるべき");
+        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label.is_empty()));
     }
 }

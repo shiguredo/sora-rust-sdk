@@ -164,6 +164,11 @@ pub enum Error {
     },
     /// DataChannel への送信に失敗した。
     DataChannelSendFailed,
+    /// シグナリング時に指定されていないラベルで DataChannel にメッセージを送信しようとした。
+    InvalidDataChannelLabel {
+        /// 指定されたラベル名。
+        label: String,
+    },
     /// UTF-8 デコードに失敗した。内部エラーとして [`std::string::FromUtf8Error`] を保持する。
     Utf8DecodeFailed(std::string::FromUtf8Error),
     /// candidate は未対応。
@@ -401,6 +406,9 @@ impl std::fmt::Display for Error {
                 write!(f, "DataChannel がありません: {label}")
             }
             Error::DataChannelSendFailed => f.write_str("DataChannel への送信に失敗しました"),
+            Error::InvalidDataChannelLabel { label } => {
+                write!(f, "シグナリング時に指定されていないラベルです: {label}")
+            }
             Error::Utf8DecodeFailed(err) => {
                 write!(f, "UTF-8 デコードに失敗しました: {err}")
             }
