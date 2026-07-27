@@ -99,5 +99,5 @@ entry = "cargo test --workspace"
 language = "system"
 types = ["rust"]
 pass_filenames = false
-# stages = ["pre-push"]
+stages = ["pre-push"]
 priority = 20
