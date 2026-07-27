@@ -137,7 +137,7 @@ type Result<T> = std::result::Result<T, Mp4Error>;
 ///
 /// `Mp4SampleReader` が生成し、native `VideoFrameBuffer` に保持されて
 /// `Mp4PassthroughEncoder` に渡される。
-pub struct Mp4EncodedSample {
+pub(crate) struct Mp4EncodedSample {
     /// エンコード済みフレームデータ。
     /// H.264/H.265 の場合は Annex B 形式に変換済み。
     /// VP8/VP9/AV1 の場合は MP4 から抽出したそのまま。
