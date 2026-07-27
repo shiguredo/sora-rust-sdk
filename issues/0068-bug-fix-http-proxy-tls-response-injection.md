@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-28
 - Model: Opus 4.7
 - Branch: feature/fix-http-proxy-tls-response-injection
 - Polished: 2026-07-27
@@ -40,6 +40,14 @@ if target.tls {
 2. 新規エラー variant `Error::ProxyConnectUnexpectedTrailingData` を追加する。
 3. 非 TLS (平文 ws://) の場合のみ、`pending` を `push_pending_read` で受け入れることを許容する。非 TLS では TLS レコード層による完全性保護が存在せず、プロキシが CONNECT 200 応答後に任意バイトを挿入しても暗号境界を侵害しない。また後方互換性の観点から、現状の挙動を維持する。
 4. 単体テストで「TLS ターゲット + CONNECT 200 応答直後に任意バイトが追加された場合に接続が拒否される」ことを検証する。
+
+## 解決方法
+
+TLS ターゲットの HTTP CONNECT 接続で、`into_plain_parts()` から得た `pending` が空でない場合、即座に `Error::ProxyConnectUnexpectedTrailingData` エラーで接続を拒否するよう修正した。
+- TLS 接続では ClientHello をクライアントが先に送るため、TLS 開始前にサーバーからバイトが届くことはありえず、余剰バイトは必ずプロキシによる挿入であるため拒否する。
+- 非 TLS ターゲットでは引き続き `pending` を `push_pending_read` で受け入れる。
+- 到達不能になった `push_pending_read` 呼び出しを削除した（後続コミット `373ff8c`）。
+- 単体テストで応答注入経路が拒否されることを検証した。
 
 ## 完了条件
 
