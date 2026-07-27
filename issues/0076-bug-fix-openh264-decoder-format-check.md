@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-28
 - Model: Opus 4.7
 - Branch: feature/fix-openh264-decoder-format-check
 - Polished: 2026-07-27
@@ -56,6 +56,14 @@ move |_env, _format| {
 2. `#[expect(unused_variables)]` を除去する。
 3. `new()` 内の builder closure (openh264.rs:508) でも format 検査を追加する。`create_video_encoder` メソッド自体は `simulcast_capability_helper` へ委譲しているだけであり、実際に `_format` を無視しているのは builder closure 側（`|_env, _format|`）のため。V4L2・AMF・VPL・NVCodec は同 closure 内で `codec_type_from_format(&format)?` + `VideoCodecType::H264` チェックを既に行っている。
 4. 単体テストで `create_video_decoder(env, vp8_format)` が None を返すことを検証する。
+
+## 解決方法
+
+`Openh264VideoCodecCapability` の encoder/decoder 生成に format 検査を追加した。
+- `create_video_decoder` で `codec_type_from_format(&format)?` を呼び、`H264` 以外の場合は `None` を返すよう修正。
+- encoder builder closure でも同様に format 検査を追加し、`_format` → `format` にリネーム。
+- `#[expect(unused_variables)]` を除去した。
+- 後続コミットで `_env` へのリネームが revert された（元のコードと整合させるため）。
 
 ## 完了条件
 
