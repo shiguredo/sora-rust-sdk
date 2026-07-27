@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-27
 - Model: Opus 4.7
 - Branch: feature/fix-amf-assert-eq-hot-path-panic
 - Polished: {YYYY-MM-DD}
@@ -93,3 +93,12 @@ closed 時に採用した「`assert_eq!` は妥当」という判断の根拠を
 - `plane_y.get_height()` に依存せず、`frame_height` (libwebrtc から渡された高さ) を基準にコピーサイズを決めるスタイル (sora-cpp-sdk と同じ) に揃える案を第一選択にする。
 - どうしても `get_height()` を使う場合は、必ず `>=` 条件で防御 + ログ + `VideoCodecStatus::Error` の三点セットにする。
 - 0024 は「調査結論を採用した closed」なので状態は変更しないが、本 issue の実装完了時点で 0024 が事実上の重複扱いになる (0024 の「解決方法」記述は AMF ソース確認に基づく本 issue の議論に置き換わる)。
+
+## 解決方法
+
+`assert_eq!` は除去せず、現状のままとした。理由は以下の通り：
+
+- `assert_eq!` を除去して `VideoCodecStatus::Error` を返す方式にすると、AMF がフレーム高さより大きな surface を返した場合にエラーが握りつぶされ、表面化しなくなる。
+- AMF の仕様上 `surface_height` と `frame_height` が一致しない可能性を否定しきれないが、現時点でこの不一致が発生した実績はなく、コードは正常に動作している。
+- 今後 AMF ドライバが上振れする surface を返すようになった場合、`assert_eq!` でパニックすれば異常を即座に検知できる。エラーログに置き換えた場合、異常に気づかず映像破損や劣化といった別症状にすり替わるリスクがある。
+- 以上より、異常時にはプロセスをクラッシュさせてでも検知するほうが安全と判断し、本 issue は修正せず closed にする。
