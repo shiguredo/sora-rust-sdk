@@ -67,7 +67,7 @@ pub(crate) enum Mp4Error {
 - `Error::source()` の match に `Error::Mp4 { source } => Some(source)` を追加。
 - `From<Mp4Error> for Error` を `Error::Mp4 { source: err }` に修正。
 - 既存テストのパターンマッチを新しいバリアント形式に更新した。
-- CHANGES.md に `[CHANGE]` エントリを追加した。
+
 
 ## 完了条件
 

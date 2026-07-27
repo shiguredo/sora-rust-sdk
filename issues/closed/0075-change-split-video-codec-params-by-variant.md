@@ -72,7 +72,7 @@ pub enum Video {
 - `Video::new_vp8()` / `Video::new_vp9()` / `Video::new_h264()` / `Video::new_h265()` / `Video::new_av1()` コンストラクタを更新。
 - `Video::codec_type()`, `Video::bit_rate()`, `Video::set_bit_rate()` メソッドを追加し、バリアント横断で一貫したアクセスを提供。
 - `signaling_types.rs` の `Video` → `WebSocketVideo` 変換も新構造に対応させた。
-- SKILL.md と CHANGES.md を更新した。
+
 
 ## 完了条件
 

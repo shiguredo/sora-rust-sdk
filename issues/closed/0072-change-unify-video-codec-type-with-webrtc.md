@@ -64,7 +64,7 @@ High。**公開 API 破壊的変更のため canary 期間中に確定必須**�
 - `DisplayJson` 実装のマッチアームを更新（JSON 出力文字列は維持）。
 - `From<sora_sdk::VideoCodecType> for shiguredo_webrtc::VideoCodecType` と逆向きの `From` 実装を追加した。
 - `Video::new_vp8()` / `Video::new_av1()` 等のバリアント名を更新。
-- SKILL.md の列挙テーブルを更新した。
+
 
 ## 完了条件
 

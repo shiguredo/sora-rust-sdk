@@ -39,7 +39,7 @@ High。**公開 API 破壊的変更のため canary 期間中に確定必須**�
 `AudioCodecType::OPUS` を `AudioCodecType::Opus` にリネームし、Rust 命名規約 (UpperCamelCase) に矯正した。
 - `DisplayJson` 実装のマッチアームを更新（JSON 出力文字列 `"OPUS"` は維持）。
 - `Audio::new_opus()` コンストラクタ内のバリアント名を更新した。
-- SKILL.md の `AudioCodecType` 列挙テーブルを更新した。
+
 
 ## 完了条件
 

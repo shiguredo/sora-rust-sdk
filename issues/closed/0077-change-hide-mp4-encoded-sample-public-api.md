@@ -42,7 +42,7 @@ pub struct Mp4EncodedSample {
 `Mp4EncodedSample` を `pub(crate)` に降格し、公開 API から削除した。
 - `Mp4EncodedSample` の可視性を `pub` → `pub(crate)` に変更。
 - `lib.rs` の `pub use` から `Mp4EncodedSample` を除去。
-- SKILL.md の公開 API テーブルから `Mp4EncodedSample` を除去した。
+
 
 ## 完了条件
 
