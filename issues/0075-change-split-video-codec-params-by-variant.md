@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-28
 - Model: Opus 4.7
 - Branch: feature/change-split-video-codec-params-by-variant
 - Polished: 2026-07-27
@@ -63,6 +63,16 @@ pub enum Video {
 6. `CHANGES.md` の `## develop` に `[CHANGE]` を追記する（公開 API 破壊的変更のため）。
 
 なお、本 issue のバリアント名 `Vp8` / `Vp9` / `H264` / `H265` / `Av1` は issue 0072 (VideoCodecType の命名矯正) の完了を前提とする。issue 0072 が先に実装されることが望ましい（`issues/0072-change-unify-video-codec-type-with-webrtc.md:46` 参照）。
+
+## 解決方法
+
+`Video::Video { ... }` をコーデック別バリアントに分割し、排他を型で保証するよう変更した。
+- 新バリアント: `Vp8` / `Vp9` / `H264` / `H265` / `Av1`。各バリアントは `bit_rate: Option<u32>` とコーデック固有の `params` フィールドを持つ。
+- `DisplayJson` 実装を新しいバリアント構造に対応させた。
+- `Video::new_vp8()` / `Video::new_vp9()` / `Video::new_h264()` / `Video::new_h265()` / `Video::new_av1()` コンストラクタを更新。
+- `Video::codec_type()`, `Video::bit_rate()`, `Video::set_bit_rate()` メソッドを追加し、バリアント横断で一貫したアクセスを提供。
+- `signaling_types.rs` の `Video` → `WebSocketVideo` 変換も新構造に対応させた。
+- SKILL.md と CHANGES.md を更新した。
 
 ## 完了条件
 
