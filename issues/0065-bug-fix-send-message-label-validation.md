@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-28
 - Model: Opus 4.7
 - Branch: feature/fix-send-message-label-validation
 - Polished: 2026-07-27
@@ -104,6 +104,15 @@ fn send_data_channel_message(&mut self, label: &str, data: &[u8]) -> Result<()> 
 ### rustdoc 更新
 
 `send_message` の rustdoc (connection.rs:506-508) を更新する。「`#` プレフィックス付きラベルのユーザー定義 DataChannel にバイナリデータを送信する」という既存の説明を、allowlist 方式に合わせて「シグナリング時に `data_channels` で指定したラベルの DataChannel にバイナリデータを送信する」に書き換え、エラー条件（違反時は `Error::InvalidDataChannelLabel`）を追記する。
+
+## 解決方法
+
+ラベル検証を `SoraConnectionHandle::send_message` の入口に追加した。
+- `SoraConnectionHandle` に `user_data_channel_labels: HashSet<String>` フィールドを追加し、`SoraConnection::new()` で `config.data_channels` から収集する。
+- `send_message` で `self.user_data_channel_labels.contains(label)` を検査し、未登録ラベルに対して `Error::InvalidDataChannelLabel` を返す。
+- `Error::InvalidDataChannelLabel` バリアントを新設し、`Display` 実装を追加した。
+- SKILL.md の記述を allowlist 方式に合わせて更新した。
+- テストでは `#` プレフィックスで照合する方式を採用し、`SoraConnection` が持つ `data_channel_configs` の `#` プレフィックスを要求するように修正した（後続コミット `bf3c977` で検証を `SoraConnection` 側に移動）。
 
 ## 完了条件
 
