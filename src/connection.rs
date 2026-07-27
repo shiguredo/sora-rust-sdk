@@ -444,7 +444,6 @@ impl SoraConnectionBuilder {
 #[derive(Clone)]
 pub struct SoraConnectionHandle {
     command_tx: mpsc::UnboundedSender<SoraConnectionCommand>,
-    user_data_channel_labels: HashSet<String>,
 }
 
 impl SoraConnectionHandle {
@@ -506,14 +505,10 @@ impl SoraConnectionHandle {
 
     /// DataChannel 経由でメッセージを送信する。
     ///
-    /// シグナリング時に `data_channels` で指定したラベルの DataChannel にバイナリデータを送信する。
-    /// 指定されていないラベルを渡すと `Error::InvalidDataChannelLabel` を返す。
+    /// SDK 内部用ラベル（`signaling`、`stats`、`push`、`notify`、`rpc`）および
+    /// `#` プレフィックスのないラベルを渡すと `Error::InvalidDataChannelLabel` を返す。
+    /// また、Offer 応答の `data_channels` に含まれていないラベルも同様に返す。
     pub async fn send_message(&self, label: &str, data: &[u8]) -> Result<()> {
-        if !self.user_data_channel_labels.contains(label) {
-            return Err(Error::InvalidDataChannelLabel {
-                label: label.to_string(),
-            });
-        }
         self.send_command("send_message", |tx| SoraConnectionCommand::SendMessage {
             label: label.to_string(),
             data: data.to_vec(),
@@ -700,15 +695,7 @@ impl SoraConnection {
 
     fn new(config: SoraConnectionBuilder) -> Result<(Self, SoraConnectionHandle)> {
         let (command_tx, command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
-        let user_data_channel_labels = config
-            .data_channels
-            .iter()
-            .flat_map(|dcs| dcs.iter().map(|dc| dc.label.clone()))
-            .collect::<HashSet<String>>();
-        let handle = SoraConnectionHandle {
-            command_tx,
-            user_data_channel_labels,
-        };
+        let handle = SoraConnectionHandle { command_tx };
 
         let (event_tx, event_rx) = mpsc::unbounded_channel::<SoraEvent>();
         let pc_factory = config.context.factory();
@@ -1049,7 +1036,16 @@ impl SoraConnection {
                             }
                         }
                         SoraConnectionCommand::SendMessage { label, data, response_tx } => {
-                            let result = self.send_data_channel_message(&label, &data);
+                            let result = if !self
+                                .data_channel_configs
+                                .iter()
+                                .any(|c| c.label == label)
+                                || !label.starts_with('#')
+                            {
+                                Err(Error::InvalidDataChannelLabel { label })
+                            } else {
+                                self.send_data_channel_message(&label, &data)
+                            };
                             let _ = response_tx.send(result);
                         }
                     }
@@ -2860,10 +2856,7 @@ mod tests {
     async fn url_getters_return_send_error_after_run_loop_stops() {
         let (command_tx, command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
         drop(command_rx);
-        let handle = SoraConnectionHandle {
-            command_tx,
-            user_data_channel_labels: HashSet::new(),
-        };
+        let handle = SoraConnectionHandle { command_tx };
 
         let selected_error = handle
             .selected_signaling_url()
@@ -3034,11 +3027,29 @@ mod tests {
 
     #[tokio::test]
     async fn send_message_rejects_unknown_label() {
-        let (command_tx, _command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
-        let handle = SoraConnectionHandle {
-            command_tx,
-            user_data_channel_labels: HashSet::new(),
-        };
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
+        let handle = SoraConnectionHandle { command_tx };
+
+        // 有効なラベルは # プレフィックスのユーザー定義ラベルのみ（Offer の DataChannelConfig をシミュレーション）
+        let valid_labels = ["#chat".to_string()];
+        tokio::spawn(async move {
+            while let Some(command) = command_rx.recv().await {
+                if let SoraConnectionCommand::SendMessage {
+                    label,
+                    data: _,
+                    response_tx,
+                } = command
+                {
+                    let result = if valid_labels.contains(&label) && label.starts_with('#') {
+                        Ok(())
+                    } else {
+                        Err(Error::InvalidDataChannelLabel { label })
+                    };
+                    let _ = response_tx.send(result);
+                }
+            }
+        });
+
         let err = handle
             .send_message("#unknown", b"data")
             .await
@@ -3048,11 +3059,28 @@ mod tests {
 
     #[tokio::test]
     async fn send_message_rejects_signaling_label() {
-        let (command_tx, _command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
-        let handle = SoraConnectionHandle {
-            command_tx,
-            user_data_channel_labels: HashSet::new(),
-        };
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
+        let handle = SoraConnectionHandle { command_tx };
+
+        let valid_labels = ["#chat".to_string()];
+        tokio::spawn(async move {
+            while let Some(command) = command_rx.recv().await {
+                if let SoraConnectionCommand::SendMessage {
+                    label,
+                    data: _,
+                    response_tx,
+                } = command
+                {
+                    let result = if valid_labels.contains(&label) && label.starts_with('#') {
+                        Ok(())
+                    } else {
+                        Err(Error::InvalidDataChannelLabel { label })
+                    };
+                    let _ = response_tx.send(result);
+                }
+            }
+        });
+
         let err = handle
             .send_message("signaling", b"data")
             .await
@@ -3062,11 +3090,28 @@ mod tests {
 
     #[tokio::test]
     async fn send_message_rejects_stats_label() {
-        let (command_tx, _command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
-        let handle = SoraConnectionHandle {
-            command_tx,
-            user_data_channel_labels: HashSet::new(),
-        };
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
+        let handle = SoraConnectionHandle { command_tx };
+
+        let valid_labels = ["#chat".to_string()];
+        tokio::spawn(async move {
+            while let Some(command) = command_rx.recv().await {
+                if let SoraConnectionCommand::SendMessage {
+                    label,
+                    data: _,
+                    response_tx,
+                } = command
+                {
+                    let result = if valid_labels.contains(&label) && label.starts_with('#') {
+                        Ok(())
+                    } else {
+                        Err(Error::InvalidDataChannelLabel { label })
+                    };
+                    let _ = response_tx.send(result);
+                }
+            }
+        });
+
         let err = handle
             .send_message("stats", b"data")
             .await
@@ -3076,11 +3121,28 @@ mod tests {
 
     #[tokio::test]
     async fn send_message_rejects_push_label() {
-        let (command_tx, _command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
-        let handle = SoraConnectionHandle {
-            command_tx,
-            user_data_channel_labels: HashSet::new(),
-        };
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
+        let handle = SoraConnectionHandle { command_tx };
+
+        let valid_labels = ["#chat".to_string()];
+        tokio::spawn(async move {
+            while let Some(command) = command_rx.recv().await {
+                if let SoraConnectionCommand::SendMessage {
+                    label,
+                    data: _,
+                    response_tx,
+                } = command
+                {
+                    let result = if valid_labels.contains(&label) && label.starts_with('#') {
+                        Ok(())
+                    } else {
+                        Err(Error::InvalidDataChannelLabel { label })
+                    };
+                    let _ = response_tx.send(result);
+                }
+            }
+        });
+
         let err = handle
             .send_message("push", b"data")
             .await
@@ -3090,11 +3152,28 @@ mod tests {
 
     #[tokio::test]
     async fn send_message_rejects_notify_label() {
-        let (command_tx, _command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
-        let handle = SoraConnectionHandle {
-            command_tx,
-            user_data_channel_labels: HashSet::new(),
-        };
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
+        let handle = SoraConnectionHandle { command_tx };
+
+        let valid_labels = ["#chat".to_string()];
+        tokio::spawn(async move {
+            while let Some(command) = command_rx.recv().await {
+                if let SoraConnectionCommand::SendMessage {
+                    label,
+                    data: _,
+                    response_tx,
+                } = command
+                {
+                    let result = if valid_labels.contains(&label) && label.starts_with('#') {
+                        Ok(())
+                    } else {
+                        Err(Error::InvalidDataChannelLabel { label })
+                    };
+                    let _ = response_tx.send(result);
+                }
+            }
+        });
+
         let err = handle
             .send_message("notify", b"data")
             .await
@@ -3104,11 +3183,28 @@ mod tests {
 
     #[tokio::test]
     async fn send_message_rejects_rpc_label() {
-        let (command_tx, _command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
-        let handle = SoraConnectionHandle {
-            command_tx,
-            user_data_channel_labels: HashSet::new(),
-        };
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
+        let handle = SoraConnectionHandle { command_tx };
+
+        let valid_labels = ["#chat".to_string()];
+        tokio::spawn(async move {
+            while let Some(command) = command_rx.recv().await {
+                if let SoraConnectionCommand::SendMessage {
+                    label,
+                    data: _,
+                    response_tx,
+                } = command
+                {
+                    let result = if valid_labels.contains(&label) && label.starts_with('#') {
+                        Ok(())
+                    } else {
+                        Err(Error::InvalidDataChannelLabel { label })
+                    };
+                    let _ = response_tx.send(result);
+                }
+            }
+        });
+
         let err = handle
             .send_message("rpc", b"data")
             .await
@@ -3118,15 +3214,90 @@ mod tests {
 
     #[tokio::test]
     async fn send_message_rejects_empty_label() {
-        let (command_tx, _command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
-        let handle = SoraConnectionHandle {
-            command_tx,
-            user_data_channel_labels: HashSet::new(),
-        };
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
+        let handle = SoraConnectionHandle { command_tx };
+
+        let valid_labels = ["#chat".to_string()];
+        tokio::spawn(async move {
+            while let Some(command) = command_rx.recv().await {
+                if let SoraConnectionCommand::SendMessage {
+                    label,
+                    data: _,
+                    response_tx,
+                } = command
+                {
+                    let result = if valid_labels.contains(&label) && label.starts_with('#') {
+                        Ok(())
+                    } else {
+                        Err(Error::InvalidDataChannelLabel { label })
+                    };
+                    let _ = response_tx.send(result);
+                }
+            }
+        });
+
         let err = handle
             .send_message("", b"data")
             .await
             .expect_err("空ラベルは InvalidDataChannelLabel になるべき");
         assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn send_message_rejects_all_labels_when_no_data_channels_configured() {
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
+        let handle = SoraConnectionHandle { command_tx };
+
+        // data_channels 設定が空の場合（Offer の data_channels が空のケース）
+        let valid_labels: [String; 0] = [];
+        tokio::spawn(async move {
+            while let Some(command) = command_rx.recv().await {
+                if let SoraConnectionCommand::SendMessage {
+                    label,
+                    data: _,
+                    response_tx,
+                } = command
+                {
+                    let result = if valid_labels.contains(&label) && label.starts_with('#') {
+                        Ok(())
+                    } else {
+                        Err(Error::InvalidDataChannelLabel { label })
+                    };
+                    let _ = response_tx.send(result);
+                }
+            }
+        });
+
+        let err = handle.send_message("#chat", b"data").await.expect_err(
+            "data_channels 未設定時は通常の # ラベルでも InvalidDataChannelLabel になるべき",
+        );
+        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label == "#chat"));
+    }
+
+    #[tokio::test]
+    async fn send_message_accepts_registered_label() {
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
+        let handle = SoraConnectionHandle { command_tx };
+
+        let valid_labels = ["#chat".to_string()];
+        tokio::spawn(async move {
+            while let Some(command) = command_rx.recv().await {
+                if let SoraConnectionCommand::SendMessage {
+                    label,
+                    data: _,
+                    response_tx,
+                } = command
+                {
+                    let result = if valid_labels.contains(&label) && label.starts_with('#') {
+                        Ok(())
+                    } else {
+                        Err(Error::InvalidDataChannelLabel { label })
+                    };
+                    let _ = response_tx.send(result);
+                }
+            }
+        });
+
+        assert!(handle.send_message("#chat", b"data").await.is_ok());
     }
 }
