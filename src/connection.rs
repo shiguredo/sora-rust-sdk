@@ -2017,13 +2017,27 @@ struct SignalingTarget {
 /// PBT 等の検証目的を主用途として公開している型のため、通常の利用者がこの型を
 /// フィールド値の取得は accessor メソッド (`host()` / `port()` / `username()` /
 /// `password()` / `user_agent()`) 経由で行う。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ParsedProxyInfo {
     pub(crate) host: String,
     pub(crate) port: u16,
     pub(crate) username: Option<String>,
     pub(crate) password: Option<String>,
     pub(crate) user_agent: String,
+}
+
+// 機密情報 (username / password) を Debug 出力時にマスクする。
+// ProxyInfo (src/types.rs) と同じパターン。
+impl std::fmt::Debug for ParsedProxyInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParsedProxyInfo")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username.as_ref().map(|_| "<redacted>"))
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("user_agent", &self.user_agent)
+            .finish()
+    }
 }
 
 impl ParsedProxyInfo {
@@ -2712,6 +2726,23 @@ mod tests {
         };
         let parsed = ParsedProxyInfo::parse(&proxy).expect("proxy URL の解析に失敗しました");
         assert_eq!(parsed.user_agent(), "");
+    }
+
+    #[test]
+    fn parsed_proxy_info_debug_masks_credentials() {
+        let parsed = ParsedProxyInfo {
+            host: "proxy.example.com".to_string(),
+            port: 8080,
+            username: Some("secret_user".to_string()),
+            password: Some("secret_pass".to_string()),
+            user_agent: "ua".to_string(),
+        };
+        let debug_str = format!("{:?}", parsed);
+        assert!(debug_str.contains("<redacted>"));
+        assert!(!debug_str.contains("secret_user"));
+        assert!(!debug_str.contains("secret_pass"));
+        assert!(debug_str.contains("proxy.example.com"));
+        assert!(debug_str.contains("8080"));
     }
 
     #[test]
