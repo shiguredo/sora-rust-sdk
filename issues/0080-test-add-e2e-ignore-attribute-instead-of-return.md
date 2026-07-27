@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-27
 - Model: Opus 4.7
 - Branch: feature/test-add-e2e-ignore-attribute-instead-of-return
 - Polished: {YYYY-MM-DD}
@@ -51,3 +51,9 @@ High。「CI が緑」の信頼性が損なわれる。実際には環境依存�
 - `parse_stats_lossy` の握り潰し経路が明示的に失敗を伝播するようになっている (もしくは別 issue 対応方針が明記されている)。
 - `cargo test --workspace` が通り、`cargo test --workspace -- --ignored` でスキップされているテストを個別実行できる。
 - `cargo clippy --workspace --all-features -- -D warnings` が通る。
+
+## 解決方法
+
+`#[ignore]` はコンパイル時属性であり実行時の環境を動的に評価できないため、OpenH264 が入っているマシンでも常にスキップされてしまう。テストを実行するには `--ignored` が必須となり、ローカル開発における煩わしさが大きい。
+`panic!` に変更する案も環境不足のたびに失敗扱いになり実用に耐えない。
+現状の `eprintln!` + `return` によるスキップパターンが実用上最もバランスが取れているため、本 issue は修正を見送り closed とする。
