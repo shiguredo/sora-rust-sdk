@@ -123,7 +123,7 @@ fn send_data_channel_message(&mut self, label: &str, data: &[u8]) -> Result<()> 
 - `SoraConnectionHandle` から `user_data_channel_labels` フィールドを削除し、`command_tx` のみに戻した。`send_message` の rustdoc を「SDK 内部用ラベルおよび `#` プレフィックスのないラベル、Offer 応答の `data_channels` に含まれていないラベルを渡すと `Error::InvalidDataChannelLabel` を返す」に更新。
 - `SendMessage` コマンドハンドラ内で `self.data_channel_configs.iter().any(|c| c.label == label) && label.starts_with('#')` により検証。`data_channel_configs` は Offer / re-offer 受信時に更新される動的な値であり、redirect 後のリセットや re-offer による差し替えに追従する。
 - テストを `command_tx + tokio::spawn` 方式に書き換え、コマンドハンドラ相当のロジックで `#` プレフィックスと `data_channel_configs` 照合を再現。
-- SKILL.md の記述を新しい方式に合わせて更新。
+- `send_message` の rustdoc を新しい検証方式に合わせて更新。
 
 ## 完了条件
 

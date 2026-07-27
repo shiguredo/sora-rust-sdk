@@ -57,7 +57,7 @@ redirect = true;
 
 `SoraConnection::run` の redirect 分岐冒頭で、以下の session 状態をすべて初期状態にリセットした。
 - ローカル変数: `switched_received`, `switched_ignore_disconnect_websocket`, `use_datachannel_signaling`, `opened_datachannels`, `ws_disconnect_delay_start`
-- `self` フィールド: `data_channels`, `data_channel_configs`, `pending_rpc_responses`, `simulcast_encodings`, `offer_simulcast`, `rpc_id_counter`
+- `self` フィールド: `data_channels`, `data_channel_configs`, `pending_rpc_responses`, `rpc_id_counter`
 - リセット前に `opened_datachannels` の各ラベルについて `handler.on_data_channel_close` を呼びユーザーに通知する。
 - `pending_rpc_responses` の各エントリには `Error::Redirected` (新設) を send してから clear する。
 - `event_rx` を `try_recv()` でドレインして旧セッション由来の滞留イベントを破棄する。

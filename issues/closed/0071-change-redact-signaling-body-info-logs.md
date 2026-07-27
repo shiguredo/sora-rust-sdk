@@ -54,7 +54,7 @@ High (セキュリティ致命)。ログ集約先 (CloudWatch / Loki / ELK 等) 
 - `connection.rs:1723` の DataChannel 送信テキスト全文ログを削除。
 - `connection.rs:1774` の DataChannel 受信テキスト全文ログを削除。
 - `connection.rs:2567` の WebSocket 送信テキスト全文ログを削除。
-- ユーザーが必要なら `on_signaling_message` / `on_message` 等のハンドラで同等の情報を取得できるよう、SKILL.md に明記した。
+
 
 ## 完了条件
 

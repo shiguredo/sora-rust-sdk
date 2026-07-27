@@ -47,7 +47,6 @@ TLS ターゲットの HTTP CONNECT 接続で、`into_plain_parts()` から得�
 - TLS 接続では ClientHello をクライアントが先に送るため、TLS 開始前にサーバーからバイトが届くことはありえず、余剰バイトは必ずプロキシによる挿入であるため拒否する。
 - 非 TLS ターゲットでは引き続き `pending` を `push_pending_read` で受け入れる。
 - 到達不能になった `push_pending_read` 呼び出しを削除した（後続コミット `373ff8c`）。
-- 単体テストで応答注入経路が拒否されることを検証した。
 
 ## 完了条件
 
