@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-28
 - Model: Opus 4.7
 - Branch: feature/change-preserve-mp4-error-source-chain
 - Polished: 2026-07-27
@@ -58,6 +58,16 @@ pub(crate) enum Mp4Error {
 6. `src/video_codecs/mp4.rs` 内のテスト `sample_reader_rejects_invalid_length_size_minus_one` で `Error::Mp4 { reason }` にパターンマッチしている箇所を `Error::Mp4 { source }` に修正する。
 7. ユーザーは `matches!(err, Error::Mp4 { source: Mp4Error::NoVideoTrack })` で分岐可能になる。
 8. `CHANGES.md` の `## develop` に `[CHANGE]` エントリを追加する。
+
+## 解決方法
+
+`Error::Mp4` を `source` 保持型に変更し、エラーチェーンを復活させた。
+- `Error::Mp4 { reason: String }` → `Error::Mp4 { source: Mp4Error }` に変更。
+- `Mp4Error` を `pub` に格上げし、`lib.rs` から再エクスポート。
+- `Error::source()` の match に `Error::Mp4 { source } => Some(source)` を追加。
+- `From<Mp4Error> for Error` を `Error::Mp4 { source: err }` に修正。
+- 既存テストのパターンマッチを新しいバリアント形式に更新した。
+- CHANGES.md に `[CHANGE]` エントリを追加した。
 
 ## 完了条件
 
