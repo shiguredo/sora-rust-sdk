@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-27
 - Model: Opus 4.7
 - Branch: feature/change-video-codec-implementation-new-into-string
 - Polished: {YYYY-MM-DD}
@@ -42,3 +42,13 @@ pub fn new(name: &'static str, description: &'static str) -> Self {
 - `VideoCodecImplementation::new` に `String` / `&str` / `&'static str` のいずれも渡せる。
 - 既存の呼び出し箇所すべてが変更なしでビルドできる。
 - `cargo clippy --workspace --all-features -- -D warnings` と `cargo test --workspace` が通る。
+
+## 解決方法
+
+`VideoCodecImplementation::new` のシグネチャを `&'static str` に制限しているのは意図的な設計である。
+
+- `name` は `PartialEq` や `Hash` の判定に使われ、実装ごとに一意である必要がある。静的文字列のみを受け付けることで、意図しない同一視や衝突を防止する。
+- `description` についてもランタイム値（GPU 名や実装バージョン等）を含める必要はなく、静的な説明文で十分である。
+- すべての既存呼び出し元は静的文字列リテラルを直接渡しており、`Into<String>` に緩和する実利がない。
+
+したがって、本 issue は対応しない。close する。
