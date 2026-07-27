@@ -1076,7 +1076,7 @@ impl SoraConnection {
                         send_text(&mut ws, &connect_text)?;
                     }
                     ConnectionEvent::TextMessage(text) => {
-                        rtc_log_info!("[WebSocket] Received text message: {}", text);
+                        rtc_log_info!("[WebSocket] Received text message of {} bytes", text.len());
                         let message = match IncomingMessage::parse(&text) {
                             Ok(message) => message,
                             Err(err) => {
@@ -1170,10 +1170,7 @@ impl SoraConnection {
                         }
                     }
                     ConnectionEvent::BinaryMessage(data) => {
-                        rtc_log_info!(
-                            "[WebSocket] バイナリメッセージを受信しました: {} bytes",
-                            data.len()
-                        );
+                        rtc_log_info!("[WebSocket] Received binary message: {} bytes", data.len());
                     }
                     ConnectionEvent::Ping(_) => {
                         rtc_log_info!("[WebSocket] Received Ping");
@@ -1764,7 +1761,7 @@ impl SoraConnection {
             message.as_bytes().to_vec()
         };
 
-        rtc_log_info!("Sent message to DataChannel '{}': {}", label, &message);
+        rtc_log_info!("Sent message to DataChannel '{}'", label);
 
         if !managed.channel.send(&data, true) {
             return Err(Error::DataChannelSendFailed);
@@ -1816,9 +1813,9 @@ impl SoraConnection {
         };
 
         rtc_log_info!(
-            "DataChannel '{}' からメッセージを受信: {}",
+            "DataChannel '{}' からメッセージを受信: {} bytes",
             label,
-            String::from_utf8_lossy(&message_bytes)
+            message_bytes.len()
         );
 
         // DataChannel API コールバック (全ラベル)
@@ -2628,7 +2625,7 @@ async fn flush_ws_output<R: RandomSource>(
 }
 
 fn send_text<R: RandomSource>(ws: &mut WebSocketClientConnection<R>, text: &str) -> Result<()> {
-    rtc_log_info!("[WebSocket] Sent text message: {}", text);
+    rtc_log_info!("[WebSocket] Sent text message of {} bytes", text.len());
     ws.send_text(text)?;
     Ok(())
 }
