@@ -178,24 +178,31 @@ fn apply_alignment_to_codec(
         return None;
     }
 
+    // トップレベル codec のアライン結果を計算する。
     let aligned_codec_width = align_down(codec.width(), horizontal_alignment)?;
     let aligned_codec_height = align_down(codec.height(), vertical_alignment)?;
 
+    // 全 simulcast stream のアライン結果を事前に計算する。
+    // いずれか 1 つでも None なら codec に何も変更を加えずに None を返す。
+    let mut stream_alignments: Vec<(usize, i32, i32)> = Vec::new();
+    for index in 0..codec.number_of_simulcast_streams() {
+        let Some(stream) = codec.simulcast_stream(index) else {
+            continue;
+        };
+        let aligned_stream_width = align_down(stream.width(), horizontal_alignment)?;
+        let aligned_stream_height = align_down(stream.height(), vertical_alignment)?;
+        stream_alignments.push((index, aligned_stream_width, aligned_stream_height));
+    }
+
+    // 全要素がアライン可能な場合のみ、一括で適用する。
+    // 部分状態（トップレベルだけ align 済み等）が発生しない。
     codec.set_width(aligned_codec_width);
     codec.set_height(aligned_codec_height);
-
-    for index in 0..codec.number_of_simulcast_streams() {
-        let Some(mut stream) = codec.simulcast_stream(index) else {
-            continue;
-        };
-        let Some(aligned_stream_width) = align_down(stream.width(), horizontal_alignment) else {
-            continue;
-        };
-        let Some(aligned_stream_height) = align_down(stream.height(), vertical_alignment) else {
-            continue;
-        };
-        stream.set_width(aligned_stream_width);
-        stream.set_height(aligned_stream_height);
+    for (index, aligned_stream_width, aligned_stream_height) in stream_alignments {
+        if let Some(mut stream) = codec.simulcast_stream(index) {
+            stream.set_width(aligned_stream_width);
+            stream.set_height(aligned_stream_height);
+        }
     }
 
     Some((aligned_codec_width, aligned_codec_height))
@@ -910,6 +917,41 @@ mod tests {
                 .height(),
             80
         );
+    }
+
+    #[test]
+    fn alignment_rejects_partial_simulcast_stream_failure() {
+        let mut codec = VideoCodec::new();
+        codec.set_codec_type(VideoCodecType::Av1);
+        codec.set_width(320);
+        codec.set_height(180);
+        codec.set_number_of_simulcast_streams(2);
+        codec
+            .simulcast_stream(0)
+            .expect("simulcast stream 0 が必要")
+            .set_width(320);
+        codec
+            .simulcast_stream(0)
+            .expect("simulcast stream 0 が必要")
+            .set_height(180);
+        codec
+            .simulcast_stream(1)
+            .expect("simulcast stream 1 が必要")
+            .set_width(15);
+        codec
+            .simulcast_stream(1)
+            .expect("simulcast stream 1 が必要")
+            .set_height(10);
+
+        // stream 1 が alignment=16 に満たないため、関数全体が None を返す。
+        // codec の状態は変更されない。
+        let result = apply_alignment_to_codec(&mut codec, VideoCodecType::Av1, 16, 16);
+        assert!(
+            result.is_none(),
+            "stream 1 がアライン不能のため None になるべき"
+        );
+        assert_eq!(codec.width(), 320);
+        assert_eq!(codec.height(), 180);
     }
 
     #[test]
