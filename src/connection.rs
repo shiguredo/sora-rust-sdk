@@ -2450,8 +2450,7 @@ async fn connect_websocket(
                 return Err(Error::ProxyConnectUnexpectedTrailingData);
             }
             let tls_stream = connect_tls(&target.host, tcp_stream, tls_config, deadline).await?;
-            let mut stream = ClientStream::new_tls(tls_stream);
-            stream.push_pending_read(pending);
+            let stream = ClientStream::new_tls(tls_stream);
             Ok(stream)
         } else {
             Ok(stream)
