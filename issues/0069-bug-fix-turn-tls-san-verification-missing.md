@@ -1,11 +1,26 @@
 # TURN-TLS のサーバー証明書検証に SubjectAltName 検証を追加する
 
-- Priority: High
+- Priority: Cancelled
 - Created: 2026-07-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-28
 - Model: Opus 4.7
 - Branch: feature/fix-turn-tls-san-verification-missing
 - Polished: 2026-07-27
+
+## 結論
+
+**修正不要。** libwebrtc が TURN-TLS 接続時に OpenSSL の `X509_check_host()` で SAN 検証を既に行っているため、sora-rust-sdk 側での追加実装は不要。
+
+libwebrtc のソースコード調査で確認したコールチェーン:
+
+- `BasicPacketSocketFactory::CreateClientTcpSocket()` (`basic_packet_socket_factory.cc:214`) が `ssl_adapter->StartSSL(remote_address.hostname())` で TURN サーバーのホスト名を SSL アダプタに渡す
+- `OpenSSLAdapter::ContinueSSL()` (`openssl_adapter.cc:396`) が TLS ハンドシェイク後に `SSLPostConnectionCheck(ssl_, ssl_host_name_)` を呼ぶ
+- `SSLPostConnectionCheck()` (`openssl_adapter.cc:773-774`) が `openssl::VerifyPeerCertMatchesHost(ssl, host) && cert_verified` の両方を要求する
+- `VerifyPeerCertMatchesHost()` (`openssl_utility.cc:215`) が `X509_check_host()` で SAN を検証する
+
+カスタム `SSLCertificateVerifier` を設定しても `VerifyPeerCertMatchesHost` は常に実行され、ホスト名検証はバイパスされない。
+
+→ commit `36f73a5` の修正は冗長と判断し revert した。
 
 ## 目的
 
