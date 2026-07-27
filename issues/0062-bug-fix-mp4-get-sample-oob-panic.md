@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-28
 - Model: Opus 4.7
 - Branch: feature/fix-mp4-get-sample-oob-panic
 - Polished: 2026-07-27
@@ -47,6 +47,14 @@ let raw_data = &self.file_data[data_offset as usize..data_offset as usize + data
    - フィーダースレッド（`mp4.rs:731`）でのエラーハンドリング設計（スレッド停止 / ログ出力 / フレームスキップ）が複雑化する。
    - コンストラクタ検証は読み込み時点で不正 MP4 を弾ける（早期失敗）。#0060 の実装とも一貫する。
 6. `cumulative_duration_us`（`mp4.rs:445`）も同型の unchecked indexing を持つが、呼び出し元が `i + 1 <= reader.len()` を保証しているため本 issue のスコープ外とする。
+
+## 解決方法
+
+`Mp4SampleReader::new` で全サンプルの事前境界検証を追加した。
+- 各サンプルの `data_offset` と `data_offset + data_size` が `file_data.len()` を超えないか検証する。
+- 不整合がある場合は `Mp4Error::InconsistentSampleTable` を返す。
+- `Mp4Error::InconsistentSampleTable` バリアントを新設し、`Display` と `Error::source()` に対応させた。
+- `stco` ボックスのチャンクオフセットを不正値に書き換えたテストフィクスチャで単体テストを追加した。
 
 ## 完了条件
 
