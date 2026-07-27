@@ -155,10 +155,8 @@ fn handle_amf_encode_callback(
     let buffer = encoded.buffer();
     let ptr = buffer.get_native() as *const u8;
     let size = buffer.get_size();
-    if ptr.is_null() || size == 0 {
-        rtc_log_error!("AMF encode callback: buffer is null or empty");
-        return;
-    }
+    // ptr.is_null() / size == 0 のチェックは extract_encoded_output() 側で
+    // 既に行われているため、ここでは不要。
     let data = unsafe { std::slice::from_raw_parts(ptr, size) };
 
     let mut encoded_image = EncodedImage::new();
