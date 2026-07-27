@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-27
 - Model: Opus 4.7
 - Branch: feature/fix-datachannel-signaling-switch-condition
 - Polished: {YYYY-MM-DD}
@@ -47,3 +47,7 @@ if self.is_datachannel_open(label) && !opened_datachannels.contains(label) {
 - `switched` を受信していない状態では切替が発火しない。
 - 単体テストで上記のシナリオが検証されている (SoraConnection のフィールド初期化コストのため、内部関数の単体テストで代替可)。
 - `cargo test --workspace` と `cargo clippy --workspace --all-features -- -D warnings` が通る。
+
+## 解決方法
+
+Sora のドキュメント上、`data_channel_signaling=false` + `data_channels`（ユーザー定義 DataChannel）の構成はサポートされていない。リアルタイムメッセージング機能を利用するには `data_channel_signaling=true` が必須であり（MESSAGING より）、`data_channel_signaling=false` の場合 Sora は offer に `data_channels` を含めない（WEBSOCKET_SIGNALING より）。そのため、この構成で offer を送信することはできず、実際に問題が発生する可能性はない。よって close する。
