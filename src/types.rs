@@ -263,13 +263,13 @@ impl TryFrom<shiguredo_webrtc::VideoCodecType> for VideoCodecType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioCodecType {
     /// Opus コーデック。
-    OPUS,
+    Opus,
 }
 
 impl DisplayJson for AudioCodecType {
     fn fmt(&self, f: &mut JsonFormatter<'_, '_>) -> std::fmt::Result {
         match self {
-            AudioCodecType::OPUS => f.value("OPUS"),
+            AudioCodecType::Opus => f.value("OPUS"),
         }
     }
 }
@@ -307,7 +307,7 @@ impl Audio {
     /// コーデックは Opus 固定、`bit_rate` と `opus_params` は任意。
     pub fn new_opus(bit_rate: Option<u32>, opus_params: Option<AudioOpusParams>) -> Self {
         Self::Audio {
-            codec_type: Some(AudioCodecType::OPUS),
+            codec_type: Some(AudioCodecType::Opus),
             bit_rate,
             opus_params,
         }
