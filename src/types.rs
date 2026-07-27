@@ -207,25 +207,54 @@ impl DisplayJson for AudioOpusParams {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoCodecType {
     /// VP8 コーデック。
-    VP8,
+    Vp8,
     /// VP9 コーデック。
-    VP9,
+    Vp9,
     /// H.264 コーデック。
     H264,
     /// H.265 コーデック。
     H265,
     /// AV1 コーデック。
-    AV1,
+    Av1,
 }
 
 impl DisplayJson for VideoCodecType {
     fn fmt(&self, f: &mut JsonFormatter<'_, '_>) -> std::fmt::Result {
         match self {
-            VideoCodecType::VP8 => f.value("VP8"),
-            VideoCodecType::VP9 => f.value("VP9"),
+            VideoCodecType::Vp8 => f.value("VP8"),
+            VideoCodecType::Vp9 => f.value("VP9"),
             VideoCodecType::H264 => f.value("H264"),
             VideoCodecType::H265 => f.value("H265"),
-            VideoCodecType::AV1 => f.value("AV1"),
+            VideoCodecType::Av1 => f.value("AV1"),
+        }
+    }
+}
+
+impl From<VideoCodecType> for shiguredo_webrtc::VideoCodecType {
+    fn from(value: VideoCodecType) -> Self {
+        match value {
+            VideoCodecType::Vp8 => shiguredo_webrtc::VideoCodecType::Vp8,
+            VideoCodecType::Vp9 => shiguredo_webrtc::VideoCodecType::Vp9,
+            VideoCodecType::H264 => shiguredo_webrtc::VideoCodecType::H264,
+            VideoCodecType::H265 => shiguredo_webrtc::VideoCodecType::H265,
+            VideoCodecType::Av1 => shiguredo_webrtc::VideoCodecType::Av1,
+        }
+    }
+}
+
+impl TryFrom<shiguredo_webrtc::VideoCodecType> for VideoCodecType {
+    type Error = String;
+
+    fn try_from(value: shiguredo_webrtc::VideoCodecType) -> std::result::Result<Self, Self::Error> {
+        match value {
+            shiguredo_webrtc::VideoCodecType::Vp8 => Ok(VideoCodecType::Vp8),
+            shiguredo_webrtc::VideoCodecType::Vp9 => Ok(VideoCodecType::Vp9),
+            shiguredo_webrtc::VideoCodecType::H264 => Ok(VideoCodecType::H264),
+            shiguredo_webrtc::VideoCodecType::H265 => Ok(VideoCodecType::H265),
+            shiguredo_webrtc::VideoCodecType::Av1 => Ok(VideoCodecType::Av1),
+            other => Err(format!(
+                "変換できません: shiguredo_webrtc::VideoCodecType::{other:?} → sora_sdk::VideoCodecType"
+            )),
         }
     }
 }
@@ -613,7 +642,7 @@ impl Video {
     /// Video バリアントの [Video] を生成する。コーデックは VP8。
     pub fn new_vp8(bit_rate: Option<u32>) -> Self {
         Self::Video {
-            codec_type: Some(VideoCodecType::VP8),
+            codec_type: Some(VideoCodecType::Vp8),
             bit_rate,
             vp9_params: None,
             av1_params: None,
@@ -624,7 +653,7 @@ impl Video {
     /// Video バリアントの [Video] を生成する。コーデックは VP9。
     pub fn new_vp9(bit_rate: Option<u32>, vp9_params: Option<VideoVP9Params>) -> Self {
         Self::Video {
-            codec_type: Some(VideoCodecType::VP9),
+            codec_type: Some(VideoCodecType::Vp9),
             bit_rate,
             vp9_params,
             av1_params: None,
@@ -635,7 +664,7 @@ impl Video {
     /// Video バリアントの [Video] を生成する。コーデックは AV1。
     pub fn new_av1(bit_rate: Option<u32>, av1_params: Option<VideoAV1Params>) -> Self {
         Self::Video {
-            codec_type: Some(VideoCodecType::AV1),
+            codec_type: Some(VideoCodecType::Av1),
             bit_rate,
             vp9_params: None,
             av1_params,
