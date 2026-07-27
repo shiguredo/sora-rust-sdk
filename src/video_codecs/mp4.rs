@@ -50,6 +50,18 @@ pub(crate) enum Mp4Error {
         /// 実際のファイルサイズ (バイト単位)。
         file_size: usize,
     },
+    /// サンプルテーブル (stsz / stco / co64) に不整合があり、
+    /// サンプルのオフセットがファイル範囲外になっている。
+    InconsistentSampleTable {
+        /// 問題のサンプルインデックス。
+        index: usize,
+        /// サンプルのファイル内オフセット。
+        offset: u64,
+        /// サンプルのデータサイズ。
+        size: usize,
+        /// 実際のファイルサイズ (バイト単位)。
+        file_size: usize,
+    },
 }
 
 impl std::fmt::Display for Mp4Error {
@@ -77,6 +89,17 @@ impl std::fmt::Display for Mp4Error {
                     "入力位置がファイルサイズ範囲外です: position={position}, file_size={file_size}"
                 )
             }
+            Self::InconsistentSampleTable {
+                index,
+                offset,
+                size,
+                file_size,
+            } => {
+                write!(
+                    f,
+                    "サンプルテーブルに不整合があります: sample={index} offset={offset} size={size} file_size={file_size}"
+                )
+            }
         }
     }
 }
@@ -90,7 +113,8 @@ impl std::error::Error for Mp4Error {
             | Self::NoVideoSamples
             | Self::UnsupportedVideoCodec
             | Self::InvalidNalLengthSize(_)
-            | Self::InputPositionOutOfRange { .. } => None,
+            | Self::InputPositionOutOfRange { .. }
+            | Self::InconsistentSampleTable { .. } => None,
         }
     }
 }
@@ -265,6 +289,22 @@ impl Mp4SampleReader {
 
         if samples.is_empty() {
             return Err(Mp4Error::NoVideoSamples);
+        }
+
+        let file_size = file_data.len();
+        for (index, &(data_offset, data_size, _, _, _)) in samples.iter().enumerate() {
+            let data_size_u64 = data_size as u64;
+            if data_offset
+                .checked_add(data_size_u64)
+                .is_none_or(|end| end > file_size as u64)
+            {
+                return Err(Mp4Error::InconsistentSampleTable {
+                    index,
+                    offset: data_offset,
+                    size: data_size,
+                    file_size,
+                });
+            }
         }
 
         // 累積再生時刻テーブルを事前計算する。
@@ -1045,5 +1085,42 @@ mod tests {
         let _ = std::fs::remove_file(&tmp_path);
 
         assert!(result.is_err(), "切り詰め MP4 は Err になるべきです");
+    }
+
+    #[test]
+    fn sample_reader_rejects_inconsistent_sample_table_offset_exceeds_file_size() {
+        let fixture = include_bytes!("testdata/archive-red-320x320-h264.mp4");
+        let mut patched = fixture.to_vec();
+        let file_size = patched.len();
+
+        let stco_offset = fixture
+            .windows(4)
+            .position(|w| w == b"stco")
+            .expect("fixture に stco ボックスが必要です");
+
+        let data_start = stco_offset + 8 + 4;
+        let bad_offset = (file_size + 1) as u32;
+        patched[data_start..data_start + 4].copy_from_slice(&bad_offset.to_be_bytes());
+
+        let tmp_name = format!(
+            "sora-sdk-mp4-test-stco-{}-{}.mp4",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after UNIX_EPOCH")
+                .as_nanos()
+        );
+        let tmp_path = std::env::temp_dir().join(tmp_name);
+
+        std::fs::write(&tmp_path, &patched).expect("failed to write temporary fixture");
+
+        let result = Mp4SampleReader::new(tmp_path.to_str().expect("path should be valid utf-8"));
+
+        let _ = std::fs::remove_file(&tmp_path);
+
+        assert!(
+            result.is_err(),
+            "不正な stco を持つ MP4 は Err になるべきです"
+        );
     }
 }
