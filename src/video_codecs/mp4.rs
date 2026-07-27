@@ -33,12 +33,18 @@ use crate::video_codec_capability::{
     CodecDirection, VideoCodecCapability, VideoCodecImplementation,
 };
 
+/// MP4 ファイル処理中に発生するエラー。
 #[derive(Debug)]
-pub(crate) enum Mp4Error {
+pub enum Mp4Error {
+    /// I/O エラー。
     Io(io::Error),
+    /// デマルチプレクスエラー。
     Demux(shiguredo_mp4::demux::DemuxError),
+    /// 映像トラックが存在しない。
     NoVideoTrack,
+    /// 映像サンプルが存在しない。
     NoVideoSamples,
+    /// 未対応の映像コーデック。
     UnsupportedVideoCodec,
     /// NAL 長プレフィックスのバイト数が不正。
     /// ISO/IEC 14496-15 では nal_length_size は 1/2/4 のみ有効 (lengthSizeMinusOne 0/1/3)。
@@ -1049,11 +1055,10 @@ mod tests {
         let _ = std::fs::remove_file(&tmp_path);
 
         match result {
-            Err(crate::error::Error::Mp4 { reason }) => {
-                // InvalidNalLengthSize 経路のエラーメッセージであることを確認する。
+            Err(crate::error::Error::Mp4 { source }) => {
                 assert!(
-                    reason.contains("NAL"),
-                    "expected NAL length size error, got: {reason}"
+                    matches!(source, Mp4Error::InvalidNalLengthSize(_)),
+                    "expected InvalidNalLengthSize error, got: {source:?}"
                 );
             }
             Err(e) => panic!("expected Mp4 error, got: {e}"),
