@@ -152,7 +152,7 @@ WebSocket TLS は PEM、TURN-TLS は DER である点に注意。
 | `selected_signaling_url()` | `Result<Option<String>>` | 最初に WebSocket 接続成功したシグナリング URL |
 | `connected_signaling_url()` | `Result<Option<String>>` | 現在接続中のシグナリング URL (リダイレクト後はリダイレクト先) |
 | `disconnect()` | `Result<()>` | 切断要求 |
-| `send_message(label, data)` | `Result<()>` | `#` プレフィックス DataChannel にバイナリ送信 |
+| `send_message(label, data)` | `Result<()>` | SDK 内部用ラベル (`signaling`、`stats`、`push`、`notify`、`rpc`) および `#` プレフィックスのないラベル、Offer 応答の `data_channels` に含まれていないラベルを渡すと `Error::InvalidDataChannelLabel` を返す |
 | `send_rpc_request(method, params, options)` | `Result<Option<RpcResponse>>` | JSON-RPC 2.0 リクエスト送信 |
 | `get_stats()` | `Result<JsonString>` | PeerConnection の統計情報 (JSON) |
 
@@ -180,11 +180,11 @@ pub enum Role { SendOnly, RecvOnly, SendRecv }
 
 | 型 | バリアント / フィールド |
 |----|----------------------|
-| `Audio` | `Bool(bool)`, `Audio { codec_type: Option<AudioCodecType>, bit_rate: Option<u32>, opus_params: Option<AudioOpusParams> }` |
-| `AudioCodecType` | `OPUS` |
+| `Audio` | `Bool(bool)`, `Opus { bit_rate: Option<u32>, params: Option<AudioOpusParams> }` |
+| `AudioCodecType` | `Opus` |
 | `AudioOpusParams` | `channels`, `maxplaybackrate`, `minptime`, `ptime`, `stereo`, `sprop_stereo`, `useinbandfec`, `usedtx` (すべて `Option`) |
-| `Video` | `Bool(bool)`, `Video { codec_type: Option<VideoCodecType>, bit_rate: Option<u32>, vp9_params: Option<VideoVP9Params>, av1_params: Option<VideoAV1Params>, h264_params: Option<VideoH264Params>, h265_params: Option<VideoH265Params> }` |
-| `VideoCodecType` | `VP8`, `VP9`, `H264`, `H265`, `AV1` |
+| `Video` | `Bool(bool)`, `Vp8 { bit_rate: Option<u32> }`, `Vp9 { bit_rate: Option<u32>, params: Option<VideoVP9Params> }`, `H264 { bit_rate: Option<u32>, params: Option<VideoH264Params> }`, `H265 { bit_rate: Option<u32>, params: Option<VideoH265Params> }`, `Av1 { bit_rate: Option<u32>, params: Option<VideoAV1Params> }` |
+| `VideoCodecType` | `Vp8`, `Vp9`, `H264`, `H265`, `Av1` |
 | `VideoVP9Params` | `profile_id: Option<u32>` (0..3) |
 | `VideoH264Params` | `profile_level_id: Option<String>`, `b_frame: Option<bool>` |
 | `VideoH265Params` | `level_id: Option<String>`, `profile_id: Option<u32>` (0..31), `tier_flag: Option<u32>` (0..1), `tx_mode: Option<String>` (`"SRST" \| "MRST" \| "MRMT"`), `b_frame: Option<bool>` |
@@ -253,7 +253,6 @@ H.264 / H.265 の `b_frame: true` は Sora 側の `sora.conf` で対応する設
 | 型 | feature / 条件 | 説明 |
 |----|---------------|------|
 | `Mp4SampleReader` | 常時 | MP4 ファイルからサンプルを取得 |
-| `Mp4EncodedSample` | 常時 | エンコード済みサンプル |
 | `Mp4VideoCapturer` | 常時 | `VideoTrackSource` 互換のキャプチャ。`Mp4PassthroughVideoCodecCapability` と組で使う |
 | `Error::Mp4` | 常時 | MP4 関連のエラー |
 | `LibcameraVideoCapturer` | `libcamera` | libcamera 経由の映像入力 |
@@ -522,15 +521,15 @@ if let Some(url) = handle.selected_signaling_url().await? {
 |----------|------------------|
 | 入力検証 | `InvalidRole`, `HostEmpty`, `HostInvalidFormat`, `UriParse`, `UrlMissingScheme`, `UrlUnsupportedScheme`, `UrlUserinfoNotSupported`, `UrlFragmentNotAllowed`, `UrlMissingHost` |
 | プロキシ | `ProxyUrlUnsupportedScheme`, `ProxyUrlUserinfoNotSupported`, `ProxyUrlFragmentNotAllowed`, `ProxyUrlMissingHost`, `ProxyUrlPathNotAllowed`, `ProxyUrlQueryNotAllowed`, `ProxyConnectDecode`, `ProxyConnectEncode`, `ProxyConnectResponseMissing`, `ProxyConnectStatusNotSuccessful`, `ProxyAuth` |
-| ネットワーク | `DnsResolve`, `NoResolvedAddress`, `TcpConnectTimeout`, `TcpConnect`, `TlsConfig`, `InvalidServerName`, `TlsConnectTimeout`, `TlsConnect`, `Websocket`, `Io` |
+| ネットワーク | `DnsResolve`, `NoResolvedAddress`, `TcpConnectTimeout`, `TcpConnect`, `TlsConfig`, `InvalidServerName`, `TlsConnectTimeout`, `TlsConnect`, `Websocket`, `Io`, `ProxyConnectUnexpectedTrailingData` |
 | シグナリング | `SignalingUrlsEmpty`, `AllSignalingUrlsFailed { errors }`, `UnsupportedMessageType`, `JsonParse` |
 | WebRTC | `Webrtc`, `PeerConnectionMissing`, `SetRemoteDescriptionTimeout`, `SetRemoteDescriptionResponseMissing`, `SetRemoteDescriptionFailed`, `AnswerTimeout`, `AnswerResponseMissing`, `AnswerFailed`, `SetLocalDescriptionTimeout`, `SetLocalDescriptionResponseMissing`, `SetLocalDescriptionFailed`, `SimulcastVideoSenderMissing`, `SimulcastSetParametersFailed`, `CandidateNotSupported` |
-| DataChannel / RPC | `DataChannelMissing`, `DataChannelSendFailed`, `Utf8DecodeFailed`, `RpcTimeout` |
+| DataChannel / RPC | `DataChannelMissing`, `DataChannelSendFailed`, `Utf8DecodeFailed`, `RpcTimeout`, `InvalidDataChannelLabel`, `Redirected` |
 | TLS 証明書 | `TurnTlsCaCert`, `ClientCertParse`, `ClientKeyParse`, `CaCertParse`, `ClientCertKeyIncomplete` |
 | コーデック | `InvalidVideoCodecCapability`, `InvalidVideoCodecPreference` |
 | 内部コマンド | `CommandSendFailed`, `CommandResponseMissing` |
 | バックエンド固有 (feature 付き) | `Libcamera`, `LibcameraMessage`, `Openh264`, `Amf { source }`, `AmfMessage`, `Vpl { source }`, `VplMessage`, `NvCodec { source }`, `NvCodecMessage`, `V4l2 { source }`, `V4l2Message` |
-| その他 | `Mp4 { reason }`, `InvalidSystemTime { source }` |
+| その他 | `Mp4 { source }`, `InvalidSystemTime { source }` |
 
 エラーメッセージ (`Display`) は日本語。ログメッセージは英語、というプロジェクト方針と分けて扱うこと。
 
@@ -543,7 +542,7 @@ if let Some(url) = handle.selected_signaling_url().await? {
 - **TLS 設定の単位の違い**: WebSocket TLS の証明書は PEM、TURN-TLS の CA 証明書は DER。
 - **ハードウェアコーデックは feature + runtime 両方の条件**: feature 有効化だけでなく GPU / ドライバが揃わないと `*Capability::new()` がエラーを返す。
 - **`VideoTrackSource` は本クレートでは作らない**: `shiguredo_webrtc` 側の capturer / source、もしくは本クレートの `Mp4VideoCapturer` / `LibcameraVideoCapturer` から生成する。
-- **`#` プレフィックス以外のラベルは触らない**: `send_message` / `on_message` はユーザー定義 DataChannel 専用。SDK 内部用ラベル (`signaling` 等) を渡すと `Error::DataChannelMissing` になる。
+- **`send_message` のラベル制約**: SDK 内部用ラベル（`signaling`、`stats`、`push`、`notify`、`rpc`）および `#` プレフィックスのないラベル、Offer 応答の `data_channels` に含まれていないラベルを渡すと `Error::InvalidDataChannelLabel` を返す。`on_message` は `#` プレフィックスのユーザー定義 DataChannel 専用。
 - **JSON-RPC の id は SDK が管理する**: 利用側が `id` を組み立てる必要はない。`params` の中身だけ渡す。
 - **ロギングは `shiguredo_webrtc` の `rtc_log_*` マクロ**: SDK 内のログは libwebrtc 側 (`rtc_log_info!` / `rtc_log_warning!` / `rtc_log_error!`) に流れる。`log` / `tracing` クレートには依存していない。
 - **デフォルトの ADM は Dummy**: マイク入力が必要な場合は `AdmConfig::UseBuiltIn` か `UseExternal` を明示する。

@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-28
 - Model: Opus 4.7
 - Branch: feature/fix-redirect-session-state-reset
 - Polished: 2026-07-27
@@ -52,6 +52,15 @@ redirect = true;
 5. `self.pending_rpc_responses` は各エントリの `oneshot::Sender` に `Err(Error::Redirected)` (新設) を send してから `clear()` する。`Error::CommandSendFailed` は「コマンド送信失敗」を意味し redirect とは意味が異なるため新設する。`response_tx` は `Option<oneshot::Sender>` であり、送信前に `.take()` で取り出すこと。`PendingRpcRequest` の `Drop` が `timeout_handle.abort()` のみを行う実装 (`l.577-581`) であり、エラー送信は `Drop` に任せず明示的に行う。
 6. リセット処理のユニットテストは、`SoraConnection` の生成コストが高いため難しい。少なくとも意図をコメントで明示する。
 7. `self.event_rx` には、redirect 前に送信された旧セッション由来のイベントが滞留している可能性がある。とくに `DataChannelMessage`（旧データで `handler.on_data_channel_message` が呼ばれる）や `DataChannelRegister`（クリア済みの `self.data_channels` に旧チャネルが再登録される）が問題になりうる。redirect 分岐内で `while self.event_rx.try_recv().is_ok() {}` によりドレインする。ただし PeerConnection が同一のままであるため、`Track` 系のイベントは依然として有効な可能性があり、一律ドレインの是非は注意を要する。
+
+## 解決方法
+
+`SoraConnection::run` の redirect 分岐冒頭で、以下の session 状態をすべて初期状態にリセットした。
+- ローカル変数: `switched_received`, `switched_ignore_disconnect_websocket`, `use_datachannel_signaling`, `opened_datachannels`, `ws_disconnect_delay_start`
+- `self` フィールド: `data_channels`, `data_channel_configs`, `pending_rpc_responses`, `rpc_id_counter`
+- リセット前に `opened_datachannels` の各ラベルについて `handler.on_data_channel_close` を呼びユーザーに通知する。
+- `pending_rpc_responses` の各エントリには `Error::Redirected` (新設) を send してから clear する。
+- `event_rx` を `try_recv()` でドレインして旧セッション由来の滞留イベントを破棄する。
 
 ## 完了条件
 

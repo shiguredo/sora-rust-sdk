@@ -2,7 +2,7 @@
 
 - Priority: Low
 - Created: 2026-07-27
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-28
 - Model: Opus 4.7
 - Branch: feature/refactor-remove-redundant-null-check-from-amf-encode-callback
 - Polished: 2026-07-27
@@ -42,6 +42,12 @@ let data = unsafe { std::slice::from_raw_parts(ptr, size) };
 
 1. `amf.rs:158-161` の `if ptr.is_null() || size == 0 { ... return; }` ブロックを削除する。`Ok(EncodedFrame)` に到達した時点で `Buffer` のポインタ非 null・サイズ非 0 は `extract_encoded_output()` によって検証済みであり、同一オブジェクトに対する再チェックは不要である。
 2. 後続の `std::slice::from_raw_parts(ptr, size)` はそのまま残す（`ptr` / `size` の取得は残す）。
+
+## 解決方法
+
+`handle_amf_encode_callback` 内の冗長な null / size 0 チェックブロックを削除した。
+- `shiguredo_amf` の `extract_encoded_output()` が既にこれらのチェックを行い、失敗時は `Err` を返して早期 return するため、amf.rs:158-161 のチェックブロックは到達不能な防御コードである。
+- 後続の `std::slice::from_raw_parts(ptr, size)` はそのまま残した。
 
 ## 完了条件
 

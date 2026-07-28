@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-28
 - Model: Opus 4.7
 - Branch: feature/refactor-rename-mock-stub-in-test-code
 - Polished: 2026-07-27
@@ -62,6 +62,16 @@ High。命名がプロジェクト規約 (AGENTS.md) の文面と衝突してお
 
 - 本 issue では命名変更とコメント追加のみを行う。テストコードの実装差し替え（元・案 B）は行わない
 - AGENTS.md の改訂（元・案 C）は行わない
+
+## 解決方法
+
+テストコード内の `Mock` / `Stub` 命名プレフィックスを持つ型名を、実体に即した名前にリネームした。
+- `StubVideoEncoder` → `NoopVideoEncoder`
+- `StubVideoDecoder` → `NoopVideoDecoder`
+- `StubVideoEncoderWithInfoName` → `NoopVideoEncoderWithInfoName`
+- `MockCapability` / `MockVideoCodecCapability` → `TestVideoCodecCapability`
+- 関連する文字列 (`"StubEncoder"` → `"NoopEncoder"`) も合わせて更新した。
+- 各型の宣言部に、テスト専用の本物の trait 実装でありモックやスタブではないことを日本語コメントで明示した。
 
 ## 完了条件
 

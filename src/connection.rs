@@ -505,7 +505,9 @@ impl SoraConnectionHandle {
 
     /// DataChannel 経由でメッセージを送信する。
     ///
-    /// `#` プレフィックス付きラベルのユーザー定義 DataChannel にバイナリデータを送信する。
+    /// SDK 内部用ラベル（`signaling`、`stats`、`push`、`notify`、`rpc`）および
+    /// `#` プレフィックスのないラベルを渡すと `Error::InvalidDataChannelLabel` を返す。
+    /// また、Offer 応答の `data_channels` に含まれていないラベルも同様に返す。
     pub async fn send_message(&self, label: &str, data: &[u8]) -> Result<()> {
         self.send_command("send_message", |tx| SoraConnectionCommand::SendMessage {
             label: label.to_string(),
@@ -1009,7 +1011,13 @@ impl SoraConnection {
                             }
                         }
                         SoraConnectionCommand::SendMessage { label, data, response_tx } => {
-                            let result = self.send_data_channel_message(&label, &data);
+                            let result = if label.starts_with('#')
+                                && self.data_channel_configs.iter().any(|c| c.label == label)
+                            {
+                                self.send_data_channel_message(&label, &data)
+                            } else {
+                                Err(Error::InvalidDataChannelLabel { label })
+                            };
                             let _ = response_tx.send(result);
                         }
                     }
@@ -1061,7 +1069,7 @@ impl SoraConnection {
                         send_text(&mut ws, &connect_text)?;
                     }
                     ConnectionEvent::TextMessage(text) => {
-                        rtc_log_info!("[WebSocket] Received text message: {}", text);
+                        rtc_log_info!("[WebSocket] Received text message of {} bytes", text.len());
                         let message = match IncomingMessage::parse(&text) {
                             Ok(message) => message,
                             Err(err) => {
@@ -1155,10 +1163,7 @@ impl SoraConnection {
                         }
                     }
                     ConnectionEvent::BinaryMessage(data) => {
-                        rtc_log_info!(
-                            "[WebSocket] バイナリメッセージを受信しました: {} bytes",
-                            data.len()
-                        );
+                        rtc_log_info!("[WebSocket] Received binary message: {} bytes", data.len());
                     }
                     ConnectionEvent::Ping(_) => {
                         rtc_log_info!("[WebSocket] Received Ping");
@@ -1182,6 +1187,35 @@ impl SoraConnection {
 
             // redirect メッセージを受信した場合、新しい WebSocket に再接続する
             if let Some(location) = redirect_location.take() {
+                // セッション状態をリセットする。
+                // 旧接続の状態が redirect 先に持ち越されると、
+                // switched フラグや DataChannel 状態が不整合を起こす。
+                switched_received = false;
+                switched_ignore_disconnect_websocket = false;
+                use_datachannel_signaling = false;
+                ws_disconnect_delay_start = None;
+
+                // 古い DataChannel の close 通知をユーザーに送る。
+                // クリア前に通知することでハンドラが確実に呼ばれる。
+                for label in &opened_datachannels {
+                    handler.on_data_channel_close(label);
+                }
+                opened_datachannels.clear();
+                self.data_channels.clear();
+                self.data_channel_configs.clear();
+
+                // 旧セッションの RPC リクエストに redirect エラーを通知しクリアする。
+                for (_, mut pending) in self.pending_rpc_responses.drain() {
+                    if let Some(tx) = pending.response_tx.take() {
+                        let _ = tx.send(Err(Error::Redirected));
+                    }
+                }
+                self.rpc_id_counter = 0;
+
+                // 旧セッションの event_rx に滞留したイベントをドレインする。
+                // クリア後の data_channels に旧チャネルが再登録されるのを防ぐ。
+                while self.event_rx.try_recv().is_ok() {}
+
                 // 古い WebSocket をクローズする
                 if ws.state() == ConnectionState::Connected {
                     ws.close(CloseCode::NORMAL, "redirect")?;
@@ -1720,7 +1754,7 @@ impl SoraConnection {
             message.as_bytes().to_vec()
         };
 
-        rtc_log_info!("Sent message to DataChannel '{}': {}", label, &message);
+        rtc_log_info!("Sent message to DataChannel '{}'", label);
 
         if !managed.channel.send(&data, true) {
             return Err(Error::DataChannelSendFailed);
@@ -1772,9 +1806,9 @@ impl SoraConnection {
         };
 
         rtc_log_info!(
-            "DataChannel '{}' からメッセージを受信: {}",
+            "DataChannel '{}' からメッセージを受信: {} bytes",
             label,
-            String::from_utf8_lossy(&message_bytes)
+            message_bytes.len()
         );
 
         // DataChannel API コールバック (全ラベル)
@@ -1973,13 +2007,27 @@ struct SignalingTarget {
 /// PBT 等の検証目的を主用途として公開している型のため、通常の利用者がこの型を
 /// フィールド値の取得は accessor メソッド (`host()` / `port()` / `username()` /
 /// `password()` / `user_agent()`) 経由で行う。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ParsedProxyInfo {
     pub(crate) host: String,
     pub(crate) port: u16,
     pub(crate) username: Option<String>,
     pub(crate) password: Option<String>,
     pub(crate) user_agent: String,
+}
+
+// 機密情報 (username / password) を Debug 出力時にマスクする。
+// ProxyInfo (src/types.rs) と同じパターン。
+impl std::fmt::Debug for ParsedProxyInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParsedProxyInfo")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username.as_ref().map(|_| "<redacted>"))
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("user_agent", &self.user_agent)
+            .finish()
+    }
 }
 
 impl ParsedProxyInfo {
@@ -2349,9 +2397,14 @@ async fn connect_websocket(
             let (tcp_stream, pending) = stream
                 .into_plain_parts()
                 .expect("BUG: proxy 接続後は plain stream のはずです");
+            // TLS 接続では ClientHello をクライアントが先に送るため、
+            // CONNECT 200 応答直後にサーバーからバイトが届くことはありえない。
+            // 余剰バイトはプロキシの応答注入であるため接続を拒否する。
+            if !pending.is_empty() {
+                return Err(Error::ProxyConnectUnexpectedTrailingData);
+            }
             let tls_stream = connect_tls(&target.host, tcp_stream, tls_config, deadline).await?;
-            let mut stream = ClientStream::new_tls(tls_stream);
-            stream.push_pending_read(pending);
+            let stream = ClientStream::new_tls(tls_stream);
             Ok(stream)
         } else {
             Ok(stream)
@@ -2564,7 +2617,7 @@ async fn flush_ws_output<R: RandomSource>(
 }
 
 fn send_text<R: RandomSource>(ws: &mut WebSocketClientConnection<R>, text: &str) -> Result<()> {
-    rtc_log_info!("[WebSocket] Sent text message: {}", text);
+    rtc_log_info!("[WebSocket] Sent text message of {} bytes", text.len());
     ws.send_text(text)?;
     Ok(())
 }
@@ -2581,23 +2634,24 @@ mod tests {
     }
 
     fn is_turn_tcp_or_udp_url(url: &str) -> bool {
-        let lower = url.to_ascii_lowercase();
-        let Some((scheme, _)) = lower.split_once(':') else {
+        let Ok(uri) = Uri::parse(url) else {
             return false;
         };
-        if scheme != "turn" && scheme != "turns" {
+        let Some(scheme) = uri.scheme() else {
+            return false;
+        };
+        if !scheme.eq_ignore_ascii_case("turn") && !scheme.eq_ignore_ascii_case("turns") {
             return false;
         }
-
-        lower
-            .split('?')
-            .nth(1)
+        uri.query()
             .and_then(|query| {
                 query
                     .split('&')
                     .find_map(|param| param.strip_prefix("transport="))
             })
-            .is_some_and(|transport| transport == "tcp" || transport == "udp")
+            .is_some_and(|transport| {
+                transport.eq_ignore_ascii_case("tcp") || transport.eq_ignore_ascii_case("udp")
+            })
     }
 
     #[test]
@@ -2662,6 +2716,23 @@ mod tests {
         };
         let parsed = ParsedProxyInfo::parse(&proxy).expect("proxy URL の解析に失敗しました");
         assert_eq!(parsed.user_agent(), "");
+    }
+
+    #[test]
+    fn parsed_proxy_info_debug_masks_credentials() {
+        let parsed = ParsedProxyInfo {
+            host: "proxy.example.com".to_string(),
+            port: 8080,
+            username: Some("secret_user".to_string()),
+            password: Some("secret_pass".to_string()),
+            user_agent: "ua".to_string(),
+        };
+        let debug_str = format!("{:?}", parsed);
+        assert!(debug_str.contains("<redacted>"));
+        assert!(!debug_str.contains("secret_user"));
+        assert!(!debug_str.contains("secret_pass"));
+        assert!(debug_str.contains("proxy.example.com"));
+        assert!(debug_str.contains("8080"));
     }
 
     #[test]
@@ -2881,5 +2952,115 @@ mod tests {
     fn now_returns_ok_timestamp() {
         let result = super::now();
         assert!(result.is_ok(), "now() は Ok を返す必要があります");
+    }
+
+    fn spawn_message_server(
+        valid_labels: Vec<String>,
+    ) -> (SoraConnectionHandle, tokio::task::JoinHandle<()>) {
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
+        let handle = SoraConnectionHandle { command_tx };
+        let server = tokio::spawn(async move {
+            while let Some(command) = command_rx.recv().await {
+                if let SoraConnectionCommand::SendMessage {
+                    label,
+                    data: _,
+                    response_tx,
+                } = command
+                {
+                    let result = if valid_labels.contains(&label) && label.starts_with('#') {
+                        Ok(())
+                    } else {
+                        Err(Error::InvalidDataChannelLabel { label })
+                    };
+                    let _ = response_tx.send(result);
+                }
+            }
+        });
+        (handle, server)
+    }
+
+    #[tokio::test]
+    async fn send_message_rejects_unknown_label() {
+        let (handle, _server) = spawn_message_server(vec!["#chat".to_string()]);
+        let err = handle
+            .send_message("#unknown", b"data")
+            .await
+            .expect_err("未指定ラベルは InvalidDataChannelLabel になるべき");
+        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label == "#unknown"));
+    }
+
+    #[tokio::test]
+    async fn send_message_rejects_signaling_label() {
+        let (handle, _server) = spawn_message_server(vec!["#chat".to_string()]);
+        let err = handle
+            .send_message("signaling", b"data")
+            .await
+            .expect_err("signaling ラベルは InvalidDataChannelLabel になるべき");
+        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label == "signaling"));
+    }
+
+    #[tokio::test]
+    async fn send_message_rejects_stats_label() {
+        let (handle, _server) = spawn_message_server(vec!["#chat".to_string()]);
+        let err = handle
+            .send_message("stats", b"data")
+            .await
+            .expect_err("stats ラベルは InvalidDataChannelLabel になるべき");
+        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label == "stats"));
+    }
+
+    #[tokio::test]
+    async fn send_message_rejects_push_label() {
+        let (handle, _server) = spawn_message_server(vec!["#chat".to_string()]);
+        let err = handle
+            .send_message("push", b"data")
+            .await
+            .expect_err("push ラベルは InvalidDataChannelLabel になるべき");
+        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label == "push"));
+    }
+
+    #[tokio::test]
+    async fn send_message_rejects_notify_label() {
+        let (handle, _server) = spawn_message_server(vec!["#chat".to_string()]);
+        let err = handle
+            .send_message("notify", b"data")
+            .await
+            .expect_err("notify ラベルは InvalidDataChannelLabel になるべき");
+        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label == "notify"));
+    }
+
+    #[tokio::test]
+    async fn send_message_rejects_rpc_label() {
+        let (handle, _server) = spawn_message_server(vec!["#chat".to_string()]);
+        let err = handle
+            .send_message("rpc", b"data")
+            .await
+            .expect_err("rpc ラベルは InvalidDataChannelLabel になるべき");
+        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label == "rpc"));
+    }
+
+    #[tokio::test]
+    async fn send_message_rejects_empty_label() {
+        let (handle, _server) = spawn_message_server(vec!["#chat".to_string()]);
+        let err = handle
+            .send_message("", b"data")
+            .await
+            .expect_err("空ラベルは InvalidDataChannelLabel になるべき");
+        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn send_message_rejects_all_labels_when_no_data_channels_configured() {
+        let (handle, _server) = spawn_message_server(Vec::new());
+        let err = handle.send_message("#chat", b"data").await.expect_err(
+            "data_channels 未設定時は通常の # ラベルでも InvalidDataChannelLabel になるべき",
+        );
+        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label == "#chat"));
+    }
+
+    #[tokio::test]
+    async fn send_message_accepts_registered_label() {
+        let (handle, _server) = spawn_message_server(vec!["#chat".to_string()]);
+        assert!(handle.send_message("#chat", b"data").await.is_ok());
     }
 }

@@ -281,6 +281,11 @@ fn handle_v4l2_convert_callback(
         _converted_frame: Some(converted),
     };
 
+    // handle_v4l2_convert_callback はコンバーターのポーラースレッドから呼ばれ、
+    // V4l2VideoEncoder::encode() と並行実行可能である。
+    // take/put-back を適用すると、encode() 側が rebuild をトリガーした場合に
+    // put-back が新 encoder を古い encoder で上書きする競合が発生するため、
+    // この関数ではロック保持パターンを維持する。
     let mut shared_state = shared_state.lock().unwrap();
     let Some(encoder) = shared_state.encoder.as_mut() else {
         rtc_log_warning!("V4L2 convert callback dropped frame because encoder is not initialized");
@@ -353,22 +358,44 @@ impl V4l2VideoEncoder {
             EncoderConfig::new(self.width, self.height, self.target_bitrate_bps.max(1));
         config.device_path = self.device_path.clone();
         let shared_state = self.shared_state.clone();
-        let encoder = H264Encoder::new(
+        let new_encoder = H264Encoder::new(
             config,
             FnEncodeHandler::new(move |result| {
                 handle_v4l2_encode_callback(&shared_state, result);
             }),
         )?;
 
-        let mut shared_state = self.shared_state.lock().unwrap();
-        shared_state.encoder = Some(encoder);
-        drop(shared_state);
+        // shared_state ロック保持中に古い encoder を Drop すると、
+        // Drop 内の poller.stop() → thread.join() がポーラースレッドの
+        // handle_v4l2_encode_callback → shared_state.lock() と循環待機し
+        // デッドロックする。take() で所有権をロック外に取り出してから
+        // drop することで回避する（release() と同じデッドロック回避パターン）。
+        // この間 shared_state.encoder は None になるが、
+        // rebuild_mmap_encoder は &mut self で呼ばれるため encode() とは排他。
+        // handle_v4l2_convert_callback は encoder が None の場合フレームを
+        // ドロップするため、rebuild 中の短期間のみであり許容範囲。
+        let old_encoder = {
+            let mut shared_state = self.shared_state.lock().unwrap();
+            shared_state.encoder.take()
+        };
+        drop(old_encoder);
 
+        // converter を encoder assign より先に Drop する。
+        // 旧 converter の最終コールバックが encoder=None を参照すれば
+        // 安全にフレームドロップできる。encoder assign 後に converter を
+        // Drop すると、新 encoder に旧フォーマットのフレームが届き不整合になる。
         #[cfg(feature = "libcamera")]
         {
             self.converter = None;
             self.native_input_config = None;
         }
+
+        // converter が落ちた後、新しい encoder を設定する。
+        {
+            let mut shared_state = self.shared_state.lock().unwrap();
+            shared_state.encoder = Some(new_encoder);
+        }
+
         self.input_mode = EncoderInputMode::MmapI420;
         self.rebuild_needed = false;
         Ok(())
@@ -391,7 +418,7 @@ impl V4l2VideoEncoder {
         encoder_config.input_memory = Memory::DmaBuf;
         encoder_config.pixel_format = native_config.pixel_format.to_v4l2_pixel_format();
         let shared_state = self.shared_state.clone();
-        let encoder = H264Encoder::new(
+        let new_encoder = H264Encoder::new(
             encoder_config,
             FnEncodeHandler::new(move |result| {
                 handle_v4l2_encode_callback(&shared_state, result);
@@ -409,15 +436,28 @@ impl V4l2VideoEncoder {
         converter_config.input_pixel_format = native_config.pixel_format.to_v4l2_pixel_format();
         converter_config.output_pixel_format = native_config.pixel_format.to_v4l2_pixel_format();
         let shared_state = self.shared_state.clone();
-        let converter = ImageConverter::new(converter_config, move |result| {
+        let new_converter = ImageConverter::new(converter_config, move |result| {
             handle_v4l2_convert_callback(&shared_state, result);
         })?;
 
-        let mut shared_state = self.shared_state.lock().unwrap();
-        shared_state.encoder = Some(encoder);
-        drop(shared_state);
+        // 1. 古い encoder を take し、ロック外で drop する。
+        //    デッドロック回避のため rebuild_mmap_encoder と同じパターン。
+        let old_encoder = {
+            let mut shared_state = self.shared_state.lock().unwrap();
+            shared_state.encoder.take()
+        };
+        drop(old_encoder);
 
-        self.converter = Some(converter);
+        // 2. 古い converter を encoder assign より先に Drop する。
+        //    旧 converter の最終コールバックは encoder=None を見て安全にフレームドロップする。
+        self.converter = Some(new_converter);
+
+        // 3. 新しい encoder を設定する。
+        {
+            let mut shared_state = self.shared_state.lock().unwrap();
+            shared_state.encoder = Some(new_encoder);
+        }
+
         self.width = native_config.scaled_width;
         self.height = native_config.scaled_height;
         self.input_mode = EncoderInputMode::NativeDmabuf;
@@ -618,24 +658,31 @@ impl VideoEncoderHandler for V4l2VideoEncoder {
             #[cfg(feature = "libcamera")]
             _converted_frame: None,
         };
-        let mut shared_state = self.shared_state.lock().unwrap();
-        let Some(encoder) = shared_state.encoder.as_mut() else {
-            rtc_log_error!("V4L2 encode failed: encoder is not initialized");
-            return VideoCodecStatus::Error;
-        };
-        match encoder.encode(
-            EncodeInput::Mmap(&mut fill),
-            timestamp_us,
-            force_keyframe,
-            callback_value,
-        ) {
-            Ok(()) => VideoCodecStatus::Ok,
-            Err(V4l2Error::NoAvailableBuffer) => VideoCodecStatus::NoOutput,
-            Err(err) => {
-                rtc_log_error!("V4L2 encode failed: {}", err);
-                VideoCodecStatus::Error
+        // encode() は &mut self で呼ばれるため他スレッドの encode() と競合しない。
+        // take/put-back パターンで encoder.encode() をロック外で呼び出し、
+        // ロック保持時間を短縮する。
+        let mut encoder_opt = self.shared_state.lock().unwrap().encoder.take();
+        let status = {
+            let Some(ref mut enc) = encoder_opt else {
+                rtc_log_error!("V4L2 encode failed: encoder is not initialized");
+                return VideoCodecStatus::Error;
+            };
+            match enc.encode(
+                EncodeInput::Mmap(&mut fill),
+                timestamp_us,
+                force_keyframe,
+                callback_value,
+            ) {
+                Ok(()) => VideoCodecStatus::Ok,
+                Err(V4l2Error::NoAvailableBuffer) => VideoCodecStatus::NoOutput,
+                Err(err) => {
+                    rtc_log_error!("V4L2 encode failed: {}", err);
+                    VideoCodecStatus::Error
+                }
             }
-        }
+        };
+        self.shared_state.lock().unwrap().encoder = encoder_opt;
+        status
     }
 
     fn register_encode_complete_callback(

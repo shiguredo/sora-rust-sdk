@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-28
 - Model: Opus 4.7
 - Branch: feature/fix-video-codec-align-down-contract
 - Polished: 2026-07-27
@@ -47,6 +47,14 @@ fn align_down(value: i32, alignment: i32) -> i32 {
    - しかし `self.encoder.init_encode()` を**呼ばずに `VideoCodecStatus::Error` を返す**。非アライン解像度のまま下流エンコーダに渡る経路を塞ぐ。
    - 後続の `encode` 呼び出しでは `target_size == None` となり、アライメントなしの生フレームが下流に届かないよう `encode` も `VideoCodecStatus::Error` を返す。
 8. simulcast stream の部分状態不整合（stream だけ非アラインのまま残る）は #0064 で対応する。#0064 では案 A（関数全体で None を返す）を推奨しており、本 issue の設計方針 7 とも整合する。
+
+## 解決方法
+
+`align_down` のシグネチャを `fn align_down(value: i32, alignment: i32) -> Option<i32>` に変更した。
+- 判定順序: `alignment <= 0` → `None`, `value <= 0` → `None`, `alignment == 1` → `Some(value)`, それ以外は `aligned > 0` なら `Some(aligned)`、`aligned == 0` なら `None`。
+- `apply_alignment_to_codec` 内で `align_down` の `None` 返却を検出し、対応するよう修正。
+- `AlignmentEncoderAdapter::init_encode` でアライン不能時に `target_size` を `None` に設定し、`init_encode` と `encode` が `VideoCodecStatus::Error` を返すよう修正。
+- 設計方針に沿った単体テストを追加した。
 
 ## 完了条件
 

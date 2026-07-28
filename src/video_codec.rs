@@ -150,12 +150,24 @@ fn find_capability<'a>(
         .find(|capability| capability.get_implementation().name() == implementation_name)
 }
 
-fn align_down(value: i32, alignment: i32) -> i32 {
-    if value <= 0 || alignment <= 1 {
-        return value;
+fn align_down(value: i32, alignment: i32) -> Option<i32> {
+    // alignment <= 0 は除算ゼロまたは無効な引数
+    if alignment <= 0 {
+        return None;
+    }
+    // value <= 0 は align 対象として意味をなさない。
+    // alignment == 1 より先に判定することで、負の値を誤って返さない。
+    if value <= 0 {
+        return None;
+    }
+    // alignment == 1 は常に align 可能
+    if alignment == 1 {
+        return Some(value);
     }
     let aligned = value - (value % alignment);
-    if aligned > 0 { aligned } else { value }
+    // align down の結果が 0 になることは数値演算としては異常ではないが、
+    // このファイルでは幅・高さが 0 のコーデックは不正なため None を返す。
+    if aligned > 0 { Some(aligned) } else { None }
 }
 
 fn apply_alignment_to_codec(
@@ -168,26 +180,31 @@ fn apply_alignment_to_codec(
         return None;
     }
 
-    let aligned_codec_width = align_down(codec.width(), horizontal_alignment);
-    let aligned_codec_height = align_down(codec.height(), vertical_alignment);
-    if aligned_codec_width <= 0 || aligned_codec_height <= 0 {
-        return None;
-    }
+    // トップレベル codec のアライン結果を計算する。
+    let aligned_codec_width = align_down(codec.width(), horizontal_alignment)?;
+    let aligned_codec_height = align_down(codec.height(), vertical_alignment)?;
 
-    codec.set_width(aligned_codec_width);
-    codec.set_height(aligned_codec_height);
-
+    // 全 simulcast stream のアライン結果を事前に計算する。
+    // いずれか 1 つでも None なら codec に何も変更を加えずに None を返す。
+    let mut stream_alignments: Vec<(usize, i32, i32)> = Vec::new();
     for index in 0..codec.number_of_simulcast_streams() {
-        let Some(mut stream) = codec.simulcast_stream(index) else {
+        let Some(stream) = codec.simulcast_stream(index) else {
             continue;
         };
-        let aligned_stream_width = align_down(stream.width(), horizontal_alignment);
-        let aligned_stream_height = align_down(stream.height(), vertical_alignment);
-        if aligned_stream_width <= 0 || aligned_stream_height <= 0 {
-            continue;
+        let aligned_stream_width = align_down(stream.width(), horizontal_alignment)?;
+        let aligned_stream_height = align_down(stream.height(), vertical_alignment)?;
+        stream_alignments.push((index, aligned_stream_width, aligned_stream_height));
+    }
+
+    // 全要素がアライン可能な場合のみ、一括で適用する。
+    // 部分状態（トップレベルだけ align 済み等）が発生しない。
+    codec.set_width(aligned_codec_width);
+    codec.set_height(aligned_codec_height);
+    for (index, aligned_stream_width, aligned_stream_height) in stream_alignments {
+        if let Some(mut stream) = codec.simulcast_stream(index) {
+            stream.set_width(aligned_stream_width);
+            stream.set_height(aligned_stream_height);
         }
-        stream.set_width(aligned_stream_width);
-        stream.set_height(aligned_stream_height);
     }
 
     Some((aligned_codec_width, aligned_codec_height))
@@ -285,6 +302,13 @@ impl VideoEncoderHandler for AlignmentEncoderAdapter {
             self.horizontal_alignment,
             self.vertical_alignment,
         );
+        // アライン不能な場合は下流エンコーダーを初期化せずにエラーを返す。
+        // 後続の encode 呼び出しでも target_size == None により
+        // VideoCodecStatus::Error が返るため、非アライン解像度が下流に
+        // 届く経路は存在しない。
+        if self.target_size.is_none() {
+            return VideoCodecStatus::Error;
+        }
         self.encoder.init_encode(codec_settings.as_ref(), settings)
     }
 
@@ -293,8 +317,12 @@ impl VideoEncoderHandler for AlignmentEncoderAdapter {
         frame: VideoFrameRef<'_>,
         frame_types: Option<VideoFrameTypeVectorRef<'_>>,
     ) -> VideoCodecStatus {
+        // target_size が None の場合:
+        // - init_encode で apply_alignment_to_codec が None を返した (アライン不能)
+        // - または codec_type 不一致 (アダプターが対象外のコーデックに適用された)
+        // いずれも下流エンコーダーに非アライン解像度を渡さないよう Error を返す。
         let Some((target_width, target_height)) = self.target_size else {
-            return self.encoder.encode(frame, frame_types);
+            return VideoCodecStatus::Error;
         };
         let Some(aligned_frame) = self.build_aligned_frame(frame, target_width, target_height)
         else {
@@ -431,22 +459,26 @@ mod tests {
     use crate::video_codec_preference::PreferenceCodec;
     use shiguredo_webrtc::{ScalabilityMode, VideoDecoderHandler, VideoEncoderHandler};
 
-    struct StubVideoEncoder;
-    impl VideoEncoderHandler for StubVideoEncoder {}
+    // VideoEncoderHandler を最小限に実装したテスト専用の型。
+    struct NoopVideoEncoder;
+    impl VideoEncoderHandler for NoopVideoEncoder {}
 
-    struct StubVideoDecoder;
-    impl VideoDecoderHandler for StubVideoDecoder {}
+    // VideoDecoderHandler を最小限に実装したテスト専用の型。
+    struct NoopVideoDecoder;
+    impl VideoDecoderHandler for NoopVideoDecoder {}
 
-    struct StubVideoEncoderWithInfoName;
-    impl VideoEncoderHandler for StubVideoEncoderWithInfoName {
+    // VideoEncoderHandler を最小限に実装したテスト専用の型。
+    struct NoopVideoEncoderWithInfoName;
+    impl VideoEncoderHandler for NoopVideoEncoderWithInfoName {
         fn get_encoder_info(&mut self) -> VideoEncoderEncoderInfo {
             let mut info = VideoEncoderEncoderInfo::new();
-            info.set_implementation_name("StubEncoder");
+            info.set_implementation_name("NoopEncoder");
             info
         }
     }
 
-    struct MockCapability {
+    // VideoCodecCapability を本物のコードで実装したテスト専用の型。
+    struct TestVideoCodecCapability {
         implementation: VideoCodecImplementation,
         encoder_supported: Vec<VideoCodecType>,
         decoder_supported: Vec<VideoCodecType>,
@@ -454,7 +486,7 @@ mod tests {
         decoder_formats: Option<Vec<VideoCodecType>>,
     }
 
-    impl MockCapability {
+    impl TestVideoCodecCapability {
         fn new(
             implementation: VideoCodecImplementation,
             encoder_supported: Vec<VideoCodecType>,
@@ -482,7 +514,7 @@ mod tests {
         }
     }
 
-    impl VideoCodecCapability for MockCapability {
+    impl VideoCodecCapability for TestVideoCodecCapability {
         fn get_implementation(&self) -> VideoCodecImplementation {
             self.implementation.clone()
         }
@@ -599,7 +631,7 @@ mod tests {
                 .ok()
                 .and_then(|name| VideoCodecType::try_from(name.as_str()).ok())?;
             if self.is_supported(CodecDirection::Encoder, codec_type) {
-                Some(VideoEncoder::new_with_handler(Box::new(StubVideoEncoder)))
+                Some(VideoEncoder::new_with_handler(Box::new(NoopVideoEncoder)))
             } else {
                 None
             }
@@ -615,7 +647,7 @@ mod tests {
                 .ok()
                 .and_then(|name| VideoCodecType::try_from(name.as_str()).ok())?;
             if self.is_supported(CodecDirection::Decoder, codec_type) {
-                Some(VideoDecoder::new_with_handler(Box::new(StubVideoDecoder)))
+                Some(VideoDecoder::new_with_handler(Box::new(NoopVideoDecoder)))
             } else {
                 None
             }
@@ -637,12 +669,12 @@ mod tests {
             ),
         ]);
         let capabilities: Vec<Box<dyn VideoCodecCapability>> = vec![
-            Box::new(MockCapability::new(
+            Box::new(TestVideoCodecCapability::new(
                 VideoCodecImplementation::new("impl-a", "Implementation A"),
                 vec![VideoCodecType::H264],
                 Vec::new(),
             )),
-            Box::new(MockCapability::new(
+            Box::new(TestVideoCodecCapability::new(
                 VideoCodecImplementation::new("impl-b", "Implementation B"),
                 vec![VideoCodecType::Vp8],
                 Vec::new(),
@@ -665,7 +697,7 @@ mod tests {
             VideoCodecImplementation::new("impl-a", "Implementation A"),
         )]);
         let capabilities: Vec<Box<dyn VideoCodecCapability>> = vec![Box::new(
-            MockCapability::new(
+            TestVideoCodecCapability::new(
                 VideoCodecImplementation::new("impl-a", "Implementation A"),
                 vec![VideoCodecType::H264],
                 Vec::new(),
@@ -699,7 +731,7 @@ mod tests {
         ]);
         let capabilities: Vec<Box<dyn VideoCodecCapability>> = vec![
             Box::new(
-                MockCapability::new(
+                TestVideoCodecCapability::new(
                     VideoCodecImplementation::new("impl-a", "Implementation A"),
                     vec![VideoCodecType::Vp8],
                     Vec::new(),
@@ -710,7 +742,7 @@ mod tests {
                 ),
             ),
             Box::new(
-                MockCapability::new(
+                TestVideoCodecCapability::new(
                     VideoCodecImplementation::new("impl-b", "Implementation B"),
                     vec![VideoCodecType::H264],
                     Vec::new(),
@@ -735,7 +767,7 @@ mod tests {
             VideoCodecImplementation::new("impl-a", "Implementation A"),
         )]);
         let capabilities: Vec<Box<dyn VideoCodecCapability>> = vec![Box::new(
-            MockCapability::new(
+            TestVideoCodecCapability::new(
                 VideoCodecImplementation::new("impl-a", "Implementation A"),
                 vec![VideoCodecType::Vp8],
                 Vec::new(),
@@ -756,11 +788,12 @@ mod tests {
             VideoCodecType::H264,
             VideoCodecImplementation::new("impl-a", "Implementation A"),
         )]);
-        let capabilities: Vec<Box<dyn VideoCodecCapability>> = vec![Box::new(MockCapability::new(
-            VideoCodecImplementation::new("impl-a", "Implementation A"),
-            Vec::new(),
-            vec![VideoCodecType::H264],
-        ))];
+        let capabilities: Vec<Box<dyn VideoCodecCapability>> =
+            vec![Box::new(TestVideoCodecCapability::new(
+                VideoCodecImplementation::new("impl-a", "Implementation A"),
+                Vec::new(),
+                vec![VideoCodecType::H264],
+            ))];
 
         let shared = Arc::new(Mutex::new(capabilities));
         let mut factory = SoraVideoDecoderFactory::new(preference, shared);
@@ -792,6 +825,46 @@ mod tests {
         assert!(
             VideoDecoderFactoryHandler::create(&mut factory, env.as_ref(), vp8.as_ref()).is_none()
         );
+    }
+
+    #[test]
+    fn align_down_normal_noop() {
+        assert_eq!(align_down(320, 16), Some(320));
+    }
+
+    #[test]
+    fn align_down_normal_round_down() {
+        assert_eq!(align_down(321, 16), Some(320));
+    }
+
+    #[test]
+    fn align_down_boundary_value_equals_alignment() {
+        assert_eq!(align_down(16, 16), Some(16));
+    }
+
+    #[test]
+    fn align_down_unable_to_align() {
+        assert_eq!(align_down(15, 16), None);
+    }
+
+    #[test]
+    fn align_down_value_zero() {
+        assert_eq!(align_down(0, 16), None);
+    }
+
+    #[test]
+    fn align_down_negative_value() {
+        assert_eq!(align_down(-1, 16), None);
+    }
+
+    #[test]
+    fn align_down_alignment_one_always_alignable() {
+        assert_eq!(align_down(16, 1), Some(16));
+    }
+
+    #[test]
+    fn align_down_alignment_zero_invalid() {
+        assert_eq!(align_down(16, 0), None);
     }
 
     #[test]
@@ -854,6 +927,57 @@ mod tests {
     }
 
     #[test]
+    fn alignment_rejects_partial_simulcast_stream_failure() {
+        let mut codec = VideoCodec::new();
+        codec.set_codec_type(VideoCodecType::Av1);
+        codec.set_width(320);
+        codec.set_height(180);
+        codec.set_number_of_simulcast_streams(2);
+        codec
+            .simulcast_stream(0)
+            .expect("simulcast stream 0 が必要")
+            .set_width(320);
+        codec
+            .simulcast_stream(0)
+            .expect("simulcast stream 0 が必要")
+            .set_height(180);
+        codec
+            .simulcast_stream(1)
+            .expect("simulcast stream 1 が必要")
+            .set_width(15);
+        codec
+            .simulcast_stream(1)
+            .expect("simulcast stream 1 が必要")
+            .set_height(10);
+
+        // stream 1 が alignment=16 に満たないため、関数全体が None を返す。
+        // codec の状態は変更されない。
+        let result = apply_alignment_to_codec(&mut codec, VideoCodecType::Av1, 16, 16);
+        assert!(
+            result.is_none(),
+            "stream 1 がアライン不能のため None になるべき"
+        );
+        assert_eq!(codec.width(), 320);
+        assert_eq!(codec.height(), 180);
+        assert_eq!(
+            codec
+                .simulcast_stream(0)
+                .expect("simulcast stream 0 が必要")
+                .width(),
+            320,
+            "stream 0 の幅は変更されていない"
+        );
+        assert_eq!(
+            codec
+                .simulcast_stream(0)
+                .expect("simulcast stream 0 が必要")
+                .height(),
+            180,
+            "stream 0 の高さは変更されていない"
+        );
+    }
+
+    #[test]
     fn alignment_is_not_applied_to_other_codec() {
         let mut codec = VideoCodec::new();
         codec.set_codec_type(VideoCodecType::H264);
@@ -890,7 +1014,7 @@ mod tests {
 
     #[test]
     fn alignment_encoder_adapter_encoder_info_contains_adapter_name() {
-        let base = VideoEncoder::new_with_handler(Box::new(StubVideoEncoderWithInfoName));
+        let base = VideoEncoder::new_with_handler(Box::new(NoopVideoEncoderWithInfoName));
         let encoder = VideoEncoder::new_with_handler(Box::new(AlignmentEncoderAdapter::new(
             base,
             VideoCodecType::Av1,
@@ -906,7 +1030,7 @@ mod tests {
             "AlignmentEncoderAdapter を含む実装名が必要: {implementation_name}",
         );
         assert!(
-            implementation_name.contains("StubEncoder"),
+            implementation_name.contains("NoopEncoder"),
             "元の implementation_name を保持する必要があります: {implementation_name}",
         );
     }

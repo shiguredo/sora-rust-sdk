@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-28
 - Model: Opus 4.7
 - Branch: feature/fix-parsed-proxy-info-debug-leak
 - Polished: 2026-07-27
@@ -44,6 +44,13 @@ pub struct ParsedProxyInfo {
    - `host` / `port` / `user_agent` はそのまま出力
 3. `format!("{:?}", parsed)` に password 文字列が含まれないことを検証する単体テスト `parsed_proxy_info_debug_masks_credentials` を追加する。テストの配置先は `src/connection.rs` 内の `#[cfg(test)] mod tests`。
 4. `ProxyInfo` の Debug 実装で採用されているマスク方式と同一のパターンとする。
+
+## 解決方法
+
+`ParsedProxyInfo` から `Debug` の derive を外し、`ProxyInfo` と同様の手書き `Debug` 実装を追加した。
+- `username` / `password` は `Some(_)` の場合 `Some("<redacted>")` を出力し、`None` の場合は `None` を出力する。
+- `host` / `port` / `user_agent` はそのまま出力する。
+- 単体テスト `parsed_proxy_info_debug_masks_credentials` を追加し、password が Debug 出力に含まれないことを検証する。
 
 ## 完了条件
 

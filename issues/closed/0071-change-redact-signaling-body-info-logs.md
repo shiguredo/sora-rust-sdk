@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-28
 - Model: Opus 4.7
 - Branch: feature/change-redact-signaling-body-info-logs
 - Polished: 2026-07-27
@@ -46,6 +46,15 @@ High (セキュリティ致命)。ログ集約先 (CloudWatch / Loki / ELK 等) 
 同様に `src/connection.rs:1745-1749`（`send_data_channel_message` 内の日本語バイナリ送信ログ）も本文は出力しておらず、機密漏洩対象外のため、本 issue では扱わない。
 
 `Ping` / `Pong` / `StateChanged` などの低頻度制御メッセージのログは本 issue の対象外とし、別 issue で整理する。
+
+## 解決方法
+
+機密情報を含むシグナリング / DataChannel 本文の info ログを削除した。
+- `connection.rs:1064` の WebSocket 受信テキスト全文ログを削除。
+- `connection.rs:1723` の DataChannel 送信テキスト全文ログを削除。
+- `connection.rs:1774` の DataChannel 受信テキスト全文ログを削除。
+- `connection.rs:2567` の WebSocket 送信テキスト全文ログを削除。
+
 
 ## 完了条件
 

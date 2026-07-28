@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-28
 - Model: Opus 4.7
 - Branch: feature/fix-apply-alignment-to-codec-partial-state
 - Polished: 2026-07-27
@@ -79,6 +79,15 @@ fn apply_alignment_to_codec(
 
 - 案 B（align 失敗 stream だけ無効化）: 「無効化」の意味（幅高さ 0 設定）が下流エンコーダに対して安全である保証がない。`None` 返却の方が呼び出し側が明示的にエラーを処理できる。
 - 案 C（非アライン値をトップレベル値で埋める）: フォールバック値の選択基準があいまいで、単純な `None` 返却に比べてメリットがない。
+
+## 解決方法
+
+`apply_alignment_to_codec` の mutation 順序を「全要素の事前検証 → 一括適用」に修正した。
+- トップレベル codec と全 simulcast stream の align 結果を先にすべて計算する。
+- いずれか 1 つでも `None` があれば codec を変更せず `None` を返す。
+- すべて `Some` の場合のみ `set_width` / `set_height` を一括適用する。
+- 事前検証用のヘルパー関数 `try_align_dimensions` を導入した。
+- partial align 状態の発生を防ぐ単体テストを追加した。
 
 ## 完了条件
 

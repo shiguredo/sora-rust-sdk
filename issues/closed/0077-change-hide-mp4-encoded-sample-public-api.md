@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-28
 - Model: Opus 4.7
 - Branch: feature/change-hide-mp4-encoded-sample-public-api
 - Polished: 2026-07-27
@@ -36,6 +36,13 @@ pub struct Mp4EncodedSample {
 `Mp4EncodedSample` を `pub(crate)` に降格し、`lib.rs` の `pub use` から除去する。
 
 `Mp4EncodedSample` は `Mp4SampleReader::get_sample()` → `Mp4VideoCapturer` → `Mp4PassthroughEncoder::encode()` の 3 コンポーネント間を native `VideoFrameBuffer` 経由 (unsafe downcast) で受け渡される内部共有型であり、ユーザーが直接構築・参照する必要はない。`pub` のまま維持する理由がなく、ユーザーが将来 API アクセスしたくなった場合は accessor 追加で対応する。
+
+## 解決方法
+
+`Mp4EncodedSample` を `pub(crate)` に降格し、公開 API から削除した。
+- `Mp4EncodedSample` の可視性を `pub` → `pub(crate)` に変更。
+- `lib.rs` の `pub use` から `Mp4EncodedSample` を除去。
+
 
 ## 完了条件
 

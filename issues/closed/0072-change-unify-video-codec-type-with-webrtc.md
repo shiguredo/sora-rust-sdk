@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-28
 - Model: Opus 4.7
 - Branch: feature/change-unify-video-codec-type-with-webrtc
 - Polished: 2026-07-27
@@ -56,6 +56,15 @@ High。**公開 API 破壊的変更のため canary 期間中に確定必須**�
 7. `sora-rust-sdk/SKILL.md` の `VideoCodecType` 列挙テーブル (バリアント名を記載している行) を更新
 
 `AudioCodecType::OPUS` → `Opus` の命名矯正は本 issue から分離し、[0084](0084-change-fix-audio-codec-type-naming.md) で対応する。
+
+## 解決方法
+
+`sora_sdk::VideoCodecType` のバリアント名を Rust 命名規約 (UpperCamelCase) に矯正した。
+- `VP8` → `Vp8`, `VP9` → `Vp9`, `AV1` → `Av1` に変更。`H264` / `H265` は変更なし。
+- `DisplayJson` 実装のマッチアームを更新（JSON 出力文字列は維持）。
+- `From<sora_sdk::VideoCodecType> for shiguredo_webrtc::VideoCodecType` と逆向きの `From` 実装を追加した。
+- `Video::new_vp8()` / `Video::new_av1()` 等のバリアント名を更新。
+
 
 ## 完了条件
 

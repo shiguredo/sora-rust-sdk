@@ -175,17 +175,20 @@ mod tests {
     use nojson::Json;
     use shiguredo_webrtc::{VideoDecoderHandler, VideoEncoderHandler};
 
-    struct StubVideoEncoder;
-    impl VideoEncoderHandler for StubVideoEncoder {}
+    // VideoEncoderHandler を最小限に実装したテスト専用の型。
+    struct NoopVideoEncoder;
+    impl VideoEncoderHandler for NoopVideoEncoder {}
 
-    struct StubVideoDecoder;
-    impl VideoDecoderHandler for StubVideoDecoder {}
+    // VideoDecoderHandler を最小限に実装したテスト専用の型。
+    struct NoopVideoDecoder;
+    impl VideoDecoderHandler for NoopVideoDecoder {}
 
-    struct MockCapability;
+    // VideoCodecCapability を本物のコードで実装したテスト専用の型。
+    struct TestVideoCodecCapability;
 
-    impl VideoCodecCapability for MockCapability {
+    impl VideoCodecCapability for TestVideoCodecCapability {
         fn get_implementation(&self) -> VideoCodecImplementation {
-            VideoCodecImplementation::new("mock", "Mock Codec")
+            VideoCodecImplementation::new("test", "Test Codec")
         }
 
         fn get_supported_formats(&self, direction: CodecDirection) -> Vec<SdpVideoFormat> {
@@ -202,7 +205,7 @@ mod tests {
             format: SdpVideoFormatRef<'_>,
         ) -> Option<VideoEncoder> {
             if format.name().ok().as_deref() == Some("H264") {
-                Some(VideoEncoder::new_with_handler(Box::new(StubVideoEncoder)))
+                Some(VideoEncoder::new_with_handler(Box::new(NoopVideoEncoder)))
             } else {
                 None
             }
@@ -214,7 +217,7 @@ mod tests {
             format: SdpVideoFormatRef<'_>,
         ) -> Option<VideoDecoder> {
             if format.name().ok().as_deref() == Some("H264") {
-                Some(VideoDecoder::new_with_handler(Box::new(StubVideoDecoder)))
+                Some(VideoDecoder::new_with_handler(Box::new(NoopVideoDecoder)))
             } else {
                 None
             }
@@ -232,8 +235,8 @@ mod tests {
 
     #[test]
     fn trait_works_with_trait_object() {
-        let capability: Box<dyn VideoCodecCapability> = Box::new(MockCapability);
-        assert_eq!(capability.get_implementation().name(), "mock");
+        let capability: Box<dyn VideoCodecCapability> = Box::new(TestVideoCodecCapability);
+        assert_eq!(capability.get_implementation().name(), "test");
         assert!(capability.is_supported(CodecDirection::Encoder, VideoCodecType::H264));
         assert!(capability.is_supported(CodecDirection::Decoder, VideoCodecType::H264));
         let h264 = SdpVideoFormat::new("H264");

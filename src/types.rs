@@ -1,5 +1,6 @@
 //! 公開型と接続設定用の型。
 use nojson::{DisplayJson, JsonFormatter, RawJsonOwned};
+use shiguredo_http11::uri::Uri;
 
 use crate::error::{Error, Result};
 
@@ -93,24 +94,31 @@ impl std::fmt::Debug for ProxyInfo {
 }
 
 fn mask_url_userinfo(url: &str) -> std::borrow::Cow<'_, str> {
-    let Some(after_scheme) = url.find("://") else {
+    let Ok(uri) = Uri::parse(url) else {
         return std::borrow::Cow::Borrowed(url);
     };
-    let after_scheme = after_scheme + 3;
-    let url_after_scheme = &url[after_scheme..];
-    let Some(at_pos) = url_after_scheme.find('@') else {
+    let Some(authority) = uri.authority() else {
         return std::borrow::Cow::Borrowed(url);
     };
-    if let Some(slash_pos) = url_after_scheme.find('/')
-        && at_pos > slash_pos
-    {
+    let Some(at_pos) = authority.rfind('@') else {
         return std::borrow::Cow::Borrowed(url);
+    };
+    let mut masked = String::with_capacity(url.len() + 10);
+    if let Some(scheme) = uri.scheme() {
+        masked.push_str(scheme);
+        masked.push_str("://");
     }
-    let masked = format!(
-        "{}<redacted>@{}",
-        &url[..after_scheme],
-        &url[after_scheme + at_pos + 1..]
-    );
+    masked.push_str("<redacted>@");
+    masked.push_str(&authority[at_pos + 1..]);
+    masked.push_str(uri.path());
+    if let Some(query) = uri.query() {
+        masked.push('?');
+        masked.push_str(query);
+    }
+    if let Some(fragment) = uri.fragment() {
+        masked.push('#');
+        masked.push_str(fragment);
+    }
     std::borrow::Cow::Owned(masked)
 }
 
@@ -207,25 +215,54 @@ impl DisplayJson for AudioOpusParams {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoCodecType {
     /// VP8 コーデック。
-    VP8,
+    Vp8,
     /// VP9 コーデック。
-    VP9,
+    Vp9,
     /// H.264 コーデック。
     H264,
     /// H.265 コーデック。
     H265,
     /// AV1 コーデック。
-    AV1,
+    Av1,
 }
 
 impl DisplayJson for VideoCodecType {
     fn fmt(&self, f: &mut JsonFormatter<'_, '_>) -> std::fmt::Result {
         match self {
-            VideoCodecType::VP8 => f.value("VP8"),
-            VideoCodecType::VP9 => f.value("VP9"),
+            VideoCodecType::Vp8 => f.value("VP8"),
+            VideoCodecType::Vp9 => f.value("VP9"),
             VideoCodecType::H264 => f.value("H264"),
             VideoCodecType::H265 => f.value("H265"),
-            VideoCodecType::AV1 => f.value("AV1"),
+            VideoCodecType::Av1 => f.value("AV1"),
+        }
+    }
+}
+
+impl From<VideoCodecType> for shiguredo_webrtc::VideoCodecType {
+    fn from(value: VideoCodecType) -> Self {
+        match value {
+            VideoCodecType::Vp8 => shiguredo_webrtc::VideoCodecType::Vp8,
+            VideoCodecType::Vp9 => shiguredo_webrtc::VideoCodecType::Vp9,
+            VideoCodecType::H264 => shiguredo_webrtc::VideoCodecType::H264,
+            VideoCodecType::H265 => shiguredo_webrtc::VideoCodecType::H265,
+            VideoCodecType::Av1 => shiguredo_webrtc::VideoCodecType::Av1,
+        }
+    }
+}
+
+impl TryFrom<shiguredo_webrtc::VideoCodecType> for VideoCodecType {
+    type Error = String;
+
+    fn try_from(value: shiguredo_webrtc::VideoCodecType) -> std::result::Result<Self, Self::Error> {
+        match value {
+            shiguredo_webrtc::VideoCodecType::Vp8 => Ok(VideoCodecType::Vp8),
+            shiguredo_webrtc::VideoCodecType::Vp9 => Ok(VideoCodecType::Vp9),
+            shiguredo_webrtc::VideoCodecType::H264 => Ok(VideoCodecType::H264),
+            shiguredo_webrtc::VideoCodecType::H265 => Ok(VideoCodecType::H265),
+            shiguredo_webrtc::VideoCodecType::Av1 => Ok(VideoCodecType::Av1),
+            other => Err(format!(
+                "変換できません: shiguredo_webrtc::VideoCodecType::{other:?} → sora_sdk::VideoCodecType"
+            )),
         }
     }
 }
@@ -234,13 +271,13 @@ impl DisplayJson for VideoCodecType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioCodecType {
     /// Opus コーデック。
-    OPUS,
+    Opus,
 }
 
 impl DisplayJson for AudioCodecType {
     fn fmt(&self, f: &mut JsonFormatter<'_, '_>) -> std::fmt::Result {
         match self {
-            AudioCodecType::OPUS => f.value("OPUS"),
+            AudioCodecType::Opus => f.value("OPUS"),
         }
     }
 }
@@ -248,7 +285,7 @@ impl DisplayJson for AudioCodecType {
 /// connect メッセージの `audio` フィールドに対応する音声設定。
 ///
 /// [Audio::Bool] で単純な有効/無効を指定するか、
-/// [Audio::Audio] でコーデックやビットレートの詳細設定を指定できる。
+/// コーデック別のバリアントで詳細設定を指定できる。
 /// role が [Role::SendRecv] または [Role::SendOnly] の場合は配信設定、
 /// [Role::RecvOnly] の場合は受信設定として扱われる。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -257,14 +294,12 @@ pub enum Audio {
     ///
     /// `true` の場合は Opus で音声が配信または受信される。
     Bool(bool),
-    /// 音声コーデックの詳細設定。
-    Audio {
-        /// 音声コーデックの種類。未指定の場合は Opus。
-        codec_type: Option<AudioCodecType>,
+    /// Opus コーデックの詳細設定。
+    Opus {
         /// ビットレート (kbps)。6〜510 の範囲。
         bit_rate: Option<u32>,
         /// Opus 固有のパラメータ。
-        opus_params: Option<AudioOpusParams>,
+        params: Option<AudioOpusParams>,
     },
 }
 
@@ -273,15 +308,9 @@ impl Audio {
     pub fn new_bool(enabled: bool) -> Self {
         Self::Bool(enabled)
     }
-    /// Audio バリアントの [Audio] を生成する。
-    ///
-    /// コーデックは Opus 固定、`bit_rate` と `opus_params` は任意。
-    pub fn new_opus(bit_rate: Option<u32>, opus_params: Option<AudioOpusParams>) -> Self {
-        Self::Audio {
-            codec_type: Some(AudioCodecType::OPUS),
-            bit_rate,
-            opus_params,
-        }
+    /// Opus バリアントの [Audio] を生成する。
+    pub fn new_opus(bit_rate: Option<u32>, params: Option<AudioOpusParams>) -> Self {
+        Self::Opus { bit_rate, params }
     }
 }
 
@@ -289,19 +318,13 @@ impl DisplayJson for Audio {
     fn fmt(&self, f: &mut JsonFormatter<'_, '_>) -> std::fmt::Result {
         match self {
             Audio::Bool(b) => f.value(*b),
-            Audio::Audio {
-                codec_type,
-                bit_rate,
-                opus_params,
-            } => f.object(|f| {
-                if let Some(codec_type) = codec_type {
-                    f.member("codec_type", codec_type)?;
-                }
+            Audio::Opus { bit_rate, params } => f.object(|f| {
+                f.member("codec_type", AudioCodecType::Opus)?;
                 if let Some(bit_rate) = bit_rate {
                     f.member("bit_rate", bit_rate)?;
                 }
-                if let Some(opus_params) = opus_params {
-                    f.member("opus_params", opus_params)?;
+                if let Some(params) = params {
+                    f.member("opus_params", params)?;
                 }
                 Ok(())
             }),
@@ -579,7 +602,7 @@ impl DisplayJson for ForwardingFilter {
 /// connect メッセージの `video` フィールドに対応する映像設定。
 ///
 /// [Video::Bool] で単純な有効/無効を指定するか、
-/// [Video::Video] でコーデックやビットレートの詳細設定を指定できる。
+/// コーデック別のバリアントで詳細設定を指定できる。
 /// role が [Role::SendRecv] または [Role::SendOnly] の場合は配信設定、
 /// [Role::RecvOnly] の場合は受信設定として扱われる。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -588,20 +611,38 @@ pub enum Video {
     ///
     /// `true` の場合はデフォルトで映像が配信または受信される。
     Bool(bool),
-    /// 映像コーデックの詳細設定。
-    Video {
-        /// 映像コーデックの種類。
-        codec_type: Option<VideoCodecType>,
+    /// VP8 コーデックの詳細設定。
+    Vp8 {
+        /// ビットレート (kbps)。1〜50000 の範囲。
+        bit_rate: Option<u32>,
+    },
+    /// VP9 コーデックの詳細設定。
+    Vp9 {
         /// ビットレート (kbps)。1〜50000 の範囲。
         bit_rate: Option<u32>,
         /// VP9 固有のパラメータ。
-        vp9_params: Option<VideoVP9Params>,
-        /// AV1 固有のパラメータ。
-        av1_params: Option<VideoAV1Params>,
+        params: Option<VideoVP9Params>,
+    },
+    /// H.264 コーデックの詳細設定。
+    H264 {
+        /// ビットレート (kbps)。1〜50000 の範囲。
+        bit_rate: Option<u32>,
         /// H.264 固有のパラメータ。
-        h264_params: Option<VideoH264Params>,
+        params: Option<VideoH264Params>,
+    },
+    /// H.265 コーデックの詳細設定。
+    H265 {
+        /// ビットレート (kbps)。1〜50000 の範囲。
+        bit_rate: Option<u32>,
         /// H.265 固有のパラメータ。
-        h265_params: Option<VideoH265Params>,
+        params: Option<VideoH265Params>,
+    },
+    /// AV1 コーデックの詳細設定。
+    Av1 {
+        /// ビットレート (kbps)。1〜50000 の範囲。
+        bit_rate: Option<u32>,
+        /// AV1 固有のパラメータ。
+        params: Option<VideoAV1Params>,
     },
 }
 
@@ -610,60 +651,25 @@ impl Video {
     pub fn new_bool(enabled: bool) -> Self {
         Self::Bool(enabled)
     }
-    /// Video バリアントの [Video] を生成する。コーデックは VP8。
+    /// VP8 バリアントの [Video] を生成する。
     pub fn new_vp8(bit_rate: Option<u32>) -> Self {
-        Self::Video {
-            codec_type: Some(VideoCodecType::VP8),
-            bit_rate,
-            vp9_params: None,
-            av1_params: None,
-            h264_params: None,
-            h265_params: None,
-        }
+        Self::Vp8 { bit_rate }
     }
-    /// Video バリアントの [Video] を生成する。コーデックは VP9。
-    pub fn new_vp9(bit_rate: Option<u32>, vp9_params: Option<VideoVP9Params>) -> Self {
-        Self::Video {
-            codec_type: Some(VideoCodecType::VP9),
-            bit_rate,
-            vp9_params,
-            av1_params: None,
-            h264_params: None,
-            h265_params: None,
-        }
+    /// VP9 バリアントの [Video] を生成する。
+    pub fn new_vp9(bit_rate: Option<u32>, params: Option<VideoVP9Params>) -> Self {
+        Self::Vp9 { bit_rate, params }
     }
-    /// Video バリアントの [Video] を生成する。コーデックは AV1。
-    pub fn new_av1(bit_rate: Option<u32>, av1_params: Option<VideoAV1Params>) -> Self {
-        Self::Video {
-            codec_type: Some(VideoCodecType::AV1),
-            bit_rate,
-            vp9_params: None,
-            av1_params,
-            h264_params: None,
-            h265_params: None,
-        }
+    /// AV1 バリアントの [Video] を生成する。
+    pub fn new_av1(bit_rate: Option<u32>, params: Option<VideoAV1Params>) -> Self {
+        Self::Av1 { bit_rate, params }
     }
-    /// Video バリアントの [Video] を生成する。コーデックは H.264。
-    pub fn new_h264(bit_rate: Option<u32>, h264_params: Option<VideoH264Params>) -> Self {
-        Self::Video {
-            codec_type: Some(VideoCodecType::H264),
-            bit_rate,
-            vp9_params: None,
-            av1_params: None,
-            h264_params,
-            h265_params: None,
-        }
+    /// H.264 バリアントの [Video] を生成する。
+    pub fn new_h264(bit_rate: Option<u32>, params: Option<VideoH264Params>) -> Self {
+        Self::H264 { bit_rate, params }
     }
-    /// Video バリアントの [Video] を生成する。コーデックは H.265。
-    pub fn new_h265(bit_rate: Option<u32>, h265_params: Option<VideoH265Params>) -> Self {
-        Self::Video {
-            codec_type: Some(VideoCodecType::H265),
-            bit_rate,
-            vp9_params: None,
-            av1_params: None,
-            h264_params: None,
-            h265_params,
-        }
+    /// H.265 バリアントの [Video] を生成する。
+    pub fn new_h265(bit_rate: Option<u32>, params: Option<VideoH265Params>) -> Self {
+        Self::H265 { bit_rate, params }
     }
 }
 
@@ -671,31 +677,50 @@ impl DisplayJson for Video {
     fn fmt(&self, f: &mut JsonFormatter<'_, '_>) -> std::fmt::Result {
         match self {
             Video::Bool(b) => f.value(*b),
-            Video::Video {
-                codec_type,
-                bit_rate,
-                vp9_params,
-                av1_params,
-                h264_params,
-                h265_params,
-            } => f.object(|f| {
-                if let Some(codec_type) = codec_type {
-                    f.member("codec_type", codec_type)?;
-                }
+            Video::Vp8 { bit_rate } => f.object(|f| {
+                f.member("codec_type", VideoCodecType::Vp8)?;
                 if let Some(bit_rate) = bit_rate {
                     f.member("bit_rate", bit_rate)?;
                 }
-                if let Some(vp9_params) = vp9_params {
-                    f.member("vp9_params", vp9_params)?;
+                Ok(())
+            }),
+            Video::Vp9 { bit_rate, params } => f.object(|f| {
+                f.member("codec_type", VideoCodecType::Vp9)?;
+                if let Some(bit_rate) = bit_rate {
+                    f.member("bit_rate", bit_rate)?;
                 }
-                if let Some(av1_params) = av1_params {
-                    f.member("av1_params", av1_params)?;
+                if let Some(params) = params {
+                    f.member("vp9_params", params)?;
                 }
-                if let Some(h264_params) = h264_params {
-                    f.member("h264_params", h264_params)?;
+                Ok(())
+            }),
+            Video::Av1 { bit_rate, params } => f.object(|f| {
+                f.member("codec_type", VideoCodecType::Av1)?;
+                if let Some(bit_rate) = bit_rate {
+                    f.member("bit_rate", bit_rate)?;
                 }
-                if let Some(h265_params) = h265_params {
-                    f.member("h265_params", h265_params)?;
+                if let Some(params) = params {
+                    f.member("av1_params", params)?;
+                }
+                Ok(())
+            }),
+            Video::H264 { bit_rate, params } => f.object(|f| {
+                f.member("codec_type", VideoCodecType::H264)?;
+                if let Some(bit_rate) = bit_rate {
+                    f.member("bit_rate", bit_rate)?;
+                }
+                if let Some(params) = params {
+                    f.member("h264_params", params)?;
+                }
+                Ok(())
+            }),
+            Video::H265 { bit_rate, params } => f.object(|f| {
+                f.member("codec_type", VideoCodecType::H265)?;
+                if let Some(bit_rate) = bit_rate {
+                    f.member("bit_rate", bit_rate)?;
+                }
+                if let Some(params) = params {
+                    f.member("h265_params", params)?;
                 }
                 Ok(())
             }),
@@ -789,6 +814,90 @@ mod tests {
         assert_eq!(
             json,
             r#"{"codec_type":"H265","bit_rate":1200000,"h265_params":{"level_id":"120","profile_id":1,"tier_flag":0,"tx_mode":"MRST","b_frame":false}}"#
+        );
+    }
+
+    #[test]
+    fn mask_url_userinfo_masks_userinfo() {
+        assert_eq!(
+            mask_url_userinfo("http://user:pass@host"),
+            "http://<redacted>@host"
+        );
+    }
+
+    #[test]
+    fn mask_url_userinfo_masks_userinfo_with_path() {
+        assert_eq!(
+            mask_url_userinfo("http://user:pass@host/path"),
+            "http://<redacted>@host/path"
+        );
+    }
+
+    #[test]
+    fn mask_url_userinfo_no_userinfo() {
+        assert_eq!(mask_url_userinfo("http://host"), "http://host");
+    }
+
+    #[test]
+    fn mask_url_userinfo_query_at_sign_not_masked() {
+        assert_eq!(mask_url_userinfo("http://host?q=x@y"), "http://host?q=x@y");
+    }
+
+    #[test]
+    fn mask_url_userinfo_fragment_at_sign_not_masked() {
+        assert_eq!(
+            mask_url_userinfo("http://host#frag@evil"),
+            "http://host#frag@evil"
+        );
+    }
+
+    #[test]
+    fn mask_url_userinfo_user_only() {
+        assert_eq!(
+            mask_url_userinfo("http://user@host"),
+            "http://<redacted>@host"
+        );
+    }
+
+    #[test]
+    fn mask_url_userinfo_query_bug_case() {
+        assert_eq!(
+            mask_url_userinfo("http://host?token=abc@evil.com"),
+            "http://host?token=abc@evil.com"
+        );
+    }
+
+    #[test]
+    fn mask_url_userinfo_with_port() {
+        assert_eq!(
+            mask_url_userinfo("http://user:pass@host:8080/path"),
+            "http://<redacted>@host:8080/path"
+        );
+    }
+
+    #[test]
+    fn mask_url_userinfo_non_http_scheme() {
+        assert_eq!(
+            mask_url_userinfo("rtsp://admin:12345@camera.example.com:554/stream"),
+            "rtsp://<redacted>@camera.example.com:554/stream"
+        );
+    }
+
+    #[test]
+    fn mask_url_userinfo_no_scheme() {
+        assert_eq!(mask_url_userinfo("no-scheme-url"), "no-scheme-url");
+    }
+
+    #[test]
+    fn mask_url_userinfo_invalid_url() {
+        assert_eq!(mask_url_userinfo("not a valid url"), "not a valid url");
+    }
+
+    #[test]
+    fn mask_url_userinfo_ipv6_address() {
+        assert_eq!(
+            mask_url_userinfo("http://user:pass@[::1]:8080/path"),
+            "http://<redacted>@[::1]:8080/path"
         );
     }
 }

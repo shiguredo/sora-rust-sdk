@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-07-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-28
 - Model: Opus 4.7
 - Branch: feature/refactor-use-uri-parse-for-url-parsing
 - Polished: 2026-07-27
@@ -105,6 +105,13 @@ fn is_turn_tcp_or_udp_url(url: &str) -> bool {
    - `rtsp://admin:12345@camera.example.com:554/stream` (http 以外のスキーム)
    - スキームなしの URL はそのまま返すこと
    - 不正な URL はそのまま返すこと
+
+## 解決方法
+
+手動の URL 文字列パースを `shiguredo_http11::uri::Uri::parse` に置き換えた。
+- `mask_url_userinfo`: `Uri::parse` で authority を正しく分離し、authority 内の `@` のみをマスク対象とする。クエリやフラグメント内の `@` は誤検出されない。
+- `is_turn_tcp_or_udp_url`: `Uri::parse` でスキームとクエリを取得し、`transport` パラメータの抽出は case-insensitive で行う。
+- 各種 URL パターンに対する単体テストを追加した。
 
 ## 完了条件
 

@@ -65,6 +65,8 @@ pub enum Error {
         /// 受信した HTTP reason phrase。
         reason_phrase: String,
     },
+    /// プロキシ CONNECT 応答後に TLS 開始前の不正な余剰データを受信した。
+    ProxyConnectUnexpectedTrailingData,
     /// プロキシ認証情報の生成に失敗した。内部エラーとして [`AuthError`] を保持する。
     ProxyAuth(AuthError),
     /// DNS 解決に失敗した。
@@ -164,6 +166,13 @@ pub enum Error {
     },
     /// DataChannel への送信に失敗した。
     DataChannelSendFailed,
+    /// リダイレクトが発生し、実行中の RPC レスポンス待機が中断された。
+    Redirected,
+    /// シグナリング時に指定されていないラベルで DataChannel にメッセージを送信しようとした。
+    InvalidDataChannelLabel {
+        /// 指定されたラベル名。
+        label: String,
+    },
     /// UTF-8 デコードに失敗した。内部エラーとして [`std::string::FromUtf8Error`] を保持する。
     Utf8DecodeFailed(std::string::FromUtf8Error),
     /// candidate は未対応。
@@ -284,10 +293,10 @@ pub enum Error {
         /// 発生した時刻エラー。
         source: std::time::SystemTimeError,
     },
-    /// MP4 ファイルの処理に失敗した。
+    /// MP4 ファイルの処理に失敗した。内部エラーとして [`Mp4Error`] を保持する。
     Mp4 {
-        /// エラーメッセージ。
-        reason: String,
+        /// 発生した MP4 エラー。
+        source: Mp4Error,
     },
 }
 
@@ -340,6 +349,9 @@ impl std::fmt::Display for Error {
                 f,
                 "Proxy CONNECT が失敗しました: status={status_code} reason={reason_phrase}"
             ),
+            Error::ProxyConnectUnexpectedTrailingData => {
+                f.write_str("Proxy CONNECT 応答後に不正な余剰データを受信しました")
+            }
             Error::ProxyAuth(err) => write!(f, "Proxy 認証ヘッダーの生成に失敗しました: {err}"),
             Error::DnsResolve { host, source } => {
                 write!(f, "DNS 解決に失敗しました: {host}: {source}")
@@ -401,6 +413,10 @@ impl std::fmt::Display for Error {
                 write!(f, "DataChannel がありません: {label}")
             }
             Error::DataChannelSendFailed => f.write_str("DataChannel への送信に失敗しました"),
+            Error::Redirected => f.write_str("リダイレクトが発生したため中断されました"),
+            Error::InvalidDataChannelLabel { label } => {
+                write!(f, "シグナリング時に指定されていないラベルです: {label}")
+            }
             Error::Utf8DecodeFailed(err) => {
                 write!(f, "UTF-8 デコードに失敗しました: {err}")
             }
@@ -469,7 +485,7 @@ impl std::fmt::Display for Error {
                     "システム時刻が UNIX エポック (1970-01-01) より前です: {source}"
                 )
             }
-            Error::Mp4 { reason } => write!(f, "MP4 ファイルの処理に失敗しました: {reason}"),
+            Error::Mp4 { source } => write!(f, "MP4 エラー: {source}"),
         }
     }
 }
@@ -504,6 +520,7 @@ impl std::error::Error for Error {
             #[cfg(feature = "v4l2")]
             Error::V4l2 { source } => Some(source),
             Error::InvalidSystemTime { source } => Some(source),
+            Error::Mp4 { source } => Some(source),
             _ => None,
         }
     }
@@ -625,9 +642,7 @@ impl From<std::time::SystemTimeError> for Error {
 
 impl From<Mp4Error> for Error {
     fn from(err: Mp4Error) -> Self {
-        Error::Mp4 {
-            reason: err.to_string(),
-        }
+        Error::Mp4 { source: err }
     }
 }
 

@@ -366,19 +366,22 @@ mod tests {
         VideoEncoder, VideoEncoderHandler,
     };
 
-    struct StubVideoEncoder;
-    impl VideoEncoderHandler for StubVideoEncoder {}
+    // VideoEncoderHandler を最小限に実装したテスト専用の型。
+    struct NoopVideoEncoder;
+    impl VideoEncoderHandler for NoopVideoEncoder {}
 
-    struct StubVideoDecoder;
-    impl VideoDecoderHandler for StubVideoDecoder {}
+    // VideoDecoderHandler を最小限に実装したテスト専用の型。
+    struct NoopVideoDecoder;
+    impl VideoDecoderHandler for NoopVideoDecoder {}
 
-    struct MockVideoCodecCapability {
+    // VideoCodecCapability を本物のコードで実装したテスト専用の型。
+    struct TestVideoCodecCapability {
         implementation: VideoCodecImplementation,
         encoder_supported: Vec<VideoCodecType>,
         decoder_supported: Vec<VideoCodecType>,
     }
 
-    impl MockVideoCodecCapability {
+    impl TestVideoCodecCapability {
         fn new(
             implementation: VideoCodecImplementation,
             encoder_supported: Vec<VideoCodecType>,
@@ -392,7 +395,7 @@ mod tests {
         }
     }
 
-    impl VideoCodecCapability for MockVideoCodecCapability {
+    impl VideoCodecCapability for TestVideoCodecCapability {
         fn get_implementation(&self) -> VideoCodecImplementation {
             self.implementation.clone()
         }
@@ -446,7 +449,7 @@ mod tests {
                 .ok()
                 .and_then(|name| VideoCodecType::try_from(name.as_str()).ok())?;
             if self.is_supported(CodecDirection::Encoder, codec_type) {
-                Some(VideoEncoder::new_with_handler(Box::new(StubVideoEncoder)))
+                Some(VideoEncoder::new_with_handler(Box::new(NoopVideoEncoder)))
             } else {
                 None
             }
@@ -462,7 +465,7 @@ mod tests {
                 .ok()
                 .and_then(|name| VideoCodecType::try_from(name.as_str()).ok())?;
             if self.is_supported(CodecDirection::Decoder, codec_type) {
-                Some(VideoDecoder::new_with_handler(Box::new(StubVideoDecoder)))
+                Some(VideoDecoder::new_with_handler(Box::new(NoopVideoDecoder)))
             } else {
                 None
             }
@@ -478,7 +481,7 @@ mod tests {
     }
 
     fn sample_capabilities() -> Vec<Box<dyn VideoCodecCapability>> {
-        vec![Box::new(MockVideoCodecCapability::new(
+        vec![Box::new(TestVideoCodecCapability::new(
             VideoCodecImplementation::new("nvcodec", "NVIDIA NVENC/NVDEC"),
             vec![VideoCodecType::H264, VideoCodecType::H265],
             vec![VideoCodecType::H264, VideoCodecType::Vp8],
@@ -507,7 +510,7 @@ mod tests {
 
     #[test]
     fn create_preference_from_single_capability() {
-        let capability = MockVideoCodecCapability::new(
+        let capability = TestVideoCodecCapability::new(
             VideoCodecImplementation::new("mock", "Mock Codec"),
             vec![VideoCodecType::H264, VideoCodecType::Vp8],
             vec![VideoCodecType::H264],
@@ -716,12 +719,12 @@ mod tests {
     fn validate_fails_on_duplicate_capability_implementation() {
         let preference = sample_preference();
         let capabilities: Vec<Box<dyn VideoCodecCapability>> = vec![
-            Box::new(MockVideoCodecCapability::new(
+            Box::new(TestVideoCodecCapability::new(
                 VideoCodecImplementation::new("nvcodec", "NVIDIA NVENC/NVDEC"),
                 vec![VideoCodecType::H264],
                 vec![VideoCodecType::H264],
             )),
-            Box::new(MockVideoCodecCapability::new(
+            Box::new(TestVideoCodecCapability::new(
                 VideoCodecImplementation::new("nvcodec", "another description"),
                 vec![VideoCodecType::Vp8],
                 vec![VideoCodecType::Vp8],
