@@ -892,4 +892,12 @@ mod tests {
     fn mask_url_userinfo_invalid_url() {
         assert_eq!(mask_url_userinfo("not a valid url"), "not a valid url");
     }
+
+    #[test]
+    fn mask_url_userinfo_ipv6_address() {
+        assert_eq!(
+            mask_url_userinfo("http://user:pass@[::1]:8080/path"),
+            "http://<redacted>@[::1]:8080/path"
+        );
+    }
 }
