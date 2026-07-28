@@ -2,8 +2,7 @@
 name = "sumomo"
 version = "0.0.0"
 edition = "2024"
-# Linux では以下のパッケージが必要:
-#   sudo apt install libssl-dev pkg-config
+publish = false
 
 [dependencies]
 noargs = "0.4"

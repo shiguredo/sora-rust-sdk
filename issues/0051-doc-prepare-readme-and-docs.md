@@ -12,7 +12,7 @@
 
 ## 目的
 
-利用者が正式版を導入するときに迷わないよう、README・付属 docs・`CODEBASE.md`・sumomo ドキュメント・sumomo Cargo.toml メタデータを現状の実装・CI・ワークスペース構成に揃える。実装 / CI が正でドキュメントを追従させる方向でズレを潰す。
+利用者が正式版を導入するときに迷わないよう、README・付属 docs・`CODEBASE.md` を現状の実装・CI・ワークスペース構成に揃える。実装 / CI が正でドキュメントを追従させる方向でズレを潰す。`examples/sumomo/README.md` は削除方針に変更済み（ルート README の実行例と `docs/INPUT_MP4.md` で足りる）。sumomo の `publish = false` と不要コメント削除も完了済み。
 
 ## 優先度根拠
 
@@ -22,11 +22,14 @@ Medium。当初は「High 相当（正式リリース blocker）: sendonly サ�
 
 - `README.md`
 - `src/lib.rs`（`//!` に埋め込まれた sendrecv 最小例が README:92-140 と公開 API 面（use 節・EventHandler・Builder 引数）を共有している。README:92-140 とは意味的に一致する独立サンプルであり完全コピーではない。README を書き換える際は公開 API 面を揃える。粒度差（README はフル `#[tokio::main]` 例、`//!` は最小スニペット）は維持する）
-- `examples/sumomo/README.md`
-- `examples/sumomo/Cargo.toml`
 - `docs/SORA_CPP_SDK.md`
 - `docs/INPUT_MP4.md`
 - `CODEBASE.md`
+
+対応済み（本 issue の残作業から外す）:
+
+- `examples/sumomo/README.md`: 削除済み。ルート README のサンプル節からリンクも除去済み
+- `examples/sumomo/Cargo.toml`: `publish = false` 追加済み。誤った `libssl-dev pkg-config` コメントも削除済み
 
 ## 対象外
 
@@ -63,28 +66,11 @@ Medium。当初は「High 相当（正式リリース blocker）: sendonly サ�
 - `README.md:406-412` の構成図は `src/` / `examples/sumomo/` / `e2e-tests/` の 3 つのみで、`pbt/`（`Cargo.toml:14` に登録済みのワークスペースメンバー）と `docs/` `tests/` が抜けている。粒度は未確定事項 5 参照
 - `README.md:66-71`「MP4 無変換送信」節に「音声は無視される」制約（`docs/INPUT_MP4.md:17` に記載）が反映されていない
 
-### sumomo 側の確定した齟齬
+### sumomo 側（対応済み）
 
-- `examples/sumomo/README.md:10` の `sudo apt install libssl-dev pkg-config` は `libssl-dev` が不要。ワークスペースは `rustls` + `rustls-platform-verifier` + `aws-lc-rs` 構成で、`Cargo.toml` / `Cargo.lock` に `openssl-sys` / `native-tls` / `libssl-*` 系は存在しない。`.github/workflows/ci.yml:41-47` の apt install にも `libssl-dev` は含まれていない
-- `pkg-config`（Debian パッケージ）は `Cargo.lock` 上で `shiguredo_audio_device` / `shiguredo_libcamera` / `shiguredo_video_device` の build.rs が pkg-config クレート経由で使うため、`media-device` / `libcamera` feature を有効化する場合は間接的に必要（github-hosted runner にはデフォルト同梱されているため CI では明示 install していない）。したがって「default features では不要、`media-device` / `libcamera` feature では必要」と分岐して案内する
-- 同じ `libssl-dev` コメントが `examples/sumomo/Cargo.toml:5-6` にも残存
-- `examples/sumomo/README.md:8-11` の「ビルドには」文脈に、runtime パッケージ `pipewire-pulse`（L16 で apt install、L25 で runtime 起動注記）と dev headers `libpulse-dev` / `libpipewire-0.3-dev` 相当が混在。build 依存と runtime 依存の分離が必要
-- `examples/sumomo/README.md:76,86,100,109,122,134,168,182,197,209` に `wss://sora-test.shiguredo.co.jp/signaling` が 10 箇所残存。ルート `README.md` / `docs/INPUT_MP4.md` は `sora.example.com` に統一済みだが、sumomo は 1 箇所も置換されていない。`shiguredo-no-secrets` 規約上も「内部エンドポイントのホスト名」の除去対象になり得るので、方針は「10 箇所すべて `sora.example.com` に統一」で確定する
-- `examples/sumomo/README.md:33-56` のオプション表に、`examples/sumomo/src/args.rs` に定義されている以下の 8 オプションが載っていない
-  - `--video-bit-rate`（`args.rs:290-297`）
-  - `--input-mp4`（`args.rs:299-302`。`docs/INPUT_MP4.md` の実行例で使われている主要機能）
-  - `--insecure`（`args.rs:336-339`）
-  - `--client-cert`（`args.rs:341-347`）
-  - `--client-key`（`args.rs:349-355`）
-  - `--ca-cert`（`args.rs:357-363`）
-  - `--turn-tls-insecure`（`args.rs:370-373`）
-  - `--turn-tls-ca-cert`（`args.rs:375-378`）
-- `examples/sumomo/src/args.rs:240-244` は `--signaling-url` を `.split(',')` で複数 URL 対応にしているが、`examples/sumomo/README.md:35` の説明は単数 URL 前提の記述で複数 URL の書き方が案内されていない
-- `examples/sumomo/Cargo.toml` のパッケージメタデータが薄い
-  - `version = "0.0.0"` のまま
-  - `description` / `license` / `readme` / `repository` / `homepage` / `authors` などが未指定
-  - `publish = false` が **未指定**。同じワークスペースの `e2e-tests/Cargo.toml:6` と `pbt/Cargo.toml:6` は `publish = false` を持っており、sumomo だけ抜けている。誤 publish リスクあり
-- `docs/INPUT_MP4.md:21`「`--video-input-device` との同時指定はできない」の実装挙動は「排他エラーではなく silent precedence」。`examples/sumomo/src/main.rs:355-399` の `create_video_capturer` は `mp4_reader` が Some のとき先頭で early return するため、`--input-mp4` と `--video-input-device` を同時指定すると `--input-mp4` が優先され `--video-input-device` は黙って無視される。**同じ early return は `--libcamera`（`main.rs:364-376`）にも先んじるため、`--input-mp4 --libcamera` の同時指定でも `--input-mp4` が優先されて libcamera が silent に無視される**。`args.rs::validate_args`（`args.rs:475-568`）には `--input-mp4 × --video-input-device` / `--input-mp4 × --libcamera` の排他チェックは無い（既存の排他チェック `--libcamera × --video-input-device`（`args.rs:515-521`、`#[cfg(feature = "media-device")]` 下）は `sumomo README:L68` の禁止事項記述と対応しており、そちらは維持する）。MP4 系はドキュメントを実装挙動に合わせて書き直す（未確定事項 7 参照）
+- `examples/sumomo/README.md` は削除済み（オプション表・内部シグナリング URL・`libssl-dev` 案内などの齟齬はファイルごと消えた）
+- `examples/sumomo/Cargo.toml` に `publish = false` を追加済み。誤った `libssl-dev pkg-config` コメントも削除済み
+- `docs/INPUT_MP4.md:21`「`--video-input-device` との同時指定はできない」の実装挙動は「排他エラーではなく silent precedence」。`examples/sumomo/src/main.rs` の `create_video_capturer` は `mp4_reader` が Some のとき先頭で early return するため、`--input-mp4` と `--video-input-device` / `--libcamera` を同時指定すると `--input-mp4` が優先される。MP4 系はドキュメントを実装挙動に合わせて書き直す（未確定事項 7 参照）。こちらは残作業
 
 ### CODEBASE.md
 
@@ -105,17 +91,17 @@ Medium。当初は「High 相当（正式リリース blocker）: sendonly サ�
 4. **`docs/SORA_CPP_SDK.md` の develop 追随スコープ**: 現状 `SORA_CPP_SDK.md:203` の 1 項目のみ develop 追随している中途半端な状態。(a) develop 追随を完全撤去して基準バージョン `2026.1.2` に対する比較に統一 (b) 「develop 追随項目リスト」節を新設して継続運用にする。**デフォルト方針: 「(a) 撤去して基準バージョン比較に統一。develop の変化を継続追随する運用コストを避ける」**
 5. **構成図の粒度**: `pbt/` `docs/` `tests/` は追記確定。**デフォルト方針: 「ワークスペースメンバー（`src/` / `examples/sumomo/` / `e2e-tests/` / `pbt/`）+ 主要ドキュメント（`README.md` / `CHANGES.md` / `LICENSE` / `THIRD_PARTY_LICENSES.md` / `AGENTS.md` / `CODEBASE.md` / `docs/`）+ ビルド設定（`Cargo.toml` / `Cargo.lock` / `Makefile` / `prek.toml` / `rust-toolchain.toml`）+ トップレベル integration test（`tests/`）を載せ、`.github/` / `.cargo/` / `issues/` / `skills/` / `target/` / `canary.py` / `.markdownlint.jsonc` / `.gitignore` は省略」。CODEBASE.md で説明する項目は構成図にも載せる原則を採る**
 6. **`shiguredo_webrtc` / `sora_sdk` バージョン記法**: `README.md:81-82` は両方 `"<version>"` プレースホルダで、crates.io ページの利用者がそのままコピペするとビルド失敗する。**デフォルト方針: 「実バージョンを直書きする（例: `sora_sdk = "2026.1.0"`, `shiguredo_webrtc = "~0.150"`）。リリース毎に更新する運用は `CODEBASE.md` のリリースフロー節に明記する」**
-7. **`docs/INPUT_MP4.md:21` の `--video-input-device` / `--libcamera` 排他制約の扱い**: 実装は silent precedence（現状節参照）。(a) ドキュメントを「同時指定時は `--input-mp4` を優先する」に書き換える (b) `args.rs::validate_args` に排他チェックを追加する別 issue を切り、本 issue のドキュメント修正は保留にする。**デフォルト方針: 「(a) ドキュメントを実装挙動に合わせて書き換える。挙動そのものは silent precedence で問題ない（`--input-mp4` は明示的な MP4 送信指定なので、意図せず両方付ける利用者はまずいない）」**。書く場所は sumomo README のオプション表（L33-56）の `--input-mp4` 行の説明列（禁止事項の列挙である「制約」節ではなく振る舞い説明の場に置く）
+7. **`docs/INPUT_MP4.md:21` の `--video-input-device` / `--libcamera` 排他制約の扱い**: 実装は silent precedence（現状節参照）。(a) ドキュメントを「同時指定時は `--input-mp4` を優先する」に書き換える (b) `args.rs::validate_args` に排他チェックを追加する別 issue を切り、本 issue のドキュメント修正は保留にする。**デフォルト方針: 「(a) `docs/INPUT_MP4.md` を実装挙動に合わせて書き換える。挙動そのものは silent precedence で問題ない（`--input-mp4` は明示的な MP4 送信指定なので、意図せず両方付ける利用者はまずいない）」**
 8. **`CHANGES.md` へのエントリ追加要否**: 本 issue は基本的にドキュメント整備だが、Linux apt パッケージ一覧の追加など既存 README になかった情報の追記も含む。**デフォルト方針: 「`CHANGES.md` にはエントリを追加しない。理由: 実装挙動には影響しない純粋な README 補記であり、既に事実だった依存を明文化するだけで利用者側の挙動変化はない」**
 
 ## 設計方針
 
 - 実装と CI を正とし、ドキュメントを追従させる（未確定事項 3 は secret 環境依存のため例外）
 - `CODEBASE.md` はリポジトリ固有規約・ディレクトリ役割が分かる最小限の本文にする（次節で具体化）
-- sumomo は「動かすための最小情報」を README / Cargo.toml に集約する
+- sumomo 専用 README は持たない。動かし方はルート README のサンプル節と `docs/INPUT_MP4.md` に寄せる
 - 本 issue ではコードの機能変更をしない。実装追加が必要なら別 issue に切り出す（未確定事項 7 参照）
 - 実行時サンプルの URL は `wss://sora.example.com/signaling` に統一する
-- `.github/workflows/ci.yml:5-6` の `paths-ignore: "**.md"` により `.md` のみの PR では CI が走らないため、sumomo `Cargo.toml` 変更を含むブランチにまとめて CI を発火させる。純粋な `.md` のみブランチにする場合は push 前にローカルで `prek run --all-files` と `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` を実行して代替検証する
+- `.github/workflows/ci.yml:5-6` の `paths-ignore: "**.md"` により `.md` のみの PR では CI が走らない。純粋な `.md` のみブランチにする場合は push 前にローカルで `prek run --all-files` と `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` を実行して代替検証する
 
 ### CODEBASE.md に入れる最小セクション
 
@@ -144,25 +130,13 @@ Medium。当初は「High 相当（正式リリース blocker）: sendonly サ�
 
 ### grep 判定（issue ファイル自身を除外するため対象パスを絞る）
 
-以下は bash（process substitution `<(...)` を使用）で実行する前提。判定は exit code で行う。
+以下は bash で実行する前提。判定は exit code で行う。対応済み（sumomo README 削除と Cargo.toml 掃除により達成）。
 
 - `git grep -q 'libssl-dev' -- 'examples/**' 'docs/**' 'README.md' 'CODEBASE.md'` の exit code が **非 0**（ヒットなし）
-- `git grep -q 'sora-test.shiguredo.co.jp' -- 'examples/**' 'docs/**' 'README.md' 'CODEBASE.md'` の exit code が **非 0**（sumomo README 10 箇所が `sora.example.com` に置換されている）
+- `git grep -q 'sora-test.shiguredo.co.jp' -- 'examples/**' 'docs/**' 'README.md' 'CODEBASE.md'` の exit code が **非 0**（ヒットなし）
+- `test ! -e examples/sumomo/README.md` が成立すること
 
 ### 突合スクリプト（bash 前提）
-
-sumomo README のオプション表と `args.rs` の noargs 定義の集合が一致すること:
-
-```sh
-# args.rs 側: noargs::opt / noargs::flag の NAME を抽出
-git grep -hoE 'noargs::(opt|flag)\("[a-z0-9-]+"\)' examples/sumomo/src/args.rs \
-  | sed -E 's/noargs::(opt|flag)\("(.*)"\)/\2/' | sort -u > /tmp/args.txt
-# sumomo README 側: `--NAME` を抽出
-grep -oE '`--[a-z0-9-]+`' examples/sumomo/README.md | tr -d '`' | sed 's/^--//' \
-  | sort -u > /tmp/readme.txt
-# 差分ゼロ（version / help は noargs 自動提供なので README 側にのみ現れる想定で除外）
-diff <(sort -u /tmp/args.txt) <(grep -vE '^(version|help)$' /tmp/readme.txt | sort -u)
-```
 
 README の Builder メソッド例と実装の突合（対象範囲を絞って false positive を減らす）:
 
@@ -189,7 +163,8 @@ README / `src/lib.rs //!` のコード例 3 種（sendrecv / sendonly / recvonly
 
 ### 構造的な整備
 
-- `examples/sumomo/Cargo.toml` に `publish = false` / `description` / `license` が追加されている
+- `examples/sumomo/Cargo.toml` に `publish = false` が追加されている（対応済み。`description` / `license` はサンプルバイナリのため不要）
+- `examples/sumomo/README.md` が存在しないこと（対応済み）
 - `README.md:406-412` の構成図が未確定事項 5 で確定した粒度どおりの内容になっている
 - `CODEBASE.md` に「CODEBASE.md に入れる最小セクション」で列挙した 9 節がすべて存在する
 
@@ -215,14 +190,7 @@ README / `src/lib.rs //!` のコード例 3 種（sendrecv / sendonly / recvonly
    - `L429-433` 前提条件に Linux 用 apt パッケージ一覧を追加（default features 用の必須集合 + feature 別追加集合の 2 段構成）
    - `L445-456` 対応プラットフォームは未確定事項 1 の方針で処理（デフォルトなら self-hosted runner 上で `lsb_release -c` を実行して codename を実測し、Raspberry Pi 行のみ `- Raspberry Pi OS <codename> arm64` の 3 要素形式で追加）
 5. `src/lib.rs:18-42` の `//!` sendrecv 最小例は #0044（callback trait 化）時点で既に公開 API 面（use 節・EventHandler・Builder 引数）が現状の実装と一致しているため、本 issue での追加作業なし
-6. `examples/sumomo/README.md` を更新する
-   - `L10` の `libssl-dev` を削除。`pkg-config` は default features では不要のため base install から外し、`media-device` / `libcamera` feature 節に移動
-   - `L8-14` の「ビルド」文脈と「runtime 起動」の切り分けを整理（`pipewire-pulse` は runtime、`libpulse-dev` / `libpipewire-0.3-dev` は build）
-   - `L33-56` オプション表に欠落 8 個を追加。種別列の書式は「必須 / 任意 (値: xxx) / 任意 (フラグ) / 任意 (フラグ、feature 有効時のみ)」の 4 パターンに統一。追加する `--input-mp4` 行の説明列には未確定事項 7 の precedence 説明（「`--video-input-device` や `--libcamera` と同時指定した場合はこちらが優先」）も同時に記載する
-   - `L35` `--signaling-url` の説明にカンマ区切りで複数 URL を渡せる旨を追記
-   - `L68` の既存排他記述（`--libcamera` と `--video-input-device` は同時に指定できません）は実装（`args.rs:515-521`）と一致しているため維持する
-   - `L76` 以降の `sora-test.shiguredo.co.jp` 10 箇所を `sora.example.com` に置換
-7. `examples/sumomo/Cargo.toml` を更新する: `publish = false` を追加、`description` / `license` を追加、`L5-6` の `libssl-dev pkg-config` コメントを削除
-8. `docs/INPUT_MP4.md` を更新する: `L21` の `--video-input-device` との排他制約を「同時指定時は `--input-mp4` を優先する。`--libcamera` も同様」に書き換える
-9. `docs/SORA_CPP_SDK.md` を確認する: 未確定事項 4 のデフォルト方針を採る場合、`L203` の「develop のみ」列を削除して基準バージョン `2026.1.2` に対する比較に統一
-10. 完了条件の grep / 突合スクリプト / cargo check / cargo doc をすべて実行して合格を確認する
+6. `examples/sumomo/README.md` 削除と `examples/sumomo/Cargo.toml` の `publish = false` / 誤コメント削除は対応済み
+7. `docs/INPUT_MP4.md` を更新する: `L21` の `--video-input-device` との排他制約を「同時指定時は `--input-mp4` を優先する。`--libcamera` も同様」に書き換える
+8. `docs/SORA_CPP_SDK.md` を確認する: 未確定事項 4 のデフォルト方針を採る場合、`L203` の「develop のみ」列を削除して基準バージョン `2026.1.2` に対する比較に統一
+9. 完了条件の grep / 突合スクリプト / cargo check / cargo doc をすべて実行して合格を確認する

@@ -415,7 +415,7 @@ sora-rust-sdk/
 
 ### sumomo
 
-Sora クライアントのサンプルです。詳細は [examples/sumomo/README.md](examples/sumomo/README.md) を参照してください。
+Sora クライアントのサンプルです。
 
 ```bash
 cargo run -p sumomo -- \
