@@ -651,7 +651,7 @@ impl Video {
     pub fn new_bool(enabled: bool) -> Self {
         Self::Bool(enabled)
     }
-    /// H.264 バリアントの [Video] を生成する。
+    /// VP8 バリアントの [Video] を生成する。
     pub fn new_vp8(bit_rate: Option<u32>) -> Self {
         Self::Vp8 { bit_rate }
     }

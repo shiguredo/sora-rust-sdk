@@ -188,7 +188,7 @@ mod tests {
 
     impl VideoCodecCapability for TestVideoCodecCapability {
         fn get_implementation(&self) -> VideoCodecImplementation {
-            VideoCodecImplementation::new("mock", "Mock Codec")
+            VideoCodecImplementation::new("test", "Test Codec")
         }
 
         fn get_supported_formats(&self, direction: CodecDirection) -> Vec<SdpVideoFormat> {

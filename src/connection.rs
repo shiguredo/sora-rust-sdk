@@ -1011,15 +1011,12 @@ impl SoraConnection {
                             }
                         }
                         SoraConnectionCommand::SendMessage { label, data, response_tx } => {
-                            let result = if !self
-                                .data_channel_configs
-                                .iter()
-                                .any(|c| c.label == label)
-                                || !label.starts_with('#')
+                            let result = if label.starts_with('#')
+                                && self.data_channel_configs.iter().any(|c| c.label == label)
                             {
-                                Err(Error::InvalidDataChannelLabel { label })
-                            } else {
                                 self.send_data_channel_message(&label, &data)
+                            } else {
+                                Err(Error::InvalidDataChannelLabel { label })
                             };
                             let _ = response_tx.send(result);
                         }

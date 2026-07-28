@@ -318,7 +318,7 @@ impl Mp4SampleReader {
         // thread::sleep の相対待ちでは処理時間の累積ドリフトが発生するが、
         // このテーブルを使って Instant ベースの絶対時刻待ちを行うことで防止する。
         let timescale = track_info.timescale as u64;
-        let mut cumulative_us = Vec::with_capacity(samples.len() + 1);
+        let mut cumulative_us = Vec::new();
         let mut acc: u64 = 0;
         cumulative_us.push(0);
         for &(_, _, _, _, duration) in &samples {
