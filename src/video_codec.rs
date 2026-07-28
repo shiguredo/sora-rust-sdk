@@ -459,15 +459,15 @@ mod tests {
     use crate::video_codec_preference::PreferenceCodec;
     use shiguredo_webrtc::{ScalabilityMode, VideoDecoderHandler, VideoEncoderHandler};
 
-    // VideoEncoderHandler を最小限に実装したテスト専用の型。モックやスタブではない
+    // VideoEncoderHandler を最小限に実装したテスト専用の型。
     struct NoopVideoEncoder;
     impl VideoEncoderHandler for NoopVideoEncoder {}
 
-    // VideoDecoderHandler を最小限に実装したテスト専用の型。モックやスタブではない
+    // VideoDecoderHandler を最小限に実装したテスト専用の型。
     struct NoopVideoDecoder;
     impl VideoDecoderHandler for NoopVideoDecoder {}
 
-    // VideoEncoderHandler を最小限に実装したテスト専用の型。モックやスタブではない
+    // VideoEncoderHandler を最小限に実装したテスト専用の型。
     struct NoopVideoEncoderWithInfoName;
     impl VideoEncoderHandler for NoopVideoEncoderWithInfoName {
         fn get_encoder_info(&mut self) -> VideoEncoderEncoderInfo {
@@ -477,7 +477,7 @@ mod tests {
         }
     }
 
-    // VideoCodecCapability を本物のコードで実装したテスト専用の型。モックやスタブではない
+    // VideoCodecCapability を本物のコードで実装したテスト専用の型。
     struct TestVideoCodecCapability {
         implementation: VideoCodecImplementation,
         encoder_supported: Vec<VideoCodecType>,

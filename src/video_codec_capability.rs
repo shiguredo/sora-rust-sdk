@@ -175,15 +175,15 @@ mod tests {
     use nojson::Json;
     use shiguredo_webrtc::{VideoDecoderHandler, VideoEncoderHandler};
 
-    // VideoEncoderHandler を最小限に実装したテスト専用の型。モックやスタブではない
+    // VideoEncoderHandler を最小限に実装したテスト専用の型。
     struct NoopVideoEncoder;
     impl VideoEncoderHandler for NoopVideoEncoder {}
 
-    // VideoDecoderHandler を最小限に実装したテスト専用の型。モックやスタブではない
+    // VideoDecoderHandler を最小限に実装したテスト専用の型。
     struct NoopVideoDecoder;
     impl VideoDecoderHandler for NoopVideoDecoder {}
 
-    // VideoCodecCapability を本物のコードで実装したテスト専用の型。モックやスタブではない
+    // VideoCodecCapability を本物のコードで実装したテスト専用の型。
     struct TestVideoCodecCapability;
 
     impl VideoCodecCapability for TestVideoCodecCapability {
