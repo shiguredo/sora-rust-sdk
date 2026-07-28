@@ -959,6 +959,22 @@ mod tests {
         );
         assert_eq!(codec.width(), 320);
         assert_eq!(codec.height(), 180);
+        assert_eq!(
+            codec
+                .simulcast_stream(0)
+                .expect("simulcast stream 0 が必要")
+                .width(),
+            320,
+            "stream 0 の幅は変更されていない"
+        );
+        assert_eq!(
+            codec
+                .simulcast_stream(0)
+                .expect("simulcast stream 0 が必要")
+                .height(),
+            180,
+            "stream 0 の高さは変更されていない"
+        );
     }
 
     #[test]
