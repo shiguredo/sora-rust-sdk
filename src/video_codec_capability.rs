@@ -236,7 +236,7 @@ mod tests {
     #[test]
     fn trait_works_with_trait_object() {
         let capability: Box<dyn VideoCodecCapability> = Box::new(TestVideoCodecCapability);
-        assert_eq!(capability.get_implementation().name(), "mock");
+        assert_eq!(capability.get_implementation().name(), "test");
         assert!(capability.is_supported(CodecDirection::Encoder, VideoCodecType::H264));
         assert!(capability.is_supported(CodecDirection::Decoder, VideoCodecType::H264));
         let h264 = SdpVideoFormat::new("H264");
