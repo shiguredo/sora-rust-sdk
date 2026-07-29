@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-07-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-29
 - Model: Composer
 - Branch: feature/fix-mp4-capturer-stop-latency
 - Polished: {YYYY-MM-DD}
@@ -48,6 +48,11 @@ Medium。
 
 ## 解決方法
 
-1. sleep 区間を分割するか、待機をキャンセル可能にする
-2. `Drop` / 明示 stop から `join` までの遅延を測るテストを追加する
-3. 既存の絶対時刻ベース送信ロジックを回帰させない
+本 issue は対応不要と判断し、コード変更なしで closed にする。
+
+理由:
+
+- 現象自体は存在するが、止まるのは `Mp4VideoCapturer` の `Drop` / `join` だけであり、Sora 切断・再接続そのもののレイテンシではない
+- 待ち時間は概ね 1 フレーム間隔（30 fps なら最大約 33 ms）で、致命的な遅延ではない
+- デッドロック・データ欠損・panic ではなく、正式リリースや再接続品質のブロッカーにもならない
+- sleep 分割や Condvar 化はコードを複雑にするだけで、実運用上の効果が薄い
