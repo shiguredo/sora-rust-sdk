@@ -57,7 +57,10 @@ impl SoraVideoDecoderFactory {
 
 impl VideoEncoderFactoryHandler for SoraVideoEncoderFactory {
     fn get_supported_formats(&mut self) -> Vec<SdpVideoFormat> {
-        let capabilities = self.capabilities.lock().unwrap();
+        let capabilities = self
+            .capabilities
+            .lock()
+            .expect("capabilities should not be poisoned");
         collect_supported_formats(&self.preference, &capabilities, CodecDirection::Encoder)
     }
 
@@ -69,7 +72,10 @@ impl VideoEncoderFactoryHandler for SoraVideoEncoderFactory {
         let format_name = format.name().ok()?;
         let codec_type = VideoCodecType::try_from(format_name.as_str()).ok()?;
         let preference = self.preference.find(CodecDirection::Encoder, codec_type)?;
-        let capabilities = self.capabilities.lock().unwrap();
+        let capabilities = self
+            .capabilities
+            .lock()
+            .expect("capabilities should not be poisoned");
         let capability = find_capability(&capabilities, preference.implementation())?;
         let resolved = capability.resolve_sdp_format(CodecDirection::Encoder, format)?;
         capability.create_video_encoder(env, resolved.as_ref())
@@ -78,7 +84,10 @@ impl VideoEncoderFactoryHandler for SoraVideoEncoderFactory {
 
 impl VideoDecoderFactoryHandler for SoraVideoDecoderFactory {
     fn get_supported_formats(&mut self) -> Vec<SdpVideoFormat> {
-        let capabilities = self.capabilities.lock().unwrap();
+        let capabilities = self
+            .capabilities
+            .lock()
+            .expect("capabilities should not be poisoned");
         collect_supported_formats(&self.preference, &capabilities, CodecDirection::Decoder)
     }
 
@@ -90,7 +99,10 @@ impl VideoDecoderFactoryHandler for SoraVideoDecoderFactory {
         let format_name = format.name().ok()?;
         let codec_type = VideoCodecType::try_from(format_name.as_str()).ok()?;
         let preference = self.preference.find(CodecDirection::Decoder, codec_type)?;
-        let capabilities = self.capabilities.lock().unwrap();
+        let capabilities = self
+            .capabilities
+            .lock()
+            .expect("capabilities should not be poisoned");
         let capability = find_capability(&capabilities, preference.implementation())?;
         let resolved = capability.resolve_sdp_format(CodecDirection::Decoder, format)?;
         capability.create_video_decoder(env, resolved.as_ref())

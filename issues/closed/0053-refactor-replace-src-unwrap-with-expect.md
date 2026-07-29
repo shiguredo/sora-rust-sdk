@@ -2,7 +2,7 @@
 
 - Priority: Low
 - Created: 2026-07-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-29
 - Model: Composer
 - Branch: feature/refactor-replace-src-unwrap-with-expect
 - Polished: {YYYY-MM-DD}
@@ -57,6 +57,9 @@ Low。
 
 ## 解決方法
 
-1. ファイルごとに `.unwrap()` を列挙し、テスト内か本番経路かを分ける
-2. 本番経路を `.expect("...")` に置換する
-3. 必要なら周辺コメントで不変条件を補う
+本番経路の `.unwrap()` を `.expect("...")` に置換した。
+
+- `connection.rs`: `video_sender.as_mut()` を `expect("video_sender must exist after is_none check")` に変更
+- `video_codec.rs` / `amf.rs` / `nvcodec.rs` / `vpl.rs` / `v4l2.rs`: `Mutex::lock()` の毒化を `expect("... should not be poisoned")` に変更
+- `mp4.rs` のテスト内 `.unwrap()` / `.unwrap_err()` は対象外のまま残した
+- `cargo test -p sora_sdk` と `cargo clippy -p sora_sdk --all-targets -- -D warnings` が通ることを確認した

@@ -175,7 +175,9 @@ fn handle_nvcodec_encode_callback(
     }
 
     let result = {
-        let callback_state = callback_state.lock().unwrap();
+        let callback_state = callback_state
+            .lock()
+            .expect("callback_state should not be poisoned");
         let Some(callback) = callback_state.callback else {
             return;
         };
@@ -272,7 +274,9 @@ fn handle_nvcodec_decode_callback(
         .set_rtp_timestamp(value.rtp_timestamp)
         .build();
 
-    let callback_state = callback_state.lock().unwrap();
+    let callback_state = callback_state
+        .lock()
+        .expect("callback_state should not be poisoned");
     let Some(callback) = callback_state.callback else {
         return;
     };
@@ -396,7 +400,10 @@ impl VideoEncoderHandler for NvCodecVideoEncoder {
         frame_types: Option<VideoFrameTypeVectorRef<'_>>,
     ) -> VideoCodecStatus {
         let has_callback = {
-            let callback_state = self.callback_state.lock().unwrap();
+            let callback_state = self
+                .callback_state
+                .lock()
+                .expect("callback_state should not be poisoned");
             callback_state.callback.is_some()
         };
         if !has_callback {
@@ -503,14 +510,20 @@ impl VideoEncoderHandler for NvCodecVideoEncoder {
         &mut self,
         callback: Option<VideoEncoderEncodedImageCallbackRef<'_>>,
     ) -> VideoCodecStatus {
-        let mut callback_state = self.callback_state.lock().unwrap();
+        let mut callback_state = self
+            .callback_state
+            .lock()
+            .expect("callback_state should not be poisoned");
         callback_state.callback = callback
             .map(|callback| unsafe { VideoEncoderEncodedImageCallbackPtr::from_ref(callback) });
         VideoCodecStatus::Ok
     }
 
     fn release(&mut self) -> VideoCodecStatus {
-        let mut callback_state = self.callback_state.lock().unwrap();
+        let mut callback_state = self
+            .callback_state
+            .lock()
+            .expect("callback_state should not be poisoned");
         callback_state.callback = None;
         drop(callback_state);
         self.encoder = None;
@@ -597,7 +610,10 @@ impl VideoDecoderHandler for NvCodecVideoDecoder {
         render_time_ms: i64,
     ) -> VideoCodecStatus {
         let has_callback = {
-            let callback_state = self.callback_state.lock().unwrap();
+            let callback_state = self
+                .callback_state
+                .lock()
+                .expect("callback_state should not be poisoned");
             callback_state.callback.is_some()
         };
         if !has_callback {
@@ -631,13 +647,19 @@ impl VideoDecoderHandler for NvCodecVideoDecoder {
         &mut self,
         callback: Option<VideoDecoderDecodedImageCallbackPtr>,
     ) -> VideoCodecStatus {
-        let mut callback_state = self.callback_state.lock().unwrap();
+        let mut callback_state = self
+            .callback_state
+            .lock()
+            .expect("callback_state should not be poisoned");
         callback_state.callback = callback;
         VideoCodecStatus::Ok
     }
 
     fn release(&mut self) -> VideoCodecStatus {
-        let mut callback_state = self.callback_state.lock().unwrap();
+        let mut callback_state = self
+            .callback_state
+            .lock()
+            .expect("callback_state should not be poisoned");
         callback_state.callback = None;
         drop(callback_state);
         self.decoder = None;

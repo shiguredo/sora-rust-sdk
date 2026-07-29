@@ -233,7 +233,9 @@ fn handle_v4l2_encode_callback(
     codec_specific_info.set_h264_idr_frame(encoded.is_keyframe());
 
     let callback = {
-        let shared_state = shared_state.lock().unwrap();
+        let shared_state = shared_state
+            .lock()
+            .expect("shared_state should not be poisoned");
         shared_state.callback
     };
     let Some(callback) = callback else {
@@ -286,7 +288,9 @@ fn handle_v4l2_convert_callback(
     // take/put-back を適用すると、encode() 側が rebuild をトリガーした場合に
     // put-back が新 encoder を古い encoder で上書きする競合が発生するため、
     // この関数ではロック保持パターンを維持する。
-    let mut shared_state = shared_state.lock().unwrap();
+    let mut shared_state = shared_state
+        .lock()
+        .expect("shared_state should not be poisoned");
     let Some(encoder) = shared_state.encoder.as_mut() else {
         rtc_log_warning!("V4L2 convert callback dropped frame because encoder is not initialized");
         return;
@@ -343,7 +347,10 @@ impl V4l2VideoEncoder {
     }
 
     fn shared_has_encoder(&self) -> bool {
-        let shared_state = self.shared_state.lock().unwrap();
+        let shared_state = self
+            .shared_state
+            .lock()
+            .expect("shared_state should not be poisoned");
         shared_state.encoder.is_some()
     }
 
@@ -375,7 +382,10 @@ impl V4l2VideoEncoder {
         // handle_v4l2_convert_callback は encoder が None の場合フレームを
         // ドロップするため、rebuild 中の短期間のみであり許容範囲。
         let old_encoder = {
-            let mut shared_state = self.shared_state.lock().unwrap();
+            let mut shared_state = self
+                .shared_state
+                .lock()
+                .expect("shared_state should not be poisoned");
             shared_state.encoder.take()
         };
         drop(old_encoder);
@@ -392,7 +402,10 @@ impl V4l2VideoEncoder {
 
         // converter が落ちた後、新しい encoder を設定する。
         {
-            let mut shared_state = self.shared_state.lock().unwrap();
+            let mut shared_state = self
+                .shared_state
+                .lock()
+                .expect("shared_state should not be poisoned");
             shared_state.encoder = Some(new_encoder);
         }
 
@@ -443,7 +456,10 @@ impl V4l2VideoEncoder {
         // 1. 古い encoder を take し、ロック外で drop する。
         //    デッドロック回避のため rebuild_mmap_encoder と同じパターン。
         let old_encoder = {
-            let mut shared_state = self.shared_state.lock().unwrap();
+            let mut shared_state = self
+                .shared_state
+                .lock()
+                .expect("shared_state should not be poisoned");
             shared_state.encoder.take()
         };
         drop(old_encoder);
@@ -454,7 +470,10 @@ impl V4l2VideoEncoder {
 
         // 3. 新しい encoder を設定する。
         {
-            let mut shared_state = self.shared_state.lock().unwrap();
+            let mut shared_state = self
+                .shared_state
+                .lock()
+                .expect("shared_state should not be poisoned");
             shared_state.encoder = Some(new_encoder);
         }
 
@@ -502,7 +521,10 @@ impl VideoEncoderHandler for V4l2VideoEncoder {
         frame_types: Option<VideoFrameTypeVectorRef<'_>>,
     ) -> VideoCodecStatus {
         let has_callback = {
-            let shared_state = self.shared_state.lock().unwrap();
+            let shared_state = self
+                .shared_state
+                .lock()
+                .expect("shared_state should not be poisoned");
             shared_state.callback.is_some()
         };
         if !has_callback {
@@ -661,7 +683,12 @@ impl VideoEncoderHandler for V4l2VideoEncoder {
         // encode() は &mut self で呼ばれるため他スレッドの encode() と競合しない。
         // take/put-back パターンで encoder.encode() をロック外で呼び出し、
         // ロック保持時間を短縮する。
-        let mut encoder_opt = self.shared_state.lock().unwrap().encoder.take();
+        let mut encoder_opt = self
+            .shared_state
+            .lock()
+            .expect("shared_state should not be poisoned")
+            .encoder
+            .take();
         let status = {
             let Some(ref mut enc) = encoder_opt else {
                 rtc_log_error!("V4L2 encode failed: encoder is not initialized");
@@ -681,7 +708,10 @@ impl VideoEncoderHandler for V4l2VideoEncoder {
                 }
             }
         };
-        self.shared_state.lock().unwrap().encoder = encoder_opt;
+        self.shared_state
+            .lock()
+            .expect("shared_state should not be poisoned")
+            .encoder = encoder_opt;
         status
     }
 
@@ -689,7 +719,10 @@ impl VideoEncoderHandler for V4l2VideoEncoder {
         &mut self,
         callback: Option<VideoEncoderEncodedImageCallbackRef<'_>>,
     ) -> VideoCodecStatus {
-        let mut shared_state = self.shared_state.lock().unwrap();
+        let mut shared_state = self
+            .shared_state
+            .lock()
+            .expect("shared_state should not be poisoned");
         shared_state.callback = callback
             .map(|callback| unsafe { VideoEncoderEncodedImageCallbackPtr::from_ref(callback) });
         VideoCodecStatus::Ok
@@ -707,7 +740,10 @@ impl VideoEncoderHandler for V4l2VideoEncoder {
         // shared_state.encoder の drop 時に drain 処理が走ってコールバックハンドラが
         // 呼ばれるが、先に callback = None にしているのでコールバックは早期 return する。
         let encoder = {
-            let mut shared_state = self.shared_state.lock().unwrap();
+            let mut shared_state = self
+                .shared_state
+                .lock()
+                .expect("shared_state should not be poisoned");
             shared_state.callback = None;
             shared_state.encoder.take()
         };
@@ -722,7 +758,10 @@ impl VideoEncoderHandler for V4l2VideoEncoder {
             .max(1);
         self.target_bitrate_bps = bitrate_bps;
 
-        let mut shared_state = self.shared_state.lock().unwrap();
+        let mut shared_state = self
+            .shared_state
+            .lock()
+            .expect("shared_state should not be poisoned");
         let Some(encoder) = shared_state.encoder.as_mut() else {
             self.rebuild_needed = true;
             return;
@@ -760,7 +799,9 @@ fn handle_v4l2_decode_resolution_changed(
     callback_state: &Arc<Mutex<DecoderCallbackState>>,
     resolution: Resolution,
 ) {
-    let mut callback_state = callback_state.lock().unwrap();
+    let mut callback_state = callback_state
+        .lock()
+        .expect("callback_state should not be poisoned");
     callback_state.resolution = Some(resolution);
 }
 
@@ -775,7 +816,9 @@ fn handle_v4l2_decode_frame(
             return;
         }
     };
-    let callback_state = callback_state.lock().unwrap();
+    let callback_state = callback_state
+        .lock()
+        .expect("callback_state should not be poisoned");
     let resolution = match callback_state.resolution {
         Some(resolution) => resolution,
         None => {
@@ -848,7 +891,10 @@ impl V4l2VideoDecoder {
                 },
             ),
         )?);
-        let mut callback_state = self.callback_state.lock().unwrap();
+        let mut callback_state = self
+            .callback_state
+            .lock()
+            .expect("callback_state should not be poisoned");
         callback_state.resolution = None;
         Ok(())
     }
@@ -881,7 +927,10 @@ impl VideoDecoderHandler for V4l2VideoDecoder {
         render_time_ms: i64,
     ) -> VideoCodecStatus {
         let has_callback = {
-            let callback_state = self.callback_state.lock().unwrap();
+            let callback_state = self
+                .callback_state
+                .lock()
+                .expect("callback_state should not be poisoned");
             callback_state.callback.is_some()
         };
         if !has_callback {
@@ -916,7 +965,10 @@ impl VideoDecoderHandler for V4l2VideoDecoder {
         ) {
             Ok(()) => {
                 if let Some(resolution) = decoder.resolution() {
-                    let mut callback_state = self.callback_state.lock().unwrap();
+                    let mut callback_state = self
+                        .callback_state
+                        .lock()
+                        .expect("callback_state should not be poisoned");
                     callback_state.resolution = Some(resolution);
                 }
                 VideoCodecStatus::Ok
@@ -938,13 +990,19 @@ impl VideoDecoderHandler for V4l2VideoDecoder {
         &mut self,
         callback: Option<VideoDecoderDecodedImageCallbackPtr>,
     ) -> VideoCodecStatus {
-        let mut callback_state = self.callback_state.lock().unwrap();
+        let mut callback_state = self
+            .callback_state
+            .lock()
+            .expect("callback_state should not be poisoned");
         callback_state.callback = callback;
         VideoCodecStatus::Ok
     }
 
     fn release(&mut self) -> VideoCodecStatus {
-        let mut callback_state = self.callback_state.lock().unwrap();
+        let mut callback_state = self
+            .callback_state
+            .lock()
+            .expect("callback_state should not be poisoned");
         callback_state.callback = None;
         callback_state.resolution = None;
         drop(callback_state);
