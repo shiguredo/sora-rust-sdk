@@ -175,7 +175,9 @@ fn handle_amf_encode_callback(
     }
 
     let result = {
-        let callback_state = callback_state.lock().unwrap();
+        let callback_state = callback_state
+            .lock()
+            .expect("callback_state should not be poisoned");
         let Some(callback) = callback_state.callback else {
             return;
         };
@@ -308,7 +310,10 @@ impl VideoEncoderHandler for AmfVideoEncoder {
         frame_types: Option<VideoFrameTypeVectorRef<'_>>,
     ) -> VideoCodecStatus {
         let has_callback = {
-            let callback_state = self.callback_state.lock().unwrap();
+            let callback_state = self
+                .callback_state
+                .lock()
+                .expect("callback_state should not be poisoned");
             callback_state.callback.is_some()
         };
         if !has_callback {
@@ -468,14 +473,20 @@ impl VideoEncoderHandler for AmfVideoEncoder {
         &mut self,
         callback: Option<VideoEncoderEncodedImageCallbackRef<'_>>,
     ) -> VideoCodecStatus {
-        let mut callback_state = self.callback_state.lock().unwrap();
+        let mut callback_state = self
+            .callback_state
+            .lock()
+            .expect("callback_state should not be poisoned");
         callback_state.callback = callback
             .map(|callback| unsafe { VideoEncoderEncodedImageCallbackPtr::from_ref(callback) });
         VideoCodecStatus::Ok
     }
 
     fn release(&mut self) -> VideoCodecStatus {
-        let mut callback_state = self.callback_state.lock().unwrap();
+        let mut callback_state = self
+            .callback_state
+            .lock()
+            .expect("callback_state should not be poisoned");
         callback_state.callback = None;
         drop(callback_state);
         self.encoder = None;
@@ -595,7 +606,9 @@ fn handle_amf_decode_callback(
         .set_rtp_timestamp(value.rtp_timestamp)
         .build();
 
-    let callback_state = callback_state.lock().unwrap();
+    let callback_state = callback_state
+        .lock()
+        .expect("callback_state should not be poisoned");
     let Some(callback) = callback_state.callback else {
         return;
     };
@@ -656,7 +669,10 @@ impl VideoDecoderHandler for AmfVideoDecoder {
         render_time_ms: i64,
     ) -> VideoCodecStatus {
         let has_callback = {
-            let callback_state = self.callback_state.lock().unwrap();
+            let callback_state = self
+                .callback_state
+                .lock()
+                .expect("callback_state should not be poisoned");
             callback_state.callback.is_some()
         };
         if !has_callback {
@@ -718,13 +734,19 @@ impl VideoDecoderHandler for AmfVideoDecoder {
         &mut self,
         callback: Option<VideoDecoderDecodedImageCallbackPtr>,
     ) -> VideoCodecStatus {
-        let mut callback_state = self.callback_state.lock().unwrap();
+        let mut callback_state = self
+            .callback_state
+            .lock()
+            .expect("callback_state should not be poisoned");
         callback_state.callback = callback;
         VideoCodecStatus::Ok
     }
 
     fn release(&mut self) -> VideoCodecStatus {
-        let mut callback_state = self.callback_state.lock().unwrap();
+        let mut callback_state = self
+            .callback_state
+            .lock()
+            .expect("callback_state should not be poisoned");
         callback_state.callback = None;
         drop(callback_state);
         self.decoder = None;

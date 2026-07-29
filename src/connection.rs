@@ -1397,7 +1397,11 @@ impl SoraConnection {
             return Err(Error::SimulcastVideoSenderMissing);
         }
 
-        let sender = self.video_sender.as_mut().unwrap();
+        // 直前の is_none チェックで欠落時は Err を返している。
+        let sender = self
+            .video_sender
+            .as_mut()
+            .expect("video_sender must exist after is_none check");
         let mut parameters = sender.get_parameters();
         let mut encodings = RtpEncodingParametersVector::new(0);
         for cfg in &self.simulcast_encodings {
