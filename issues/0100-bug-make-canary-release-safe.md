@@ -387,15 +387,6 @@ uv run --frozen pytest tests/test_canary.py
 
 `.github/workflows/release.yml` は issue 0099 の変更対象とし、本 issue では変更しない。
 
-## pending 理由
-
-2026-07-30 時点では、end-to-end の公開安全性を所有する issue 0099 が未実装である。
-現行 release workflow のまま新しい script が tag を push すると、安全でない workflow を即時起動する。
-0100 の local state machine は独立して実装可能だが、安全な canary release 操作として実運用・完了するには 0099 が必要なため pending にする。
-
-issue 0099 の実装、workflow test、release environment / trusted publisher の確認が完了した後に reopened にする。
-reopened 後は 0100 の local state machine を実装し、local bare remote test までは実際の GitHub / crates.io へ公開せずに完了させる。
-
 ## 完了条件
 
 - issue 0099 の release workflow gate と再開可能な公開 state machine が実装・検証済みである
