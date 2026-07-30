@@ -187,15 +187,6 @@ fixture を byte patch する場合は、書き換え前の box type、box size�
 
 upstream `shiguredo_mp4` の source と test は prerequisite の別 issue / branch / PR で変更し、本 issue の commit には含めない。
 
-## pending 理由
-
-2026-07-30 時点では、安全化を含む upstream `shiguredo_mp4 2026.4.0` と、その issue / PR が存在しない。
-また、SDK timeline の prerequisite である issue 0096 も未実装である。
-この状態で open にすると実装を完了できず、自動対応も必ず外部 release 待ちで停止するため pending にする。
-
-upstream の issue / PR を作成して `2026.4.0` を公開し、issue 0096 の実装が完了した後に reopened にする。
-reopened 時に upstream issue / PR / release の URL と確定 version を本文へ記録し、`Cargo.toml` / `Cargo.lock` の更新から着手する。
-
 ## 完了条件
 
 - upstream の専用 issue / PR が、対象算術の checked arithmetic、具体的な error、境界 test を実装している
