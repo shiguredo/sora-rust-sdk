@@ -216,14 +216,6 @@ job timeout を 15 分、各 CLI child timeout を 30 秒にする。
 
 `src/video_codecs/mp4.rs` は本 issue の変更対象に含めず、prerequisite の issue 0098 だけで変更する。
 
-## pending 理由
-
-2026-07-30 時点では、長い sample deadline 中の `Mp4VideoCapturer` を stop signal で中断する issue 0098 が pending である。
-0101 だけを実装しても `--input-mp4 --duration ...` の capturer drop / join が長時間停止し、目的の「指定時間後に確実に終了する」を全入力で満たせない。
-
-issue 0098 が reopened され、stop + unpark + join と長い deadline の実 thread test が実装・検証された後に本 issue を reopened にする。
-reopened 後は 0098 の実装を再利用し、0101 で MP4 capturer の停止処理を重複変更しない。
-
 ## 完了条件
 
 - issue 0098 の `Mp4VideoCapturer` bounded shutdown が実装・検証済みである
