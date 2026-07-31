@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-29
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-07-31
 - Model: GPT-5
 - Branch: feature/fix-bound-datachannel-event-queue
 - Polished: 2026-07-29
@@ -63,6 +63,15 @@ High。リモートがメッセージを連続送信すると、所有された�
 
 payload の保持量は 16 MiB 以下、未処理または処理中の DataChannel メッセージは 64 件以下に制限する。
 ラベル、イベント本体、channel node、allocator のオーバーヘッドはこの 16 MiB には含めず、64 件の上限で有界化する。
+
+## 解決方法
+
+有界化は実装せず、DataChannel 受信イベントキューは unbounded のままとした。利用方法の管理はユーザーに委ねる。
+
+- 制御イベント（track、ICE candidate、状態遷移、RPC timeout）は元々 unbounded のまま維持する設計であり、DataChannel メッセージだけを有界化してもメモリ枯渇の防止は部分的なものにとどまる。全部 unbounded で割り切る方が一貫している
+- 件数 64 件・本文合計 16 MiB を内部定数で超過時に切断するのは、大容量データ転送などの正当な利用を予測不能に遮断し、設定 API もないためユーザー側で回避できない
+- semaphore 2 本・共有フラグ・overflow event・redirect の drain 前後検査といった複雑な実装はバグの温床となるため、導入する複雑さに見合わないと判断した
+- DoS 耐性は認証付きの Sora 参加者に限られるため、実害の確率は低い
 
 ## 完了条件
 
