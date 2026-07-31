@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-29
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-01
 - Model: GPT-5
 - Branch: feature/fix-vpl-vp9-payload-normalization
 - Polished: 2026-07-29
@@ -58,3 +58,11 @@ oneVPL の `mfxExtVP9Param::WriteIVFHeaders` も、IVF container header を出�
   - outbound-rtp の MIME type が `video/VP9` で、`packetsSent` が 0 より大きい
   - inbound-rtp の MIME type が `video/VP9` で、`packetsReceived` と `framesDecoded` が 0 より大きい
 - `cargo test --workspace --features vpl` が成功する
+
+## 解決方法
+
+前提を調査し直した結果、対応しないで closed にした。
+
+- oneVPL の VP9 encoder は `mfxExtVP9Param::WriteIVFHeaders` のデフォルトが ON で、現在利用している shiguredo_vpl 2026.3.0 は同フィールドを設定しないため、現状の VPL 出力は IVF ヘッダー付きで返る
+- そのため `vp9_payload_from_vpl` による IVF ヘッダー除去は正しく動作しており、issue の前提である「VPL の VP9 encoder を利用するだけで payload が破損する」は誤りだった
+- `WriteIVFHeaders` の OFF 設定や将来の設定変更に堅牢にするための対応は、byte 列の推測ではなく shiguredo_vpl の報告に基づいて分岐する新 issue 0105 に引き継ぐ
