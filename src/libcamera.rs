@@ -2,6 +2,7 @@
 //!
 //! `#[cfg(feature = "libcamera")]` でのみコンパイルされる。
 
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -228,7 +229,7 @@ pub struct LibcameraNativeFrameBuffer {
     raw_height: i32,
     scaled_width: i32,
     scaled_height: i32,
-    fd: i32,
+    fd: Arc<OwnedFd>,
     size: usize,
     stride: i32,
     frame_pixel_format: FramePixelFormat,
@@ -241,7 +242,7 @@ struct LibcameraNativeFrameBufferConfig {
     raw_height: i32,
     scaled_width: i32,
     scaled_height: i32,
-    fd: i32,
+    fd: Arc<OwnedFd>,
     size: usize,
     stride: i32,
     frame_pixel_format: FramePixelFormat,
@@ -265,7 +266,7 @@ impl LibcameraNativeFrameBuffer {
 
     /// DMA-BUF のファイルディスクリプタを返す。
     pub fn fd(&self) -> i32 {
-        self.fd
+        self.fd.as_raw_fd()
     }
 
     /// バッファサイズを返す。
@@ -358,7 +359,7 @@ impl VideoFrameBufferHandler for LibcameraNativeFrameBuffer {
             raw_height: self.raw_height,
             scaled_width,
             scaled_height,
-            fd: self.fd,
+            fd: Arc::clone(&self.fd),
             size: self.size,
             stride: self.stride,
             frame_pixel_format: self.frame_pixel_format,
@@ -367,9 +368,9 @@ impl VideoFrameBufferHandler for LibcameraNativeFrameBuffer {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct NativeFrameInfo {
-    fd: i32,
+    fd: Arc<OwnedFd>,
     size: usize,
 }
 
@@ -590,7 +591,7 @@ fn run_libcamera_loop_inner(
                 mapped_buffers.push(mapped_planes);
             }
             CapturedFrameBuffers::Native(native_frame_infos) => {
-                let native_frame_info = build_native_frame_info(&frame_buffer_layout);
+                let native_frame_info = build_native_frame_info(&frame_buffer_layout)?;
                 native_frame_infos.push(native_frame_info);
             }
         }
@@ -697,7 +698,7 @@ fn run_capture_loop(
 
         match &captured_frame_buffers {
             CapturedFrameBuffers::Native(native_infos) => {
-                let Some(native_info) = native_infos.get(cookie as usize).copied() else {
+                let Some(native_info) = native_infos.get(cookie as usize).cloned() else {
                     rtc_log_warning!(
                         "native buffer is missing for request cookie: cookie={} buffers={}",
                         cookie,
@@ -834,7 +835,7 @@ fn on_native_frame_buffer(
             raw_height: config.raw_height,
             scaled_width: config.scaled_width,
             scaled_height: config.scaled_height,
-            fd: config.native_info.fd,
+            fd: Arc::clone(&config.native_info.fd),
             size: config.native_info.size,
             stride: config.stride,
             frame_pixel_format: config.frame_pixel_format,
@@ -922,11 +923,22 @@ fn build_mapped_frame_buffer_planes(layout: &FrameBufferLayout) -> Result<Vec<Ma
         .collect::<Vec<_>>())
 }
 
-fn build_native_frame_info(layout: &FrameBufferLayout) -> NativeFrameInfo {
-    NativeFrameInfo {
-        fd: layout.shared_fd,
-        size: layout.mapped_len,
+// allocator が閉じた後も下流の native frame から DMA-BUF を参照できるよう、
+// 複製した fd を OwnedFd として所有する。
+// 複製に失敗した場合は fallback せずエラーを返す。
+fn dup_fd_for_native_frame(fd: i32) -> Result<OwnedFd> {
+    let dup_fd = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC) };
+    if dup_fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
     }
+    Ok(unsafe { OwnedFd::from_raw_fd(dup_fd) })
+}
+
+fn build_native_frame_info(layout: &FrameBufferLayout) -> Result<NativeFrameInfo> {
+    Ok(NativeFrameInfo {
+        fd: Arc::new(dup_fd_for_native_frame(layout.shared_fd)?),
+        size: layout.mapped_len,
+    })
 }
 
 fn plane_stride_from_len(plane_len: usize, rows: usize) -> Option<i32> {
@@ -1488,6 +1500,11 @@ mod tests {
         assert!(format!("{err}").contains("invalid nv12 uv stride"));
     }
 
+    fn create_owned_fd_for_test() -> Arc<OwnedFd> {
+        let file = std::fs::File::open("/dev/null").expect("テスト用 fd の生成に失敗しました");
+        Arc::new(OwnedFd::from(file))
+    }
+
     fn create_native_frame_buffer_for_test(
         cookie: u64,
         raw_width: i32,
@@ -1503,7 +1520,7 @@ mod tests {
                 raw_height,
                 scaled_width,
                 scaled_height,
-                fd: 123,
+                fd: create_owned_fd_for_test(),
                 size: 4096,
                 stride: 640,
                 frame_pixel_format: FramePixelFormat::I420,
@@ -1514,8 +1531,33 @@ mod tests {
     }
 
     #[test]
+    fn dup_fd_for_native_frame_survives_after_original_fd_is_closed() {
+        let file = std::fs::File::open("/dev/null").expect("テスト用 fd の生成に失敗しました");
+        let original_fd = file.as_raw_fd();
+
+        let dup_fd = dup_fd_for_native_frame(original_fd).expect("fd の複製に失敗しました");
+        assert_ne!(
+            dup_fd.as_raw_fd(),
+            original_fd,
+            "複製 fd が元の fd と同じ番号になっています"
+        );
+
+        // 元の fd（allocator が所有する fd に相当）を閉じても、
+        // 複製した fd は最後の native frame が破棄されるまで有効なままである
+        drop(file);
+        let result = unsafe { libc::fcntl(dup_fd.as_raw_fd(), libc::F_GETFD) };
+        assert!(result >= 0, "元 fd を閉じた後に複製 fd が無効化されました");
+    }
+
+    #[test]
     fn native_frame_buffer_crop_and_scale_updates_scaled_size_only() {
         let (mut frame_buffer, _rx) = create_native_frame_buffer_for_test(10, 640, 480, 640, 480);
+
+        // crop_and_scale で生成される clone が同じ fd を共有することを確認するため、
+        // 変換前に fd の値を記録しておく
+        let expected_fd = unsafe { frame_buffer.as_native_ref::<LibcameraNativeFrameBuffer>() }
+            .expect("元バッファから native 参照を取得できませんでした")
+            .fd();
 
         let scaled = frame_buffer
             .crop_and_scale(100, 50, 320, 240, 160, 120)
@@ -1535,7 +1577,7 @@ mod tests {
         assert_eq!(native_scaled.raw_height(), 480);
         assert_eq!(native_scaled.scaled_width(), 160);
         assert_eq!(native_scaled.scaled_height(), 120);
-        assert_eq!(native_scaled.fd(), 123);
+        assert_eq!(native_scaled.fd(), expected_fd);
         assert_eq!(native_scaled.size(), 4096);
         assert_eq!(native_scaled.stride(), 640);
     }
@@ -1601,7 +1643,10 @@ mod tests {
         let mut native = CapturedFrameBuffers::Native(Vec::with_capacity(1));
         match &mut native {
             CapturedFrameBuffers::Native(native_infos) => {
-                native_infos.push(NativeFrameInfo { fd: 3, size: 4 });
+                native_infos.push(NativeFrameInfo {
+                    fd: create_owned_fd_for_test(),
+                    size: 4,
+                });
             }
             CapturedFrameBuffers::Mapped(_) => panic!("native variant expected"),
         }
