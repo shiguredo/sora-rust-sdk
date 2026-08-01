@@ -2,9 +2,9 @@
 
 - Priority: High
 - Created: 2026-07-29
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-01
 - Model: GPT-5
-- Branch: feature/fix-libcamera-shutdown-lifetime
+- Branch: feature/fix-iroiro3
 - Polished: 2026-07-29
 
 ## 目的
@@ -119,3 +119,18 @@ panic は capture thread の stack が unwind した後に join 側で検出さ�
 - Raspberry Pi 実機で次が成功する
   - `cargo test -p sora_sdk --features libcamera,v4l2`
   - `cargo test -p e2e-tests --features libcamera,v4l2 --test libcamera_video_capturer --test v4l2_video_codec`
+
+## 解決方法
+
+対応範囲を検討した結果、設計方針のうち「Native frame の DMA-BUF 所有権」のみを実装し、「Capture session の停止」と「公開 API へのエラー伝播」は対応しないで closed にした。
+
+- 各 DMA-BUF fd を `F_DUPFD_CLOEXEC` で複製し、`Arc<OwnedFd>` として所有する
+- `NativeFrameInfo` と `LibcameraNativeFrameBuffer` は複製した fd を保持し、`crop_and_scale()` や V4L2 converter の clone が同じ fd を共有する
+- allocator が元の fd を閉じても、最後の native frame clone が破棄されるまで複製 fd が有効なままである
+- 実 OS fd を使う単体テストで、元の fd を閉じた後に複製 fd が有効なままであることを確認する
+
+「Capture session の停止」と「公開 API へのエラー伝播」を対象外にした理由は次のとおり。
+
+- `camera.stop()` 失敗時の終了保証は原理的に不可能で、libcamera に強制停止 API はない。失敗後の安全な遷移は隔離かリトライのみであり、fail-closed の隔離は回復処理ではなく稀な失敗経路の最終安全策に過ぎない
+- `stop()` が失敗した時点で capturer は実質死亡しており、失敗を利用者へ返しても取れる行動がない。public API の破壊的変更と二重の状態機械を導入するコストに見合わない
+- 通常の停止では `camera.stop()` の成功後に resource を破棄する順序が既に維持されており、fd の寿命延長と組み合わせることで停止時のクラッシュは防げる
