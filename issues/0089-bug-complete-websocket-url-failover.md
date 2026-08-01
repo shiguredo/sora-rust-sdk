@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-29
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-01
 - Model: GPT-5
 - Branch: feature/fix-websocket-url-failover
 - Polished: 2026-07-29
@@ -72,6 +72,15 @@ redirect も transport 接続後、Upgrade 成功前に `connected_signaling_url
 - redirect 後も `selected_signaling_url` は初回 winner のまま維持する
 - redirect 先への接続に失敗した場合は初回 URL 群へ fallback せず、接続全体をその error で終了する
 - 初回接続と redirect で transport と WebSocket state machine を別々に構築する重複経路を残さない
+
+## 解決方法
+
+設計検討の結果、実装せず closed にする。
+
+- フル handshake レース方式は、複数 URL 設定時の毎回の接続で敗者サーバーが Upgrade を完走して即切断されるため、サーバー側の無駄な処理とログノイズが増える
+- 接続時点で切る方式（現行実装）は、Upgrade 失敗を検出できず本 issue が直す対象のバグを維持するため採用できない
+- TCP/TLS のみ並列で張って敗者を hot-spare として保持する方式はサーバー負荷を抑えられるが、確立済み接続の保持と逐次 Upgrade による failover 遅延があり、実装コストに対して効果が薄い
+- 現行の TCP 時点切断に比べた改善の価値が低いため、対応しない
 
 ## 変更対象
 
