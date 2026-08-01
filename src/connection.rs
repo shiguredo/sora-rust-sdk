@@ -893,7 +893,12 @@ impl SoraConnection {
         const WS_DISCONNECT_DELAY: Duration = Duration::from_secs(10);
         let mut buf = vec![0u8; 8192];
 
-        loop {
+        // DataChannel の signaling label で受信した server Close による終了かどうか。
+        // server Close はすでに terminal event として確定しているため、
+        // 終了処理の WebSocket close handshake で発生するエラーを warning に落とすために使う。
+        let mut server_close_received = false;
+
+        'run_loop: loop {
             tokio::select! {
                 read = stream.read(&mut buf), if !websocket_closed => {
                     // ピアが close_notify を送らずに TCP を閉じた場合 UnexpectedEof になるため、
@@ -932,9 +937,28 @@ impl SoraConnection {
                             }
                         }
                         SoraEvent::DataChannelMessage { label, data } => {
-                            self
+                            match self
                                 .handle_datachannel_message(&mut *handler, &label, &data)
-                                .await?;
+                                .await?
+                            {
+                                HandleDatachannelMessageResult::Continue => {}
+                                HandleDatachannelMessageResult::ServerClose {
+                                    code,
+                                    reason,
+                                } => {
+                                    rtc_log_info!(
+                                        "Received server close message: code={} reason={}",
+                                        code,
+                                        reason
+                                    );
+                                    server_close_received = true;
+                                    // server Close は接続全体の終了通知であり、
+                                    // 同一 iteration で終了処理へ移行する。
+                                    // それ以降の redirect、WebSocket flush、command、
+                                    // signaling event は処理しない。
+                                    break 'run_loop;
+                                }
+                            }
                         }
                         SoraEvent::Track(transceiver) => {
                             handler.on_track(transceiver);
@@ -1156,7 +1180,7 @@ impl SoraConnection {
                                 redirect_location = Some(location);
                                 break;
                             }
-                            IncomingMessageData::Close {} => {
+                            IncomingMessageData::Close { .. } => {
                                 rtc_log_info!("Disconnected from Sora server");
                                 break;
                             }
@@ -1343,8 +1367,10 @@ impl SoraConnection {
         }
 
         if ws.state() == ConnectionState::Connected {
-            ws.close(CloseCode::NORMAL, "shutdown")?;
+            // server Close はすでに terminal event として確定しているため、
+            // この後始末で発生するエラーは warning として記録し、run の Ok(()) を覆さない。
             let close_result = tokio::time::timeout(websocket_close_timeout, async {
+                ws.close(CloseCode::NORMAL, "shutdown")?;
                 loop {
                     if flush_ws_output(&mut ws, &mut stream, &mut timers).await? {
                         return Ok::<_, Error>(());
@@ -1362,8 +1388,18 @@ impl SoraConnection {
                 }
             })
             .await;
-            if close_result.is_err() {
-                rtc_log_warning!("WebSocket close timed out");
+            match close_result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    if server_close_received {
+                        rtc_log_warning!("WebSocket close handshake failed: {}", e);
+                    } else {
+                        return Err(e);
+                    }
+                }
+                Err(_) => {
+                    rtc_log_warning!("WebSocket close timed out");
+                }
             }
         }
 
@@ -1797,7 +1833,7 @@ impl SoraConnection {
         handler: &mut dyn SoraConnectionEventHandler,
         label: &str,
         data: &[u8],
-    ) -> Result<()> {
+    ) -> Result<HandleDatachannelMessageResult> {
         // DataChannel の設定を検索
         let managed = self.data_channels.get(label);
         let compress = managed.is_some_and(|m| m.compress);
@@ -1873,6 +1909,12 @@ impl SoraConnection {
                     IncomingMessageData::Push {} => {
                         handler.on_push(&text);
                     }
+                    // signaling label の Close だけを接続全体の終了通知として扱う。
+                    // stats / push / notify label に届いた Close は接続を終了させず、
+                    // 既存どおり unsupported message として扱う。
+                    IncomingMessageData::Close { code, reason } if is_server_close_label(label) => {
+                        return Ok(HandleDatachannelMessageResult::ServerClose { code, reason });
+                    }
                     _ => {
                         rtc_log_warning!("Received unsupported message via DataChannel");
                     }
@@ -1902,13 +1944,40 @@ impl SoraConnection {
             }
         }
 
-        Ok(())
+        Ok(HandleDatachannelMessageResult::Continue)
     }
 }
 
 // -------------------------
 // 管理対象 DataChannel
 // -------------------------
+
+/// DataChannel の受信メッセージをどう扱うかを表す。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HandleDatachannelMessageResult {
+    /// 通常どおり接続を継続する。
+    Continue,
+    /// Sora からの接続終了通知 (`signaling` label の `{"type":"close"}`)。
+    ServerClose {
+        /// Sora が通知した Close code。
+        code: u16,
+        /// Sora が通知した Close reason。
+        reason: String,
+    },
+}
+
+/// 指定した DataChannel label で受信した Close メッセージを server Close として
+/// 扱うかどうかを返す。
+///
+/// Sora ドキュメント「Sora クライアント要求仕様」の
+/// 「DataChannel シグナリングのみ利用時に Sora から切断が発生した際の
+///  `"type": "close"` メッセージの送信」に基づき、`signaling` label の Close
+/// メッセージだけを接続全体の終了通知として扱う。
+/// `stats`、`push`、`notify` label に同じ JSON が届いても接続を終了させず、
+/// 既存どおり unsupported message として扱う。
+fn is_server_close_label(label: &str) -> bool {
+    label == "signaling"
+}
 
 struct ManagedDataChannel {
     channel: DataChannel,
@@ -3066,5 +3135,20 @@ mod tests {
     async fn send_message_accepts_registered_label() {
         let (handle, _server) = spawn_message_server(vec!["#chat".to_string()]);
         assert!(handle.send_message("#chat", b"data").await.is_ok());
+    }
+
+    #[test]
+    fn server_close_label_returns_true_for_signaling() {
+        assert!(is_server_close_label("signaling"));
+    }
+
+    #[test]
+    fn server_close_label_returns_false_for_other_labels() {
+        for label in ["stats", "push", "notify"] {
+            assert!(
+                !is_server_close_label(label),
+                "label={label} の Close は接続を終了させない"
+            );
+        }
     }
 }
