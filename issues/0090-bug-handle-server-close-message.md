@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-29
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-01
 - Model: GPT-5
 - Branch: feature/fix-server-close-message
 - Polished: 2026-07-29
@@ -135,3 +135,12 @@ Sora が WebSocket シグナリング利用中に切断を通知する正式な�
   - server Close によって `on_websocket_close` の回数が増えない
 - production log は英語、コメントとテストの assertion message は日本語にする
 - `cargo test --workspace` が成功する
+
+## 解決方法
+
+- `IncomingMessageData::Close` に必須の `code: u16` と `reason: String` を保持し、欠落・型違い・範囲外を parse error にする
+- `handle_datachannel_message` の戻り値を `HandleDatachannelMessageResult` に変更し、`signaling` label の Close だけを `ServerClose` として扱う
+- メインの接続 loop は `ServerClose` を受信した同一 iteration で label 付き break により終了処理へ移行する
+- DataChannel の終了待機後に、WebSocket が接続中であれば close handshake を実行する。server Close は terminal event として確定しているため、後始末の error は warning として記録し `run` の `Ok(())` を覆さない
+- `on_data_channel_close` は `opened_datachannels.remove(label)` が成功したときだけ呼び、server Close を `on_websocket_close` として通知しない
+- 実接続 E2E は DisconnectChannel API を `TEST_API_URL` へ実 HTTP 接続で実行して、WebSocket 接続中と切断済みの両ケースで Close message 受信と `run` の正常終了を確認する
