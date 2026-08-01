@@ -138,9 +138,9 @@ Sora が WebSocket シグナリング利用中に切断を通知する正式な�
 
 ## 解決方法
 
-- `IncomingMessageData::Close` に必須の `code: u16` と `reason: String` を保持し、欠落・型違い・範囲外を parse error にする
-- `handle_datachannel_message` の戻り値を `HandleDatachannelMessageResult` に変更し、`signaling` label の Close だけを `ServerClose` として扱う
-- メインの接続 loop は `ServerClose` を受信した同一 iteration で label 付き break により終了処理へ移行する
-- DataChannel の終了待機後に、WebSocket が接続中であれば close handshake を実行する。server Close は terminal event として確定しているため、後始末の error は warning として記録し `run` の `Ok(())` を覆さない
-- `on_data_channel_close` は `opened_datachannels.remove(label)` が成功したときだけ呼び、server Close を `on_websocket_close` として通知しない
-- 実接続 E2E は DisconnectChannel API を `TEST_API_URL` へ実 HTTP 接続で実行して、WebSocket 接続中と切断済みの両ケースで Close message 受信と `run` の正常終了を確認する
+- `IncomingMessageData::Close` に必須の `code: u16` と `reason: String` を保持し、欠落・型違い・範囲外を parse error にした
+- `handle_datachannel_message` の戻り値を `HandleDatachannelMessageResult` に変更し、`signaling` label の Close だけを `ServerClose` として扱うようにした
+- メインの接続 loop は `ServerClose` を受信した同一 iteration で label 付き break により終了処理へ移行するようにした
+- DataChannel の終了待機後に、WebSocket が接続中であれば close handshake を実行し、server Close では後始末の error を warning として記録して `run` の `Ok(())` を覆さないようにした
+- Close メッセージの parse と `signaling` label の判定はモックなしの単体テストで確認した
+- 実接続 E2E (DisconnectChannel API を `TEST_API_URL` へ実 HTTP 接続で実行し、WebSocket 接続中と切断済みの両ケースで Close message 受信と `run` の正常終了、`on_data_channel_close` の非重複、server Close による `on_websocket_close` の非通知を確認する) はテストコードを作成済みで、実接続環境が必要なため CI で確認する
