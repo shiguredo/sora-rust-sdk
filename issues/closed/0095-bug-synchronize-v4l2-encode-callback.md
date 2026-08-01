@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-29
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-02
 - Model: GPT-5
 - Branch: feature/fix-v4l2-encode-callback-race
 - Polished: 2026-07-29
@@ -158,3 +158,11 @@ register と release の競合は、update ownership を先に取得した操作
 - callback state の lock、外部 callback、encoder Drop、`Condvar` wait の順序を日本語コメントで記載する
 - `CHANGES.md` の develop セクションに `[FIX]` を追記する
 - production log は英語、コメントとテストの assertion message は日本語にする
+
+## 解決方法
+
+libwebrtc m150 の production call path を一次ソースで検証した結果、本 issue が想定する競合は実際には成立しないため、対応不要として closed にする。
+
+固定中の `shiguredo_webrtc` が参照する libwebrtc の `video/video_stream_encoder.cc` を確認すると、`RegisterEncodeCompleteCallback` の呼出し箇所は `ReconfigureEncoder`（encoder queue 上で実行）の `encoder_reset_required` ブロック内で `InitEncode` 成功直後の 1 箇所のみである。エンコード開始後に callback の再登録が走る経路はなく、encoder reset 時も先に `ReleaseEncoder()` → `encoder_->Release()` が同期実行され、Rust 側 `release()` の `shared_state.encoder.take()` と `drop(encoder)` → `H264Encoder::drop` → `poller.stop()`（join 含む）を経て poller が停止してから register に進む。さらに登録される pointer は常に `VideoStreamEncoder` 自身 (`this`) であり、`Stop()` は teardown task の `ReleaseEncoder()` 完了を待ってから破棄へ進むため、poller が callback を呼び出している間は参照先が生存する。
+
+したがって「poller が旧 callback pointer を呼び出している間に register で寿命が終わる」という前提が成立せず、本 issue の同期設計は不要と判断する。前提は register / release が libwebrtc の encoder queue からのみ呼ばれること、および libwebrtc 更新時にはこの呼出順序を再検証することを条件とする。
