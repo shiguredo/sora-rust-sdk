@@ -15,5 +15,7 @@
   - @voluntas
 - [UPDATE] `shiguredo_webrtc` を 0.150.3 に上げ、Ubuntu 26.04 LTS に対応する
   - @voluntas
+- [UPDATE] `shiguredo_mp4` を 2026.4.0 に上げる
+  - @voluntas
 - [FIX] MP4 の `length_size_minus_one` が reserved 値のときに panic せずエラーを返すようにする
   - @voluntas
