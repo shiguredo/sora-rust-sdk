@@ -63,6 +63,22 @@ jobs:
         run: echo "OPENH264_PATH=${{ steps.openh264.outputs.openh264_path }}" >> $GITHUB_ENV
         shell: bash
 
+      # DisconnectChannel API E2E (server_close_message テスト) が Sora の API へ
+      # アクセスするため、GitHub-hosted ランナーから lab への Tailscale 接続を張る。
+      # self-hosted ランナーは lab 内ネットワークにいるため不要。
+      - name: Setup Tailscale
+        if: ${{ runner.environment != 'self-hosted' }}
+        uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888 # v4.1.3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          use-cache: "true"
+          hostname: gha-${{ github.run_id }}-${{ github.run_number }}
+          version: latest
+          timeout: 2m
+          retry: 5
+
       - run: cp .cargo/config.toml.ci .cargo/config.toml
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace -- -D warnings
