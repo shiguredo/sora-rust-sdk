@@ -113,14 +113,20 @@ async fn assert_close_message_notified_once(connection: &mut SoraTestConnection)
     );
 }
 
-/// server Close によって on_websocket_close の回数が増えないことを確認する。
-async fn assert_websocket_close_not_notified(connection: &mut SoraTestConnection) {
+/// server Close の処理で on_websocket_close が追加通知されないことを確認する。
+///
+/// Sora は DisconnectChannel による切断時に WebSocket Close フレームを送信し、
+/// SDK 側も WebSocket を閉じた時点で通知するため、on_websocket_close は
+/// WebSocket の終了時に 1 回だけ通知される。
+/// server Close メッセージ (DataChannel) の処理では通知されないことを、
+/// run 終了後の合計回数が 1 回であることで確認する。
+async fn assert_websocket_close_not_duplicated(connection: &mut SoraTestConnection) {
     let count = connection
         .count_events(|event| matches!(event, SoraTestEvent::WebsocketClose { .. }))
         .await;
     assert_eq!(
-        count, 0,
-        "server Close によって on_websocket_close が通知されてはいけません"
+        count, 1,
+        "on_websocket_close は 1 回だけ通知される必要があります: {count} 回"
     );
 }
 
@@ -194,8 +200,6 @@ async fn server_close_message_terminates_run_while_websocket_connected() {
 
     wait_for_close_signaling_message(&mut connection).await;
     assert_close_message_notified_once(&mut connection).await;
-    // Close message 受信時点でも on_websocket_close が未通知であることを確認する。
-    assert_websocket_close_not_notified(&mut connection).await;
 
     // server Close は terminal event のため、run が Ok(()) で終了する。
     let run_result = connection
@@ -208,6 +212,10 @@ async fn server_close_message_terminates_run_while_websocket_connected() {
         "run task は Ok(()) で終了する必要があります: {:?}",
         run_result
     );
+
+    // Sora は切断時に WebSocket Close フレームを送信するため、on_websocket_close は
+    // その時点で 1 回通知される。server Close メッセージの処理で追加通知されない。
+    assert_websocket_close_not_duplicated(&mut connection).await;
 
     assert_data_channel_close_not_duplicated(&mut connection).await;
 }
@@ -250,7 +258,6 @@ async fn server_close_message_terminates_run_after_websocket_closed() {
 
     wait_for_close_signaling_message(&mut connection).await;
     assert_close_message_notified_once(&mut connection).await;
-    assert_websocket_close_not_notified(&mut connection).await;
 
     // WebSocket は切断済みのため close handshake は実行されず、run が Ok(()) で終了する。
     let run_result = connection
@@ -261,6 +268,10 @@ async fn server_close_message_terminates_run_after_websocket_closed() {
         "run task は Ok(()) で終了する必要があります: {:?}",
         run_result
     );
+
+    // SDK が自分で WebSocket を閉じた時点で on_websocket_close は 1 回通知される。
+    // server Close メッセージの処理で追加通知されない。
+    assert_websocket_close_not_duplicated(&mut connection).await;
 
     assert_data_channel_close_not_duplicated(&mut connection).await;
 }
