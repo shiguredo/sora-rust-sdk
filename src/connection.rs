@@ -1840,7 +1840,7 @@ impl SoraConnection {
 
         // 圧縮されている場合は展開
         let message_bytes = if compress {
-            decompress_zlib(data)?
+            decompress_zlib(data, MAX_DECOMPRESSED_DATA_CHANNEL_MESSAGE_SIZE)?
         } else {
             data.to_vec()
         };
@@ -1989,6 +1989,11 @@ struct ManagedDataChannel {
 
 const DEFAULT_TLS_PORT: u16 = 443;
 const DEFAULT_PLAIN_PORT: u16 = 80;
+
+// DataChannel メッセージの展開後サイズ上限。
+// WebSocket 実装の DEFAULT_MAX_DECOMPRESSED_SIZE と同じ 16 MiB にそろえる。
+// WebSocket 側の定数は SDK から参照できないため、独立した定数として定義する。
+const MAX_DECOMPRESSED_DATA_CHANNEL_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 
 #[derive(Clone)]
 struct SecureRandom {
