@@ -184,6 +184,17 @@ pub fn api_url() -> Option<String> {
     env::var("TEST_API_URL").ok()
 }
 
+/// DisconnectChannel API の応答種別。
+///
+/// Sora ドキュメント「クラスター機能」の HTTP API のリダイレクト機能に基づき、
+/// 307 (Temporary Redirect) の応答を追従するために 2xx とリダイレクトを区別する。
+enum DisconnectChannelResponse {
+    /// 応答が 3xx で Location ヘッダーを含む場合のリダイレクト先
+    Redirect { location: String },
+    /// 2xx の応答で、response body の `channel_id` が要求値と一致した場合
+    Success,
+}
+
 /// DisconnectChannel API を実行して、指定したチャネルの接続をすべて切断する。
 ///
 /// Sora ドキュメント「API」のコネクション API 仕様に基づき、`api_url` に対して
@@ -200,10 +211,66 @@ pub fn api_url() -> Option<String> {
 /// timeout を適用する。
 /// HTTP response が 2xx でない場合、response の decode に失敗した場合、または
 /// response body の `channel_id` が要求値と一致しない場合は `Err` を返す。
+///
+/// クラスター機能により、指定したチャネル ID を他ノードが担当している場合は
+/// 307 (Temporary Redirect) の HTTP 応答でリダイレクトされる。この場合は
+/// Location ヘッダーを追従して再要求する。
+/// 無限ループを防ぐため、リダイレクトは最大 10 回まで追従する。
 pub async fn disconnect_channel(
     api_url: &str,
     channel_id: &str,
 ) -> std::result::Result<(), io::Error> {
+    let mut url = api_url.to_string();
+    for _ in 0..10 {
+        match send_disconnect_channel_request_to_url(&url, channel_id).await? {
+            DisconnectChannelResponse::Success => return Ok(()),
+            DisconnectChannelResponse::Redirect { location } => {
+                url = resolve_redirect_url(&url, &location)?;
+            }
+        }
+    }
+    Err(io::Error::other(
+        "DisconnectChannel API のリダイレクトが多すぎます",
+    ))
+}
+
+/// リダイレクトの Location ヘッダーを現在の URL に対して解決する。
+///
+/// Location が絶対 URL (`http://` または `https://`) の場合はそのまま使い、
+/// `/` から始まる相対パスの場合は現在の URL の scheme、host、port に基づいて
+/// 解決する。
+/// それ以外の相対 URL は解決できないため `Err` を返す。
+fn resolve_redirect_url(
+    current_url: &str,
+    location: &str,
+) -> std::result::Result<String, io::Error> {
+    if location.starts_with("http://") || location.starts_with("https://") {
+        return Ok(location.to_string());
+    }
+    let base = Uri::parse(current_url)
+        .map_err(|e| io::Error::other(format!("リダイレクト元 URL の解析に失敗しました: {e}")))?;
+    let scheme = base
+        .scheme()
+        .ok_or_else(|| io::Error::other("リダイレクト元 URL に scheme がありません"))?;
+    let host = base
+        .host()
+        .ok_or_else(|| io::Error::other("リダイレクト元 URL に host がありません"))?;
+    let authority = match base.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    };
+    let location = location.strip_prefix('/').unwrap_or(location);
+    Ok(format!("{scheme}://{authority}/{location}"))
+}
+
+/// 単一 URL への DisconnectChannel API リクエストを送信して応答を検証する。
+///
+/// connect、request write、response header / body read の全体へ共通の 5 秒
+/// timeout を適用する。
+async fn send_disconnect_channel_request_to_url(
+    api_url: &str,
+    channel_id: &str,
+) -> std::result::Result<DisconnectChannelResponse, io::Error> {
     let uri = Uri::parse(api_url)
         .map_err(|e| io::Error::other(format!("TEST_API_URL の解析に失敗しました: {e}")))?;
     let scheme = uri
@@ -287,11 +354,12 @@ fn host_header(host: &str, port: Option<u16>) -> String {
 ///
 /// 2xx でない場合、response の decode に失敗した場合、または response body の
 /// `channel_id` が要求値と一致しない場合は `Err` を返す。
+/// 3xx で Location ヘッダーを含む場合は `DisconnectChannelResponse::Redirect` を返す。
 async fn send_disconnect_channel_request<S>(
     mut stream: S,
     request: &[u8],
     channel_id: &str,
-) -> std::result::Result<(), io::Error>
+) -> std::result::Result<DisconnectChannelResponse, io::Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -315,6 +383,16 @@ where
             .map_err(|e| io::Error::other(format!("API レスポンスの decode に失敗しました: {e}")))?
         {
             let status = response.status_code();
+            // Sora ドキュメント「クラスター機能」の HTTP API のリダイレクト機能に基づき、
+            // 指定したチャネル ID を他ノードが担当している場合に 307 (Temporary Redirect) で
+            // そのノードへ誘導される。Location ヘッダーを追従して再要求する。
+            if matches!(status, 301 | 302 | 303 | 307 | 308)
+                && let Some(location) = response.get_header("Location")
+            {
+                return Ok(DisconnectChannelResponse::Redirect {
+                    location: location.to_string(),
+                });
+            }
             if !(200..300).contains(&status) {
                 return Err(io::Error::other(format!(
                     "DisconnectChannel API が失敗しました: status={status}"
@@ -346,7 +424,7 @@ where
                     "API レスポンスの channel_id が要求値と一致しません: expected={channel_id} actual={actual_channel_id}"
                 )));
             }
-            return Ok(());
+            return Ok(DisconnectChannelResponse::Success);
         }
     }
 }
