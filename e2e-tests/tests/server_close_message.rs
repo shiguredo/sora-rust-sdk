@@ -158,8 +158,10 @@ async fn assert_data_channel_close_not_duplicated(connection: &mut SoraTestConne
 async fn server_close_message_terminates_run_while_websocket_connected() {
     load_env();
 
+    let Some(api_url) = api_url() else {
+        return;
+    };
     let urls = signaling_urls().expect("TEST_SIGNALING_URLS が必要");
-    let api_url = api_url().expect("TEST_API_URL が必要");
     let channel_id = generate_channel_id();
     let mut connection = build_recvonly_connection(urls, channel_id.clone());
 
@@ -219,8 +221,10 @@ async fn server_close_message_terminates_run_while_websocket_connected() {
 async fn server_close_message_terminates_run_after_websocket_closed() {
     load_env();
 
+    let Some(api_url) = api_url() else {
+        return;
+    };
     let urls = signaling_urls().expect("TEST_SIGNALING_URLS が必要");
-    let api_url = api_url().expect("TEST_API_URL が必要");
     let channel_id = generate_channel_id();
     let mut connection = build_recvonly_connection(urls, channel_id.clone());
 
