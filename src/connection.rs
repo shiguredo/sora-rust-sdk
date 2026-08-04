@@ -909,7 +909,7 @@ impl SoraConnection {
                         Err(e) => return Err(e.into()),
                     };
                     if n == 0 {
-                        if switched_ignore_disconnect_websocket {
+                        if switched_ignore_disconnect_websocket && use_datachannel_signaling {
                             rtc_log_info!("WebSocket closed; continuing DataChannel signaling");
                             websocket_closed = true;
                             // 期限切れ sleep_until で select! がスピンしないようリセットする
@@ -973,7 +973,7 @@ impl SoraConnection {
                             rtc_log_info!("Registered DataChannel '{}'", label);
                             handler.on_data_channel(&label);
                             self.register_data_channel(channel, &event_tx);
-                            self.handle_datachannel_state(&mut *handler, &label, &mut opened_datachannels, &mut use_datachannel_signaling);
+                            self.handle_datachannel_state(&mut *handler, &label, &mut opened_datachannels, &mut use_datachannel_signaling, switched_received);
                         }
                         SoraEvent::RpcTimeout { id } => {
                             if let Some(mut pending) = self.pending_rpc_responses.remove(&id) {
@@ -981,7 +981,7 @@ impl SoraConnection {
                             }
                         }
                         SoraEvent::DataChannelStateChange(label) => {
-                            self.handle_datachannel_state(&mut *handler, &label, &mut opened_datachannels, &mut use_datachannel_signaling);
+                            self.handle_datachannel_state(&mut *handler, &label, &mut opened_datachannels, &mut use_datachannel_signaling, switched_received);
                         }
                     }
                 }
@@ -1169,6 +1169,15 @@ impl SoraConnection {
                                 switched_received = true;
                                 switched_ignore_disconnect_websocket = iws;
                                 handler.on_switched();
+                                if !use_datachannel_signaling
+                                    && is_datachannel_signaling_ready(
+                                        switched_received,
+                                        &self.data_channel_configs,
+                                        &opened_datachannels,
+                                    )
+                                {
+                                    use_datachannel_signaling = true;
+                                }
                             }
                             IncomingMessageData::Redirect { location } => {
                                 handler.on_signaling_message(
@@ -1286,12 +1295,15 @@ impl SoraConnection {
             }
 
             // DataChannel シグナリングへの切替条件が揃ったら WebSocket を切断する
-            if switched_received && switched_ignore_disconnect_websocket && !websocket_closed {
-                let expected = self.data_channel_configs.len();
-                let opened = opened_datachannels.len();
-                let all_open = expected > 0 && opened >= expected;
-
-                if all_open && ws_disconnect_delay_start.is_none() {
+            if switched_ignore_disconnect_websocket
+                && !websocket_closed
+                && is_datachannel_signaling_ready(
+                    switched_received,
+                    &self.data_channel_configs,
+                    &opened_datachannels,
+                )
+            {
+                if ws_disconnect_delay_start.is_none() {
                     ws_disconnect_delay_start = Some(tokio::time::Instant::now());
                 }
 
@@ -1308,7 +1320,10 @@ impl SoraConnection {
             let close_emitted = match flush_ws_output(&mut ws, &mut stream, &mut timers).await {
                 Ok(emitted) => emitted,
                 Err(e) => {
-                    if switched_ignore_disconnect_websocket && !websocket_closed {
+                    if switched_ignore_disconnect_websocket
+                        && use_datachannel_signaling
+                        && !websocket_closed
+                    {
                         // switched 後の WebSocket I/O 失敗は DataChannel シグナリング継続のため吸収する
                         rtc_log_warning!(
                             "flush WebSocket output failed; continuing DataChannel signaling: {}",
@@ -1322,7 +1337,7 @@ impl SoraConnection {
             };
 
             if close_emitted || ws.state() == ConnectionState::Closed {
-                if switched_ignore_disconnect_websocket {
+                if switched_ignore_disconnect_websocket && use_datachannel_signaling {
                     if !websocket_closed {
                         rtc_log_info!("WebSocket closed; continuing DataChannel signaling");
                         websocket_closed = true;
@@ -1757,12 +1772,19 @@ impl SoraConnection {
         label: &str,
         opened_datachannels: &mut HashSet<String>,
         use_datachannel_signaling: &mut bool,
+        switched_received: bool,
     ) {
         if self.is_datachannel_open(label) && !opened_datachannels.contains(label) {
             rtc_log_info!("DataChannel '{}' opened", label);
             opened_datachannels.insert(label.to_string());
             handler.on_data_channel_open(label);
-            if opened_datachannels.len() == self.data_channel_configs.len() {
+            if !*use_datachannel_signaling
+                && is_datachannel_signaling_ready(
+                    switched_received,
+                    &self.data_channel_configs,
+                    opened_datachannels,
+                )
+            {
                 *use_datachannel_signaling = true;
             }
         } else if self.is_datachannel_closed(label) && opened_datachannels.contains(label) {
@@ -1964,6 +1986,21 @@ enum HandleDatachannelMessageResult {
         /// Sora が通知した Close reason。
         reason: String,
     },
+}
+
+/// DataChannel シグナリングへの切替 readiness を判定する pure なヘルパー。
+///
+/// 次の 3 条件をすべて満たしたときだけ true を返す:
+/// - WebSocket 経由で正式な `switched` メッセージを受信済み
+/// - Offer の `data_channels` が空でない
+/// - 全設定 DataChannel が Open 済み
+fn is_datachannel_signaling_ready(
+    switched_received: bool,
+    data_channel_configs: &[DataChannelConfig],
+    opened_labels: &HashSet<String>,
+) -> bool {
+    let expected = data_channel_configs.len();
+    expected > 0 && switched_received && opened_labels.len() >= expected
 }
 
 /// 指定した DataChannel label で受信した Close メッセージを server Close として
@@ -3155,5 +3192,70 @@ mod tests {
                 "label={label} の Close は接続を終了させない"
             );
         }
+    }
+
+    fn data_channel_config(labels: &[&str]) -> Vec<DataChannelConfig> {
+        labels
+            .iter()
+            .map(|label| DataChannelConfig {
+                label: (*label).to_string(),
+                compress: false,
+                direction: "sendrecv".to_string(),
+            })
+            .collect()
+    }
+
+    fn opened_labels(labels: &[&str]) -> HashSet<String> {
+        labels.iter().map(|label| (*label).to_string()).collect()
+    }
+
+    #[test]
+    fn datachannel_signaling_ready_is_false_without_switched() {
+        let configs = data_channel_config(&["signaling"]);
+        let opened = opened_labels(&["signaling"]);
+        assert!(
+            !is_datachannel_signaling_ready(false, &configs, &opened),
+            "switched 未受信の場合は全設定チャンネルが Open 済みでも readiness は false"
+        );
+    }
+
+    #[test]
+    fn datachannel_signaling_ready_is_false_with_partial_open() {
+        let configs = data_channel_config(&["signaling", "#messaging"]);
+        let opened = opened_labels(&["signaling"]);
+        assert!(
+            !is_datachannel_signaling_ready(true, &configs, &opened),
+            "switched 受信済みでも一部の設定チャンネルが未 Open なら readiness は false"
+        );
+    }
+
+    #[test]
+    fn datachannel_signaling_ready_is_true_with_all_open() {
+        let configs = data_channel_config(&["signaling", "#messaging"]);
+        let opened = opened_labels(&["signaling", "#messaging"]);
+        assert!(
+            is_datachannel_signaling_ready(true, &configs, &opened),
+            "switched 受信済みかつ全設定チャンネルが Open 済みなら readiness は true"
+        );
+    }
+
+    #[test]
+    fn datachannel_signaling_ready_is_false_with_empty_configs() {
+        let configs = data_channel_config(&[]);
+        let opened = opened_labels(&[]);
+        assert!(
+            !is_datachannel_signaling_ready(true, &configs, &opened),
+            "data_channels が空の構成では readiness は false"
+        );
+    }
+
+    #[test]
+    fn datachannel_signaling_ready_is_false_after_redirect_reset() {
+        let configs = data_channel_config(&["signaling", "#messaging"]);
+        let opened = opened_labels(&[]);
+        assert!(
+            !is_datachannel_signaling_ready(false, &configs, &opened),
+            "redirect 相当として switched と opened label を初期化すると readiness は false に戻る"
+        );
     }
 }
