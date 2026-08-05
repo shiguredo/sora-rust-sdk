@@ -1876,8 +1876,22 @@ impl SoraConnection {
         let compress = managed.is_some_and(|m| m.compress);
 
         // 圧縮されている場合は展開
+        // 展開に失敗した場合は、受信メッセージ 1 件だけを破棄して処理を継続する。
+        // DataChannel の本文は利用者由来の任意データを含むため、
+        // 1 件の不正な圧縮データで接続全体を終了させない。
+        // warning にはどの DataChannel で失敗したかを特定できるようラベルを出す。
+        // 圧縮前後の本文と zlib の error message は含めない。
         let message_bytes = if compress {
-            decompress_zlib(data, MAX_DECOMPRESSED_DATA_CHANNEL_MESSAGE_SIZE)?
+            match decompress_zlib(data, MAX_DECOMPRESSED_DATA_CHANNEL_MESSAGE_SIZE) {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    rtc_log_warning!(
+                        "Discarded malformed DataChannel message: label='{}' stage=zlib",
+                        label
+                    );
+                    return Ok(HandleDatachannelMessageResult::Continue);
+                }
+            }
         } else {
             data.to_vec()
         };
@@ -3271,6 +3285,305 @@ mod tests {
         assert!(
             !is_datachannel_signaling_ready(false, &configs, &opened),
             "redirect 相当として switched と opened label を初期化すると readiness は false に戻る"
+        );
+    }
+
+    use shiguredo_webrtc::DataChannelInit;
+
+    /// 実際の `SoraConnectionContext` と `SoraConnection` を構築するテスト用ヘルパー。
+    fn build_test_connection(
+        handler: impl SoraConnectionEventHandler + 'static,
+    ) -> (SoraConnection, SoraConnectionHandle) {
+        let context =
+            SoraConnectionContext::new().expect("SoraConnectionContext の作成に失敗しました");
+        SoraConnection::builder(
+            context,
+            vec!["wss://example.com/signaling".to_string()],
+            "test-channel".to_string(),
+            Role::RecvOnly,
+            handler,
+        )
+        .build()
+        .expect("SoraConnection の生成に失敗しました")
+    }
+
+    /// callback の呼び出しを記録するテスト用ハンドラ。
+    #[derive(Default)]
+    struct RecordingHandler {
+        data_channel_message_count: usize,
+        signaling_received_count: usize,
+        notify_count: usize,
+        push_count: usize,
+        message_count: usize,
+        message_data: Vec<Vec<u8>>,
+    }
+
+    impl SoraConnectionEventHandler for RecordingHandler {
+        fn on_signaling_message(
+            &mut self,
+            signaling_type: SignalingType,
+            direction: SignalingDirection,
+            _text: &str,
+        ) {
+            if signaling_type == SignalingType::DataChannel
+                && direction == SignalingDirection::Received
+            {
+                self.signaling_received_count += 1;
+            }
+        }
+
+        fn on_notify(&mut self, _text: &str) {
+            self.notify_count += 1;
+        }
+
+        fn on_push(&mut self, _text: &str) {
+            self.push_count += 1;
+        }
+
+        fn on_message(&mut self, _label: &str, data: &[u8]) {
+            self.message_count += 1;
+            self.message_data.push(data.to_vec());
+        }
+
+        fn on_data_channel_message(&mut self, _label: &str, _data: &[u8]) {
+            self.data_channel_message_count += 1;
+        }
+    }
+
+    /// compress 有効の DataChannel を実 PeerConnection 経由で登録するテスト用ヘルパー。
+    fn register_compressed_datachannel(connection: &mut SoraConnection, label: &str) {
+        connection.data_channel_configs.push(DataChannelConfig {
+            label: label.to_string(),
+            compress: true,
+            direction: "sendrecv".to_string(),
+        });
+        let mut init = DataChannelInit::new();
+        let channel = connection
+            .pc
+            .create_data_channel(label, &mut init)
+            .expect("DataChannel の生成に失敗しました");
+        let event_tx = connection.event_tx.clone();
+        connection.register_data_channel(channel, &event_tx);
+    }
+
+    #[tokio::test]
+    async fn zlib_failure_then_same_label_then_other_label() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_compressed_datachannel(&mut connection, "signaling");
+        register_compressed_datachannel(&mut connection, "push");
+        let mut handler = RecordingHandler::default();
+
+        // 1. zlib 展開に失敗する message
+        let result = connection
+            .handle_datachannel_message(&mut handler, "signaling", &[0x00, 0x01, 0x02, 0x03])
+            .await;
+        assert!(
+            result.is_ok(),
+            "zlib 展開失敗は Ok(Continue) を返す必要があります"
+        );
+        assert_eq!(
+            handler.data_channel_message_count, 0,
+            "zlib 展開失敗では callback を呼ばない必要があります"
+        );
+
+        // 2. 同じ label の正常 message
+        let compressed = compress_zlib(b"{\"type\":\"notify\"}").expect("zlib 圧縮に失敗しました");
+        let result = connection
+            .handle_datachannel_message(&mut handler, "signaling", &compressed)
+            .await;
+        assert!(result.is_ok(), "正常 message は Ok を返す必要があります");
+        assert_eq!(
+            handler.notify_count, 1,
+            "同じ label の正常 message が semantic callback まで到達する必要があります"
+        );
+        // 3. 別 label の正常 message
+        let compressed = compress_zlib(b"{\"type\":\"push\"}").expect("zlib 圧縮に失敗しました");
+        let result = connection
+            .handle_datachannel_message(&mut handler, "push", &compressed)
+            .await;
+        assert!(
+            result.is_ok(),
+            "別 label の正常 message は Ok を返す必要があります"
+        );
+        assert_eq!(
+            handler.push_count, 1,
+            "別 label の正常 message が semantic callback まで到達する必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn zlib_failure_is_discarded_per_message() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_compressed_datachannel(&mut connection, "signaling");
+
+        let valid = compress_zlib(b"{\"type\":\"notify\"}").expect("zlib 圧縮に失敗しました");
+
+        // 不正 header
+        let invalid_header = vec![0x00, 0x01, 0x02, 0x03];
+        // truncated stream
+        let truncated = valid[..valid.len() - 1].to_vec();
+        // Adler-32 不一致
+        let mut adler_mismatch = valid.clone();
+        let last = adler_mismatch.len() - 1;
+        adler_mismatch[last] ^= 0xFF;
+        // 展開後サイズ上限を超える入力
+        let oversized = compress_zlib(&vec![b'a'; MAX_DECOMPRESSED_DATA_CHANNEL_MESSAGE_SIZE + 1])
+            .expect("zlib 圧縮に失敗しました");
+
+        for bad in [invalid_header, truncated, adler_mismatch, oversized] {
+            let mut handler = RecordingHandler::default();
+            let result = connection
+                .handle_datachannel_message(&mut handler, "signaling", &bad)
+                .await;
+            assert!(
+                result.is_ok(),
+                "不正な圧縮データは Ok(Continue) を返す必要があります"
+            );
+            assert_eq!(
+                handler.data_channel_message_count, 0,
+                "不正な圧縮データでは callback を呼ばない必要があります"
+            );
+        }
+
+        // 同じ DataChannel と接続は維持される
+        let mut handler = RecordingHandler::default();
+        let result = connection
+            .handle_datachannel_message(&mut handler, "signaling", &valid)
+            .await;
+        assert!(
+            result.is_ok(),
+            "後続の正常 message は Ok を返す必要があります"
+        );
+        assert_eq!(
+            handler.notify_count, 1,
+            "破棄の後も同じ DataChannel の後続 message を処理できる必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_defined_label_binary_message_is_forwarded() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let mut handler = RecordingHandler::default();
+        let data = [0xDE, 0xAD, 0xBE, 0xEF];
+
+        let result = connection
+            .handle_datachannel_message(&mut handler, "#messaging", &data)
+            .await;
+        assert!(
+            result.is_ok(),
+            "任意 binary data は Ok を返す必要があります"
+        );
+        assert_eq!(
+            handler.data_channel_message_count, 1,
+            "on_data_channel_message が 1 回呼ばれる必要があります"
+        );
+        assert_eq!(
+            handler.message_count, 1,
+            "on_message が 1 回呼ばれる必要があります"
+        );
+        assert_eq!(
+            handler.message_data,
+            vec![data.to_vec()],
+            "on_message に本文がそのまま渡される必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_label_binary_message_does_not_terminate_connection() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let mut handler = RecordingHandler::default();
+        let data = [0xFF, 0xFE, 0xFD];
+
+        let result = connection
+            .handle_datachannel_message(&mut handler, "unknown-label", &data)
+            .await;
+        assert!(
+            result.is_ok(),
+            "未対応 label の binary data は Ok を返す必要があります"
+        );
+        assert_eq!(
+            handler.data_channel_message_count, 1,
+            "on_data_channel_message が 1 回呼ばれる必要があります"
+        );
+        assert_eq!(
+            handler.message_count, 0,
+            "未対応 label では on_message を呼ばない必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn signaling_invalid_utf8_remains_fatal() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let mut handler = RecordingHandler::default();
+
+        let result = connection
+            .handle_datachannel_message(&mut handler, "signaling", &[0xFF, 0xFE, 0xFD])
+            .await;
+        assert!(
+            result.is_err(),
+            "signaling label の不正 UTF-8 は run の終了原因のままにする必要があります"
+        );
+        assert_eq!(
+            handler.data_channel_message_count, 1,
+            "on_data_channel_message は zlib 展開成功時に 1 回呼ばれる必要があります"
+        );
+        assert_eq!(
+            handler.signaling_received_count, 0,
+            "UTF-8 変換失敗時は on_signaling_message を呼ばない必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn signaling_json_syntax_error_remains_fatal() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let mut handler = RecordingHandler::default();
+
+        let result = connection
+            .handle_datachannel_message(&mut handler, "signaling", b"this is not json")
+            .await;
+        assert!(
+            result.is_err(),
+            "signaling label の JSON syntax error は run の終了原因のままにする必要があります"
+        );
+        assert_eq!(
+            handler.data_channel_message_count, 1,
+            "on_data_channel_message は zlib 展開成功時に 1 回呼ばれる必要があります"
+        );
+        assert_eq!(
+            handler.signaling_received_count, 1,
+            "UTF-8 成功時は JSON parse の成否にかかわらず on_signaling_message を 1 回呼ぶ必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn reoffer_with_invalid_sdp_returns_error() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let mut handler = RecordingHandler::default();
+        let message = br#"{"type":"re-offer","sdp":"this is not a valid SDP"}"#;
+
+        let result = connection
+            .handle_datachannel_message(&mut handler, "signaling", message)
+            .await;
+        assert!(
+            result.is_err(),
+            "parse 成功後の不正 SDP は SDP 適用 error になる必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn ping_without_signaling_datachannel_returns_datachannel_missing() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let mut handler = RecordingHandler::default();
+
+        let result = connection
+            .handle_datachannel_message(&mut handler, "signaling", br#"{"type":"ping"}"#)
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(Error::DataChannelMissing { label }) if label == "signaling"
+            ),
+            "signaling DataChannel 未登録の ping は DataChannelMissing になる必要があります"
         );
     }
 }
