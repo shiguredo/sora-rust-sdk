@@ -1,6 +1,6 @@
 [package]
 name = "sora_sdk"
-version = "2026.1.0-canary.16"
+version = "2026.1.0-canary.17"
 edition = "2024"
 rust-version = "1.93"
 description = "Sora Rust SDK"
@@ -26,7 +26,7 @@ shiguredo_http11 = "~2026.6"
 # libcamera 経由のカメラキャプチャ (Linux 向け)
 shiguredo_libcamera = "~2026.1"
 # MP4 ファイルからの映像入力で利用するデマルチプレクサ
-shiguredo_mp4 = "~2026.3"
+shiguredo_mp4 = "~2026.4"
 # NVIDIA Video Codec によるハードウェアエンコード/デコード
 shiguredo_nvcodec = "~2026.2"
 # OpenH264 による H.264 ソフトウェアエンコード/デコード

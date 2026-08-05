@@ -1296,9 +1296,9 @@ dependencies = [
 
 [[package]]
 name = "shiguredo_mp4"
-version = "2026.3.0"
+version = "2026.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b135058874815f8f13edae644ceedb659f7238fe4a9e2b1bdceecc72dc659b35"
+checksum = "6f4ddf515b74c7fd601854cf7ae57094635f3795b0d5028b11cc4e32fb8d4098"
 
 [[package]]
 name = "shiguredo_nvcodec"
@@ -1444,7 +1444,7 @@ dependencies = [
 
 [[package]]
 name = "sora_sdk"
-version = "2026.1.0-canary.16"
+version = "2026.1.0-canary.17"
 dependencies = [
  "aws-lc-rs",
  "libc",

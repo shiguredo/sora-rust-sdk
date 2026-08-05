@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-29
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-05
 - Model: GPT-5
 - Branch: feature/fix-redact-signaling-url-query
 - Polished: 2026-07-29
@@ -136,3 +136,13 @@ SDK 自身が原値を出力または保存する経路は次のとおり。
 - `CHANGES.md` の develop セクションに `[FIX]` を追記する
 - production log は英語、コメントとテストの assertion message は日本語にする
 - `cargo test --workspace` が成功する
+
+## 解決方法
+
+対応しない方針で close する。
+
+Sora の仕様では、access_token は connect シグナリングメッセージの metadata で送信し、シグナリング URL の query には付与しない。そのため、シグナリング URL の query に認証情報が含まれるという前提は、ユーザーアプリケーションの実装次第であり、Sora の標準的な利用では成立しない。
+
+また、query だけを除去しても、ホスト名やパスも同様にユーザーアプリケーションの実装次第で機密情報になり得る。ホスト名やパスまで除去すると、どのサーバーに接続したかをログから把握できなくなり、運用上の価値が失われる。このトレードオフを踏まえ、SDK 側で URL の一部を自動的に秘匿する対応は行わない。
+
+なお、`selected_signaling_url()` / `connected_signaling_url()` の返り値や `on_signaling_message` の raw JSON は、query を含む原値を従来どおり返すため、利用者側で機密情報の扱いを判断できる。
