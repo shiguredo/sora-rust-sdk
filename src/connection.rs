@@ -896,6 +896,8 @@ impl SoraConnection {
         // DataChannel の signaling label で受信した server Close による終了かどうか。
         // server Close はすでに terminal event として確定しているため、
         // 終了処理の WebSocket close handshake で発生するエラーを warning に落とすために使う。
+        // また、終了処理の close handshake で Sora の WebSocket Close フレームを受信した
+        // 場合に on_websocket_close を通知するかどうかの判定にも使う。
         let mut server_close_received = false;
 
         'run_loop: loop {
@@ -1396,7 +1398,20 @@ impl SoraConnection {
                         return Ok(());
                     }
                     ws.feed_recv_buf(&buf[..n], now()?)?;
-                    while let Some(_event) = ws.poll_event() {}
+                    // server Close の終了処理では、Sora が送信した WebSocket Close
+                    // フレームを検出して on_websocket_close を通知する。
+                    // server Close メッセージと WebSocket Close フレームは別経路で
+                    // 届くため、処理順のレースで Close フレームが未処理のまま残る
+                    // 場合がある。ここで読み取ることで、on_websocket_close を
+                    // 決定的に 1 回だけ通知する。
+                    // server Close 以外の終了経路では従来どおりイベントを破棄する。
+                    while let Some(event) = ws.poll_event() {
+                        if server_close_received
+                            && let ConnectionEvent::Close { code, reason } = event
+                        {
+                            handler.on_websocket_close(code.map(|c| c.0), &reason);
+                        }
+                    }
                     if ws.state() == ConnectionState::Closed {
                         return Ok(());
                     }
