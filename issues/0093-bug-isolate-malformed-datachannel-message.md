@@ -80,7 +80,10 @@ SDK 自身の warning log へ受信本文を出力しない。
 
 ### ログ
 
-- 新たに出す zlib 破棄 warning は固定の英語文とし、raw label、圧縮前後の本文、zlib の error message、metadata を含めない
+- 新たに出す zlib 破棄 warning は英語の固定文とし、どの DataChannel で失敗したかを特定できるようラベル名と失敗段階 (zlib) を含める
+  - ラベル名は Sora サーバーが offer で設定する値であり、通常ログにもすでに出力されている
+  - `signaling` / `stats` / `push` / `notify` / `rpc` には Sora サーバーのデータしか届かないため zlib 展開失敗は稀で、warning は主に `#` ラベルの任意データで発生する
+- warning には圧縮前後の本文、zlib の error message、metadata を含めない
 - 同一入力による warning の頻度制限は本 issue の対象外とする
 
 ## 変更対象
@@ -107,7 +110,7 @@ SDK 自身の warning log へ受信本文を出力しない。
 - `signaling` label の不正 UTF-8 と JSON syntax error が、現行どおり `SoraConnection::run` の終了原因になることを確認する
 - parse に成功した `re-offer` と不正 SDP の組み合わせで SDP 適用 error が返ることを確認する
 - parse に成功した `ping` を signaling DataChannel が未登録の実際の `SoraConnection` で処理し、`DataChannelMissing` が返ることを確認する
-- 新たな zlib 破棄 warning に raw label、圧縮前後の本文、zlib の error message、metadata を渡す箇所がないことをコードレビューで確認する
+- 新たな zlib 破棄 warning にラベル名と失敗段階 (zlib) が含まれ、圧縮前後の本文、zlib の error message、metadata が含まれないことをコードレビューで確認する
 - `CHANGES.md` の develop セクションに `[FIX]` を追記する
 - production log は英語、コメントとテストの assertion message は日本語にする
 - `cargo test --workspace` が成功する
