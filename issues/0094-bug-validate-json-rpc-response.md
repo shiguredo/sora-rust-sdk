@@ -90,7 +90,7 @@ response 全体の validation より先に `id` を独立に検査し、後続�
 - `ProtocolViolation { trusted_id: None, error }`
   - top-level、`id`、またはその他の validation に失敗し、SDK の request と相関可能な `id` を得られない response
 
-JSON syntax error と UTF-8 error は issue 0093 の decode / parse error 境界で処理する。
+`rpc` ラベルの UTF-8 error と JSON syntax error は、response の `id` を相関できない入力として本 issue で message 単位に破棄する。
 semantic validation error は `nojson::JsonParseError::invalid_value` と、入力値を保持しない固定の private error kind から既存の `Error::JsonParse` を生成する。
 
 ### pending request の状態遷移
@@ -107,6 +107,9 @@ semantic validation error は `nojson::JsonParseError::invalid_value` と、入�
   - timeout task を abort する
   - response channel を `Err(Error::JsonParse(_))` で 1 回完了する
   - 他の pending request を変更しない
+- UTF-8 変換または JSON syntax の解析に失敗した場合
+  - response を message 単位で破棄する
+  - 全 pending request、timeout task、response channel を変更しない
 - 信頼できる `id` がない場合
   - response を message 単位で破棄する
   - 全 pending request、timeout task、response channel を変更しない
@@ -123,6 +126,7 @@ semantic validation error は `nojson::JsonParseError::invalid_value` と、入�
   - 信頼できる既知 `id` 付き protocol violation: `Err(Error::JsonParse(_))`
 - `SoraConnectionHandle::send_rpc_request` の Rustdoc と README に上記の返却契約を明記する
 - issue 0093 を先に実装する
+- issue 0093 は `rpc` ラベルの UTF-8 / JSON syntax error を対象外とするため、その破棄は本 issue で行う
 - protocol violation 1 件で `SoraConnection::run`、DataChannel、PeerConnection を終了しない
 - trusted `id` の有無や pending request の有無にかかわらず、`handle_datachannel_message` から protocol violation を main event loop の error として伝播しない
 - issue 0093 で定めた raw `on_data_channel_message` の通知契約を変更しない
@@ -168,6 +172,7 @@ semantic validation error は `nojson::JsonParseError::invalid_value` と、入�
   - 未知 id、timeout 済み id、同じ id の重複 response は他の pending request を変更しない
   - protocol violation の後も同じ DataChannel の正常 response と別 DataChannel の正常 message を処理できる
   - `handle_datachannel_message` は protocol violation について `Ok(())` を返し、main event loop の終了原因にしない
+  - `rpc` ラベルの UTF-8 error と JSON syntax error は、全 pending と timeout task を維持し、`handle_datachannel_message` が `Ok(())` を返す
 - private validation error と新たな warning の `Display` / `Debug` / `source()` に raw response、実在する credential、metadata を含めない
 - 仕様由来の validation コードコメントに JSON-RPC 2.0 Specification Section 5 / 5.1 を記載する
 - 重複 member を検出するコードコメントには RFC 8259 Section 4 も記載する
