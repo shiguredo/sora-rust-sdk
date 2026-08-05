@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-29
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-05
 - Model: GPT-5
 - Branch: feature/fix-datachannel-signaling-switch
 - Polished: 2026-07-29
@@ -101,3 +101,14 @@ WebSocket の EOF、flush error、Close output / Closed state を無視して Da
 - `CHANGES.md` の develop セクションに `[FIX]` を追記する
 - production log は英語、コメントとテストの assertion message は日本語にする
 - `cargo test --workspace` が成功する
+
+## 解決方法
+
+`is_datachannel_signaling_ready` という private な pure helper を `src/connection.rs` に追加し、切替 readiness を「WebSocket 経由で `switched` を受信済み」「Offer の `data_channels` が空でない」「全設定 DataChannel が Open 済み」の 3 条件の論理積として判定した。
+
+- `handle_datachannel_state` は `switched_received` を受け取り、個数比較をやめて helper で判定する
+- `switched` 受信直後と DataChannel の Open / StateChange 直後に同じ helper で readiness を再評価する
+- `use_datachannel_signaling` は初回切替成立を保持する latch とし、成立後は戻さない
+- WebSocket の EOF / `UnexpectedEof`、flush error、Close / Closed state の継続判定を `switched_ignore_disconnect_websocket && use_datachannel_signaling` に変更し、readiness 成立前の切断を吸収しないようにした
+- SDK 側の WebSocket close delay の開始条件も helper で再評価する
+- pure helper の単体テスト 5 件を追加し、`e2e-tests/tests/messaging.rs` は `#messaging` の Open 明示待機と `re-offer` / `re-answer` の DataChannel 経路観測を追加した
