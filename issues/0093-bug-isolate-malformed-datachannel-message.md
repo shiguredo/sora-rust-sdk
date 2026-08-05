@@ -2,9 +2,9 @@
 
 - Priority: High
 - Created: 2026-07-29
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-05
 - Model: GPT-5
-- Branch: feature/fix-malformed-datachannel-message
+- Branch: feature/fix-iroiro3
 - Polished: 2026-07-29
 
 ## 目的
@@ -114,3 +114,17 @@ SDK 自身の warning log へ受信本文を出力しない。
 - `CHANGES.md` の develop セクションに `[FIX]` を追記する
 - production log は英語、コメントとテストの assertion message は日本語にする
 - `cargo test --workspace` が成功する
+
+## 解決方法
+
+- `SoraConnection::handle_datachannel_message` で、zlib 展開に失敗した場合に受信メッセージ 1 件だけを破棄して `Ok(Continue)` を返すようにした
+  - 固定英語の warning `Discarded malformed DataChannel message: label='...' stage=zlib` を出し、本文と zlib の error message はログに含めない
+  - DataChannel と PeerConnection は維持され、同じ・別の DataChannel の後続メッセージを処理できる
+- UTF-8 変換と JSON / schema / RPC の parse 失敗は従来どおり接続全体の終了原因のままとした (Sora サーバー由来のデータのため)
+- 実 `SoraConnectionContext` と `SoraConnection` を構築し、モックやスタブを使わないテストを追加した
+  - zlib の不正 header / truncated stream / Adler-32 不一致 / 展開サイズ上限超過を各 1 件破棄
+  - 破棄後の同じ label・別 label の正常メッセージ処理
+  - `#` label と未対応 label の任意 binary データの転送
+  - signaling の不正 UTF-8 / JSON syntax error が従来どおり fatal であること
+  - re-offer + 不正 SDP の SDP 適用 error、ping + signaling DataChannel 未登録の `DataChannelMissing`
+- `CHANGES.md` は本実装では更新しない方針のため未更新
