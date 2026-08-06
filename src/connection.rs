@@ -47,7 +47,7 @@ use crate::types::{
     SignalingType, Video,
 };
 use crate::zlib::{compress_zlib, decompress_zlib};
-use shiguredo_webrtc::{rtc_log_error, rtc_log_info, rtc_log_warning};
+use shiguredo_webrtc::{rtc_log_error, rtc_log_info, rtc_log_verbose, rtc_log_warning};
 
 /// WebSocket (シグナリング接続) の TLS 設定。
 ///
@@ -485,6 +485,14 @@ impl SoraConnectionHandle {
     /// SDK 内部で JSON-RPC 2.0 メッセージを組み立てて送信する。
     /// `options.notification` が `true` の場合はレスポンスを待たずに即座に `Ok(None)` を返す。
     /// `options.timeout` でレスポンスの待機タイムアウトを指定する (デフォルト 5 秒)。
+    ///
+    /// 返り値:
+    /// - `Ok(Some(RpcResponse::Success { result }))`: 正規の success response
+    /// - `Ok(Some(RpcResponse::Error { code, message, data }))`: 正規の remote error response
+    /// - `Err(Error::RpcProtocolViolation)`: JSON-RPC 2.0 の要件を満たさない応答で、
+    ///   本 SDK が生成した Request ID と相関できる id を持つもの
+    /// - `Err(Error::RpcTimeout)`: `options.timeout` の経過
+    /// - `Ok(None)`: notification (`options.notification` が `true` の場合)
     pub async fn send_rpc_request(
         &self,
         method: &str,
@@ -1972,18 +1980,78 @@ impl SoraConnection {
                 }
             }
             "rpc" => {
-                let text = String::from_utf8(message_bytes)?;
-                rtc_log_info!("Received RPC message via DataChannel");
-                let (id, response) = RpcResponse::parse(&text)?;
-                if let Some(id) = id
-                    && let Some(mut pending) = self.pending_rpc_responses.remove(&id)
-                {
-                    pending.timeout_handle.abort();
-                    let _ = pending
-                        .response_tx
-                        .take()
-                        .expect("response_tx は必ず存在する")
-                        .send(Ok(Some(response)));
+                // rpc ラベルの UTF-8 変換失敗は response の id を相関できない入力として、
+                // メッセージ 1 件単位に破棄して接続を終了しない。
+                // 受信本文はログに含めない。
+                let text = match String::from_utf8(message_bytes) {
+                    Ok(text) => text,
+                    Err(_) => {
+                        rtc_log_warning!(
+                            "Discarded malformed RPC response: label='{}' stage=utf8",
+                            label
+                        );
+                        return Ok(HandleDatachannelMessageResult::Continue);
+                    }
+                };
+                rtc_log_verbose!(
+                    "Received RPC message via DataChannel: label='{}' message={} bytes",
+                    label,
+                    text.len()
+                );
+                match RpcResponse::parse(&text) {
+                    Ok((Some(id), response)) => {
+                        if let Some(mut pending) = self.pending_rpc_responses.remove(&id) {
+                            pending.timeout_handle.abort();
+                            let _ = pending
+                                .response_tx
+                                .take()
+                                .expect("response_tx は必ず存在する")
+                                .send(Ok(Some(response)));
+                        } else {
+                            // 未知 / timeout 済み / 重複の id の正常 response は破棄する。
+                            rtc_log_warning!(
+                                "Discarded unmatched RPC response: label='{}' stage=unknown-id",
+                                label
+                            );
+                        }
+                    }
+                    Ok((None, _)) => {
+                        // 信頼できる id がない response はメッセージ単位に破棄する。
+                        rtc_log_warning!(
+                            "Discarded malformed RPC response: label='{}' stage=protocol",
+                            label
+                        );
+                    }
+                    Err(err) => {
+                        // JSON-RPC 2.0 の要件を満たさない応答は、信頼できる既知 id がある場合のみ
+                        // 対応する pending request へ error として通知する。
+                        let trusted_id = match &err {
+                            Error::RpcProtocolViolation { id: Some(id) } => Some(*id),
+                            _ => None,
+                        };
+                        if let Some(id) = trusted_id
+                            && let Some(mut pending) = self.pending_rpc_responses.remove(&id)
+                        {
+                            pending.timeout_handle.abort();
+                            let _ = pending
+                                .response_tx
+                                .take()
+                                .expect("response_tx は必ず存在する")
+                                .send(Err(err));
+                        } else {
+                            // JSON syntax error と相関できない protocol violation は破棄する。
+                            let stage = if matches!(err, Error::JsonParse(_)) {
+                                "syntax"
+                            } else {
+                                "protocol"
+                            };
+                            rtc_log_warning!(
+                                "Discarded malformed RPC response: label='{}' stage={}",
+                                label,
+                                stage
+                            );
+                        }
+                    }
                 }
             }
             // # で始まるラベルはユーザー定義メッセージとして処理
@@ -3584,6 +3652,448 @@ mod tests {
                 Err(Error::DataChannelMissing { label }) if label == "signaling"
             ),
             "signaling DataChannel 未登録の ping は DataChannelMissing になる必要があります"
+        );
+    }
+
+    /// 実 oneshot channel と timeout task を持つ pending request を登録する。
+    ///
+    /// timeout task は run loop の `SendRpcRequest` 処理と同じく、
+    /// 経過後に `SoraEvent::RpcTimeout` を送信する。
+    fn insert_pending_rpc_with_timeout(
+        connection: &mut SoraConnection,
+        id: u64,
+        timeout: Duration,
+    ) -> oneshot::Receiver<Result<Option<RpcResponse>>> {
+        let (response_tx, response_rx) = oneshot::channel();
+        let event_tx = connection.event_tx.clone();
+        let timeout_handle = tokio::spawn(async move {
+            tokio::time::sleep(timeout).await;
+            let _ = event_tx.send(SoraEvent::RpcTimeout { id });
+        });
+        connection.pending_rpc_responses.insert(
+            id,
+            PendingRpcRequest {
+                response_tx: Some(response_tx),
+                timeout_handle,
+            },
+        );
+        response_rx
+    }
+
+    /// デフォルトの短いタイムアウトで pending request を登録する。
+    fn insert_pending_rpc(
+        connection: &mut SoraConnection,
+        id: u64,
+    ) -> oneshot::Receiver<Result<Option<RpcResponse>>> {
+        insert_pending_rpc_with_timeout(connection, id, Duration::from_millis(50))
+    }
+
+    /// 指定 id の pending の timeout task が abort され、
+    /// その id の `RpcTimeout` が届かないことを確認する。
+    ///
+    /// 他の pending 由来の `RpcTimeout` は無視する。
+    async fn assert_no_rpc_timeout_for_id(connection: &mut SoraConnection, id: u64) {
+        // 50ms のタイムアウトを 4 倍以上待っても、abort されていれば event は届かない。
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        while let Ok(event) = connection.event_rx.try_recv() {
+            if let SoraEvent::RpcTimeout { id: received_id } = event {
+                assert_ne!(
+                    received_id, id,
+                    "id={id} の RpcTimeout が届きました。timeout task が abort されていません"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rpc_known_id_success_completes_only_corresponding_pending() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let mut handler = RecordingHandler::default();
+
+        let rx1 = insert_pending_rpc(&mut connection, 1);
+        let mut rx2 = insert_pending_rpc(&mut connection, 2);
+
+        let result = connection
+            .handle_datachannel_message(
+                &mut handler,
+                "rpc",
+                br#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#,
+            )
+            .await;
+        assert!(result.is_ok(), "正常 response は Ok を返す必要があります");
+
+        let result = rx1.await.expect("id=1 の pending が完了しませんでした");
+        let response = result.expect("id=1 の pending が error で完了しました");
+        let Some(RpcResponse::Success { result }) = response else {
+            panic!("Success を期待しましたが別の response になりました");
+        };
+        assert_eq!(
+            result.to_string(),
+            r#"{"ok":true}"#,
+            "result が一致しません"
+        );
+
+        // 対応する pending だけが remove され、他は維持される。
+        assert!(
+            !connection.pending_rpc_responses.contains_key(&1),
+            "id=1 の pending が remove されていません"
+        );
+        assert!(
+            connection.pending_rpc_responses.contains_key(&2),
+            "id=2 の pending が変更されています"
+        );
+        assert!(
+            matches!(rx2.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "id=2 の response channel を完了しない必要があります"
+        );
+
+        // timeout task が abort され、id=1 の RpcTimeout が届かない。
+        assert_no_rpc_timeout_for_id(&mut connection, 1).await;
+    }
+
+    #[tokio::test]
+    async fn rpc_known_id_remote_error_completes_only_corresponding_pending() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let mut handler = RecordingHandler::default();
+
+        let rx1 = insert_pending_rpc(&mut connection, 1);
+        let mut rx2 = insert_pending_rpc(&mut connection, 2);
+
+        let result = connection
+            .handle_datachannel_message(
+                &mut handler,
+                "rpc",
+                br#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"custom message","data":{"k":1}}}"#,
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "正常 remote error は Ok を返す必要があります"
+        );
+
+        let result = rx1.await.expect("id=1 の pending が完了しませんでした");
+        let Ok(Some(RpcResponse::Error {
+            code,
+            message,
+            data,
+        })) = result
+        else {
+            panic!("Error を期待しましたが別の response になりました");
+        };
+        assert_eq!(code, -32000, "code が一致しません");
+        assert_eq!(message, "custom message", "message が一致しません");
+        assert_eq!(
+            data.map(|d| d.to_string()),
+            Some(r#"{"k":1}"#.to_string()),
+            "data が一致しません"
+        );
+
+        assert!(
+            !connection.pending_rpc_responses.contains_key(&1),
+            "id=1 の pending が remove されていません"
+        );
+        assert!(
+            connection.pending_rpc_responses.contains_key(&2),
+            "id=2 の pending が変更されています"
+        );
+        assert!(
+            matches!(rx2.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "id=2 の response channel を完了しない必要があります"
+        );
+
+        assert_no_rpc_timeout_for_id(&mut connection, 1).await;
+    }
+
+    #[tokio::test]
+    async fn rpc_known_id_protocol_violation_completes_only_corresponding_pending() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let mut handler = RecordingHandler::default();
+
+        let rx1 = insert_pending_rpc(&mut connection, 1);
+        let mut rx2 = insert_pending_rpc(&mut connection, 2);
+
+        // jsonrpc が不正だが id=1 は有効な u64 id のため、対応する pending へ通知される。
+        let result = connection
+            .handle_datachannel_message(
+                &mut handler,
+                "rpc",
+                br#"{"jsonrpc":"2.0x","id":1,"result":null}"#,
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "protocol violation でも handle_datachannel_message は Ok を返す必要があります"
+        );
+
+        let result = rx1.await.expect("id=1 の pending が完了しませんでした");
+        assert!(
+            matches!(result, Err(Error::RpcProtocolViolation { id: Some(1) })),
+            "RpcProtocolViolation で完了する必要があります"
+        );
+
+        assert!(
+            !connection.pending_rpc_responses.contains_key(&1),
+            "id=1 の pending が remove されていません"
+        );
+        assert!(
+            connection.pending_rpc_responses.contains_key(&2),
+            "id=2 の pending が変更されています"
+        );
+        assert!(
+            matches!(rx2.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "id=2 の response channel を完了しない必要があります"
+        );
+
+        assert_no_rpc_timeout_for_id(&mut connection, 1).await;
+    }
+
+    #[tokio::test]
+    async fn rpc_untrusted_id_response_keeps_all_pending() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let mut handler = RecordingHandler::default();
+
+        let mut rx1 = insert_pending_rpc(&mut connection, 1);
+
+        // id が String の正常 response は SDK の Request ID と相関できないため破棄される。
+        let result = connection
+            .handle_datachannel_message(
+                &mut handler,
+                "rpc",
+                br#"{"jsonrpc":"2.0","id":"x","result":null}"#,
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "信頼できない id の response は Ok を返す必要があります"
+        );
+        assert!(
+            connection.pending_rpc_responses.contains_key(&1),
+            "pending を変更しない必要があります"
+        );
+
+        // timeout task は維持されるため、timeout 経過後に RpcTimeout が届く。
+        let event = tokio::time::timeout(Duration::from_millis(300), connection.event_rx.recv())
+            .await
+            .expect("timeout task が abort されています")
+            .expect("RpcTimeout が届きませんでした");
+        assert!(
+            matches!(event, SoraEvent::RpcTimeout { id: 1 }),
+            "id=1 の RpcTimeout を期待しました"
+        );
+        // 破棄された response は channel を完了しない。
+        assert!(
+            matches!(rx1.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "response channel を完了しない必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn rpc_unknown_id_response_keeps_other_pending() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let mut handler = RecordingHandler::default();
+
+        let mut rx1 = insert_pending_rpc(&mut connection, 1);
+
+        // id=99 は pending に存在しない正常 response のため破棄される。
+        let result = connection
+            .handle_datachannel_message(
+                &mut handler,
+                "rpc",
+                br#"{"jsonrpc":"2.0","id":99,"result":null}"#,
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "未知 id の response は Ok を返す必要があります"
+        );
+        assert!(
+            connection.pending_rpc_responses.contains_key(&1),
+            "他の pending を変更しない必要があります"
+        );
+        assert!(
+            matches!(rx1.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "破棄された response は channel を完了しない必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn rpc_timed_out_id_response_keeps_other_pending() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let mut handler = RecordingHandler::default();
+
+        let rx1 = insert_pending_rpc(&mut connection, 1);
+        let mut rx2 = insert_pending_rpc(&mut connection, 2);
+
+        // id=1 は timeout 済みとして pending から取り除かれている状態を再現する。
+        connection.pending_rpc_responses.remove(&1);
+
+        let result = connection
+            .handle_datachannel_message(
+                &mut handler,
+                "rpc",
+                br#"{"jsonrpc":"2.0","id":1,"result":null}"#,
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "timeout 済み id の response は Ok を返す必要があります"
+        );
+        assert!(
+            connection.pending_rpc_responses.contains_key(&2),
+            "他の pending を変更しない必要があります"
+        );
+        assert!(
+            matches!(rx2.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "他の pending の response channel を完了しない必要があります"
+        );
+        // 破棄された response は channel を完了しない (remove 済みのため Closed)。
+        assert!(
+            rx1.await.is_err(),
+            "response channel を完了しない必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn rpc_duplicated_response_keeps_other_pending() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let mut handler = RecordingHandler::default();
+
+        let rx1 = insert_pending_rpc(&mut connection, 1);
+        let mut rx2 = insert_pending_rpc(&mut connection, 2);
+
+        // 1 回目は id=1 の pending を完了する。
+        let result = connection
+            .handle_datachannel_message(
+                &mut handler,
+                "rpc",
+                br#"{"jsonrpc":"2.0","id":1,"result":null}"#,
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "1 回目の response は Ok を返す必要があります"
+        );
+        let result = rx1.await.expect("id=1 の pending が完了しませんでした");
+        assert!(
+            result.is_ok(),
+            "1 回目の response は success で完了する必要があります"
+        );
+
+        // 2 回目は id=1 の pending が既に無いため破棄され、他を変更しない。
+        let result = connection
+            .handle_datachannel_message(
+                &mut handler,
+                "rpc",
+                br#"{"jsonrpc":"2.0","id":1,"result":null}"#,
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "同じ id の重複 response は Ok を返す必要があります"
+        );
+        assert!(
+            connection.pending_rpc_responses.contains_key(&2),
+            "他の pending を変更しない必要があります"
+        );
+        assert!(
+            matches!(rx2.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "他の pending の response channel を完了しない必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn rpc_protocol_violation_does_not_terminate_connection() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let mut handler = RecordingHandler::default();
+
+        // protocol violation
+        let rx1 = insert_pending_rpc(&mut connection, 1);
+        let result = connection
+            .handle_datachannel_message(
+                &mut handler,
+                "rpc",
+                br#"{"jsonrpc":"2.0x","id":1,"result":null}"#,
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "protocol violation は Ok を返す必要があります"
+        );
+        let result = rx1.await.expect("id=1 の pending が完了しませんでした");
+        assert!(
+            matches!(result, Err(Error::RpcProtocolViolation { .. })),
+            "RpcProtocolViolation で完了する必要があります"
+        );
+
+        // 同じ DataChannel の正常 response を処理できる。
+        let rx2 = insert_pending_rpc(&mut connection, 2);
+        let result = connection
+            .handle_datachannel_message(
+                &mut handler,
+                "rpc",
+                br#"{"jsonrpc":"2.0","id":2,"result":null}"#,
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "protocol violation 後の正常 response は Ok を返す必要があります"
+        );
+        let result = rx2.await.expect("id=2 の pending が完了しませんでした");
+        assert!(
+            result.is_ok(),
+            "id=2 の正常 response は success で完了する必要があります"
+        );
+
+        // 別 DataChannel の正常 message を処理できる。
+        let result = connection
+            .handle_datachannel_message(&mut handler, "push", br#"{"type":"push"}"#)
+            .await;
+        assert!(
+            result.is_ok(),
+            "別 DataChannel の正常 message は Ok を返す必要があります"
+        );
+        assert_eq!(
+            handler.push_count, 1,
+            "on_push が 1 回呼ばれる必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn rpc_utf8_and_syntax_error_keep_pending_and_return_ok() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let mut handler = RecordingHandler::default();
+
+        let mut rx1 = insert_pending_rpc(&mut connection, 1);
+        let mut rx2 = insert_pending_rpc(&mut connection, 2);
+
+        // UTF-8 変換失敗は破棄され、Ok を返す。
+        let result = connection
+            .handle_datachannel_message(&mut handler, "rpc", &[0xFF, 0xFE, 0xFD])
+            .await;
+        assert!(result.is_ok(), "UTF-8 error は Ok を返す必要があります");
+
+        // JSON syntax error は破棄され、Ok を返す。
+        let result = connection
+            .handle_datachannel_message(&mut handler, "rpc", b"this is not json")
+            .await;
+        assert!(
+            result.is_ok(),
+            "JSON syntax error は Ok を返す必要があります"
+        );
+
+        // 全 pending と timeout task が維持される。
+        assert!(
+            connection.pending_rpc_responses.contains_key(&1),
+            "id=1 の pending を変更しない必要があります"
+        );
+        assert!(
+            connection.pending_rpc_responses.contains_key(&2),
+            "id=2 の pending を変更しない必要があります"
+        );
+        assert!(
+            matches!(rx1.try_recv(), Err(oneshot::error::TryRecvError::Empty))
+                && matches!(rx2.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "破棄された response は response channel を完了しない必要があります"
         );
     }
 }

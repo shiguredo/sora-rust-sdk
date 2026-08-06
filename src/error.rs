@@ -244,6 +244,12 @@ pub enum Error {
     },
     /// RPC の応答がタイムアウトした。
     RpcTimeout,
+    /// RPC の応答が JSON-RPC 2.0 の要件を満たしていない。
+    RpcProtocolViolation {
+        /// SDK が生成した Request ID と相関できた id。
+        /// 相関できない場合は `None`。
+        id: Option<u64>,
+    },
     /// シグナリング URL が空。
     SignalingUrlsEmpty,
     /// すべてのシグナリング URL への接続が失敗した。
@@ -454,6 +460,15 @@ impl std::fmt::Display for Error {
             #[cfg(feature = "vpl")]
             Error::VplMessage { reason } => write!(f, "VPL error: {reason}"),
             Error::RpcTimeout => f.write_str("RPC レスポンスがタイムアウトしました"),
+            Error::RpcProtocolViolation { id } => match id {
+                Some(id) => {
+                    write!(
+                        f,
+                        "RPC レスポンスが JSON-RPC 2.0 の要件を満たしていません: id={id}"
+                    )
+                }
+                None => f.write_str("RPC レスポンスが JSON-RPC 2.0 の要件を満たしていません"),
+            },
             Error::SignalingUrlsEmpty => f.write_str("シグナリング URL が指定されていません"),
             Error::AllSignalingUrlsFailed { errors } => {
                 write!(f, "すべてのシグナリング URL への接続に失敗しました:")?;
