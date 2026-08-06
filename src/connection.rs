@@ -2121,6 +2121,18 @@ struct ManagedDataChannel {
     compress: bool,
 }
 
+impl Drop for ManagedDataChannel {
+    fn drop(&mut self) {
+        // DataChannelObserver を解放する前に、C++ 側の DataChannel から observer を解除する。
+        // SctpDataChannel::ObserverAdapter の状態遷移コールバックはネットワークスレッドから
+        // シグナリングスレッドへ非同期に配送される。observer を先に解放すると、
+        // 配送済みの遅延コールバックが解放済みメモリを参照して SIGSEGV になる。
+        // UnregisterObserver で observer_ を null にすることで、遅延コールバックの
+        // 実行時に observer 呼び出しがスキップされる。
+        self.channel.unregister_observer();
+    }
+}
+
 const DEFAULT_TLS_PORT: u16 = 443;
 const DEFAULT_PLAIN_PORT: u16 = 80;
 
