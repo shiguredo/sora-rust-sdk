@@ -319,7 +319,7 @@ struct FrameDispatchConfig {
     timestamp_us: i64,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct NativeFrameDispatchConfig {
     raw_width: i32,
     raw_height: i32,
