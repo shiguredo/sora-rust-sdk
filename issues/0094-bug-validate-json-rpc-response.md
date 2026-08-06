@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-29
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-06
 - Model: GPT-5
 - Branch: feature/fix-iroiro3
 - Polished: 2026-07-29
@@ -187,3 +187,15 @@ semantic validation error は公開 `Error::RpcProtocolViolation { id: Option<u6
 - テスト用の公開 API を追加しない
 - production log は英語、コメントとテストの assertion message は日本語にする
 - `cargo test --workspace` が成功する
+
+## 解決方法
+
+- `RpcResponse::parse` を JSON-RPC 2.0 の要件に沿った厳密検証に書き換え、不正な応答を成功 `null` や正規エラーとして受理しないようにした
+  - top-level の単一 Object、`jsonrpc` の `"2.0"` 完全一致、必須 `id`、`result` / `error` の存在排他、Error Object の `code` (字句上の JSON 整数かつ `i32`) / `message` / `data` を検証する
+  - response と Error Object の制御 member の重複は RFC 8259 Section 4 に基づき拒否する (member 名は JSON escape を decode した後で比較する)
+  - `id` は response 全体の validation より先に独立に検査し、SDK が生成する Request ID (`u64`) と相関できる値だけを trusted id として保持する
+- 公開 `Error` に `RpcProtocolViolation { id: Option<u64> }` を追加し、protocol violation を既存の `Error::JsonParse` とは別のエラーとして、相関できる known id を持つ pending request だけへ通知する
+- `SoraConnection::handle_datachannel_message` の rpc ラベル処理を非 fatal 化し、UTF-8 変換失敗・JSON syntax error・相関できない応答はメッセージ 1 件単位で破棄して接続と他の pending request を維持するようにした
+- 破棄時は固定英語の warning を validation stage の分類 (utf8 / syntax / protocol / unknown-id) 付きで出し、本文と field の実値はログに含めない
+- `src/rpc.rs` に table-driven unit test、`src/connection.rs` に実 `SoraConnectionContext` / `SoraConnection` / Tokio の oneshot channel と timeout task を使うテストを追加した
+- `CHANGES.md` は本実装では更新しない方針のため未更新
