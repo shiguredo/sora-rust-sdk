@@ -4,7 +4,7 @@
 - Created: 2026-07-29
 - Completed: {YYYY-MM-DD}
 - Model: GPT-5
-- Branch: feature/fix-validate-json-rpc-response
+- Branch: feature/fix-iroiro3
 - Polished: 2026-07-29
 
 ## 目的
@@ -81,17 +81,22 @@ response 全体の validation より先に `id` を独立に検査し、後続�
 
 ### parser outcome
 
-`RpcResponse::parse` の private な戻り値を、少なくとも次の outcome に分ける。
+`RpcResponse::parse` の戻り値は `Result<(Option<u64>, RpcResponse)>` を維持する。
 
-- `Response { id, response }`
-  - 全 validation に成功した response
-- `ProtocolViolation { trusted_id: Some(id), error }`
-  - `id` は SDK の request と相関可能だが、他の validation に失敗した response
-- `ProtocolViolation { trusted_id: None, error }`
-  - top-level、`id`、またはその他の validation に失敗し、SDK の request と相関可能な `id` を得られない response
+- `Ok((Some(id), response))`
+  - 全 validation に成功し、SDK の request と相関できる `id` を持つ response
+- `Ok((None, response))`
+  - 全 validation に成功したが、`id` が欠落 / Null / String / 負数 / 小数 / 範囲外で
+    SDK の request と相関できない response (message 単位で破棄する)
+- `Err(Error::RpcProtocolViolation { id })`
+  - top-level、`jsonrpc`、`result` / `error`、Error Object の validation に失敗した response
+  - `id` は validation より先に独立に検査した trusted id を保持し、
+    相関できる `id` を得られない場合は `None`
+- `Err(Error::JsonParse(_))`
+  - JSON syntax error (message 単位で破棄する)
 
 `rpc` ラベルの UTF-8 error と JSON syntax error は、response の `id` を相関できない入力として本 issue で message 単位に破棄する。
-semantic validation error は `nojson::JsonParseError::invalid_value` と、入力値を保持しない固定の private error kind から既存の `Error::JsonParse` を生成する。
+semantic validation error は公開 `Error::RpcProtocolViolation { id: Option<u64> }` を生成する。
 
 ### pending request の状態遷移
 
@@ -105,7 +110,7 @@ semantic validation error は `nojson::JsonParseError::invalid_value` と、入�
 - protocol violation に信頼できる既知 `id` がある場合
   - 一致する pending request だけを remove する
   - timeout task を abort する
-  - response channel を `Err(Error::JsonParse(_))` で 1 回完了する
+  - response channel を `Err(Error::RpcProtocolViolation { id: Some(id) })` で 1 回完了する
   - 他の pending request を変更しない
 - UTF-8 変換または JSON syntax の解析に失敗した場合
   - response を message 単位で破棄する
@@ -119,12 +124,14 @@ semantic validation error は `nojson::JsonParseError::invalid_value` と、入�
 
 ### 公開 API と 0093 との境界
 
-- 公開 `RpcResponse` と `Error` へ variant を追加しない
-  - どちらも `#[non_exhaustive]` ではなく、variant 追加は下流 crate の exhaustive match を壊すため
-- 正規の remote error と protocol violation は、次の既存 API で区別できる
+- 公開 `Error` に variant `Error::RpcProtocolViolation { id: Option<u64> }` を追加する
+  - `id` は SDK が request と相関できた trusted id
+  - 公開 API の破壊的変更は許容する
+- 公開 `RpcResponse` には variant を追加しない
+- 正規の remote error と protocol violation は、次の公開 API で区別できる
   - remote error: `Ok(Some(RpcResponse::Error { .. }))`
-  - 信頼できる既知 `id` 付き protocol violation: `Err(Error::JsonParse(_))`
-- `SoraConnectionHandle::send_rpc_request` の Rustdoc と README に上記の返却契約を明記する
+  - 信頼できる既知 `id` 付き protocol violation: `Err(Error::RpcProtocolViolation { id: Some(id) })`
+- `SoraConnectionHandle::send_rpc_request` の Rustdoc に上記の返却契約を明記する
 - issue 0093 を先に実装する
 - issue 0093 は `rpc` ラベルの UTF-8 / JSON syntax error を対象外とするため、その破棄は本 issue で行う
 - protocol violation 1 件で `SoraConnection::run`、DataChannel、PeerConnection を終了しない
@@ -133,8 +140,9 @@ semantic validation error は `nojson::JsonParseError::invalid_value` と、入�
 
 ### 秘密情報とログ
 
-- private validation error kind、`Error::JsonParse` の `Display` / `Debug` / `source()`、SDK warning へ raw response を保持または連結しない
+- `Error::RpcProtocolViolation` の `Display` / `Debug` / `source()`、SDK warning へ raw response を保持または連結しない
 - 不正な `jsonrpc` / `id` / `code` / `message` の実値、remote `error.message` / `data`、metadata を protocol error へ含めない
+- `Error::RpcProtocolViolation` が保持するのは SDK の Request ID と相関できた trusted id のみとする
 - 正規の remote error を公開 `RpcResponse::Error` として利用者へ返す既存契約は維持する
 - 新たに追加する production log は英語の固定文とし、validation stage の安全な分類だけを出す
 
@@ -142,8 +150,7 @@ semantic validation error は `nojson::JsonParseError::invalid_value` と、入�
 
 - `src/rpc.rs`
 - `src/connection.rs`
-- `README.md`
-- `CHANGES.md`
+- `src/error.rs`
 
 ## 完了条件
 
@@ -159,25 +166,24 @@ semantic validation error は `nojson::JsonParseError::invalid_value` と、入�
   - response の制御 member と Error Object の制御 member の重複を拒否する
   - raw 表記が異なる escaped member 名の重複も拒否する
 - parser outcome について次を確認する
-  - 有効な `u64` id と不正 version の組み合わせは、同じ `trusted_id` を持つ `ProtocolViolation` になる
-  - id 欠落、Null、String、負数、小数、範囲外は `trusted_id: None` の `ProtocolViolation` になる
-  - 重複した id は 2 つの値が同一でも `trusted_id: None` の `ProtocolViolation` になる
+  - 有効な `u64` id と不正 version の組み合わせは、`Err(Error::RpcProtocolViolation { id: Some(id) })` になる
+  - id 欠落、Null、String、負数、小数、範囲外は、それ以外の validation に成功していれば `Ok((None, response))` で返り、相関できないため破棄される
+  - 重複した id は 2 つの値が同一でも trusted id を確立せず、それ以外の validation に成功していれば `Ok((None, response))` になる
   - validation error の `Display`、`Debug`、`source()` に各 field のダミー marker と raw response が含まれない
 - `src/connection.rs` で実際の `SoraConnectionContext`、`SoraConnection`、Tokio の oneshot channel と timeout task を使い、モックやスタブなしで次を確認する
   - 既知 id の正常 success は対応する pending request だけを `Ok(Some(RpcResponse::Success))` で完了する
   - 既知 id の正常 remote error は対応する pending request だけを `Ok(Some(RpcResponse::Error))` で完了し、`message` / `data` を維持する
-  - 既知 id 付き protocol violation は対応する pending request だけを `Err(Error::JsonParse(_))` で完了する
+  - 既知 id 付き protocol violation は対応する pending request だけを `Err(Error::RpcProtocolViolation { id: Some(id) })` で完了する
   - 上記 3 case は pending を remove し、timeout task を abort し、response channel を 1 回だけ完了する
   - 信頼できる id がない response は全 pending と timeout task を維持する
   - 未知 id、timeout 済み id、同じ id の重複 response は他の pending request を変更しない
   - protocol violation の後も同じ DataChannel の正常 response と別 DataChannel の正常 message を処理できる
   - `handle_datachannel_message` は protocol violation について `Ok(())` を返し、main event loop の終了原因にしない
   - `rpc` ラベルの UTF-8 error と JSON syntax error は、全 pending と timeout task を維持し、`handle_datachannel_message` が `Ok(())` を返す
-- private validation error と新たな warning の `Display` / `Debug` / `source()` に raw response、実在する credential、metadata を含めない
+- `Error::RpcProtocolViolation` と新たな warning の `Display` / `Debug` / `source()` に raw response、実在する credential、metadata を含めない
 - 仕様由来の validation コードコメントに JSON-RPC 2.0 Specification Section 5 / 5.1 を記載する
 - 重複 member を検出するコードコメントには RFC 8259 Section 4 も記載する
 - 上記の各仕様コメントに、仕様が将来変更される可能性を明記する
 - テスト用の公開 API を追加しない
-- `CHANGES.md` の develop セクションに `[FIX]` を追記する
 - production log は英語、コメントとテストの assertion message は日本語にする
 - `cargo test --workspace` が成功する
