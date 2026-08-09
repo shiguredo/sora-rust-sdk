@@ -15,7 +15,7 @@
 
 `SoraConnection::run` のメインループ (`src/connection.rs`) では、switched 後の WebSocket 終了を吸収する処理が経路ごとに非対称になっている。
 
-- `flush_ws_output` のエラーは `switched_ignore_disconnect_websocket` が true なら吸収される
+- `flush_ws_output` のエラーは `switched_ignore_disconnect_websocket && !websocket_closed` が成立するなら吸収される
 - 一方、`stream.read` の `UnexpectedEof` 以外のエラー (ECONNRESET 等) は `return Err` で run() が終了する
 - `ws.feed_recv_buf` のエラー (壊れたフレーム・不正 UTF-8 等の WebSocket プロトコルエラー) も `?` で run() が終了する
 
