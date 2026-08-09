@@ -9,25 +9,28 @@
 
 ## 目的
 
-libcamera の `all_control_ids` に `WdrMode` / `WdrStrength` を追加し、設定可能なはずのコントロールが静かに無視される問題を解消する。
+libcamera の `WdrMode` / `WdrStrength` コントロールを `--libcamera-control` で文字列指定したときに正しい enum 値へ解決し、設定可能なはずのコントロールが静かに無視される問題を解消する。
 
 ## 現状
 
-`src/libcamera.rs` の `all_control_ids()` は libcamera の設定可能な In / InOut コントロールの一覧を返すが、`core::WDR_MODE` (Int32, InOut) と `core::WDR_STRENGTH` (Float, In) の 2 つが欠落している。shiguredo_libcamera の control_ids.rs には両方が定義されている。
+`src/libcamera.rs` の `all_control_ids()` には `core::WDR_MODE` (Int32, InOut) と `core::WDR_STRENGTH` (Float, In) は既に含まれており、`find_control_id` も成功する。
 
-ユーザーが `--libcamera-control WdrMode=...` 等で指定しても、`find_control_id` が失敗して「unknown libcamera control」警告が出るだけで無視される。
+一方 `resolve_enum_value` には `WdrMode` の enum 解決分岐がない。shiguredo_libcamera の control_ids.rs には `wdr_mode` の enum 定義（OFF / LINEAR / POWER / EXPONENTIAL / HISTOGRAM_EQUALIZATION）があるのに参照されていない。
+
+`parse_control_value` の Int32 分岐は `resolve_enum_value(id.name(), value)` を呼ぶため、`--libcamera-control WdrMode=Off` のような文字列指定は enum 解決に失敗し、コントロールが静かに無視される。数値指定（`WdrMode=1` 等）は `parse::<i32>()` で解決できるため設定可能。
 
 ## 設計方針
 
-- `all_control_ids()` に `WdrMode` / `WdrStrength` を追加する
-- `WdrMode` の enum 値解決 (`resolve_enum_value`) を追加する (shiguredo_libcamera の control_ids.rs に `wdr_mode` の enum 定義があるため)
+- `resolve_enum_value` に `WdrMode` の enum 解決を追加する（shiguredo_libcamera の control_ids.rs の `core::wdr_mode` を参照）
+- `all_control_ids()` への追加は不要（`WDR_MODE` / `WDR_STRENGTH` は既に含まれている）
 - `--libcamera-control` 指定時に unknown コントロールが警告のみでなく、必要に応じてエラーになる挙動を検討する
 
 ## 完了条件
 
-- `WdrMode` / `WdrStrength` が `all_control_ids()` に含まれる
-- `--libcamera-control WdrMode=...` で実際に設定が渡される
-- 設定可能な In / InOut コントロールの一覧と control_ids.rs の突き合わせで欠落がないことを確認するテストがある
+- `resolve_enum_value` で `WdrMode` の各 enum 値（OFF / LINEAR / POWER / EXPONENTIAL / HISTOGRAM_EQUALIZATION）が解決される
+- `--libcamera-control WdrMode=Off` のような文字列指定で実際に設定が渡される
+- `WdrStrength` は Float 型のため、`parse_control_value` の Float 分岐で既に設定可能であることを確認する
+- enum 解決の単体テストがある（モックやスタブは使わない）
 - `cargo test --workspace` が成功する
 - production log は英語、コメントとテストの assertion message は日本語にする
 
