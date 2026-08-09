@@ -18,7 +18,7 @@ Medium。特定の CLI option 組み合わせが必要だが、接続成功後�
 ## 現状
 
 `build_context_config` は MP4 passthrough preference を先に追加し、後から手動 codec implementation を merge する。
-同一 codec の後勝ち規則により、実 codec を encoder 方向でサポートする手動 implementation を指定した場合（Manual）は passthrough が上書きされる。
+`VideoCodecPreference::merge` は方向・codec が一致する既存エントリの implementation を上書きする後勝ち規則のため、実 codec を encoder 方向でサポートする手動 implementation を指定した場合（Manual）は preference の実装指定が passthrough へ上書きされる。`video_codec_capabilities` には passthrough と手動の両方の capability が残るが、preference の実装指定が置き換わることで encoder 選択が手動 implementation になる。
 `prepare_mp4_state` が取得した実 codec と CLI の video codec type は独立して扱われ、`--video-codec-type` が実 codec と異なっても接続前に失敗しない。
 
 ## 設計方針
