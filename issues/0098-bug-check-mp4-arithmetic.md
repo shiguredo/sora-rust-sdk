@@ -39,8 +39,8 @@ SDK 側だけを checked arithmetic 化しても、その検査へ到達する�
 
 `src/video_codecs/mp4.rs` の `Mp4SampleReader::new_inner` には次の未検査演算が残る。
 
-- `required.position as usize` は、`u64` が `usize` に収まらない target で上位 bit を切り捨てる
-- `start + size` は、`RequiredInput::size` が大きいと `usize` overflow を起こす
+- `required.position as usize` は、`u64` の `position` が `usize` に収まらない target で上位 bit を切り捨てる
+- `required.size` は `Option<usize>` であり、`start + size` は `usize` 同士の検査なし加算で、overflow すると `min(file_data.len())` でクランプされる（wraparound とクランプの組による未検査演算）
 - sample の `data_offset` と `data_size` は `u64` / `usize` のまま保持され、検証後の `get_sample` で `as` 変換と加算をやり直す
 
 issue 0061 は `required.position > file_data.len()`、issue 0062 は sample range がファイル末尾を超える場合を既に修正した。
