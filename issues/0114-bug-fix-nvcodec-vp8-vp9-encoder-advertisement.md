@@ -15,7 +15,7 @@ NVCodec が実際には初期化できない VP8/VP9 エンコーダーを広告
 
 `src/video_codecs/nvcodec.rs` では、ハードウェアが VP8/VP9 のエンコード対応を報告すると `supported_formats_for_codec` が `VideoCodecType::Vp8` / `VideoCodecType::Vp9` の SDP フォーマットを返す (エンコード方向の区別がない)。一方 `encoder_codec_config` は `_ => None` で VP8/VP9 に対応しておらず、`NvCodecVideoEncoder::init_encode` → `rebuild_encoder` が必ず `unsupported codec type for encoder config` で失敗する。
 
-NVENC は VP9 エンコードを報告し得るハードウェア (Ada 以降等) があるため、該当環境では `create_video_encoder` は成功するのに `init_encode` が常に Error を返す破損エンコーダーが生成される。`get_supported_formats` の doc コメントは「エンコードは H.264 / H.265 / AV1、デコードは VP8 / VP9」と意図を明記しており、広告と実装が矛盾している。テストもこの整合性を検証していない。
+NVENC は VP9 エンコードを報告し得るハードウェア (Ada 以降等) があるため、該当環境では `create_video_encoder` は成功するのに `init_encode` が常に Error を返す破損エンコーダーが生成される。`NvCodecVideoCodecCapability` の doc コメントは「エンコードは H.264 / H.265 / AV1、デコードは H.264 / H.265 / AV1 / VP8 / VP9 をサポートする」と意図を明記しており、広告と実装が矛盾している。テストもこの整合性を検証していない。
 
 ## 設計方針
 
