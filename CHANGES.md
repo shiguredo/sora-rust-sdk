@@ -22,3 +22,5 @@
 - [FIX] 非ゼロの composition time offset (B フレーム) を含む MP4 を `Mp4SampleReader` の初期化時に拒否する
   - 今までは composition time offset を無視してデコード順のまま送信していた
   - @sile
+- [FIX] sumomo の `--audio false` 指定時に音声トラックが SDP に含まれないようにする
+  - @voluntas
