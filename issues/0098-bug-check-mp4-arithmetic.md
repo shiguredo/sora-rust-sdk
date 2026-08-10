@@ -5,7 +5,7 @@
 - Completed: {YYYY-MM-DD}
 - Model: GPT-5
 - Branch: feature/fix-mp4-arithmetic
-- Polished: 2026-07-30
+- Polished: 2026-08-10
 - Updated: 2026-08-10
 
 ## 目的
@@ -46,6 +46,10 @@ sample 数の業務上限は汎用ライブラリの関心事ではないため 
 - `required.position as usize` は、`u64` の `position` が `usize` に収まらない target で上位 bit を切り捨てる
 - `required.size` は `Option<usize>` であり、`start + size` は `usize` 同士の検査なし加算で、overflow すると `min(file_data.len())` でクランプされる（wraparound とクランプの組による未検査演算）
 - sample の `data_offset` と `data_size` は `u64` / `usize` のまま保持され、検証後の `get_sample` で `as` 変換と加算をやり直す
+- `cumulative_us` の構築で `acc += duration as u64` と `(acc * 1_000_000) / timescale` を未検査で行う。後者は後述の sample count 上限を適用しても `u64` の overflow を起こし得る
+
+なお、`shiguredo_mp4 2026.4.0` は moov box の decode 時に全 sample 分の `sample_data_offsets` を eager に構築するため、`stts` 1 entry で巨大な sample 数を宣言した入力では、SDK 側の検証へ到達する前に依存 crate 内で大きな allocation が発生し得る。
+この allocation は依存 crate の設計による制約であり、本 issue では対処しない（SDK 側の sample count 上限は SDK が展開する metadata と `next_sample()` のループ回数を制限することを目的とする）。
 
 issue 0061 は `required.position > file_data.len()`、issue 0062 は sample range がファイル末尾を超える場合を既に修正した。
 本 issue はその初期化時検証方針を維持し、残っている型変換と算術 overflow を同じ検証へ統合する。
@@ -68,9 +72,17 @@ closed issue 0048 は通常の 30 fps なら停止待ちが約 1 frame 分であ
 
 ### sample count 上限
 
-`Mp4SampleReader` は全 sample の metadata を `Vec` に展開し、`next_sample()` を sample 数分ループするため、sample 数に比例するメモリと処理時間を制限する。
+`Mp4SampleReader` は全 sample の metadata を `Vec` に展開し、`next_sample()` を sample 数分ループするため、SDK が展開する metadata のメモリとループの処理時間を制限する。
 `MAX_SAMPLE_COUNT_PER_TRACK = 10_368_000`（120 fps を 24 時間保持できる件数）を設け、上限値ちょうどを受理し、1 sample 超過を拒否する。
-`stts` は run-length 形式であり、1 entry だけで巨大な sample 数を表現できるため、`next_sample()` のループで sample 数を数え、上限超過を検出した時点で sample index を含む error を返す。
+`stts` は run-length 形式であり、1 entry だけで巨大な sample 数を表現できるため、`next_sample()` のループで sample 数を数え、上限超過を検出した時点で `SampleCountLimitExceeded` error（sample index 付き）を返す。
+上限判定は sample index を受け取る pure helper に抽出し、helper は上限値ちょうどを受理して 1 超過を拒否する。
+依存 crate が moov decode 時に eager に構築する `sample_data_offsets` の allocation は本 issue の対象外である（現状セクション参照）。
+
+### duration 累積と microseconds 変換
+
+`cumulative_us` の構築で行う `acc += duration as u64` と `(acc * 1_000_000) / timescale` は checked arithmetic へ変更する。
+加算または乗算が overflow した場合は、sample index を含む `DurationOverflow` error で reader 初期化を失敗させる。
+検証は reader 初期化時（`cumulative_us` 構築時）に行い、`get_sample` や capturer の hot path には未検査演算を残さない。
 
 ### required input range
 
@@ -116,6 +128,7 @@ test thread が `park_timeout` 直前へ到達したことを barrier で確認�
 ### error
 
 required input の `start + size` overflow には、`position` と `size` を保持する専用の `Mp4Error` variant を追加する。
+`MAX_SAMPLE_COUNT_PER_TRACK` 超過には sample index を保持する `SampleCountLimitExceeded`、`cumulative_us` 構築の加算 / 乗算 overflow には sample index を保持する `DurationOverflow` を追加する。
 `Display` と `std::error::Error::source` を更新し、error message は日本語とする。
 position 変換または開始位置の範囲外は既存の `InputPositionOutOfRange`、sample range の変換・加算・EOF 超過は既存の `InconsistentSampleTable` を使う。
 
@@ -130,6 +143,8 @@ mock / stub、sleep、外部 command、ネットワークを使わず、pure hel
 - `required.position` の変換は target pointer width ごとに期待値を分け、64 bit では `u64::MAX` の変換成功後に file size error、32 bit の conditional test では `u32::MAX + 1` を変換 error にする
 - 既存 H.264 fixture の `moov` header を 64 bit `largesize` 形式の `u64::MAX` へ書き換え、`position > 0` かつ `size == usize::MAX` となる入力で reader が panic せず input range overflow error を返すことを確認する
 - sample range helper で、空 sample、EOF ちょうど、EOF 1 byte 超過、`usize::MAX` 近傍の offset / size と加算 overflow を確認する
+- 上限判定 helper に、`MAX_SAMPLE_COUNT_PER_TRACK` ちょうどの index を渡して受理し、1 超過の index を渡して `SampleCountLimitExceeded`（sample index 付き）で拒否することを確認する。境界テストは実 reader 経路では 10.4M sample の構築が必要になるため、helper 経由で検証する
+- `cumulative_us` 構築の加算 / 乗算が overflow する duration 入力を `DurationOverflow`（sample index 付き）で拒否し、正常な入力では従来どおりの累積値になることを確認する
 - malformed MP4 は `catch_unwind` で panic の不在だけを確認せず、具体的な error variant、sample index、position、size を検証する
 - 既存の composition time offset が 0 の fixture (`testdata/red-320x320-h264.mp4` 等) について、sample payload、送信順序、全 deadline が変わらないことを確認する
 - stop 設定済みの wait helper が park せず停止し、spurious wakeup 相当の再評価で deadline 前に送信継続を返さないことを確認する
