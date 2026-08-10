@@ -38,6 +38,7 @@ SDK が metadata を受け取る前の依存 crate 内の未検査演算は `shi
 - `required.size` は `Option<usize>` であり、`start + size` は `usize` 同士の検査なし加算で、overflow すると `min(file_data.len())` でクランプされる（wraparound とクランプの組による未検査演算）
 - sample の `data_offset` と `data_size` は `u64` / `usize` のまま保持され、検証後の `get_sample` で `as` 変換と加算をやり直す
 - `cumulative_us` の構築で `acc += duration as u64` と `(acc * 1_000_000) / timescale` を未検査で行う。後者は `u64` の overflow を起こし得る
+- `Mp4VideoCapturer` の feeder thread は、フレームの絶対送信時刻を `loop_start + Duration::from_micros(...)` で未検査に計算する
 
 issue 0061 は `required.position > file_data.len()`、issue 0062 は sample range がファイル末尾を超える場合を既に修正した。
 本 issue はその初期化時検証方針を維持し、残っている型変換と算術 overflow を同じ検証へ統合する。
@@ -59,6 +60,11 @@ issue 0061 は `required.position > file_data.len()`、issue 0062 は sample ran
 `cumulative_us` の構築で行う `acc += duration as u64` と `(acc * 1_000_000) / timescale` は checked arithmetic へ変更する。
 加算または乗算が overflow した場合は、sample index を含む `DurationOverflow` error で reader 初期化を失敗させる。
 検証は reader 初期化時（`cumulative_us` 構築時）に行い、`get_sample` の hot path には未検査演算を残さない。
+
+### deadline 算術
+
+`Mp4VideoCapturer` の feeder thread がフレームの絶対送信時刻を計算する `loop_start + Duration::from_micros(...)` は `checked_add` へ変更する。
+オーバーフローした場合は panic や飽和を避け、英語の production log を残して feeder thread を正常停止する。
 
 ### required input range
 
@@ -103,6 +109,7 @@ mock / stub、sleep、外部 command、ネットワークを使わず、pure hel
 - 既存 H.264 fixture の `moov` header を 64 bit `largesize` 形式の `u64::MAX` へ書き換え、`position > 0` かつ `size == usize::MAX` となる入力で reader が panic せず input range overflow error を返すことを確認する
 - sample range helper で、空サンプル、ファイル末尾ちょうど、ファイル末尾 1 バイト超過、`usize::MAX` 近傍の offset / size と加算 overflow を確認する
 - `cumulative_us` 構築の加算 / 乗算が overflow する duration 入力を `DurationOverflow`（sample index 付き）で拒否し、正常な入力では従来どおりの累積値になることを確認する
+- feeder thread の deadline 計算 (`loop_start + Duration`) が overflow する場合に、panic や飽和を避けて正常停止することを確認する
 - malformed MP4 は `catch_unwind` で panic の不在だけを確認せず、具体的な error variant、sample index、position、size を検証する
 - 既存の composition time offset が 0 の fixture (`testdata/red-320x320-h264.mp4` 等) について、sample payload、送信順序、全 deadline が変わらないことを確認する
 
@@ -120,7 +127,7 @@ fixture を byte patch する場合は、書き換え前の box type、box size�
 - sample の offset を reader 初期化時に `usize` へ検査付き変換し、`checked_add` 済みの range を `samples` に保持する
 - `get_sample` に `as usize` と未検査の range 加算が残っていない
 - sample range が変換不能、加算 overflow、またはファイル範囲外の場合に `InconsistentSampleTable` を返す
-- SDK 内の duration 累積、microseconds 変換に未検査の `+`、`*`、`as` が残っていない
+- SDK 内の duration 累積、microseconds 変換、deadline 算術に未検査の `+`、`*`、`as` が残っていない
 - large-size box、sample range の境界 test が具体的な error と終了結果を検証する
 - 通常 fixture の sample payload、送信順序、deadline が従来どおりである
 - debug / release profile に依存せず、同じ不正入力が同じ error になる

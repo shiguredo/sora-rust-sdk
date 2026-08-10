@@ -868,17 +868,8 @@ impl Mp4VideoCapturer {
                     // 次のフレームの絶対送信時刻まで待機する。
                     // cumulative_duration_us(i+1) は「フレーム 0 から i までの合計再生時間」を返す。
                     // loop_start からのオフセットとして使うことで、累積ドリフトを防止する。
-                    // deadline の計算がオーバーフローした場合は、panic や飽和を避けて正常停止する。
                     let next_frame_time_us = reader.cumulative_duration_us(i + 1);
-                    let target = match loop_start
-                        .checked_add(std::time::Duration::from_micros(next_frame_time_us))
-                    {
-                        Some(target) => target,
-                        None => {
-                            rtc_log_warning!("MP4: loop deadline overflow, stopping feeder thread");
-                            return;
-                        }
-                    };
+                    let target = loop_start + std::time::Duration::from_micros(next_frame_time_us);
                     // 停止フラグが設定されたら feeder thread を終了する。
                     if wait_until(&stop_clone, target) {
                         return;

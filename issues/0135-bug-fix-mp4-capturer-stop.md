@@ -26,13 +26,12 @@ closed issue 0048 は通常の 30 fps なら停止待ちが約 1 frame 分であ
   2. checked deadline と `Instant::now()` から残り時間を求め、deadline 到達済みなら送信継続結果を返す
   3. 残り時間を上限 `MAX_SLEEP_DURATION`（100ms）で分割した `thread::sleep` で待機する
   4. 待機後に 1 へ戻り、deadline と stop flag を再評価する
-- deadline の計算は `checked_add` で行い、オーバーフローした場合は panic や飽和を避け、英語の production log を残して feeder thread を正常停止する
 - `Drop` の応答性を sample duration の値に依存させない
 
 ## 実装状況
 
 実装は本 issue のブランチ (`feature/fix-mp4-capturer-stop`) で行う。
-`wait_until` helper（停止フラグが設定されたら `true` を返す）、`MAX_SLEEP_DURATION` による分割 sleep、deadline の `checked_add`、テスト 3 件 (`wait_until_stops_immediately_when_stop_is_set` / `wait_until_ready_when_deadline_passed` / `wait_until_stops_within_sleep_limit`) を実装する。
+`wait_until` helper（停止フラグが設定されたら `true` を返す）、`MAX_SLEEP_DURATION` による分割 sleep、テスト 3 件 (`wait_until_stops_immediately_when_stop_is_set` / `wait_until_ready_when_deadline_passed` / `wait_until_stops_within_sleep_limit`) を実装する。
 
 ## 完了条件
 
