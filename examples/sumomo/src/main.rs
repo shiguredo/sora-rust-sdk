@@ -404,7 +404,7 @@ fn attach_sender_tracks(
     args: &Args,
     mp4_reader: Option<Mp4SampleReader>,
 ) -> Result<(SoraConnectionBuilder, Option<VideoCapturerHolder>)> {
-    let video_enabled = args.video.unwrap_or(true);
+    let video_enabled = args.video_enabled();
     let audio_enabled = args.audio_enabled();
     let mut video_capturer = None;
     if args.role.wants_send() && video_enabled {

@@ -48,6 +48,13 @@ impl Args {
     pub(crate) fn audio_enabled(&self) -> bool {
         self.audio.unwrap_or(true)
     }
+
+    /// 映像が有効かどうかを返す。
+    ///
+    /// `--video false` 指定時は映像トラックと映像キャプチャーを無効化する。
+    pub(crate) fn video_enabled(&self) -> bool {
+        self.video.unwrap_or(true)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
