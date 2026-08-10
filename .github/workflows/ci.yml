@@ -63,6 +63,17 @@ jobs:
         run: echo "OPENH264_PATH=${{ steps.openh264.outputs.openh264_path }}" >> $GITHUB_ENV
         shell: bash
 
+      # Tailscale のセットアップ（self-hosted runner 以外）
+      - if: ${{ runner.environment != 'self-hosted' }}
+        uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888 # v4.1.3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: ${{ secrets.TS_TAGS }}
+          ping: ${{ secrets.TEST_TS_DOMAIN }}
+          version: latest
+          use-cache: true
+
       - run: cp .cargo/config.toml.ci .cargo/config.toml
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace -- -D warnings
@@ -103,8 +114,39 @@ jobs:
       - run: cargo clippy --workspace ${{ matrix.features }} -- -D warnings
       - run: cargo test --workspace ${{ matrix.features }}
 
+  # sumomo の raw-player は SDL を利用するため、Linux (Ubuntu 24.04) の
+  # 独立 job で clippy とテストを実行する。
+  ci-raw-player:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          # git / curl / build-essential / ca-certificates は runner にプリインストール済み。
+          # raw-player は prebuilt SDL3 を利用する。
+          # - libclang-dev: raw_player の bindgen で必要
+          # - libx11-dev: prebuilt SDL3 のリンクで必要
+          # - libasound2t64: SDL3 が実行時に動的ロードする (Ubuntu 24.04 のパッケージ名)
+          sudo apt-get install -y --no-install-recommends \
+            libclang-dev \
+            libx11-dev \
+            libasound2t64
+
+      - run: rustup update stable
+      - uses: shiguredo/github-actions/.github/actions/rust-cache@main
+        with:
+          os: ubuntu-24.04
+          toolchain: stable
+
+      - run: cp .cargo/config.toml.ci .cargo/config.toml
+      - run: cargo clippy -p sumomo --features raw-player --all-targets -- -D warnings
+      - run: SDL_VIDEODRIVER=dummy cargo test -p sumomo --features raw-player
+
   slack_notify:
-    needs: [ci, ci-self-hosted]
+    needs: [ci, ci-self-hosted, ci-raw-player]
     runs-on: ubuntu-slim
     if: ${{ !cancelled() }}
     steps:

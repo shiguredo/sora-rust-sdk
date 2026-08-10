@@ -383,6 +383,8 @@ dependencies = [
  "base64ct",
  "nojson",
  "raden",
+ "rustls",
+ "rustls-platform-verifier",
  "serial_test",
  "shiguredo_audio_device",
  "shiguredo_http11",
@@ -390,6 +392,7 @@ dependencies = [
  "shiguredo_webrtc",
  "sora_sdk",
  "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]
@@ -1480,6 +1483,8 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 name = "sumomo"
 version = "0.0.0"
 dependencies = [
+ "aws-lc-rs",
+ "base64ct",
  "noargs",
  "nojson",
  "raw_player",

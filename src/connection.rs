@@ -47,7 +47,7 @@ use crate::types::{
     SignalingType, Video,
 };
 use crate::zlib::{compress_zlib, decompress_zlib};
-use shiguredo_webrtc::{rtc_log_error, rtc_log_info, rtc_log_warning};
+use shiguredo_webrtc::{rtc_log_error, rtc_log_info, rtc_log_verbose, rtc_log_warning};
 
 /// WebSocket (シグナリング接続) の TLS 設定。
 ///
@@ -485,6 +485,14 @@ impl SoraConnectionHandle {
     /// SDK 内部で JSON-RPC 2.0 メッセージを組み立てて送信する。
     /// `options.notification` が `true` の場合はレスポンスを待たずに即座に `Ok(None)` を返す。
     /// `options.timeout` でレスポンスの待機タイムアウトを指定する (デフォルト 5 秒)。
+    ///
+    /// 返り値:
+    /// - `Ok(Some(RpcResponse::Success { result }))`: 正規の success response
+    /// - `Ok(Some(RpcResponse::Error { code, message, data }))`: 正規の remote error response
+    /// - `Err(Error::RpcProtocolViolation)`: JSON-RPC 2.0 の要件を満たさない応答で、
+    ///   本 SDK が生成した Request ID と相関できる id を持つもの
+    /// - `Err(Error::RpcTimeout)`: `options.timeout` の経過
+    /// - `Ok(None)`: notification (`options.notification` が `true` の場合)
     pub async fn send_rpc_request(
         &self,
         method: &str,
@@ -893,7 +901,14 @@ impl SoraConnection {
         const WS_DISCONNECT_DELAY: Duration = Duration::from_secs(10);
         let mut buf = vec![0u8; 8192];
 
-        loop {
+        // DataChannel の signaling label で受信した server Close による終了かどうか。
+        // server Close はすでに terminal event として確定しているため、
+        // 終了処理の WebSocket close handshake で発生するエラーを warning に落とすために使う。
+        // また、終了処理の close handshake で Sora の WebSocket Close フレームを受信した
+        // 場合に on_websocket_close を通知するかどうかの判定にも使う。
+        let mut server_close_received = false;
+
+        'run_loop: loop {
             tokio::select! {
                 read = stream.read(&mut buf), if !websocket_closed => {
                     // ピアが close_notify を送らずに TCP を閉じた場合 UnexpectedEof になるため、
@@ -904,7 +919,7 @@ impl SoraConnection {
                         Err(e) => return Err(e.into()),
                     };
                     if n == 0 {
-                        if switched_ignore_disconnect_websocket {
+                        if switched_ignore_disconnect_websocket && use_datachannel_signaling {
                             rtc_log_info!("WebSocket closed; continuing DataChannel signaling");
                             websocket_closed = true;
                             // 期限切れ sleep_until で select! がスピンしないようリセットする
@@ -932,9 +947,28 @@ impl SoraConnection {
                             }
                         }
                         SoraEvent::DataChannelMessage { label, data } => {
-                            self
+                            match self
                                 .handle_datachannel_message(&mut *handler, &label, &data)
-                                .await?;
+                                .await?
+                            {
+                                HandleDatachannelMessageResult::Continue => {}
+                                HandleDatachannelMessageResult::ServerClose {
+                                    code,
+                                    reason,
+                                } => {
+                                    rtc_log_info!(
+                                        "Received server close message: code={} reason={}",
+                                        code,
+                                        reason
+                                    );
+                                    server_close_received = true;
+                                    // server Close は接続全体の終了通知であり、
+                                    // 同一 iteration で終了処理へ移行する。
+                                    // それ以降の redirect、WebSocket flush、command、
+                                    // signaling event は処理しない。
+                                    break 'run_loop;
+                                }
+                            }
                         }
                         SoraEvent::Track(transceiver) => {
                             handler.on_track(transceiver);
@@ -949,7 +983,7 @@ impl SoraConnection {
                             rtc_log_info!("Registered DataChannel '{}'", label);
                             handler.on_data_channel(&label);
                             self.register_data_channel(channel, &event_tx);
-                            self.handle_datachannel_state(&mut *handler, &label, &mut opened_datachannels, &mut use_datachannel_signaling);
+                            self.handle_datachannel_state(&mut *handler, &label, &mut opened_datachannels, &mut use_datachannel_signaling, switched_received);
                         }
                         SoraEvent::RpcTimeout { id } => {
                             if let Some(mut pending) = self.pending_rpc_responses.remove(&id) {
@@ -957,7 +991,7 @@ impl SoraConnection {
                             }
                         }
                         SoraEvent::DataChannelStateChange(label) => {
-                            self.handle_datachannel_state(&mut *handler, &label, &mut opened_datachannels, &mut use_datachannel_signaling);
+                            self.handle_datachannel_state(&mut *handler, &label, &mut opened_datachannels, &mut use_datachannel_signaling, switched_received);
                         }
                     }
                 }
@@ -1145,6 +1179,15 @@ impl SoraConnection {
                                 switched_received = true;
                                 switched_ignore_disconnect_websocket = iws;
                                 handler.on_switched();
+                                if !use_datachannel_signaling
+                                    && is_datachannel_signaling_ready(
+                                        switched_received,
+                                        &self.data_channel_configs,
+                                        &opened_datachannels,
+                                    )
+                                {
+                                    use_datachannel_signaling = true;
+                                }
                             }
                             IncomingMessageData::Redirect { location } => {
                                 handler.on_signaling_message(
@@ -1156,7 +1199,7 @@ impl SoraConnection {
                                 redirect_location = Some(location);
                                 break;
                             }
-                            IncomingMessageData::Close {} => {
+                            IncomingMessageData::Close { .. } => {
                                 rtc_log_info!("Disconnected from Sora server");
                                 break;
                             }
@@ -1262,12 +1305,15 @@ impl SoraConnection {
             }
 
             // DataChannel シグナリングへの切替条件が揃ったら WebSocket を切断する
-            if switched_received && switched_ignore_disconnect_websocket && !websocket_closed {
-                let expected = self.data_channel_configs.len();
-                let opened = opened_datachannels.len();
-                let all_open = expected > 0 && opened >= expected;
-
-                if all_open && ws_disconnect_delay_start.is_none() {
+            if switched_ignore_disconnect_websocket
+                && !websocket_closed
+                && is_datachannel_signaling_ready(
+                    switched_received,
+                    &self.data_channel_configs,
+                    &opened_datachannels,
+                )
+            {
+                if ws_disconnect_delay_start.is_none() {
                     ws_disconnect_delay_start = Some(tokio::time::Instant::now());
                 }
 
@@ -1284,7 +1330,10 @@ impl SoraConnection {
             let close_emitted = match flush_ws_output(&mut ws, &mut stream, &mut timers).await {
                 Ok(emitted) => emitted,
                 Err(e) => {
-                    if switched_ignore_disconnect_websocket && !websocket_closed {
+                    if switched_ignore_disconnect_websocket
+                        && use_datachannel_signaling
+                        && !websocket_closed
+                    {
                         // switched 後の WebSocket I/O 失敗は DataChannel シグナリング継続のため吸収する
                         rtc_log_warning!(
                             "flush WebSocket output failed; continuing DataChannel signaling: {}",
@@ -1298,7 +1347,7 @@ impl SoraConnection {
             };
 
             if close_emitted || ws.state() == ConnectionState::Closed {
-                if switched_ignore_disconnect_websocket {
+                if switched_ignore_disconnect_websocket && use_datachannel_signaling {
                     if !websocket_closed {
                         rtc_log_info!("WebSocket closed; continuing DataChannel signaling");
                         websocket_closed = true;
@@ -1343,8 +1392,10 @@ impl SoraConnection {
         }
 
         if ws.state() == ConnectionState::Connected {
-            ws.close(CloseCode::NORMAL, "shutdown")?;
+            // server Close はすでに terminal event として確定しているため、
+            // この後始末で発生するエラーは warning として記録し、run の Ok(()) を覆さない。
             let close_result = tokio::time::timeout(websocket_close_timeout, async {
+                ws.close(CloseCode::NORMAL, "shutdown")?;
                 loop {
                     if flush_ws_output(&mut ws, &mut stream, &mut timers).await? {
                         return Ok::<_, Error>(());
@@ -1355,15 +1406,38 @@ impl SoraConnection {
                         return Ok(());
                     }
                     ws.feed_recv_buf(&buf[..n], now()?)?;
-                    while let Some(_event) = ws.poll_event() {}
+                    // server Close の終了処理では、Sora が送信した WebSocket Close
+                    // フレームを検出して on_websocket_close を通知する。
+                    // server Close メッセージと WebSocket Close フレームは別経路で
+                    // 届くため、処理順のレースで Close フレームが未処理のまま残る
+                    // 場合がある。ここで読み取ることで、on_websocket_close を
+                    // 決定的に 1 回だけ通知する。
+                    // server Close 以外の終了経路では従来どおりイベントを破棄する。
+                    while let Some(event) = ws.poll_event() {
+                        if server_close_received
+                            && let ConnectionEvent::Close { code, reason } = event
+                        {
+                            handler.on_websocket_close(code.map(|c| c.0), &reason);
+                        }
+                    }
                     if ws.state() == ConnectionState::Closed {
                         return Ok(());
                     }
                 }
             })
             .await;
-            if close_result.is_err() {
-                rtc_log_warning!("WebSocket close timed out");
+            match close_result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    if server_close_received {
+                        rtc_log_warning!("WebSocket close handshake failed: {}", e);
+                    } else {
+                        return Err(e);
+                    }
+                }
+                Err(_) => {
+                    rtc_log_warning!("WebSocket close timed out");
+                }
             }
         }
 
@@ -1721,12 +1795,19 @@ impl SoraConnection {
         label: &str,
         opened_datachannels: &mut HashSet<String>,
         use_datachannel_signaling: &mut bool,
+        switched_received: bool,
     ) {
         if self.is_datachannel_open(label) && !opened_datachannels.contains(label) {
             rtc_log_info!("DataChannel '{}' opened", label);
             opened_datachannels.insert(label.to_string());
             handler.on_data_channel_open(label);
-            if opened_datachannels.len() == self.data_channel_configs.len() {
+            if !*use_datachannel_signaling
+                && is_datachannel_signaling_ready(
+                    switched_received,
+                    &self.data_channel_configs,
+                    opened_datachannels,
+                )
+            {
                 *use_datachannel_signaling = true;
             }
         } else if self.is_datachannel_closed(label) && opened_datachannels.contains(label) {
@@ -1797,14 +1878,28 @@ impl SoraConnection {
         handler: &mut dyn SoraConnectionEventHandler,
         label: &str,
         data: &[u8],
-    ) -> Result<()> {
+    ) -> Result<HandleDatachannelMessageResult> {
         // DataChannel の設定を検索
         let managed = self.data_channels.get(label);
         let compress = managed.is_some_and(|m| m.compress);
 
         // 圧縮されている場合は展開
+        // 展開に失敗した場合は、受信メッセージ 1 件だけを破棄して処理を継続する。
+        // DataChannel の本文は利用者由来の任意データを含むため、
+        // 1 件の不正な圧縮データで接続全体を終了させない。
+        // warning にはどの DataChannel で失敗したかを特定できるようラベルを出す。
+        // 圧縮前後の本文と zlib の error message は含めない。
         let message_bytes = if compress {
-            decompress_zlib(data)?
+            match decompress_zlib(data, MAX_DECOMPRESSED_DATA_CHANNEL_MESSAGE_SIZE) {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    rtc_log_warning!(
+                        "Discarded malformed DataChannel message: label='{}' stage=zlib",
+                        label
+                    );
+                    return Ok(HandleDatachannelMessageResult::Continue);
+                }
+            }
         } else {
             data.to_vec()
         };
@@ -1873,24 +1968,90 @@ impl SoraConnection {
                     IncomingMessageData::Push {} => {
                         handler.on_push(&text);
                     }
+                    // signaling label の Close だけを接続全体の終了通知として扱う。
+                    // stats / push / notify label に届いた Close は接続を終了させず、
+                    // 既存どおり unsupported message として扱う。
+                    IncomingMessageData::Close { code, reason } if is_server_close_label(label) => {
+                        return Ok(HandleDatachannelMessageResult::ServerClose { code, reason });
+                    }
                     _ => {
                         rtc_log_warning!("Received unsupported message via DataChannel");
                     }
                 }
             }
             "rpc" => {
-                let text = String::from_utf8(message_bytes)?;
-                rtc_log_info!("Received RPC message via DataChannel");
-                let (id, response) = RpcResponse::parse(&text)?;
-                if let Some(id) = id
-                    && let Some(mut pending) = self.pending_rpc_responses.remove(&id)
-                {
-                    pending.timeout_handle.abort();
-                    let _ = pending
-                        .response_tx
-                        .take()
-                        .expect("response_tx は必ず存在する")
-                        .send(Ok(Some(response)));
+                // rpc ラベルの UTF-8 変換失敗は response の id を相関できない入力として、
+                // メッセージ 1 件単位に破棄して接続を終了しない。
+                // 受信本文はログに含めない。
+                let text = match String::from_utf8(message_bytes) {
+                    Ok(text) => text,
+                    Err(_) => {
+                        rtc_log_warning!(
+                            "Discarded malformed RPC response: label='{}' stage=utf8",
+                            label
+                        );
+                        return Ok(HandleDatachannelMessageResult::Continue);
+                    }
+                };
+                rtc_log_verbose!(
+                    "Received RPC message via DataChannel: label='{}' message={} bytes",
+                    label,
+                    text.len()
+                );
+                match RpcResponse::parse(&text) {
+                    Ok((Some(id), response)) => {
+                        if let Some(mut pending) = self.pending_rpc_responses.remove(&id) {
+                            pending.timeout_handle.abort();
+                            let _ = pending
+                                .response_tx
+                                .take()
+                                .expect("response_tx は必ず存在する")
+                                .send(Ok(Some(response)));
+                        } else {
+                            // 未知 / timeout 済み / 重複の id の正常 response は破棄する。
+                            rtc_log_warning!(
+                                "Discarded unmatched RPC response: label='{}' stage=unknown-id",
+                                label
+                            );
+                        }
+                    }
+                    Ok((None, _)) => {
+                        // 信頼できる id がない response はメッセージ単位に破棄する。
+                        rtc_log_warning!(
+                            "Discarded malformed RPC response: label='{}' stage=protocol",
+                            label
+                        );
+                    }
+                    Err(err) => {
+                        // JSON-RPC 2.0 の要件を満たさない応答は、信頼できる既知 id がある場合のみ
+                        // 対応する pending request へ error として通知する。
+                        let trusted_id = match &err {
+                            Error::RpcProtocolViolation { id: Some(id) } => Some(*id),
+                            _ => None,
+                        };
+                        if let Some(id) = trusted_id
+                            && let Some(mut pending) = self.pending_rpc_responses.remove(&id)
+                        {
+                            pending.timeout_handle.abort();
+                            let _ = pending
+                                .response_tx
+                                .take()
+                                .expect("response_tx は必ず存在する")
+                                .send(Err(err));
+                        } else {
+                            // JSON syntax error と相関できない protocol violation は破棄する。
+                            let stage = if matches!(err, Error::JsonParse(_)) {
+                                "syntax"
+                            } else {
+                                "protocol"
+                            };
+                            rtc_log_warning!(
+                                "Discarded malformed RPC response: label='{}' stage={}",
+                                label,
+                                stage
+                            );
+                        }
+                    }
                 }
             }
             // # で始まるラベルはユーザー定義メッセージとして処理
@@ -1902,13 +2063,55 @@ impl SoraConnection {
             }
         }
 
-        Ok(())
+        Ok(HandleDatachannelMessageResult::Continue)
     }
 }
 
 // -------------------------
 // 管理対象 DataChannel
 // -------------------------
+
+/// DataChannel の受信メッセージをどう扱うかを表す。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HandleDatachannelMessageResult {
+    /// 通常どおり接続を継続する。
+    Continue,
+    /// Sora からの接続終了通知 (`signaling` label の `{"type":"close"}`)。
+    ServerClose {
+        /// Sora が通知した Close code。
+        code: u16,
+        /// Sora が通知した Close reason。
+        reason: String,
+    },
+}
+
+/// DataChannel シグナリングへの切替 readiness を判定する pure なヘルパー。
+///
+/// 次の 3 条件をすべて満たしたときだけ true を返す:
+/// - WebSocket 経由で正式な `switched` メッセージを受信済み
+/// - Offer の `data_channels` が空でない
+/// - 全設定 DataChannel が Open 済み
+fn is_datachannel_signaling_ready(
+    switched_received: bool,
+    data_channel_configs: &[DataChannelConfig],
+    opened_labels: &HashSet<String>,
+) -> bool {
+    let expected = data_channel_configs.len();
+    expected > 0 && switched_received && opened_labels.len() >= expected
+}
+
+/// 指定した DataChannel label で受信した Close メッセージを server Close として
+/// 扱うかどうかを返す。
+///
+/// Sora ドキュメント「Sora クライアント要求仕様」の
+/// 「DataChannel シグナリングのみ利用時に Sora から切断が発生した際の
+///  `"type": "close"` メッセージの送信」に基づき、`signaling` label の Close
+/// メッセージだけを接続全体の終了通知として扱う。
+/// `stats`、`push`、`notify` label に同じ JSON が届いても接続を終了させず、
+/// 既存どおり unsupported message として扱う。
+fn is_server_close_label(label: &str) -> bool {
+    label == "signaling"
+}
 
 struct ManagedDataChannel {
     channel: DataChannel,
@@ -1918,8 +2121,25 @@ struct ManagedDataChannel {
     compress: bool,
 }
 
+impl Drop for ManagedDataChannel {
+    fn drop(&mut self) {
+        // DataChannelObserver を解放する前に、C++ 側の DataChannel から observer を解除する。
+        // SctpDataChannel::ObserverAdapter の状態遷移コールバックはネットワークスレッドから
+        // シグナリングスレッドへ非同期に配送される。observer を先に解放すると、
+        // 配送済みの遅延コールバックが解放済みメモリを参照して SIGSEGV になる。
+        // UnregisterObserver で observer_ を null にすることで、遅延コールバックの
+        // 実行時に observer 呼び出しがスキップされる。
+        self.channel.unregister_observer();
+    }
+}
+
 const DEFAULT_TLS_PORT: u16 = 443;
 const DEFAULT_PLAIN_PORT: u16 = 80;
+
+// DataChannel メッセージの展開後サイズ上限。
+// WebSocket 実装の DEFAULT_MAX_DECOMPRESSED_SIZE と同じ 16 MiB にそろえる。
+// WebSocket 側の定数は SDK から参照できないため、独立した定数として定義する。
+const MAX_DECOMPRESSED_DATA_CHANNEL_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 
 #[derive(Clone)]
 struct SecureRandom {
@@ -3066,5 +3286,826 @@ mod tests {
     async fn send_message_accepts_registered_label() {
         let (handle, _server) = spawn_message_server(vec!["#chat".to_string()]);
         assert!(handle.send_message("#chat", b"data").await.is_ok());
+    }
+
+    #[test]
+    fn server_close_label_returns_true_for_signaling() {
+        assert!(is_server_close_label("signaling"));
+    }
+
+    #[test]
+    fn server_close_label_returns_false_for_other_labels() {
+        for label in ["stats", "push", "notify"] {
+            assert!(
+                !is_server_close_label(label),
+                "label={label} の Close は接続を終了させない"
+            );
+        }
+    }
+
+    fn data_channel_config(labels: &[&str]) -> Vec<DataChannelConfig> {
+        labels
+            .iter()
+            .map(|label| DataChannelConfig {
+                label: (*label).to_string(),
+                compress: false,
+                direction: "sendrecv".to_string(),
+            })
+            .collect()
+    }
+
+    fn opened_labels(labels: &[&str]) -> HashSet<String> {
+        labels.iter().map(|label| (*label).to_string()).collect()
+    }
+
+    #[test]
+    fn datachannel_signaling_ready_is_false_without_switched() {
+        let configs = data_channel_config(&["signaling"]);
+        let opened = opened_labels(&["signaling"]);
+        assert!(
+            !is_datachannel_signaling_ready(false, &configs, &opened),
+            "switched 未受信の場合は全設定チャンネルが Open 済みでも readiness は false"
+        );
+    }
+
+    #[test]
+    fn datachannel_signaling_ready_is_false_with_partial_open() {
+        let configs = data_channel_config(&["signaling", "#messaging"]);
+        let opened = opened_labels(&["signaling"]);
+        assert!(
+            !is_datachannel_signaling_ready(true, &configs, &opened),
+            "switched 受信済みでも一部の設定チャンネルが未 Open なら readiness は false"
+        );
+    }
+
+    #[test]
+    fn datachannel_signaling_ready_is_true_with_all_open() {
+        let configs = data_channel_config(&["signaling", "#messaging"]);
+        let opened = opened_labels(&["signaling", "#messaging"]);
+        assert!(
+            is_datachannel_signaling_ready(true, &configs, &opened),
+            "switched 受信済みかつ全設定チャンネルが Open 済みなら readiness は true"
+        );
+    }
+
+    #[test]
+    fn datachannel_signaling_ready_is_false_with_empty_configs() {
+        let configs = data_channel_config(&[]);
+        let opened = opened_labels(&[]);
+        assert!(
+            !is_datachannel_signaling_ready(true, &configs, &opened),
+            "data_channels が空の構成では readiness は false"
+        );
+    }
+
+    #[test]
+    fn datachannel_signaling_ready_is_false_after_redirect_reset() {
+        let configs = data_channel_config(&["signaling", "#messaging"]);
+        let opened = opened_labels(&[]);
+        assert!(
+            !is_datachannel_signaling_ready(false, &configs, &opened),
+            "redirect 相当として switched と opened label を初期化すると readiness は false に戻る"
+        );
+    }
+
+    use shiguredo_webrtc::DataChannelInit;
+
+    /// 実際の `SoraConnectionContext` と `SoraConnection` を構築するテスト用ヘルパー。
+    fn build_test_connection(
+        handler: impl SoraConnectionEventHandler + 'static,
+    ) -> (SoraConnection, SoraConnectionHandle) {
+        let context =
+            SoraConnectionContext::new().expect("SoraConnectionContext の作成に失敗しました");
+        SoraConnection::builder(
+            context,
+            vec!["wss://example.com/signaling".to_string()],
+            "test-channel".to_string(),
+            Role::RecvOnly,
+            handler,
+        )
+        .build()
+        .expect("SoraConnection の生成に失敗しました")
+    }
+
+    /// callback の呼び出しを記録するテスト用ハンドラ。
+    #[derive(Default)]
+    struct RecordingHandler {
+        data_channel_message_count: usize,
+        signaling_received_count: usize,
+        notify_count: usize,
+        push_count: usize,
+        message_count: usize,
+        message_data: Vec<Vec<u8>>,
+    }
+
+    impl SoraConnectionEventHandler for RecordingHandler {
+        fn on_signaling_message(
+            &mut self,
+            signaling_type: SignalingType,
+            direction: SignalingDirection,
+            _text: &str,
+        ) {
+            if signaling_type == SignalingType::DataChannel
+                && direction == SignalingDirection::Received
+            {
+                self.signaling_received_count += 1;
+            }
+        }
+
+        fn on_notify(&mut self, _text: &str) {
+            self.notify_count += 1;
+        }
+
+        fn on_push(&mut self, _text: &str) {
+            self.push_count += 1;
+        }
+
+        fn on_message(&mut self, _label: &str, data: &[u8]) {
+            self.message_count += 1;
+            self.message_data.push(data.to_vec());
+        }
+
+        fn on_data_channel_message(&mut self, _label: &str, _data: &[u8]) {
+            self.data_channel_message_count += 1;
+        }
+    }
+
+    /// compress 有効の DataChannel を実 PeerConnection 経由で登録するテスト用ヘルパー。
+    fn register_compressed_datachannel(connection: &mut SoraConnection, label: &str) {
+        connection.data_channel_configs.push(DataChannelConfig {
+            label: label.to_string(),
+            compress: true,
+            direction: "sendrecv".to_string(),
+        });
+        let mut init = DataChannelInit::new();
+        let channel = connection
+            .pc
+            .create_data_channel(label, &mut init)
+            .expect("DataChannel の生成に失敗しました");
+        let event_tx = connection.event_tx.clone();
+        connection.register_data_channel(channel, &event_tx);
+    }
+
+    #[tokio::test]
+    async fn zlib_failure_then_same_label_then_other_label() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_compressed_datachannel(&mut connection, "signaling");
+        register_compressed_datachannel(&mut connection, "push");
+        let mut handler = RecordingHandler::default();
+
+        // 1. zlib 展開に失敗する message
+        let result = connection
+            .handle_datachannel_message(&mut handler, "signaling", &[0x00, 0x01, 0x02, 0x03])
+            .await;
+        assert!(
+            result.is_ok(),
+            "zlib 展開失敗は Ok(Continue) を返す必要があります"
+        );
+        assert_eq!(
+            handler.data_channel_message_count, 0,
+            "zlib 展開失敗では callback を呼ばない必要があります"
+        );
+
+        // 2. 同じ label の正常 message
+        let compressed = compress_zlib(b"{\"type\":\"notify\"}").expect("zlib 圧縮に失敗しました");
+        let result = connection
+            .handle_datachannel_message(&mut handler, "signaling", &compressed)
+            .await;
+        assert!(result.is_ok(), "正常 message は Ok を返す必要があります");
+        assert_eq!(
+            handler.notify_count, 1,
+            "同じ label の正常 message が semantic callback まで到達する必要があります"
+        );
+        // 3. 別 label の正常 message
+        let compressed = compress_zlib(b"{\"type\":\"push\"}").expect("zlib 圧縮に失敗しました");
+        let result = connection
+            .handle_datachannel_message(&mut handler, "push", &compressed)
+            .await;
+        assert!(
+            result.is_ok(),
+            "別 label の正常 message は Ok を返す必要があります"
+        );
+        assert_eq!(
+            handler.push_count, 1,
+            "別 label の正常 message が semantic callback まで到達する必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn zlib_failure_is_discarded_per_message() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_compressed_datachannel(&mut connection, "signaling");
+
+        let valid = compress_zlib(b"{\"type\":\"notify\"}").expect("zlib 圧縮に失敗しました");
+
+        // 不正 header
+        let invalid_header = vec![0x00, 0x01, 0x02, 0x03];
+        // truncated stream
+        let truncated = valid[..valid.len() - 1].to_vec();
+        // Adler-32 不一致
+        let mut adler_mismatch = valid.clone();
+        let last = adler_mismatch.len() - 1;
+        adler_mismatch[last] ^= 0xFF;
+        // 展開後サイズ上限を超える入力
+        let oversized = compress_zlib(&vec![b'a'; MAX_DECOMPRESSED_DATA_CHANNEL_MESSAGE_SIZE + 1])
+            .expect("zlib 圧縮に失敗しました");
+
+        for bad in [invalid_header, truncated, adler_mismatch, oversized] {
+            let mut handler = RecordingHandler::default();
+            let result = connection
+                .handle_datachannel_message(&mut handler, "signaling", &bad)
+                .await;
+            assert!(
+                result.is_ok(),
+                "不正な圧縮データは Ok(Continue) を返す必要があります"
+            );
+            assert_eq!(
+                handler.data_channel_message_count, 0,
+                "不正な圧縮データでは callback を呼ばない必要があります"
+            );
+        }
+
+        // 同じ DataChannel と接続は維持される
+        let mut handler = RecordingHandler::default();
+        let result = connection
+            .handle_datachannel_message(&mut handler, "signaling", &valid)
+            .await;
+        assert!(
+            result.is_ok(),
+            "後続の正常 message は Ok を返す必要があります"
+        );
+        assert_eq!(
+            handler.notify_count, 1,
+            "破棄の後も同じ DataChannel の後続 message を処理できる必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_defined_label_binary_message_is_forwarded() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let mut handler = RecordingHandler::default();
+        let data = [0xDE, 0xAD, 0xBE, 0xEF];
+
+        let result = connection
+            .handle_datachannel_message(&mut handler, "#messaging", &data)
+            .await;
+        assert!(
+            result.is_ok(),
+            "任意 binary data は Ok を返す必要があります"
+        );
+        assert_eq!(
+            handler.data_channel_message_count, 1,
+            "on_data_channel_message が 1 回呼ばれる必要があります"
+        );
+        assert_eq!(
+            handler.message_count, 1,
+            "on_message が 1 回呼ばれる必要があります"
+        );
+        assert_eq!(
+            handler.message_data,
+            vec![data.to_vec()],
+            "on_message に本文がそのまま渡される必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_label_binary_message_does_not_terminate_connection() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let mut handler = RecordingHandler::default();
+        let data = [0xFF, 0xFE, 0xFD];
+
+        let result = connection
+            .handle_datachannel_message(&mut handler, "unknown-label", &data)
+            .await;
+        assert!(
+            result.is_ok(),
+            "未対応 label の binary data は Ok を返す必要があります"
+        );
+        assert_eq!(
+            handler.data_channel_message_count, 1,
+            "on_data_channel_message が 1 回呼ばれる必要があります"
+        );
+        assert_eq!(
+            handler.message_count, 0,
+            "未対応 label では on_message を呼ばない必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn signaling_invalid_utf8_remains_fatal() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let mut handler = RecordingHandler::default();
+
+        let result = connection
+            .handle_datachannel_message(&mut handler, "signaling", &[0xFF, 0xFE, 0xFD])
+            .await;
+        assert!(
+            result.is_err(),
+            "signaling label の不正 UTF-8 は run の終了原因のままにする必要があります"
+        );
+        assert_eq!(
+            handler.data_channel_message_count, 1,
+            "on_data_channel_message は zlib 展開成功時に 1 回呼ばれる必要があります"
+        );
+        assert_eq!(
+            handler.signaling_received_count, 0,
+            "UTF-8 変換失敗時は on_signaling_message を呼ばない必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn signaling_json_syntax_error_remains_fatal() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let mut handler = RecordingHandler::default();
+
+        let result = connection
+            .handle_datachannel_message(&mut handler, "signaling", b"this is not json")
+            .await;
+        assert!(
+            result.is_err(),
+            "signaling label の JSON syntax error は run の終了原因のままにする必要があります"
+        );
+        assert_eq!(
+            handler.data_channel_message_count, 1,
+            "on_data_channel_message は zlib 展開成功時に 1 回呼ばれる必要があります"
+        );
+        assert_eq!(
+            handler.signaling_received_count, 1,
+            "UTF-8 成功時は JSON parse の成否にかかわらず on_signaling_message を 1 回呼ぶ必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn reoffer_with_invalid_sdp_returns_error() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let mut handler = RecordingHandler::default();
+        let message = br#"{"type":"re-offer","sdp":"this is not a valid SDP"}"#;
+
+        let result = connection
+            .handle_datachannel_message(&mut handler, "signaling", message)
+            .await;
+        assert!(
+            result.is_err(),
+            "parse 成功後の不正 SDP は SDP 適用 error になる必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn ping_without_signaling_datachannel_returns_datachannel_missing() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let mut handler = RecordingHandler::default();
+
+        let result = connection
+            .handle_datachannel_message(&mut handler, "signaling", br#"{"type":"ping"}"#)
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(Error::DataChannelMissing { label }) if label == "signaling"
+            ),
+            "signaling DataChannel 未登録の ping は DataChannelMissing になる必要があります"
+        );
+    }
+
+    /// 実 oneshot channel と timeout task を持つ pending request を登録する。
+    ///
+    /// timeout task は run loop の `SendRpcRequest` 処理と同じく、
+    /// 経過後に `SoraEvent::RpcTimeout` を送信する。
+    fn insert_pending_rpc_with_timeout(
+        connection: &mut SoraConnection,
+        id: u64,
+        timeout: Duration,
+    ) -> oneshot::Receiver<Result<Option<RpcResponse>>> {
+        let (response_tx, response_rx) = oneshot::channel();
+        let event_tx = connection.event_tx.clone();
+        let timeout_handle = tokio::spawn(async move {
+            tokio::time::sleep(timeout).await;
+            let _ = event_tx.send(SoraEvent::RpcTimeout { id });
+        });
+        connection.pending_rpc_responses.insert(
+            id,
+            PendingRpcRequest {
+                response_tx: Some(response_tx),
+                timeout_handle,
+            },
+        );
+        response_rx
+    }
+
+    /// デフォルトの短いタイムアウトで pending request を登録する。
+    fn insert_pending_rpc(
+        connection: &mut SoraConnection,
+        id: u64,
+    ) -> oneshot::Receiver<Result<Option<RpcResponse>>> {
+        insert_pending_rpc_with_timeout(connection, id, Duration::from_millis(50))
+    }
+
+    /// 指定 id の pending の timeout task が abort され、
+    /// その id の `RpcTimeout` が届かないことを確認する。
+    ///
+    /// 他の pending 由来の `RpcTimeout` は無視する。
+    async fn assert_no_rpc_timeout_for_id(connection: &mut SoraConnection, id: u64) {
+        // 50ms のタイムアウトを 4 倍以上待っても、abort されていれば event は届かない。
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        while let Ok(event) = connection.event_rx.try_recv() {
+            if let SoraEvent::RpcTimeout { id: received_id } = event {
+                assert_ne!(
+                    received_id, id,
+                    "id={id} の RpcTimeout が届きました。timeout task が abort されていません"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rpc_known_id_success_completes_only_corresponding_pending() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let mut handler = RecordingHandler::default();
+
+        let rx1 = insert_pending_rpc(&mut connection, 1);
+        let mut rx2 = insert_pending_rpc(&mut connection, 2);
+
+        let result = connection
+            .handle_datachannel_message(
+                &mut handler,
+                "rpc",
+                br#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#,
+            )
+            .await;
+        assert!(result.is_ok(), "正常 response は Ok を返す必要があります");
+
+        let result = rx1.await.expect("id=1 の pending が完了しませんでした");
+        let response = result.expect("id=1 の pending が error で完了しました");
+        let Some(RpcResponse::Success { result }) = response else {
+            panic!("Success を期待しましたが別の response になりました");
+        };
+        assert_eq!(
+            result.to_string(),
+            r#"{"ok":true}"#,
+            "result が一致しません"
+        );
+
+        // 対応する pending だけが remove され、他は維持される。
+        assert!(
+            !connection.pending_rpc_responses.contains_key(&1),
+            "id=1 の pending が remove されていません"
+        );
+        assert!(
+            connection.pending_rpc_responses.contains_key(&2),
+            "id=2 の pending が変更されています"
+        );
+        assert!(
+            matches!(rx2.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "id=2 の response channel を完了しない必要があります"
+        );
+
+        // timeout task が abort され、id=1 の RpcTimeout が届かない。
+        assert_no_rpc_timeout_for_id(&mut connection, 1).await;
+    }
+
+    #[tokio::test]
+    async fn rpc_known_id_remote_error_completes_only_corresponding_pending() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let mut handler = RecordingHandler::default();
+
+        let rx1 = insert_pending_rpc(&mut connection, 1);
+        let mut rx2 = insert_pending_rpc(&mut connection, 2);
+
+        let result = connection
+            .handle_datachannel_message(
+                &mut handler,
+                "rpc",
+                br#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"custom message","data":{"k":1}}}"#,
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "正常 remote error は Ok を返す必要があります"
+        );
+
+        let result = rx1.await.expect("id=1 の pending が完了しませんでした");
+        let Ok(Some(RpcResponse::Error {
+            code,
+            message,
+            data,
+        })) = result
+        else {
+            panic!("Error を期待しましたが別の response になりました");
+        };
+        assert_eq!(code, -32000, "code が一致しません");
+        assert_eq!(message, "custom message", "message が一致しません");
+        assert_eq!(
+            data.map(|d| d.to_string()),
+            Some(r#"{"k":1}"#.to_string()),
+            "data が一致しません"
+        );
+
+        assert!(
+            !connection.pending_rpc_responses.contains_key(&1),
+            "id=1 の pending が remove されていません"
+        );
+        assert!(
+            connection.pending_rpc_responses.contains_key(&2),
+            "id=2 の pending が変更されています"
+        );
+        assert!(
+            matches!(rx2.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "id=2 の response channel を完了しない必要があります"
+        );
+
+        assert_no_rpc_timeout_for_id(&mut connection, 1).await;
+    }
+
+    #[tokio::test]
+    async fn rpc_known_id_protocol_violation_completes_only_corresponding_pending() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let mut handler = RecordingHandler::default();
+
+        let rx1 = insert_pending_rpc(&mut connection, 1);
+        let mut rx2 = insert_pending_rpc(&mut connection, 2);
+
+        // jsonrpc が不正だが id=1 は有効な u64 id のため、対応する pending へ通知される。
+        let result = connection
+            .handle_datachannel_message(
+                &mut handler,
+                "rpc",
+                br#"{"jsonrpc":"2.0x","id":1,"result":null}"#,
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "protocol violation でも handle_datachannel_message は Ok を返す必要があります"
+        );
+
+        let result = rx1.await.expect("id=1 の pending が完了しませんでした");
+        assert!(
+            matches!(result, Err(Error::RpcProtocolViolation { id: Some(1) })),
+            "RpcProtocolViolation で完了する必要があります"
+        );
+
+        assert!(
+            !connection.pending_rpc_responses.contains_key(&1),
+            "id=1 の pending が remove されていません"
+        );
+        assert!(
+            connection.pending_rpc_responses.contains_key(&2),
+            "id=2 の pending が変更されています"
+        );
+        assert!(
+            matches!(rx2.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "id=2 の response channel を完了しない必要があります"
+        );
+
+        assert_no_rpc_timeout_for_id(&mut connection, 1).await;
+    }
+
+    #[tokio::test]
+    async fn rpc_untrusted_id_response_keeps_all_pending() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let mut handler = RecordingHandler::default();
+
+        let mut rx1 = insert_pending_rpc(&mut connection, 1);
+
+        // id が String の正常 response は SDK の Request ID と相関できないため破棄される。
+        let result = connection
+            .handle_datachannel_message(
+                &mut handler,
+                "rpc",
+                br#"{"jsonrpc":"2.0","id":"x","result":null}"#,
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "信頼できない id の response は Ok を返す必要があります"
+        );
+        assert!(
+            connection.pending_rpc_responses.contains_key(&1),
+            "pending を変更しない必要があります"
+        );
+
+        // timeout task は維持されるため、timeout 経過後に RpcTimeout が届く。
+        let event = tokio::time::timeout(Duration::from_millis(300), connection.event_rx.recv())
+            .await
+            .expect("timeout task が abort されています")
+            .expect("RpcTimeout が届きませんでした");
+        assert!(
+            matches!(event, SoraEvent::RpcTimeout { id: 1 }),
+            "id=1 の RpcTimeout を期待しました"
+        );
+        // 破棄された response は channel を完了しない。
+        assert!(
+            matches!(rx1.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "response channel を完了しない必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn rpc_unknown_id_response_keeps_other_pending() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let mut handler = RecordingHandler::default();
+
+        let mut rx1 = insert_pending_rpc(&mut connection, 1);
+
+        // id=99 は pending に存在しない正常 response のため破棄される。
+        let result = connection
+            .handle_datachannel_message(
+                &mut handler,
+                "rpc",
+                br#"{"jsonrpc":"2.0","id":99,"result":null}"#,
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "未知 id の response は Ok を返す必要があります"
+        );
+        assert!(
+            connection.pending_rpc_responses.contains_key(&1),
+            "他の pending を変更しない必要があります"
+        );
+        assert!(
+            matches!(rx1.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "破棄された response は channel を完了しない必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn rpc_timed_out_id_response_keeps_other_pending() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let mut handler = RecordingHandler::default();
+
+        let rx1 = insert_pending_rpc(&mut connection, 1);
+        let mut rx2 = insert_pending_rpc(&mut connection, 2);
+
+        // id=1 は timeout 済みとして pending から取り除かれている状態を再現する。
+        connection.pending_rpc_responses.remove(&1);
+
+        let result = connection
+            .handle_datachannel_message(
+                &mut handler,
+                "rpc",
+                br#"{"jsonrpc":"2.0","id":1,"result":null}"#,
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "timeout 済み id の response は Ok を返す必要があります"
+        );
+        assert!(
+            connection.pending_rpc_responses.contains_key(&2),
+            "他の pending を変更しない必要があります"
+        );
+        assert!(
+            matches!(rx2.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "他の pending の response channel を完了しない必要があります"
+        );
+        // 破棄された response は channel を完了しない (remove 済みのため Closed)。
+        assert!(
+            rx1.await.is_err(),
+            "response channel を完了しない必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn rpc_duplicated_response_keeps_other_pending() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let mut handler = RecordingHandler::default();
+
+        let rx1 = insert_pending_rpc(&mut connection, 1);
+        let mut rx2 = insert_pending_rpc(&mut connection, 2);
+
+        // 1 回目は id=1 の pending を完了する。
+        let result = connection
+            .handle_datachannel_message(
+                &mut handler,
+                "rpc",
+                br#"{"jsonrpc":"2.0","id":1,"result":null}"#,
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "1 回目の response は Ok を返す必要があります"
+        );
+        let result = rx1.await.expect("id=1 の pending が完了しませんでした");
+        assert!(
+            result.is_ok(),
+            "1 回目の response は success で完了する必要があります"
+        );
+
+        // 2 回目は id=1 の pending が既に無いため破棄され、他を変更しない。
+        let result = connection
+            .handle_datachannel_message(
+                &mut handler,
+                "rpc",
+                br#"{"jsonrpc":"2.0","id":1,"result":null}"#,
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "同じ id の重複 response は Ok を返す必要があります"
+        );
+        assert!(
+            connection.pending_rpc_responses.contains_key(&2),
+            "他の pending を変更しない必要があります"
+        );
+        assert!(
+            matches!(rx2.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "他の pending の response channel を完了しない必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn rpc_protocol_violation_does_not_terminate_connection() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let mut handler = RecordingHandler::default();
+
+        // protocol violation
+        let rx1 = insert_pending_rpc(&mut connection, 1);
+        let result = connection
+            .handle_datachannel_message(
+                &mut handler,
+                "rpc",
+                br#"{"jsonrpc":"2.0x","id":1,"result":null}"#,
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "protocol violation は Ok を返す必要があります"
+        );
+        let result = rx1.await.expect("id=1 の pending が完了しませんでした");
+        assert!(
+            matches!(result, Err(Error::RpcProtocolViolation { .. })),
+            "RpcProtocolViolation で完了する必要があります"
+        );
+
+        // 同じ DataChannel の正常 response を処理できる。
+        let rx2 = insert_pending_rpc(&mut connection, 2);
+        let result = connection
+            .handle_datachannel_message(
+                &mut handler,
+                "rpc",
+                br#"{"jsonrpc":"2.0","id":2,"result":null}"#,
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "protocol violation 後の正常 response は Ok を返す必要があります"
+        );
+        let result = rx2.await.expect("id=2 の pending が完了しませんでした");
+        assert!(
+            result.is_ok(),
+            "id=2 の正常 response は success で完了する必要があります"
+        );
+
+        // 別 DataChannel の正常 message を処理できる。
+        let result = connection
+            .handle_datachannel_message(&mut handler, "push", br#"{"type":"push"}"#)
+            .await;
+        assert!(
+            result.is_ok(),
+            "別 DataChannel の正常 message は Ok を返す必要があります"
+        );
+        assert_eq!(
+            handler.push_count, 1,
+            "on_push が 1 回呼ばれる必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn rpc_utf8_and_syntax_error_keep_pending_and_return_ok() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let mut handler = RecordingHandler::default();
+
+        let mut rx1 = insert_pending_rpc(&mut connection, 1);
+        let mut rx2 = insert_pending_rpc(&mut connection, 2);
+
+        // UTF-8 変換失敗は破棄され、Ok を返す。
+        let result = connection
+            .handle_datachannel_message(&mut handler, "rpc", &[0xFF, 0xFE, 0xFD])
+            .await;
+        assert!(result.is_ok(), "UTF-8 error は Ok を返す必要があります");
+
+        // JSON syntax error は破棄され、Ok を返す。
+        let result = connection
+            .handle_datachannel_message(&mut handler, "rpc", b"this is not json")
+            .await;
+        assert!(
+            result.is_ok(),
+            "JSON syntax error は Ok を返す必要があります"
+        );
+
+        // 全 pending と timeout task が維持される。
+        assert!(
+            connection.pending_rpc_responses.contains_key(&1),
+            "id=1 の pending を変更しない必要があります"
+        );
+        assert!(
+            connection.pending_rpc_responses.contains_key(&2),
+            "id=2 の pending を変更しない必要があります"
+        );
+        assert!(
+            matches!(rx1.try_recv(), Err(oneshot::error::TryRecvError::Empty))
+                && matches!(rx2.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "破棄された response は response channel を完了しない必要があります"
+        );
     }
 }

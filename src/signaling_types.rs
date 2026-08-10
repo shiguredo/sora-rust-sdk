@@ -67,7 +67,10 @@ pub(crate) enum IncomingMessageData {
     Redirect {
         location: String,
     },
-    Close {},
+    Close {
+        code: u16,
+        reason: String,
+    },
 }
 
 pub(crate) struct IncomingMessage {
@@ -182,7 +185,13 @@ impl<'text, 'raw> TryFrom<RawJsonValue<'text, 'raw>> for IncomingMessageData {
                 let location = value.to_member("location")?.required()?.try_into()?;
                 Ok(Self::Redirect { location })
             }
-            "close" => Ok(Self::Close {}),
+            "close" => {
+                // Sora ドキュメント「シグナリングの型定義」の SignalingCloseMessage に基づき、
+                // code と reason は必須として検証する。
+                let code = value.to_member("code")?.required()?.try_into()?;
+                let reason = value.to_member("reason")?.required()?.try_into()?;
+                Ok(Self::Close { code, reason })
+            }
             "candidate" => Err(Error::CandidateNotSupported),
             other => Err(Error::UnsupportedMessageType {
                 message_type: other.to_string(),
@@ -528,5 +537,88 @@ impl OutgoingMessage {
         Self::Candidate {
             candidate: candidate.to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Close メッセージの parse が成功して code と reason を保持することを確認する。
+    fn assert_close_parsed(text: &str, code: u16, reason: &str) {
+        let message =
+            IncomingMessage::parse(text).expect("Close メッセージの parse に失敗しました");
+        match message.data {
+            IncomingMessageData::Close {
+                code: actual_code,
+                reason: actual_reason,
+            } => {
+                assert_eq!(actual_code, code);
+                assert_eq!(actual_reason, reason);
+            }
+            _ => panic!("Close 以外のメッセージとして parse されました: {text}"),
+        }
+    }
+
+    /// Close メッセージの parse が失敗することを確認する。
+    fn assert_close_parse_failed(text: &str) {
+        let result = IncomingMessage::parse(text);
+        assert!(
+            result.is_err(),
+            "不正な Close メッセージが parse されてしまいました: {text}"
+        );
+    }
+
+    #[test]
+    fn close_accepts_code_1000_with_reason() {
+        assert_close_parsed(
+            r#"{"type":"close","code":1000,"reason":"DISCONNECTED-API"}"#,
+            1000,
+            "DISCONNECTED-API",
+        );
+    }
+
+    #[test]
+    fn close_accepts_code_4490_with_reason() {
+        assert_close_parsed(
+            r#"{"type":"close","code":4490,"reason":"INTERNAL-ERROR"}"#,
+            4490,
+            "INTERNAL-ERROR",
+        );
+    }
+
+    #[test]
+    fn close_rejects_missing_code() {
+        assert_close_parse_failed(r#"{"type":"close","reason":"DISCONNECTED-API"}"#);
+    }
+
+    #[test]
+    fn close_rejects_missing_reason() {
+        assert_close_parse_failed(r#"{"type":"close","code":1000}"#);
+    }
+
+    #[test]
+    fn close_rejects_string_code() {
+        assert_close_parse_failed(r#"{"type":"close","code":"1000","reason":"DISCONNECTED-API"}"#);
+    }
+
+    #[test]
+    fn close_rejects_float_code() {
+        assert_close_parse_failed(r#"{"type":"close","code":1000.5,"reason":"DISCONNECTED-API"}"#);
+    }
+
+    #[test]
+    fn close_rejects_negative_code() {
+        assert_close_parse_failed(r#"{"type":"close","code":-1,"reason":"DISCONNECTED-API"}"#);
+    }
+
+    #[test]
+    fn close_rejects_overflowing_code() {
+        assert_close_parse_failed(r#"{"type":"close","code":65536,"reason":"DISCONNECTED-API"}"#);
+    }
+
+    #[test]
+    fn close_rejects_non_string_reason() {
+        assert_close_parse_failed(r#"{"type":"close","code":1000,"reason":12345}"#);
     }
 }

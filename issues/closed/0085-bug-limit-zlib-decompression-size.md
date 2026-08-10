@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-29
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-03
 - Model: GPT-5
 - Branch: feature/fix-limit-zlib-decompression-size
 - Polished: 2026-07-29
@@ -58,3 +58,11 @@ High。リモートから受信したデータだけで無制限のメモリ確�
 - 上限未満と上限ちょうどの zlib データを従来どおり展開できる
 - 上限 + 1 バイト、高圧縮率入力、上限 0 での空ペイロードを表す正常な zlib ストリーム、trailer 未完了、Adler-32 不一致を検証する単体テストがある
 - モックやスタブを使わずにテストされている
+
+## 解決方法
+
+- `decompress_zlib` を one-shot の `noflate::zlib::decompress` から `noflate::zlib::Decoder` を使う方式に変更し、引数で展開後サイズ上限を受け取るようにした
+- 圧縮入力を 4 KiB チャンクに分割して `feed` し、各回の `output()` 長を `checked_add` で累積検査して上限を超えたら `io::ErrorKind::InvalidData` を返すようにした
+- 全入力供給後に `is_finished()` を検査し、trailer 未完了の入力はエラーにするようにした
+- `SoraConnection::handle_datachannel_message` から `MAX_DECOMPRESSED_DATA_CHANNEL_MESSAGE_SIZE` (16 MiB) を渡すようにした
+- `zlib` モジュールに上限未満・上限ちょうど・上限超過・高圧縮率入力・空ペイロード・trailer 未完了・Adler-32 不一致の単体テストを追加した

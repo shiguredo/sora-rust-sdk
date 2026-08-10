@@ -14,7 +14,12 @@ base64ct = "1.8"
 nojson.workspace = true
 # FakeVideoCapturer のテスト用映像描画に利用
 raden = "2026.2"
-# プロキシ E2E テストでの HTTP リクエスト/レスポンス処理に利用
+# DisconnectChannel API への TLS 接続 (https://) で利用
+rustls.workspace = true
+# DisconnectChannel API への TLS 接続での OS 標準のルート証明書検証に利用
+rustls-platform-verifier.workspace = true
+# プロキシ E2E テストの HTTP リクエスト/レスポンス処理と
+# DisconnectChannel API E2E のリクエストエンコード/レスポンスデコードに利用
 shiguredo_http11.workspace = true
 # 映像キャプチャデバイスの E2E テストに利用
 shiguredo_video_device = "2026.2"
@@ -24,6 +29,8 @@ shiguredo_webrtc.workspace = true
 sora_sdk.workspace = true
 # E2E テストの非同期処理を支える非同期ランタイム
 tokio = { workspace = true, features = ["full"] }
+# tokio 上で rustls を利用して DisconnectChannel API へ TLS 接続するために利用
+tokio-rustls.workspace = true
 
 [dev-dependencies]
 # ハードウェア共有テストの直列実行に利用

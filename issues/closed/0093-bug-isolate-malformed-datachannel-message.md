@@ -2,9 +2,9 @@
 
 - Priority: High
 - Created: 2026-07-29
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-05
 - Model: GPT-5
-- Branch: feature/fix-malformed-datachannel-message
+- Branch: feature/fix-iroiro3
 - Polished: 2026-07-29
 
 ## 目的
@@ -80,7 +80,10 @@ SDK 自身の warning log へ受信本文を出力しない。
 
 ### ログ
 
-- 新たに出す zlib 破棄 warning は固定の英語文とし、raw label、圧縮前後の本文、zlib の error message、metadata を含めない
+- 新たに出す zlib 破棄 warning は英語の固定文とし、どの DataChannel で失敗したかを特定できるようラベル名と失敗段階 (zlib) を含める
+  - ラベル名は Sora サーバーが offer で設定する値であり、通常ログにもすでに出力されている
+  - `signaling` / `stats` / `push` / `notify` / `rpc` には Sora サーバーのデータしか届かないため zlib 展開失敗は稀で、warning は主に `#` ラベルの任意データで発生する
+- warning には圧縮前後の本文、zlib の error message、metadata を含めない
 - 同一入力による warning の頻度制限は本 issue の対象外とする
 
 ## 変更対象
@@ -107,7 +110,21 @@ SDK 自身の warning log へ受信本文を出力しない。
 - `signaling` label の不正 UTF-8 と JSON syntax error が、現行どおり `SoraConnection::run` の終了原因になることを確認する
 - parse に成功した `re-offer` と不正 SDP の組み合わせで SDP 適用 error が返ることを確認する
 - parse に成功した `ping` を signaling DataChannel が未登録の実際の `SoraConnection` で処理し、`DataChannelMissing` が返ることを確認する
-- 新たな zlib 破棄 warning に raw label、圧縮前後の本文、zlib の error message、metadata を渡す箇所がないことをコードレビューで確認する
+- 新たな zlib 破棄 warning にラベル名と失敗段階 (zlib) が含まれ、圧縮前後の本文、zlib の error message、metadata が含まれないことをコードレビューで確認する
 - `CHANGES.md` の develop セクションに `[FIX]` を追記する
 - production log は英語、コメントとテストの assertion message は日本語にする
 - `cargo test --workspace` が成功する
+
+## 解決方法
+
+- `SoraConnection::handle_datachannel_message` で、zlib 展開に失敗した場合に受信メッセージ 1 件だけを破棄して `Ok(Continue)` を返すようにした
+  - 固定英語の warning `Discarded malformed DataChannel message: label='...' stage=zlib` を出し、本文と zlib の error message はログに含めない
+  - DataChannel と PeerConnection は維持され、同じ・別の DataChannel の後続メッセージを処理できる
+- UTF-8 変換と JSON / schema / RPC の parse 失敗は従来どおり接続全体の終了原因のままとした (Sora サーバー由来のデータのため)
+- 実 `SoraConnectionContext` と `SoraConnection` を構築し、モックやスタブを使わないテストを追加した
+  - zlib の不正 header / truncated stream / Adler-32 不一致 / 展開サイズ上限超過を各 1 件破棄
+  - 破棄後の同じ label・別 label の正常メッセージ処理
+  - `#` label と未対応 label の任意 binary データの転送
+  - signaling の不正 UTF-8 / JSON syntax error が従来どおり fatal であること
+  - re-offer + 不正 SDP の SDP 適用 error、ping + signaling DataChannel 未登録の `DataChannelMissing`
+- `CHANGES.md` は本実装では更新しない方針のため未更新

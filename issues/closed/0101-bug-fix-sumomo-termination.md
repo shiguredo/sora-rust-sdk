@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-07-29
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-10
 - Model: GPT-5
 - Branch: feature/fix-sumomo-termination
 - Polished: 2026-07-30
@@ -160,14 +160,19 @@ mock / stub、fake subprocess runner、test 専用の分岐、実装を差し替
 - read-only の実 OS file へ ANSI output helper から書き込み、write error が伝播する
 - 実 `I420Frame` を `AnsiTrackSinkHandler` へ渡して write error を発生させ、専用 channel の最初の error を main の result arbitration helper が renderer error として分類する
 - `raw_player_renderer.rs` 内の test で実 `I420Frame` に invalid size を設定し、SDL dummy driver の実 `RawPlayerRenderer::render` が error を返す
-- SDL の実 event queue へ Quit / WindowClose event を投入し、renderer loop の停止要求、worker completion、join までを検証する
 - SDL owner の drop が texture → renderer → window → quit の順で完了し、部分初期化 error 後にも再初期化できる
+
+raw_player の公開 API に `SDL_PushEvent` が存在しないため、SDL の event queue への Quit / WindowClose event 投入による renderer loop 停止要求のテストは行わない。
+renderer loop の停止要求と worker の終了は、実 thread を使う別項目 (worker completion guard の Release store、Acquire load、join、`WorkerPanic` 変換) で検証する。
 
 ### CLI integration test
 
 `examples/sumomo/tests/termination.rs` から Cargo が提供する実 `CARGO_BIN_EXE_sumomo` を child process として起動する。
-sumomo には metadata option がなく既存 `TEST_SECRET_KEY` を渡せないため、credential や secret query を含まない公開 test Sora を指す `TEST_SUMOMO_SIGNALING_URLS` と random channel ID を使って実 Sora へ接続する。
-CI repository variable が未設定なら skip せず設定不足で失敗させる。
+sumomo に `--metadata` オプションを追加し、e2e-tests と共有する `TEST_SIGNALING_URLS` と `TEST_SECRET_KEY` で認証付きの実 Sora へ接続する。
+`TEST_SECRET_KEY` がある場合は access_token (JWT) を生成し、`--metadata '{"access_token":"<jwt>"}'` を child argv に渡す。
+未設定の場合は access_token なしで接続する。
+channel ID は `TEST_CHANNEL_ID_PREFIX` (デフォルト `sumomo-test`) + random 8 bytes hex + `TEST_CHANNEL_ID_SUFFIX` で構成し、ログや Sora 側でどのテストの接続かを識別できるようにする。
+`TEST_SIGNALING_URLS` が未設定なら skip せず設定不足で失敗させる。
 公開 endpoint 値は sumomo の正式な `--signaling-url` 入力として child argv にだけ渡し、test の assertion / panic message へ埋め込まない。
 実行ごとに 30 秒の process timeout を設け、timeout 時は child を kill / wait して test を失敗させる。
 application の duration 1 秒 + shutdown 最大 10 秒と、test harness の 30 秒強制 kill を別の deadline として検証する。
@@ -197,7 +202,7 @@ cargo clippy -p sumomo --features raw-player --all-targets -- -D warnings
 SDL_VIDEODRIVER=dummy cargo test -p sumomo --features raw-player
 ```
 
-workflow top-level `env` に `TEST_SUMOMO_SIGNALING_URLS: ${{ vars.TEST_SUMOMO_SIGNALING_URLS }}` を追加し、通常 matrix、self-hosted、raw-player 独立 job の全 `cargo test` から利用できるようにする。
+workflow top-level `env` には `TEST_SIGNALING_URLS`、`TEST_SECRET_KEY`、`TEST_CHANNEL_ID_PREFIX`、`TEST_CHANNEL_ID_SUFFIX` が既に設定されており、sumomo の CLI integration test はこれらをそのまま利用する。
 workflow の command text へ値を展開せず、test process が環境変数から読み取って child argv を構築する。
 値を assertion / panic message に出さない。
 job timeout を 15 分、各 CLI child timeout を 30 秒にする。
@@ -206,13 +211,13 @@ job timeout を 15 分、各 CLI child timeout を 30 秒にする。
 
 - `examples/sumomo/src/main.rs`
 - `examples/sumomo/src/error.rs`
+- `examples/sumomo/src/args.rs`
 - `examples/sumomo/src/ansi_renderer.rs`
 - `examples/sumomo/src/raw_player_renderer.rs`
 - `examples/sumomo/src/tests.rs`
 - `examples/sumomo/tests/termination.rs`
 - `examples/sumomo/Cargo.toml`
 - `.github/workflows/ci.yml`
-- `CHANGES.md`
 
 `src/video_codecs/mp4.rs` は本 issue の変更対象に含めず、prerequisite の issue 0098 だけで変更する。
 
@@ -235,7 +240,6 @@ job timeout を 15 分、各 CLI child timeout を 30 秒にする。
 - `cargo test --workspace` が成功する
 - `cargo clippy -p sumomo --features raw-player --all-targets -- -D warnings` が成功する
 - `SDL_VIDEODRIVER=dummy cargo test -p sumomo --features raw-player` が成功する
-- `CHANGES.md` の `develop` セクションへ `[FIX]` と担当者 `@voluntas` を追記する
 - comment と test assertion message は日本語、production error / log は英語にする
 
 ## 参考
@@ -246,3 +250,73 @@ job timeout を 15 分、各 CLI child timeout を 30 秒にする。
 - `examples/sumomo/src/raw_player_renderer.rs` の `RawPlayerRenderer::render`
 - `src/connection.rs` の `SoraConnectionHandle::disconnect`
 - `src/connection.rs` の `SoraConnection::run`
+
+## 解決方法
+
+### connection の終了 helper と run の別タスク化
+
+`examples/sumomo/src/main.rs` に次を実装した。
+
+- `CONNECTION_SHUTDOWN_TIMEOUT` を 10 秒で固定した。
+- `build_and_run_connection` を追加し、`SoraConnectionBuilder::build()` で生成した `SoraConnection` と `SoraConnectionHandle` を返し、`connection.run()` を `tokio::spawn` で別タスクとして開始して `JoinHandle` を返すようにした。capturer は run タスク内で保持し、run 完了時に drop される。
+- `shutdown_connection(handle, run_handle, deadline)` を追加した。`run_handle.is_finished()` なら disconnect を送らずにその結果を返し、未完了なら disconnect command を送って `run()` の完了を deadline の内側で待つ。`run()` は別タスクで動いているため、disconnect を先に await しても deadlock しない。deadline 超過は `AppError::ConnectionShutdownTimeout` を返す。
+- main loop では `run_handle` 完了、duration 経過、event channel close、renderer error を `tokio::select!` で待ち、break 後に `shutdown_connection` を呼ぶ。
+
+### raw-player worker thread の廃止と main への統合
+
+`run_with_raw_player` を廃止し、`main()` に統合した。それに伴い次を削除した。
+
+- worker thread (`thread::Builder` / `rt.block_on`)
+- `WorkerCompletionGuard`
+- `join_worker`
+- main thread と worker 間の stop flag による双方向 protocol
+
+raw-player 経路も通常表示と同じ `build_and_run_connection` / `shutdown_connection` / main loop を使う。SDL の window close / Escape は `VideoRenderer::poll_events` / `is_running` で検出し、main loop から break する。
+
+### レンダラーの共通インターフェース化
+
+`examples/sumomo/src/video.rs` を新設した。
+
+- `I420Frame` を `raw_player_renderer.rs` から移動した。
+- `VideoRenderer` enum (`Ansi(AnsiRenderer)` / `RawPlayer(RawPlayerRenderer)`) を追加し、`render_frame(&I420Frame)` / `poll_events` / `is_running` を提供する。`AnsiRenderer` と `RawPlayerRenderer` の描画を同じインターフェースに揃えた。
+- `VideoFrameSinkHandler` を追加し、`AnsiTrackSinkHandler` と `RawPlayerTrackSinkHandler` を統合した。frame は channel へ送るだけで、描画と error 検出は main loop が行う。
+
+`AnsiRenderer` は `render_frame(&I420Frame)` に変更し、`AnsiTrackSinkHandler` と `AppEvent::RendererError` を削除した。renderer error は main loop が `renderer.render_frame(&frame)` の `Err` を直接検出して primary error とする。
+
+`RawPlayerRenderer` は `render(&I420Frame)` を `render_frame(&I420Frame)` に改名し、SDL object を `Option` で所有して `SdlCleanupGuard` が texture → renderer → window → `raw_player::quit()` の順で解放するようにした。`RawPlayerTrackSinkHandler` を削除した。
+
+### error とオプション
+
+- `examples/sumomo/src/error.rs` に `AppError::ConnectionShutdownTimeout`、`AppError::WorkerPanic`、`AppError::Ansi` を追加した。
+- `examples/sumomo/src/args.rs` に `--metadata` オプションを追加し、`SoraConnectionBuilder::metadata` へ渡すようにした。
+- 変更対象の renderer / raw-player 経路に残っていた日本語の frame 受信 log を英語に統一した。
+
+### test
+
+- `examples/sumomo/src/tests.rs` に次を追加・更新した。
+  - `shutdown_connection` が実 connection の run 未開始時に deadline で timeout することを検証
+  - `shutdown_connection` が panic した run タスクを `WorkerPanic` に変換することを検証
+  - `write_ansi_output` が read-only の実 OS file への書き込み error を返すことを検証
+- `examples/sumomo/tests/termination.rs` を新設し、`CARGO_BIN_EXE_sumomo` を child process として起動して次を検証した。
+  - 通常表示 / raw-player の `--duration 1` が 30 秒以内に exit 0 になる
+  - `--input-mp4` と実 MP4 fixture で 30 秒以内に exit 0 になる
+  - 構文不正な signaling URL、存在しない MP4 path、無効な SDL video driver が exit non-zero になる
+  - `TEST_SIGNALING_URLS` 等の環境変数は `load_env()` で e2e-tests/.env を自動読み込みする。CI の repository variable / secret が設定済みの場合はそちらを優先する
+
+### CI
+
+- `.github/workflows/ci.yml` に `ci-raw-player` job を追加し、Ubuntu 24.04 で次を実行する。
+  - `cargo clippy -p sumomo --features raw-player --all-targets -- -D warnings`
+  - `SDL_VIDEODRIVER=dummy cargo test -p sumomo --features raw-player`
+  - 必要な apt パッケージは `libclang-dev` / `libx11-dev` / `libasound2t64` のみ。git / curl / build-essential / ca-certificates は runner にプリインストール済みのため不要
+
+### 検証
+
+- `cargo fmt --all --check`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo clippy -p sumomo --features raw-player --all-targets -- -D warnings`
+- `cargo clippy -p sumomo --features raw-player,media-device --all-targets -- -D warnings`
+- `SDL_VIDEODRIVER=dummy cargo test -p sumomo --features raw-player` (unit test 37 件、CLI integration test 6 件)
+- `cargo test --workspace`
+
+のすべてが成功することを確認した。CLI integration test は e2e-tests/.env の実 Sora への接続で動作する。

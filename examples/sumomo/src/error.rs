@@ -10,6 +10,12 @@ pub(crate) enum AppError {
     RawPlayer(raw_player::Error),
     Io(std::io::Error),
     Pem(rustls_pki_types::pem::Error),
+    /// ANSI レンダラーの描画処理が失敗した。
+    Ansi(String),
+    /// 接続終了処理が 10 秒以内に完了しなかった。
+    ConnectionShutdownTimeout,
+    /// raw-player のワーカースレッドまたは run タスクが panic した。
+    WorkerPanic,
 }
 
 impl std::fmt::Display for AppError {
@@ -25,6 +31,11 @@ impl std::fmt::Display for AppError {
             AppError::RawPlayer(err) => write!(f, "AppError::RawPlayer: {err}"),
             AppError::Io(err) => write!(f, "AppError::Io: {err}"),
             AppError::Pem(err) => write!(f, "AppError::Pem: {err}"),
+            AppError::Ansi(message) => write!(f, "AppError::Ansi: {message}"),
+            AppError::ConnectionShutdownTimeout => {
+                write!(f, "AppError::ConnectionShutdownTimeout")
+            }
+            AppError::WorkerPanic => write!(f, "AppError::WorkerPanic"),
         }
     }
 }

@@ -26,6 +26,7 @@ pub(crate) struct Args {
     pub(crate) client_key: Option<String>,
     pub(crate) ca_cert: Option<String>,
     pub(crate) duration: Option<u64>,
+    pub(crate) metadata: Option<String>,
     pub(crate) turn_tls_insecure: bool,
     pub(crate) turn_tls_ca_cert: Option<String>,
     pub(crate) use_libcamera: bool,
@@ -193,6 +194,7 @@ pub(crate) fn parse_args(mut args: noargs::RawArgs) -> Result<Args> {
             client_key: None,
             ca_cert: None,
             duration: None,
+            metadata: None,
             turn_tls_insecure: false,
             turn_tls_ca_cert: None,
             use_libcamera: false,
@@ -237,6 +239,7 @@ pub(crate) fn parse_args(mut args: noargs::RawArgs) -> Result<Args> {
             client_key: None,
             ca_cert: None,
             duration: None,
+            metadata: None,
             turn_tls_insecure: false,
             turn_tls_ca_cert: None,
             input_mp4: None,
@@ -383,6 +386,11 @@ pub(crate) fn parse_args(mut args: noargs::RawArgs) -> Result<Args> {
         .take(&mut args)
         .present_and_then(|o| o.value().parse::<u64>())?;
 
+    let metadata: Option<String> = noargs::opt("metadata")
+        .doc("接続時に Sora へ送信する認証メタデータ (JSON)")
+        .take(&mut args)
+        .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
+
     let turn_tls_insecure = noargs::flag("turn-tls-insecure")
         .doc("TURN-TLS の証明書検証をスキップする")
         .take(&mut args)
@@ -472,6 +480,7 @@ pub(crate) fn parse_args(mut args: noargs::RawArgs) -> Result<Args> {
         client_key,
         ca_cert,
         duration,
+        metadata,
         turn_tls_insecure,
         turn_tls_ca_cert,
         use_libcamera,
