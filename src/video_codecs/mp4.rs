@@ -68,6 +68,17 @@ pub enum Mp4Error {
         /// 実際のファイルサイズ (バイト単位)。
         file_size: usize,
     },
+    /// 非ゼロの composition time offset を含むビデオサンプルが存在する。
+    ///
+    /// decode order と表示時刻が異なる映像 (B frame 等) を、decode order のまま
+    /// 単調増加の RTP timestamp で送信すると受信側の表示順序が壊れるため、
+    /// 現在の送信経路では受理しない。
+    UnsupportedCompositionTimeOffset {
+        /// 問題のサンプルインデックス (0 始まり、ビデオサンプル内の連番)。
+        index: usize,
+        /// ビデオコーデック種別。
+        codec_type: VideoCodecType,
+    },
 }
 
 impl std::fmt::Display for Mp4Error {
@@ -106,6 +117,12 @@ impl std::fmt::Display for Mp4Error {
                     "サンプルテーブルに不整合があります: sample={index} offset={offset} size={size} file_size={file_size}"
                 )
             }
+            Self::UnsupportedCompositionTimeOffset { index, codec_type } => {
+                write!(
+                    f,
+                    "サンプルの composition time offset が非ゼロです: sample={index} codec={codec_type:?} (B frame には未対応)"
+                )
+            }
         }
     }
 }
@@ -120,7 +137,8 @@ impl std::error::Error for Mp4Error {
             | Self::UnsupportedVideoCodec
             | Self::InvalidNalLengthSize(_)
             | Self::InputPositionOutOfRange { .. }
-            | Self::InconsistentSampleTable { .. } => None,
+            | Self::InconsistentSampleTable { .. }
+            | Self::UnsupportedCompositionTimeOffset { .. } => None,
         }
     }
 }
@@ -280,6 +298,19 @@ impl Mp4SampleReader {
                 && let Some(entry) = sample.sample_entry
             {
                 track_info = Some(Self::extract_track_info(entry, timescale)?);
+            }
+
+            // 非ゼロの composition time offset は decode order と表示時刻が一致しないため拒否する。
+            if sample.composition_time_offset.unwrap_or(0) != 0 {
+                return Err(Mp4Error::UnsupportedCompositionTimeOffset {
+                    index: samples.len(),
+                    // 通常はビデオトラックの最初のサンプルで sample_entry から確定済みだが、
+                    // sample_entry が付与されない異常入力に備えて Generic を返す。
+                    codec_type: track_info
+                        .as_ref()
+                        .map(|info| info.codec_type)
+                        .unwrap_or(VideoCodecType::Generic),
+                });
             }
 
             samples.push((
@@ -1148,5 +1179,125 @@ mod tests {
             ),
             "不正な stco を持つ MP4 は InconsistentSampleTable エラーになるべきです"
         );
+    }
+
+    // 非ゼロの composition time offset (B frame) を含む MP4 を入力した場合に、
+    // Mp4SampleReader::new が panic せず UnsupportedCompositionTimeOffset エラーを返すことを確認する。
+    //
+    // フィクスチャは次のコマンドで生成した (ffmpeg 7.1.1):
+    //   ffmpeg -y -v error -f lavfi -i "color=red:size=320x320:rate=25:duration=2" \
+    //     -c:v libx264 -preset medium -bf 2 -g 50 -b:v 50k -maxrate 50k -bufsize 100k \
+    //     -pix_fmt yuv420p archive-red-bframe-320x320-h264.mp4
+    // H.264 High Profile Level 2.1、timescale=12800 で、B frame の先頭 reorder により
+    // 最初の sample (index 0) の composition time offset が 1024 になる。
+    #[test]
+    fn sample_reader_rejects_b_frame_fixture() {
+        let fixture = include_bytes!("testdata/archive-red-bframe-320x320-h264.mp4");
+
+        let tmp_name = format!(
+            "sora-sdk-mp4-test-bframe-{}-{}.mp4",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("システム時刻は UNIX_EPOCH より後である必要があります")
+                .as_nanos()
+        );
+        let tmp_path = std::env::temp_dir().join(tmp_name);
+
+        std::fs::write(&tmp_path, fixture).expect("一時フィクスチャの書き込みに失敗しました");
+
+        let result = Mp4SampleReader::new(
+            tmp_path
+                .to_str()
+                .expect("パスは有効な UTF-8 である必要があります"),
+        );
+
+        let _ = std::fs::remove_file(&tmp_path);
+
+        match result {
+            Err(crate::error::Error::Mp4 { source }) => {
+                assert!(
+                    matches!(
+                        source,
+                        Mp4Error::UnsupportedCompositionTimeOffset {
+                            index: 0,
+                            codec_type: VideoCodecType::H264,
+                        }
+                    ),
+                    "UnsupportedCompositionTimeOffset エラーを期待しましたが、実際は: {source:?}"
+                );
+            }
+            Err(e) => panic!("Mp4 エラーを期待しましたが、実際は: {e}"),
+            Ok(_) => panic!("Err を期待しましたが、Ok でした"),
+        }
+    }
+
+    // ctts ボックスが存在しても composition time offset が全て 0 の MP4 は受理されることを確認する。
+    //
+    // 判定は「offset の値」で行うため、ctts なし (None) と offset 0 (Some(0)) は同じように受理される。
+    // フィクスチャ差し替えを検出するため、パッチ前に最初のエントリの offset が 1024 であることを確認する。
+    #[test]
+    fn sample_reader_accepts_zero_composition_time_offset_fixture() {
+        let fixture = include_bytes!("testdata/archive-red-bframe-320x320-h264.mp4");
+        let mut patched = fixture.to_vec();
+
+        // ctts ボックスの全エントリの sample_offset を 0 に書き換える。
+        // ボックス構造: size(4) + type(4) + version/flags(4) + entry_count(4) + [sample_count(4) + sample_offset(4)] * entry_count
+        let ctts_offset = patched
+            .windows(4)
+            .position(|w| w == b"ctts")
+            .expect("fixture に ctts ボックスが必要です");
+        // ctts の位置から type(4) と version/flags(4) を飛ばすと entry_count が読める。
+        let entry_count_offset = ctts_offset + 8;
+        let entry_count = u32::from_be_bytes(
+            patched[entry_count_offset..entry_count_offset + 4]
+                .try_into()
+                .expect("entry_count は 4 バイトで読める必要があります"),
+        );
+        // 先頭エントリの sample_offset は entry_count(4) + sample_count(4) の後にある。
+        assert_eq!(
+            u32::from_be_bytes(
+                patched[entry_count_offset + 8..entry_count_offset + 12]
+                    .try_into()
+                    .expect("先頭エントリの sample_offset は 4 バイトで読める必要があります")
+            ),
+            1024,
+            "フィクスチャの先頭エントリの sample_offset が移動しています"
+        );
+        for i in 0..entry_count {
+            let offset_pos = entry_count_offset + 4 + i as usize * 8 + 4;
+            patched[offset_pos..offset_pos + 4].copy_from_slice(&0u32.to_be_bytes());
+        }
+
+        let tmp_name = format!(
+            "sora-sdk-mp4-test-ctts-zero-{}-{}.mp4",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("システム時刻は UNIX_EPOCH より後である必要があります")
+                .as_nanos()
+        );
+        let tmp_path = std::env::temp_dir().join(tmp_name);
+
+        std::fs::write(&tmp_path, &patched).expect("一時フィクスチャの書き込みに失敗しました");
+
+        let result = Mp4SampleReader::new(
+            tmp_path
+                .to_str()
+                .expect("パスは有効な UTF-8 である必要があります"),
+        );
+
+        let _ = std::fs::remove_file(&tmp_path);
+
+        match result {
+            Ok(reader) => {
+                assert_eq!(
+                    reader.codec_type(),
+                    VideoCodecType::H264,
+                    "offset 0 の MP4 は H.264 reader として読み込めるべきです"
+                );
+            }
+            Err(e) => panic!("offset 0 の MP4 は Ok を期待しましたが、実際は: {e}"),
+        }
     }
 }
