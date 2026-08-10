@@ -362,7 +362,9 @@ pub(crate) fn parse_args(mut args: noargs::RawArgs) -> Result<Args> {
         .is_present();
 
     let client_cert: Option<String> = noargs::opt("client-cert")
-        .doc("クライアント証明書の PEM ファイルパス")
+        .doc(
+            "クライアント証明書の PEM ファイルパス (--client-key と合わせて指定する必要があります)",
+        )
         .take(&mut args)
         .present_and_then(|o| {
             std::fs::read_to_string(o.value())
@@ -370,7 +372,7 @@ pub(crate) fn parse_args(mut args: noargs::RawArgs) -> Result<Args> {
         })?;
 
     let client_key: Option<String> = noargs::opt("client-key")
-        .doc("クライアント秘密鍵の PEM ファイルパス")
+        .doc("クライアント秘密鍵の PEM ファイルパス (--client-cert と合わせて指定する必要があります)")
         .take(&mut args)
         .present_and_then(|o| {
             std::fs::read_to_string(o.value())
@@ -502,6 +504,13 @@ pub(crate) fn parse_args(mut args: noargs::RawArgs) -> Result<Args> {
 }
 
 pub(crate) fn validate_args(args: &Args) -> Result<()> {
+    // client certificate と private key は両方指定または両方未指定のみ許可する。
+    if args.client_cert.is_some() != args.client_key.is_some() {
+        return Err(
+            io::Error::other("--client-cert and --client-key must be specified together").into(),
+        );
+    }
+
     // --input-mp4 を指定した場合は MP4 ファイルの実際のコーデックをシグナリング時に
     // 渡すようになっているため、--video-codec-type と併用することはできない。
     if args.input_mp4.is_some() && args.video_codec_type.is_some() {
