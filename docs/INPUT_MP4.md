@@ -22,57 +22,17 @@ sumomo の `--input-mp4` オプションを使用すると、MP4 ファイルか
 
 ## 実行方法
 
-### H.264 の MP4 ファイルを送信する
-
 ```bash
 cargo run -p sumomo -- \
   --signaling-url wss://sora.example.com/signaling \
   --channel-id your-channel-id \
   --role sendonly \
   --input-mp4 /path/to/video.mp4 \
-  --video-codec-type h264 \
   --video-bit-rate 30000 \
   --audio false
 ```
 
-### H.265 の MP4 ファイルを送信する
-
-```bash
-cargo run -p sumomo -- \
-  --signaling-url wss://sora.example.com/signaling \
-  --channel-id your-channel-id \
-  --role sendonly \
-  --input-mp4 /path/to/video.mp4 \
-  --video-codec-type h265 \
-  --video-bit-rate 30000 \
-  --audio false
-```
-
-### VP9 の MP4 ファイルを送信する
-
-```bash
-cargo run -p sumomo -- \
-  --signaling-url wss://sora.example.com/signaling \
-  --channel-id your-channel-id \
-  --role sendonly \
-  --input-mp4 /path/to/video.mp4 \
-  --video-codec-type vp9 \
-  --video-bit-rate 30000 \
-  --audio false
-```
-
-### AV1 の MP4 ファイルを送信する
-
-```bash
-cargo run -p sumomo -- \
-  --signaling-url wss://sora.example.com/signaling \
-  --channel-id your-channel-id \
-  --role sendonly \
-  --input-mp4 /path/to/video.mp4 \
-  --video-codec-type av1 \
-  --video-bit-rate 30000 \
-  --audio false
-```
+MP4 の実コーデックはファイルから自動で検出され、`--video-codec-type` で指定する必要はない。`--video-codec-type` は `--input-mp4` と併用できない。
 
 ## 仕組み
 

@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-07-29
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-11
 - Model: GPT-5
 - Branch: feature/fix-sumomo-mp4-codec-config
 - Polished: 2026-08-07
@@ -79,6 +79,38 @@ codec 決定の helper、`build_context_config` の呼び出し側、既存の `
 
 - エラーは既存の `validate_args` と同じ英語 + オプション名の形式にする
 
+## 設計からの変更点
+
+当初の設計方針（上記）から、実装時に以下の変更を行った。設計方針・変更対象・完了条件は当初の計画として残し、変更理由をここに記す。
+
+### 手動 implementation の fail-fast 拒否 → passthrough 固定 + Decoder 維持
+
+- 当初設計: 実 codec の encoder を提供する手動 implementation の選択は接続前にエラーにする（fail-fast）。passthrough を手動 merge の後に適用する方式は「明示指定を黙って passthrough へ差し替える」ため不採用とした（設計方針 75 行）
+- 実装: `--video-codec-implementation` は `--input-mp4` と併用許可し、手動 merge の後に passthrough を適用して Encoder のみ passthrough に固定した。指定された実装は受信 (Decoder) にのみ使われる
+- 理由: 一律拒否すると、MP4 使用時に受信デコーダーが使えなくなる（passthrough は Encoder 専用でデコーダーを提供しない）。当初設計が不採用とした方式を「Encoder のみ固定・Decoder は維持」の形で採用した
+
+### video_send_enabled helper による判定の単一ソース化 → 従来の判定を維持
+
+- 当初設計: 映像送信の有効性を `video_send_enabled(&Args) -> bool` に集約し、codec 決定 helper・`build_context_config` 呼び出し側・`attach_sender_tracks` の 3 箇所で共有
+- 実装: 従来どおり `attach_sender_tracks` は `role.wants_send()` + `args.video_enabled()` を使う（helper は追加しない）
+- 追加対応: RecvOnly + `--input-mp4` で MP4 の実 codec がシグナリングの `video` フィールド（受信設定）に漏れる問題が判明したため、`apply_video_options` で `role.wants_send()` によるゲートを追加し、受信専用では MP4 の実 codec を明示しないようにした
+
+### codec 決定 helper + `--video-codec-type` 一致検証 → 併用拒否
+
+- 当初設計: `(args, Option<VideoCodecType>) -> Result<Option<Video>>` の pure helper で `--video-codec-type` の一致を検証し、不一致は `Err` にする
+- 実装: `--input-mp4` と `--video-codec-type` の併用自体を `validate_args` で拒否した（実 codec と一致する正しい指定も含む）。`Args.video_codec_type` を `Option<VideoCodecType>` に正規化し、`video_from_codec_type` で `Video` を生成した
+- 理由: MP4 の実 codec はファイルから自動検出されるため `--video-codec-type` の明示指定は冗長であり、不一致時の誤った codec 通知を防ぐため接続前の早い段階で拒否する方が確実
+
+### 依存 issue（0096 / 0102）との関係
+
+- 当初設計: 0096 の reader ベース API 完了後に着手し、0102 を先に完了・merge
+- 実装: 0096 は pending のまま、codec type ベース API（`Mp4PassthroughVideoCodecCapability::new(codec_type)`）で実装した。0096 実装時に `examples/sumomo/src/main.rs` / `tests.rs` の追随が必要
+
+### 完了条件のうち未実施の項目
+
+- `video_send_enabled` の単体テスト、手動拒否判定 helper の単体テスト、実 MP4 fixture を使うテスト（完了条件 107-113）は、上記の設計変更（helper 群の廃止・併用拒否化）に伴い実施しない
+- `CHANGES.md` の develop セクションへの `[FIX]` 追記（完了条件 116）は、対応方針の判断により未実施
+
 ## 変更対象
 
 - `examples/sumomo/src/main.rs`
@@ -115,3 +147,18 @@ codec 決定の helper、`build_context_config` の呼び出し側、既存の `
 - `cargo clippy -p sumomo --features raw-player --all-targets -- -D warnings` が成功する
 - `CHANGES.md` の develop セクションへ `[FIX]` と担当者 `@voluntas` を追記する
 - production log は英語、コメントとテストの assertion message は日本語にする
+
+## 解決方法
+
+- `Args.video_codec_type` を `Option<String>` から `Option<VideoCodecType>` へ変更し、`parse_args` で vp8/vp9/av1/h264/h265 の 5 値をパース時に変換するようにした
+- `--input-mp4` と `--video-codec-type` の併用拒否を `validate_args` に追加した
+  - 当初は `parse_args` で拒否し、`--video-codec-implementation` も併用拒否していたが、MP4 使用時に受信デコーダーが使えなくなる問題があったため、実装の併用は許可へ、併用チェック自体は `validate_args` へ移動した
+- `validate_args` の `--input-mp4` と `--openh264-path` の排他チェックを削除し、openh264 を受信デコーダーとして併用できるようにした
+- `build_context_config` を、MP4 使用時は選択された codec 実装と passthrough の両方を持つ構成へ変更した
+  - 送信 (Encoder) の preference は MP4 の実 codec の passthrough のみに固定し、指定された実装は受信 (Decoder) にのみ使われる
+- `apply_video_options` に `mp4_codec_type` を渡し、MP4 使用時は実 codec をシグナリングの `video` フィールドへ明示するようにした
+  - 受信専用 (RecvOnly) では `role.wants_send()` でゲートし、MP4 の実 codec を受信設定へ波及させない
+- `video_from_codec_type` を新設し、`VideoCodecType` からシグナリング用 `sora_sdk::Video` を生成するようにした（`Generic` / `Unknown` はエラー）
+- `apply_common_builder_options` を `build_connection_builder` にインライン化した
+- `docs/INPUT_MP4.md` から `--video-codec-type` を使う例を削除し、codec 自動検出と併用不可を明記した
+- `--input-mp4` と `--video-codec-type` の併用拒否、MP4 使用時に送信エンコーダーが passthrough のみになること・受信デコーダーが維持されることのテストを追加した

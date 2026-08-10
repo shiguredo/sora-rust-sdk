@@ -1,7 +1,5 @@
 use super::*;
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-use sora_sdk::CodecDirection;
-use sora_sdk::Role;
+use sora_sdk::{CodecDirection, Role};
 fn test_args(
     video_codec_implementation: VideoCodecImplementationSelections,
     openh264_path: Option<&str>,
@@ -132,6 +130,151 @@ fn parse_video_codec_implementation_accepts_v4l2() {
     assert_eq!(
         parsed,
         VideoCodecImplementationSelections::Manual(vec![VideoCodecImplementationSelection::V4l2,])
+    );
+}
+
+#[test]
+fn parse_args_accepts_mp4_with_video_codec_implementation_manual() {
+    let raw_args = make_raw_args(&[
+        "sumomo",
+        "--signaling-url",
+        "wss://example.com/signaling",
+        "--channel-id",
+        "test-channel",
+        "--role",
+        "sendonly",
+        "--input-mp4",
+        "/tmp/video.mp4",
+        "--video-codec-implementation",
+        "internal",
+    ]);
+    let args = crate::args::parse_args(raw_args)
+        .expect("MP4 と codec 実装の併用はパースに成功するはずです");
+    assert_eq!(args.input_mp4.as_deref(), Some("/tmp/video.mp4"));
+    assert_eq!(
+        args.video_codec_implementation,
+        VideoCodecImplementationSelections::Manual(vec![
+            VideoCodecImplementationSelection::Internal,
+        ])
+    );
+}
+
+#[test]
+fn parse_args_accepts_mp4_with_video_codec_implementation_auto() {
+    let raw_args = make_raw_args(&[
+        "sumomo",
+        "--signaling-url",
+        "wss://example.com/signaling",
+        "--channel-id",
+        "test-channel",
+        "--role",
+        "sendonly",
+        "--input-mp4",
+        "/tmp/video.mp4",
+        "--video-codec-implementation",
+        "auto",
+    ]);
+    let args = crate::args::parse_args(raw_args)
+        .expect("MP4 と auto 明示の併用はパースに成功するはずです");
+    assert_eq!(args.input_mp4.as_deref(), Some("/tmp/video.mp4"));
+    assert_eq!(
+        args.video_codec_implementation,
+        VideoCodecImplementationSelections::Auto
+    );
+}
+
+#[test]
+fn parse_args_accepts_mp4_without_video_codec_implementation() {
+    let raw_args = make_raw_args(&[
+        "sumomo",
+        "--signaling-url",
+        "wss://example.com/signaling",
+        "--channel-id",
+        "test-channel",
+        "--role",
+        "sendonly",
+        "--input-mp4",
+        "/tmp/video.mp4",
+    ]);
+    let args = crate::args::parse_args(raw_args).expect("MP4 のみの指定はパースに成功するはずです");
+    assert_eq!(args.input_mp4.as_deref(), Some("/tmp/video.mp4"));
+    assert_eq!(
+        args.video_codec_implementation,
+        VideoCodecImplementationSelections::Auto
+    );
+    assert_eq!(args.video_codec_type, None);
+}
+
+#[test]
+fn validate_args_rejects_mp4_with_video_codec_type() {
+    let raw_args = make_raw_args(&[
+        "sumomo",
+        "--signaling-url",
+        "wss://example.com/signaling",
+        "--channel-id",
+        "test-channel",
+        "--role",
+        "sendonly",
+        "--input-mp4",
+        "/tmp/video.mp4",
+        "--video-codec-type",
+        "h264",
+    ]);
+    let args =
+        crate::args::parse_args(raw_args).expect("MP4 と codec type のパースは成功するはずです");
+    let err = validate_args(&args).expect_err("MP4 と codec type の併用は失敗するはずです");
+    let message = err.to_string();
+    assert!(
+        message.contains("--input-mp4 and --video-codec-type cannot be used together"),
+        "エラーメッセージが期待と異なります: {message}"
+    );
+}
+
+#[test]
+fn video_from_codec_type_builds_codec_specific_video() {
+    let bit_rate = Some(30000);
+    assert_eq!(
+        video_from_codec_type(shiguredo_webrtc::VideoCodecType::Vp8, bit_rate)
+            .expect("vp8 は Video を生成できるはずです"),
+        sora_sdk::Video::new_vp8(bit_rate)
+    );
+    assert_eq!(
+        video_from_codec_type(shiguredo_webrtc::VideoCodecType::Vp9, bit_rate)
+            .expect("vp9 は Video を生成できるはずです"),
+        sora_sdk::Video::new_vp9(bit_rate, None)
+    );
+    assert_eq!(
+        video_from_codec_type(shiguredo_webrtc::VideoCodecType::Av1, bit_rate)
+            .expect("av1 は Video を生成できるはずです"),
+        sora_sdk::Video::new_av1(bit_rate, None)
+    );
+    assert_eq!(
+        video_from_codec_type(shiguredo_webrtc::VideoCodecType::H264, bit_rate)
+            .expect("h264 は Video を生成できるはずです"),
+        sora_sdk::Video::new_h264(bit_rate, None)
+    );
+    assert_eq!(
+        video_from_codec_type(shiguredo_webrtc::VideoCodecType::H265, bit_rate)
+            .expect("h265 は Video を生成できるはずです"),
+        sora_sdk::Video::new_h265(bit_rate, None)
+    );
+}
+
+#[test]
+fn video_from_codec_type_rejects_unknown_codec() {
+    let err = video_from_codec_type(shiguredo_webrtc::VideoCodecType::Generic, None)
+        .expect_err("Generic はエラーになるはずです");
+    let message = err.to_string();
+    assert!(
+        message.contains("unsupported video codec type"),
+        "エラーメッセージが期待と異なります: {message}"
+    );
+    let err = video_from_codec_type(shiguredo_webrtc::VideoCodecType::Unknown(0), None)
+        .expect_err("Unknown はエラーになるはずです");
+    let message = err.to_string();
+    assert!(
+        message.contains("unsupported video codec type"),
+        "エラーメッセージが期待と異なります: {message}"
     );
 }
 
@@ -270,6 +413,18 @@ fn validate_args_accepts_openh264_with_path() {
         ]),
         Some("/tmp/libopenh264.so"),
     );
+    assert!(validate_args(&args).is_ok());
+}
+
+#[test]
+fn validate_args_accepts_mp4_with_openh264() {
+    let mut args = test_args(
+        VideoCodecImplementationSelections::Manual(vec![
+            VideoCodecImplementationSelection::Openh264,
+        ]),
+        Some("/tmp/libopenh264.so"),
+    );
+    args.input_mp4 = Some("/tmp/video.mp4".to_string());
     assert!(validate_args(&args).is_ok());
 }
 
@@ -444,6 +599,119 @@ fn build_context_config_manual_internal_only() {
             .iter()
             .any(|codec| codec.implementation().name() == "internal")
     );
+}
+
+// MP4 使用時は送信 (Encoder) に passthrough のみを使い、受信 (Decoder) は選択された実装を維持することを確認する。
+#[serial_test::serial]
+#[test]
+fn build_context_config_mp4_encoder_preference_uses_only_passthrough() {
+    let config = build_context_config(
+        sora_sdk::AdmConfig::NoAudioDevice,
+        Some(shiguredo_webrtc::VideoCodecType::H264),
+        None,
+        VideoCodecImplementationSelections::Auto,
+    )
+    .expect("MP4 設定は構築できるはずです");
+
+    // Encoder 方向は MP4 の実 codec の passthrough 1 件のみを利用する。
+    let encoders: Vec<&PreferenceCodec> = config
+        .video_codec_preference
+        .codecs()
+        .iter()
+        .filter(|codec| codec.direction() == CodecDirection::Encoder)
+        .collect();
+    assert_eq!(
+        encoders.len(),
+        1,
+        "Encoder preference は passthrough のみのはずです"
+    );
+    assert_eq!(
+        encoders[0].codec_type(),
+        shiguredo_webrtc::VideoCodecType::H264
+    );
+    assert_eq!(encoders[0].implementation().name(), "mp4-passthrough");
+    // Decoder 方向は MP4 なしの Auto 構成と同じ実装が維持される。
+    let base_config = build_context_config(
+        sora_sdk::AdmConfig::NoAudioDevice,
+        None,
+        None,
+        VideoCodecImplementationSelections::Auto,
+    )
+    .expect("Auto 設定は構築できるはずです");
+    let decoders: Vec<&PreferenceCodec> = config
+        .video_codec_preference
+        .codecs()
+        .iter()
+        .filter(|codec| codec.direction() == CodecDirection::Decoder)
+        .collect();
+    let base_decoders: Vec<&PreferenceCodec> = base_config
+        .video_codec_preference
+        .codecs()
+        .iter()
+        .filter(|codec| codec.direction() == CodecDirection::Decoder)
+        .collect();
+    assert_eq!(decoders, base_decoders);
+}
+
+// MP4 使用時に Manual で internal を選んでも、送信 (Encoder) は passthrough に固定されることを確認する。
+#[serial_test::serial]
+#[test]
+fn build_context_config_mp4_manual_internal_encoder_is_passthrough() {
+    let config = build_context_config(
+        sora_sdk::AdmConfig::NoAudioDevice,
+        Some(shiguredo_webrtc::VideoCodecType::H264),
+        None,
+        VideoCodecImplementationSelections::Manual(vec![
+            VideoCodecImplementationSelection::Internal,
+        ]),
+    )
+    .expect("MP4 + internal 設定は構築できるはずです");
+
+    let names = capability_names(&config);
+    assert_eq!(
+        names,
+        vec!["internal".to_string(), "mp4-passthrough".to_string()]
+    );
+    // Encoder 方向は passthrough 1 件のみで、internal の Encoder エントリは残らない。
+    let encoders: Vec<&PreferenceCodec> = config
+        .video_codec_preference
+        .codecs()
+        .iter()
+        .filter(|codec| codec.direction() == CodecDirection::Encoder)
+        .collect();
+    assert_eq!(
+        encoders.len(),
+        1,
+        "Encoder preference は passthrough のみのはずです"
+    );
+    assert_eq!(
+        encoders[0].codec_type(),
+        shiguredo_webrtc::VideoCodecType::H264
+    );
+    assert_eq!(encoders[0].implementation().name(), "mp4-passthrough");
+    // Decoder 方向は MP4 なしの Manual(internal) 構成と同じ実装が維持される。
+    let base_config = build_context_config(
+        sora_sdk::AdmConfig::NoAudioDevice,
+        None,
+        None,
+        VideoCodecImplementationSelections::Manual(vec![
+            VideoCodecImplementationSelection::Internal,
+        ]),
+    )
+    .expect("Manual 設定は構築できるはずです");
+    let decoders: Vec<&PreferenceCodec> = config
+        .video_codec_preference
+        .codecs()
+        .iter()
+        .filter(|codec| codec.direction() == CodecDirection::Decoder)
+        .collect();
+    let base_decoders: Vec<&PreferenceCodec> = base_config
+        .video_codec_preference
+        .codecs()
+        .iter()
+        .filter(|codec| codec.direction() == CodecDirection::Decoder)
+        .collect();
+    assert_eq!(decoders, base_decoders);
 }
 
 #[serial_test::serial]
