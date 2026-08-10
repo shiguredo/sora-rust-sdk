@@ -797,15 +797,6 @@ pub struct Mp4VideoCapturer {
     thread_handle: Option<thread::JoinHandle<()>>,
 }
 
-/// deadline 待機の結果。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WaitResult {
-    /// 停止フラグが設定された。
-    Stopped,
-    /// deadline に到達した。
-    Ready,
-}
-
 /// 停止フラグの確認間隔の上限。
 ///
 /// フレーム間隔の待機をこの時間ずつに分割して `thread::sleep` し、
@@ -816,14 +807,15 @@ const MAX_SLEEP_DURATION: std::time::Duration = std::time::Duration::from_millis
 ///
 /// `thread::sleep` を `MAX_SLEEP_DURATION` ずつに分割して呼び、停止フラグの確認を挟む。
 /// 停止までの最大遅延は `MAX_SLEEP_DURATION` に制限される。
-fn wait_until(stop: &AtomicBool, deadline: std::time::Instant) -> WaitResult {
+/// 停止フラグが設定されたら `true`、deadline に到達したら `false` を返す。
+fn wait_until(stop: &AtomicBool, deadline: std::time::Instant) -> bool {
     loop {
         if stop.load(Ordering::Acquire) {
-            return WaitResult::Stopped;
+            return true;
         }
         let now = std::time::Instant::now();
         if now >= deadline {
-            return WaitResult::Ready;
+            return false;
         }
         thread::sleep((deadline - now).min(MAX_SLEEP_DURATION));
     }
@@ -889,9 +881,9 @@ impl Mp4VideoCapturer {
                             return;
                         }
                     };
-                    match wait_until(&stop_clone, target) {
-                        WaitResult::Stopped => return,
-                        WaitResult::Ready => {}
+                    // 停止フラグが設定されたら feeder thread を終了する。
+                    if wait_until(&stop_clone, target) {
+                        return;
                     }
                 }
 
@@ -1343,25 +1335,25 @@ mod tests {
         }
     }
 
-    // wait_until が、停止フラグ設定済みなら park せずに即座に Stopped を返すことを確認する。
+    // wait_until が、停止フラグ設定済みなら sleep せずに即座に true を返すことを確認する。
     #[test]
     fn wait_until_stops_immediately_when_stop_is_set() {
         let stop = AtomicBool::new(true);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         assert!(
-            matches!(wait_until(&stop, deadline), WaitResult::Stopped),
-            "停止フラグ設定済みなら即座に Stopped を返すべきです"
+            wait_until(&stop, deadline),
+            "停止フラグ設定済みなら即座に true を返すべきです"
         );
     }
 
-    // wait_until が、deadline 到達済みなら park せずに即座に Ready を返すことを確認する。
+    // wait_until が、deadline 到達済みなら sleep せずに即座に false を返すことを確認する。
     #[test]
     fn wait_until_ready_when_deadline_passed() {
         let stop = AtomicBool::new(false);
         let deadline = std::time::Instant::now() - std::time::Duration::from_secs(1);
         assert!(
-            matches!(wait_until(&stop, deadline), WaitResult::Ready),
-            "deadline 到達済みなら即座に Ready を返すべきです"
+            !wait_until(&stop, deadline),
+            "deadline 到達済みなら即座に false を返すべきです"
         );
     }
 
@@ -1391,12 +1383,12 @@ mod tests {
         // stop を設定すると、wait_until は最大 MAX_SLEEP_DURATION の待機後に停止する。
         stop.store(true, Ordering::Release);
 
-        let result = done_rx
+        let stopped = done_rx
             .recv_timeout(MAX_SLEEP_DURATION + std::time::Duration::from_millis(100))
             .expect("待機中のスレッドは停止フラグ設定から 200ms 以内に終了するべきです");
         assert!(
-            matches!(result, WaitResult::Stopped),
-            "stop による停止を期待しましたが、実際は: {result:?}"
+            stopped,
+            "stop による停止 (true) を期待しましたが、実際は: {stopped:?}"
         );
     }
 }
