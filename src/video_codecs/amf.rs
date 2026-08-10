@@ -894,7 +894,7 @@ mod tests {
             test_supported_formats(&[VideoCodecType::H264]),
             test_supported_formats(&[VideoCodecType::H264]),
         )
-        .expect("Failed to create AmfVideoCodecCapability for test");
+        .expect("テスト用の AmfVideoCodecCapability の生成に失敗しました");
         assert_eq!(capability.get_implementation().name(), "amf");
     }
 
@@ -904,7 +904,7 @@ mod tests {
             test_supported_formats(&[VideoCodecType::H264, VideoCodecType::Av1]),
             test_supported_formats(&[VideoCodecType::H264, VideoCodecType::H265]),
         )
-        .expect("Failed to create AmfVideoCodecCapability for test");
+        .expect("テスト用の AmfVideoCodecCapability の生成に失敗しました");
 
         assert!(capability.is_supported(CodecDirection::Encoder, VideoCodecType::H264));
         assert!(capability.is_supported(CodecDirection::Decoder, VideoCodecType::H264));
@@ -932,7 +932,7 @@ mod tests {
                 CodecDirection::Encoder,
                 SdpVideoFormat::new("H264").as_ref(),
             )
-            .expect("h264 format should be resolved");
+            .expect("h264 フォーマットが解決されるはずです");
         let params = resolved
             .to_owned()
             .parameters_mut()
@@ -954,13 +954,13 @@ mod tests {
             test_supported_formats(&[VideoCodecType::H264]),
             test_supported_formats(&[VideoCodecType::H264]),
         )
-        .expect("Failed to create AmfVideoCodecCapability for test");
+        .expect("テスト用の AmfVideoCodecCapability の生成に失敗しました");
 
         let env = Environment::new();
         let format = SdpVideoFormat::new("H264");
         let encoder = capability
             .create_video_encoder(env.as_ref(), format.as_ref())
-            .expect("encoder must be created for supported format");
+            .expect("サポートされているフォーマットでエンコーダーが生成されなければなりません");
         let info = encoder.get_encoder_info();
         let implementation_name = info
             .implementation_name()

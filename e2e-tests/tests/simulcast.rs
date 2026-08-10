@@ -169,7 +169,9 @@ async fn test_sendonly_simulcast_outbound_layers() {
 async fn test_sendonly_simulcast_outbound_layers_openh264() {
     load_env();
     let Some(path) = openh264_path() else {
-        eprintln!("OPENH264_PATH is not set, skipping OpenH264 non-builtin simulcast failure test");
+        eprintln!(
+            "OPENH264_PATH が設定されていないため OpenH264 の組み込み以外の simulcast 失敗テストをスキップします"
+        );
         return;
     };
     let capability: Box<dyn VideoCodecCapability> = Box::new(
@@ -191,8 +193,8 @@ async fn test_sendonly_simulcast_outbound_layers_openh264() {
 #[serial]
 async fn test_sendonly_simulcast_outbound_layers_nvcodec() {
     load_env();
-    let capability =
-        NvCodecVideoCodecCapability::new().expect("Failed to create NvCodecVideoCodecCapability");
+    let capability = NvCodecVideoCodecCapability::new()
+        .expect("NvCodecVideoCodecCapability の生成に失敗しました");
     let capability: Box<dyn VideoCodecCapability> = Box::new(capability);
     let context = create_non_builtin_context(capability).expect("コンテキスト作成失敗");
     run_sendonly_simulcast_outbound_layers(
@@ -212,7 +214,9 @@ async fn test_sendonly_simulcast_outbound_layers_v4l2() {
     let capability = match V4l2VideoCodecCapability::new() {
         Ok(capability) => capability,
         Err(err) => {
-            eprintln!("V4L2 capability is not available, skipping simulcast test: {err}");
+            eprintln!(
+                "V4L2 の capability を利用できないため simulcast テストをスキップします: {err}"
+            );
             return;
         }
     };
@@ -233,7 +237,7 @@ fn amf_simulcast_supported_codecs() -> Option<Vec<VideoCodecType>> {
     let capability = match AmfVideoCodecCapability::new() {
         Ok(capability) => capability,
         Err(err) => {
-            eprintln!("AMF capability is not available, skipping test: {err}");
+            eprintln!("AMF の capability を利用できないためテストをスキップします: {err}");
             return None;
         }
     };
@@ -249,7 +253,7 @@ fn amf_simulcast_supported_codecs() -> Option<Vec<VideoCodecType>> {
         }
     }
     if codec_types.is_empty() {
-        eprintln!("AMF has no encoder support, skipping simulcast test");
+        eprintln!("AMF にエンコーダーサポートがないため simulcast テストをスキップします");
         return None;
     }
 
@@ -301,7 +305,9 @@ fn vpl_simulcast_supported_codecs() -> Option<Vec<VideoCodecType>> {
     let capability = match VplVideoCodecCapability::new() {
         Ok(capability) => capability,
         Err(err) => {
-            eprintln!("VPL capability is not available, skipping simulcast test: {err}");
+            eprintln!(
+                "VPL の capability を利用できないため simulcast テストをスキップします: {err}"
+            );
             return None;
         }
     };
@@ -318,7 +324,7 @@ fn vpl_simulcast_supported_codecs() -> Option<Vec<VideoCodecType>> {
         }
     }
     if codec_types.is_empty() {
-        eprintln!("VPL has no encoder support, skipping simulcast test");
+        eprintln!("VPL にエンコーダーサポートがないため simulcast テストをスキップします");
         return None;
     }
 
@@ -375,7 +381,7 @@ async fn test_sendonly_simulcast_outbound_layers_vpl() {
 async fn test_sendonly_simulcast_outbound_layers_internal_apple() {
     load_env();
     let Some(capability) = InternalAppleVideoCodecCapability::new() else {
-        eprintln!("InternalAppleVideoCodecCapability is not available, skipping test");
+        eprintln!("InternalAppleVideoCodecCapability を利用できないためテストをスキップします");
         return;
     };
     let capability: Box<dyn VideoCodecCapability> = Box::new(capability);

@@ -43,7 +43,7 @@ fn video_setting(codec_type: VideoCodecType) -> Video {
         VideoCodecType::H264 => Video::new_h264(None, None),
         VideoCodecType::H265 => Video::new_h265(None, None),
         VideoCodecType::Av1 => Video::new_av1(None, None),
-        _ => panic!("unsupported codec type"),
+        _ => panic!("未対応のコーデック種別です"),
     }
 }
 
@@ -64,7 +64,7 @@ fn amf_fully_supported_codecs() -> Option<Vec<VideoCodecType>> {
     let capability = match AmfVideoCodecCapability::new() {
         Ok(capability) => capability,
         Err(err) => {
-            eprintln!("AMF capability is not available, skipping test: {err}");
+            eprintln!("AMF の capability を利用できないためテストをスキップします: {err}");
             return None;
         }
     };
@@ -82,7 +82,9 @@ fn amf_fully_supported_codecs() -> Option<Vec<VideoCodecType>> {
         }
     }
     if codecs.is_empty() {
-        eprintln!("AMF has no codec with both encoder and decoder support, skipping test");
+        eprintln!(
+            "AMF にエンコーダーとデコーダーの両方をサポートするコーデックがないためテストをスキップします"
+        );
         return None;
     }
 
@@ -90,18 +92,18 @@ fn amf_fully_supported_codecs() -> Option<Vec<VideoCodecType>> {
 }
 
 async fn run_sendonly_recvonly_with_codec(codec_type: VideoCodecType) {
-    let urls = signaling_urls().expect("TEST_SIGNALING_URLS is required");
+    let urls = signaling_urls().expect("TEST_SIGNALING_URLS が必須です");
     let channel_id = test_channel_id(&format!(
         "amf-{}-sendonly-recvonly",
         codec_label(codec_type)
     ));
     let expected_mime_type = codec_mime_type(codec_type);
 
-    let sendonly_context = create_amf_context().expect("failed to create sendonly context");
+    let sendonly_context = create_amf_context().expect("sendonly のコンテキスト生成に失敗しました");
     let mut capturer = FakeVideoCapturer::new(FakeVideoCapturerConfig::default())
-        .expect("failed to create FakeVideoCapturer");
-    let (video_track, audio_track) =
-        build_sender_tracks(&sendonly_context, &mut capturer).expect("failed to build tracks");
+        .expect("FakeVideoCapturer の生成に失敗しました");
+    let (video_track, audio_track) = build_sender_tracks(&sendonly_context, &mut capturer)
+        .expect("トラックの生成に失敗しました");
 
     let mut sendonly_builder = SoraTestConnection::builder(
         sendonly_context,
@@ -120,14 +122,14 @@ async fn run_sendonly_recvonly_with_codec(codec_type: VideoCodecType) {
 
     let mut sendonly = sendonly_builder
         .connect()
-        .expect("failed to build sendonly client");
+        .expect("sendonly クライアントの構築に失敗しました");
 
     sendonly
         .wait_for_connect(Duration::from_secs(10))
         .await
-        .expect("sendonly connection timed out");
+        .expect("sendonly の接続がタイムアウトしました");
 
-    let recvonly_context = create_amf_context().expect("failed to create recvonly context");
+    let recvonly_context = create_amf_context().expect("recvonly のコンテキスト生成に失敗しました");
     let mut recvonly_builder =
         SoraTestConnection::builder(recvonly_context, urls, channel_id, Role::RecvOnly)
             .data_channel_signaling(true);
@@ -138,16 +140,16 @@ async fn run_sendonly_recvonly_with_codec(codec_type: VideoCodecType) {
 
     let mut recvonly = recvonly_builder
         .connect()
-        .expect("failed to build recvonly client");
+        .expect("recvonly クライアントの構築に失敗しました");
 
     recvonly
         .wait_for_connect(Duration::from_secs(10))
         .await
-        .expect("recvonly connection timed out");
+        .expect("recvonly の接続がタイムアウトしました");
     recvonly
         .wait_for_video_track(Duration::from_secs(10))
         .await
-        .expect("recvonly did not receive tracks");
+        .expect("recvonly がトラックを受信しませんでした");
 
     sendonly
         .wait_stats(
@@ -158,7 +160,7 @@ async fn run_sendonly_recvonly_with_codec(codec_type: VideoCodecType) {
             Duration::from_secs(15),
         )
         .await
-        .expect("sendonly stats did not reach expected values");
+        .expect("sendonly の統計情報が期待した値に達しませんでした");
     recvonly
         .wait_stats(
             |stats| {
@@ -169,28 +171,28 @@ async fn run_sendonly_recvonly_with_codec(codec_type: VideoCodecType) {
             Duration::from_secs(15),
         )
         .await
-        .expect("recvonly stats did not reach expected values");
+        .expect("recvonly の統計情報が期待した値に達しませんでした");
 
     sendonly
         .disconnect_and_wait(Duration::from_secs(10))
         .await
-        .expect("failed to disconnect sendonly");
+        .expect("sendonly の切断に失敗しました");
     recvonly
         .disconnect_and_wait(Duration::from_secs(10))
         .await
-        .expect("failed to disconnect recvonly");
+        .expect("recvonly の切断に失敗しました");
 }
 
 async fn run_sendrecv_with_codec(codec_type: VideoCodecType) {
-    let urls = signaling_urls().expect("TEST_SIGNALING_URLS is required");
+    let urls = signaling_urls().expect("TEST_SIGNALING_URLS が必須です");
     let channel_id = test_channel_id(&format!("amf-{}-sendrecv", codec_label(codec_type)));
     let expected_mime_type = codec_mime_type(codec_type);
 
-    let context1 = create_amf_context().expect("failed to create client1 context");
+    let context1 = create_amf_context().expect("client1 のコンテキスト生成に失敗しました");
     let mut capturer1 = FakeVideoCapturer::new(FakeVideoCapturerConfig::default())
-        .expect("failed to create FakeVideoCapturer for client1");
-    let (video_track1, audio_track1) =
-        build_sender_tracks(&context1, &mut capturer1).expect("failed to build client1 tracks");
+        .expect("client1 の FakeVideoCapturer 生成に失敗しました");
+    let (video_track1, audio_track1) = build_sender_tracks(&context1, &mut capturer1)
+        .expect("client1 のトラック生成に失敗しました");
 
     let mut builder1 =
         SoraTestConnection::builder(context1, urls.clone(), channel_id.clone(), Role::SendRecv)
@@ -203,18 +205,18 @@ async fn run_sendrecv_with_codec(codec_type: VideoCodecType) {
         builder1 = builder1.metadata(build_metadata_with_access_token(&token));
     }
 
-    let mut client1 = builder1.connect().expect("failed to build client1");
+    let mut client1 = builder1.connect().expect("client1 の構築に失敗しました");
 
     client1
         .wait_for_connect(Duration::from_secs(10))
         .await
-        .expect("client1 connection timed out");
+        .expect("client1 の接続がタイムアウトしました");
 
-    let context2 = create_amf_context().expect("failed to create client2 context");
+    let context2 = create_amf_context().expect("client2 のコンテキスト生成に失敗しました");
     let mut capturer2 = FakeVideoCapturer::new(FakeVideoCapturerConfig::default())
-        .expect("failed to create FakeVideoCapturer for client2");
-    let (video_track2, audio_track2) =
-        build_sender_tracks(&context2, &mut capturer2).expect("failed to build client2 tracks");
+        .expect("client2 の FakeVideoCapturer 生成に失敗しました");
+    let (video_track2, audio_track2) = build_sender_tracks(&context2, &mut capturer2)
+        .expect("client2 のトラック生成に失敗しました");
 
     let mut builder2 = SoraTestConnection::builder(context2, urls, channel_id, Role::SendRecv)
         .sender_video_track(video_track2)
@@ -226,20 +228,20 @@ async fn run_sendrecv_with_codec(codec_type: VideoCodecType) {
         builder2 = builder2.metadata(build_metadata_with_access_token(&token));
     }
 
-    let mut client2 = builder2.connect().expect("failed to build client2");
+    let mut client2 = builder2.connect().expect("client2 の構築に失敗しました");
 
     client2
         .wait_for_connect(Duration::from_secs(10))
         .await
-        .expect("client2 connection timed out");
+        .expect("client2 の接続がタイムアウトしました");
     client1
         .wait_for_video_track(Duration::from_secs(10))
         .await
-        .expect("client1 did not receive tracks");
+        .expect("client1 がトラックを受信しませんでした");
     client2
         .wait_for_video_track(Duration::from_secs(10))
         .await
-        .expect("client2 did not receive tracks");
+        .expect("client2 がトラックを受信しませんでした");
 
     client1
         .wait_stats(
@@ -253,7 +255,7 @@ async fn run_sendrecv_with_codec(codec_type: VideoCodecType) {
             Duration::from_secs(15),
         )
         .await
-        .expect("client1 stats did not reach expected values");
+        .expect("client1 の統計情報が期待した値に達しませんでした");
     client2
         .wait_stats(
             |stats| {
@@ -266,16 +268,16 @@ async fn run_sendrecv_with_codec(codec_type: VideoCodecType) {
             Duration::from_secs(15),
         )
         .await
-        .expect("client2 stats did not reach expected values");
+        .expect("client2 の統計情報が期待した値に達しませんでした");
 
     client1
         .disconnect_and_wait(Duration::from_secs(10))
         .await
-        .expect("failed to disconnect client1");
+        .expect("client1 の切断に失敗しました");
     client2
         .disconnect_and_wait(Duration::from_secs(10))
         .await
-        .expect("failed to disconnect client2");
+        .expect("client2 の切断に失敗しました");
 }
 
 #[tokio::test]

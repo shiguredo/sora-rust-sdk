@@ -802,7 +802,7 @@ mod tests {
             test_supported_formats(&[VideoCodecType::H264]),
             test_supported_formats(&[VideoCodecType::H264]),
         )
-        .expect("Failed to create NvCodecVideoCodecCapability for test");
+        .expect("テスト用の NvCodecVideoCodecCapability の生成に失敗しました");
         assert_eq!(capability.get_implementation().name(), "nvcodec");
     }
 
@@ -845,7 +845,7 @@ mod tests {
             test_supported_formats(&[VideoCodecType::H264]),
             7,
         )
-        .expect("Failed to create NvCodecVideoCodecCapability for test");
+        .expect("テスト用の NvCodecVideoCodecCapability の生成に失敗しました");
         assert_eq!(capability.device_id, 7);
     }
 
@@ -865,7 +865,7 @@ mod tests {
                 VideoCodecType::Vp9,
             ]),
         )
-        .expect("Failed to create NvCodecVideoCodecCapability for test");
+        .expect("テスト用の NvCodecVideoCodecCapability の生成に失敗しました");
 
         assert!(capability.is_supported(CodecDirection::Encoder, VideoCodecType::H264));
         assert!(capability.is_supported(CodecDirection::Encoder, VideoCodecType::H265));
@@ -898,7 +898,7 @@ mod tests {
                 CodecDirection::Encoder,
                 SdpVideoFormat::new("H264").as_ref(),
             )
-            .expect("h264 format should be resolved");
+            .expect("h264 フォーマットが解決されるはずです");
         let params = resolved
             .to_owned()
             .parameters_mut()
@@ -931,12 +931,12 @@ mod tests {
             test_supported_formats(&[VideoCodecType::H264]),
             test_supported_formats(&[VideoCodecType::H264]),
         )
-        .expect("Failed to create NvCodecVideoCodecCapability for test");
+        .expect("テスト用の NvCodecVideoCodecCapability の生成に失敗しました");
         let env = Environment::new();
         let format = SdpVideoFormat::new("H264");
         let encoder = capability
             .create_video_encoder(env.as_ref(), format.as_ref())
-            .expect("encoder must be created for supported format");
+            .expect("サポートされているフォーマットでエンコーダーが生成されなければなりません");
         let info = encoder.get_encoder_info();
         let implementation_name = info
             .implementation_name()

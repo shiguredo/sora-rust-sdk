@@ -75,22 +75,22 @@ async fn test_sendonly_recvonly_with_libcamera() {
     sendonly
         .wait_for_connect(Duration::from_secs(10))
         .await
-        .expect("sendonly connection timed out");
+        .expect("sendonly の接続がタイムアウトしました");
     recvonly
         .wait_for_connect(Duration::from_secs(10))
         .await
-        .expect("recvonly connection timed out");
+        .expect("recvonly の接続がタイムアウトしました");
     recvonly
         .wait_for_video_track(Duration::from_secs(10))
         .await
-        .expect("recvonly did not receive video track");
+        .expect("recvonly が映像トラックを受信しませんでした");
     sendonly
         .wait_stats(
             |stats| verify_video_stats_field_positive(stats, "outbound-rtp", "packetsSent"),
             Duration::from_secs(15),
         )
         .await
-        .expect("sendonly stats did not reach expected values within timeout");
+        .expect("sendonly の統計情報がタイムアウト内に期待した値に達しませんでした");
     recvonly
         .wait_stats(
             |stats| {
@@ -100,7 +100,7 @@ async fn test_sendonly_recvonly_with_libcamera() {
             Duration::from_secs(15),
         )
         .await
-        .expect("recvonly stats did not reach expected values within timeout");
+        .expect("recvonly の統計情報がタイムアウト内に期待した値に達しませんでした");
 
     let _ = sendonly.disconnect_and_wait(Duration::from_secs(10)).await;
     let _ = recvonly.disconnect_and_wait(Duration::from_secs(10)).await;

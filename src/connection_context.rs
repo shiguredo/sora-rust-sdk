@@ -248,11 +248,11 @@ mod tests {
                 let preference = config
                     .video_codec_preference
                     .find(direction, codec_type)
-                    .expect("preference entry must exist");
+                    .expect("preference エントリは必ず存在する");
                 assert_eq!(
                     preference.implementation(),
                     &internal_apple_implementation,
-                    "internal-apple must be preferred for {direction:?} {codec_type:?}",
+                    "internal-apple が {direction:?} {codec_type:?} で優先されなければなりません",
                 );
             }
         }

@@ -1121,14 +1121,14 @@ mod tests {
     #[test]
     fn v4l2_capability_has_expected_implementation_name() {
         let capability =
-            V4l2VideoCodecCapability::new_for_test().expect("failed to create V4L2 capability");
+            V4l2VideoCodecCapability::new_for_test().expect("V4L2 capability の生成に失敗しました");
         assert_eq!(capability.get_implementation().name(), "v4l2");
     }
 
     #[test]
     fn v4l2_capability_supports_only_h264() {
         let capability =
-            V4l2VideoCodecCapability::new_for_test().expect("failed to create V4L2 capability");
+            V4l2VideoCodecCapability::new_for_test().expect("V4L2 capability の生成に失敗しました");
 
         assert!(capability.is_supported(CodecDirection::Encoder, VideoCodecType::H264));
         assert!(capability.is_supported(CodecDirection::Decoder, VideoCodecType::H264));
@@ -1140,7 +1140,7 @@ mod tests {
                 CodecDirection::Encoder,
                 SdpVideoFormat::new("H264").as_ref(),
             )
-            .expect("h264 format should be resolved");
+            .expect("h264 フォーマットが解決されるはずです");
         let params = resolved
             .to_owned()
             .parameters_mut()
@@ -1172,12 +1172,12 @@ mod tests {
     #[test]
     fn v4l2_create_video_encoder_uses_simulcast_adapter() {
         let capability =
-            V4l2VideoCodecCapability::new_for_test().expect("failed to create V4L2 capability");
+            V4l2VideoCodecCapability::new_for_test().expect("V4L2 capability の生成に失敗しました");
         let env = Environment::new();
         let format = SdpVideoFormat::new("H264");
         let encoder = capability
             .create_video_encoder(env.as_ref(), format.as_ref())
-            .expect("encoder must be created for supported format");
+            .expect("サポートされているフォーマットでエンコーダーが生成されなければなりません");
         let info = encoder.get_encoder_info();
         let implementation_name = info
             .implementation_name()
