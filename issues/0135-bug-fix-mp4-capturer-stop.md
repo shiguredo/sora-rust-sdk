@@ -4,7 +4,7 @@
 - Created: 2026-08-10
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-mp4-capturer-stop
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-08-10
 
 ## 目的
 
@@ -28,13 +28,20 @@ closed issue 0048 は通常の 30 fps なら停止待ちが約 1 frame 分であ
 - deadline の計算は `checked_add` で行い、オーバーフローした場合は panic や飽和を避け、英語の production log を残して feeder thread を正常停止する
 - `Drop` の応答性を sample duration の値に依存させない
 
+## 実装状況
+
+capturer 停止の実装は、`feature/fix-mp4-arithmetic` ブランチに含まれている。
+具体的には `wait_until` helper、`WaitResult` enum、`Drop` の `unpark`、deadline の `checked_add`、テスト 4 件 (`wait_until_stops_immediately_when_stop_is_set` / `wait_until_ready_when_deadline_passed` / `wait_until_interrupted_by_unpark` / `wait_until_rechecks_deadline_after_spurious_wakeup`) が実装済みである。
+0098 のマージ後、capturer 停止部分を本 issue のブランチ (`feature/fix-mp4-capturer-stop`) へ分離して PR を出す。
+
 ## 完了条件
 
 - feeder thread の待機を stop signal で中断でき、`Drop` が sample duration の残り時間だけ停止しない
 - stop flag 設定済みなら park せずに即座に停止する
 - unpark だけでは deadline 前に送信継続を返さない（loop で deadline と stop flag を再評価する）
-- 実 thread と channel barrier を使うテストで、park 中の wait が stop + unpark により終了し、`recv_timeout` まで `join` を停止させないことを確認する
+- 実 thread と `std::sync::Barrier`、mpsc channel を使うテストで、park 中の wait が stop + unpark により終了し、終了通知を `recv_timeout` で受け取れることを確認する（`join` のブロック時間は計測しない）
 - mock / stub、`thread::sleep` は使わず、`Drop` と同じ stop / unpark / join 順序でテストする
+- 検証は 0098 マージ後に分離した本 issue のブランチ上で行う
 - `cargo test --workspace` が成功する
 - `cargo clippy --workspace --all-targets -- -D warnings` が成功する
 - `CHANGES.md` の develop セクションに `[FIX]` を追記する
