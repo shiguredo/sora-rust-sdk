@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-07-29
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-11
 - Model: GPT-5
 - Branch: feature/fix-sumomo-mp4-codec-config
 - Polished: 2026-08-07
@@ -115,3 +115,13 @@ codec 決定の helper、`build_context_config` の呼び出し側、既存の `
 - `cargo clippy -p sumomo --features raw-player --all-targets -- -D warnings` が成功する
 - `CHANGES.md` の develop セクションへ `[FIX]` と担当者 `@voluntas` を追記する
 - production log は英語、コメントとテストの assertion message は日本語にする
+
+## 解決方法
+
+- `parse_args` に `--input-mp4` と `--video-codec-implementation`（`auto` を含む明示指定）の併用拒否を追加した
+- `parse_args` に `--input-mp4` と `--video-codec-type` の併用拒否を追加した
+- `build_context_config` を、MP4 使用時は passthrough capability のみを追加して他の codec 実装を追加しない実装に変更した
+- `apply_video_options` に `mp4_codec_type` を渡し、MP4 使用時は実 codec をシグナリングの `video` フィールドへ明示するようにした
+- `apply_common_builder_options` を `build_connection_builder` にインライン化した
+- `docs/INPUT_MP4.md` から `--video-codec-type` を使う例を削除し、codec 自動検出と併用不可を明記した
+- `--input-mp4` と `--video-codec-implementation` / `--video-codec-type` の併用拒否、MP4 使用時に passthrough のみが選ばれることのテストを追加した
