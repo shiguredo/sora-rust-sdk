@@ -547,7 +547,7 @@ mod tests {
             + for<'text, 'raw> TryFrom<RawJsonValue<'text, 'raw>, Error = JsonParseError>,
     {
         let json_text = Json(&value).to_string();
-        let parsed: Json<T> = json_text.parse().expect("failed to parse JSON");
+        let parsed: Json<T> = json_text.parse().expect("JSON のパースに失敗しました");
         assert_eq!(parsed.0, value);
     }
 
@@ -579,7 +579,8 @@ mod tests {
             ],
             "unknown":"ignored"
         }"#;
-        let parsed: Json<VideoCodecPreference> = json.parse().expect("failed to parse preference");
+        let parsed: Json<VideoCodecPreference> =
+            json.parse().expect("preference のパースに失敗しました");
         assert_eq!(parsed.0.codecs().len(), 1);
     }
 
@@ -637,13 +638,13 @@ mod tests {
             ),
         ]);
         let capabilities = sample_capabilities();
-        let error =
-            validate_video_codec_preference(&preference, &capabilities).expect_err("must fail");
+        let error = validate_video_codec_preference(&preference, &capabilities)
+            .expect_err("失敗する必要があります");
         match error {
             Error::InvalidVideoCodecPreference { reason } => {
                 assert_eq!(reason, "duplicate H264 encoder");
             }
-            other => panic!("unexpected error: {other:?}"),
+            other => panic!("予期しないエラー: {other:?}"),
         }
     }
 
@@ -662,13 +663,13 @@ mod tests {
             ),
         ]);
         let capabilities = sample_capabilities();
-        let error =
-            validate_video_codec_preference(&preference, &capabilities).expect_err("must fail");
+        let error = validate_video_codec_preference(&preference, &capabilities)
+            .expect_err("失敗する必要があります");
         match error {
             Error::InvalidVideoCodecPreference { reason } => {
                 assert!(reason.contains("encoder implementation not found"));
             }
-            other => panic!("unexpected error: {other:?}"),
+            other => panic!("予期しないエラー: {other:?}"),
         }
     }
 
@@ -680,13 +681,13 @@ mod tests {
             VideoCodecImplementation::new("nvcodec", "NVIDIA NVENC/NVDEC"),
         )]);
         let capabilities = sample_capabilities();
-        let error =
-            validate_video_codec_preference(&preference, &capabilities).expect_err("must fail");
+        let error = validate_video_codec_preference(&preference, &capabilities)
+            .expect_err("失敗する必要があります");
         match error {
             Error::InvalidVideoCodecPreference { reason } => {
                 assert!(reason.contains("codec type not found"));
             }
-            other => panic!("unexpected error: {other:?}"),
+            other => panic!("予期しないエラー: {other:?}"),
         }
     }
 
@@ -705,13 +706,13 @@ mod tests {
             ),
         ]);
         let capabilities = sample_capabilities();
-        let error =
-            validate_video_codec_preference(&preference, &capabilities).expect_err("must fail");
+        let error = validate_video_codec_preference(&preference, &capabilities)
+            .expect_err("失敗する必要があります");
         match error {
             Error::InvalidVideoCodecPreference { reason } => {
                 assert!(reason.contains("encoder not supported"));
             }
-            other => panic!("unexpected error: {other:?}"),
+            other => panic!("予期しないエラー: {other:?}"),
         }
     }
 
@@ -730,13 +731,13 @@ mod tests {
                 vec![VideoCodecType::Vp8],
             )),
         ];
-        let error =
-            validate_video_codec_preference(&preference, &capabilities).expect_err("must fail");
+        let error = validate_video_codec_preference(&preference, &capabilities)
+            .expect_err("失敗する必要があります");
         match error {
             Error::InvalidVideoCodecCapability { reason } => {
                 assert!(reason.contains("duplicate implementation in capabilities"));
             }
-            other => panic!("unexpected error: {other:?}"),
+            other => panic!("予期しないエラー: {other:?}"),
         }
     }
 
@@ -755,13 +756,13 @@ mod tests {
             ),
         ]);
         let capabilities = sample_capabilities();
-        let error =
-            validate_video_codec_preference(&preference, &capabilities).expect_err("must fail");
+        let error = validate_video_codec_preference(&preference, &capabilities)
+            .expect_err("失敗する必要があります");
         match error {
             Error::InvalidVideoCodecPreference { reason } => {
                 assert_eq!(reason, "duplicate H264 encoder");
             }
-            other => panic!("unexpected error: {other:?}"),
+            other => panic!("予期しないエラー: {other:?}"),
         }
     }
 
@@ -797,11 +798,11 @@ mod tests {
         preference.merge(&merged);
         let h264_encoder = preference
             .find(CodecDirection::Encoder, VideoCodecType::H264)
-            .expect("h264 encoder must exist after merge");
+            .expect("マージ後に h264 エンコーダーが存在する必要があります");
         assert_eq!(h264_encoder.implementation().name(), "vpl");
         let h264_decoder = preference
             .find(CodecDirection::Decoder, VideoCodecType::H264)
-            .expect("h264 decoder must exist after merge");
+            .expect("マージ後に h264 デコーダーが存在する必要があります");
         assert_eq!(h264_decoder.implementation().name(), "nvcodec");
     }
 }

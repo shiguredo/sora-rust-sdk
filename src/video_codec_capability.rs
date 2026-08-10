@@ -229,7 +229,7 @@ mod tests {
         let value = VideoCodecImplementation::new("nvcodec", "NVIDIA NVENC/NVDEC");
         let json_text = Json(&value).to_string();
         let parsed: Json<VideoCodecImplementation> =
-            json_text.parse().expect("failed to parse JSON");
+            json_text.parse().expect("JSON のパースに失敗しました");
         assert_eq!(parsed.0, value);
     }
 

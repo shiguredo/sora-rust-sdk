@@ -979,18 +979,22 @@ mod tests {
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time should be after UNIX_EPOCH")
+                .expect("システム時刻は UNIX_EPOCH より後である必要があります")
                 .as_nanos()
         );
         let tmp_path = std::env::temp_dir().join(tmp_name);
 
-        std::fs::write(&tmp_path, fixture).expect("failed to write temporary fixture");
+        std::fs::write(&tmp_path, fixture).expect("一時フィクスチャの書き込みに失敗しました");
 
-        let reader = Mp4SampleReader::new(tmp_path.to_str().expect("path should be valid utf-8"));
+        let reader = Mp4SampleReader::new(
+            tmp_path
+                .to_str()
+                .expect("パスは有効な UTF-8 である必要があります"),
+        );
 
         let _ = std::fs::remove_file(&tmp_path);
 
-        let reader = reader.expect("failed to parse fixture MP4");
+        let reader = reader.expect("フィクスチャ MP4 のパースに失敗しました");
         assert_eq!(reader.codec_type(), VideoCodecType::H264);
         assert!(!reader.is_empty());
         let sample = reader.get_sample(0);
@@ -1034,7 +1038,7 @@ mod tests {
         // フィクスチャ差し替え時にオフセットがズレていないことを確認する。
         assert_eq!(
             patched[0x6ea], 0xFF,
-            "fixture's lengthSizeMinusOne byte has moved"
+            "フィクスチャの lengthSizeMinusOne バイトが移動しています"
         );
         patched[0x6ea] = 0xFE;
 
@@ -1043,14 +1047,18 @@ mod tests {
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time should be after UNIX_EPOCH")
+                .expect("システム時刻は UNIX_EPOCH より後である必要があります")
                 .as_nanos()
         );
         let tmp_path = std::env::temp_dir().join(tmp_name);
 
-        std::fs::write(&tmp_path, &patched).expect("failed to write temporary fixture");
+        std::fs::write(&tmp_path, &patched).expect("一時フィクスチャの書き込みに失敗しました");
 
-        let result = Mp4SampleReader::new(tmp_path.to_str().expect("path should be valid utf-8"));
+        let result = Mp4SampleReader::new(
+            tmp_path
+                .to_str()
+                .expect("パスは有効な UTF-8 である必要があります"),
+        );
 
         let _ = std::fs::remove_file(&tmp_path);
 
@@ -1058,11 +1066,11 @@ mod tests {
             Err(crate::error::Error::Mp4 { source }) => {
                 assert!(
                     matches!(source, Mp4Error::InvalidNalLengthSize(_)),
-                    "expected InvalidNalLengthSize error, got: {source:?}"
+                    "InvalidNalLengthSize エラーを期待しましたが、実際は: {source:?}"
                 );
             }
-            Err(e) => panic!("expected Mp4 error, got: {e}"),
-            Ok(_) => panic!("expected Err, got Ok"),
+            Err(e) => panic!("Mp4 エラーを期待しましたが、実際は: {e}"),
+            Ok(_) => panic!("Err を期待しましたが、Ok でした"),
         }
     }
 
@@ -1078,14 +1086,18 @@ mod tests {
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time should be after UNIX_EPOCH")
+                .expect("システム時刻は UNIX_EPOCH より後である必要があります")
                 .as_nanos()
         );
         let tmp_path = std::env::temp_dir().join(tmp_name);
 
-        std::fs::write(&tmp_path, truncated).expect("failed to write temporary fixture");
+        std::fs::write(&tmp_path, truncated).expect("一時フィクスチャの書き込みに失敗しました");
 
-        let result = Mp4SampleReader::new(tmp_path.to_str().expect("path should be valid utf-8"));
+        let result = Mp4SampleReader::new(
+            tmp_path
+                .to_str()
+                .expect("パスは有効な UTF-8 である必要があります"),
+        );
 
         let _ = std::fs::remove_file(&tmp_path);
 
@@ -1112,14 +1124,18 @@ mod tests {
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time should be after UNIX_EPOCH")
+                .expect("システム時刻は UNIX_EPOCH より後である必要があります")
                 .as_nanos()
         );
         let tmp_path = std::env::temp_dir().join(tmp_name);
 
-        std::fs::write(&tmp_path, &patched).expect("failed to write temporary fixture");
+        std::fs::write(&tmp_path, &patched).expect("一時フィクスチャの書き込みに失敗しました");
 
-        let result = Mp4SampleReader::new(tmp_path.to_str().expect("path should be valid utf-8"));
+        let result = Mp4SampleReader::new(
+            tmp_path
+                .to_str()
+                .expect("パスは有効な UTF-8 である必要があります"),
+        );
 
         let _ = std::fs::remove_file(&tmp_path);
 

@@ -270,7 +270,7 @@ impl ProxyHarness {
                                 | Some(io::ErrorKind::ConnectionAborted)
                         )
                     {
-                        eprintln!("proxy connection error: {err}");
+                        eprintln!("proxy 接続エラー: {err}");
                     }
                     active_connection_count.fetch_sub(1, Ordering::SeqCst);
                 });

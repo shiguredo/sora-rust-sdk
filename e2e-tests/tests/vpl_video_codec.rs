@@ -46,7 +46,7 @@ fn video_setting(codec_type: VideoCodecType) -> Video {
         VideoCodecType::H265 => Video::new_h265(None, None),
         VideoCodecType::Vp9 => Video::new_vp9(None, None),
         VideoCodecType::Av1 => Video::new_av1(None, None),
-        _ => panic!("unsupported codec type"),
+        _ => panic!("未対応のコーデック種別です"),
     }
 }
 
@@ -67,7 +67,7 @@ fn vpl_capability() -> Option<VplVideoCodecCapability> {
     match VplVideoCodecCapability::new() {
         Ok(capability) => Some(capability),
         Err(err) => {
-            eprintln!("VPL capability is not available, skipping test: {err}");
+            eprintln!("VPL の capability を利用できないためテストをスキップします: {err}");
             None
         }
     }
@@ -90,7 +90,9 @@ fn vpl_fully_supported_codecs() -> Option<Vec<VideoCodecType>> {
     }
 
     if codecs.is_empty() {
-        eprintln!("VPL has no codec with both encoder and decoder support, skipping test");
+        eprintln!(
+            "VPL にエンコーダーとデコーダーの両方をサポートするコーデックがないためテストをスキップします"
+        );
         return None;
     }
 
@@ -114,7 +116,7 @@ fn vpl_decoder_supported_only_codecs() -> Option<Vec<VideoCodecType>> {
     }
 
     if codecs.is_empty() {
-        eprintln!("VPL has no decoder-only codec, skipping test");
+        eprintln!("VPL にデコーダーのみサポートするコーデックがないためテストをスキップします");
         return None;
     }
 
@@ -138,7 +140,7 @@ fn vpl_encoder_supported_only_codecs() -> Option<Vec<VideoCodecType>> {
     }
 
     if codecs.is_empty() {
-        eprintln!("VPL has no encoder-only codec, skipping test");
+        eprintln!("VPL にエンコーダーのみサポートするコーデックがないためテストをスキップします");
         return None;
     }
 
@@ -167,15 +169,15 @@ async fn run_sendonly_recvonly_with_contexts(
     codec_type: VideoCodecType,
     suffix_prefix: &str,
 ) -> std::result::Result<(), String> {
-    let urls = signaling_urls().expect("TEST_SIGNALING_URLS is required");
+    let urls = signaling_urls().expect("TEST_SIGNALING_URLS が必須です");
     let codec_label = codec_label(codec_type);
     let expected_mime_type = codec_mime_type(codec_type);
     let channel_id = test_channel_id(&format!("{suffix_prefix}-{codec_label}-sendonly-recvonly"));
 
     let mut capturer = FakeVideoCapturer::new(FakeVideoCapturerConfig::default())
-        .map_err(|e| format!("failed to create FakeVideoCapturer: {e}"))?;
+        .map_err(|e| format!("FakeVideoCapturer の生成に失敗しました: {e}"))?;
     let (video_track, audio_track) = build_sender_tracks(&sendonly_context, &mut capturer)
-        .map_err(|e| format!("failed to build tracks: {e}"))?;
+        .map_err(|e| format!("トラックの生成に失敗しました: {e}"))?;
 
     let mut sendonly_builder = SoraTestConnection::builder(
         sendonly_context,
@@ -194,7 +196,7 @@ async fn run_sendonly_recvonly_with_contexts(
 
     let mut sendonly = sendonly_builder
         .connect()
-        .map_err(|e| format!("failed to build sendonly client: {e}"))?;
+        .map_err(|e| format!("sendonly クライアントの生成に失敗しました: {e}"))?;
 
     if sendonly
         .wait_for_connect(Duration::from_secs(10))
@@ -202,7 +204,7 @@ async fn run_sendonly_recvonly_with_contexts(
         .is_err()
     {
         let _ = sendonly.disconnect_and_wait(Duration::from_secs(10)).await;
-        return Err("sendonly connection timed out".to_string());
+        return Err("sendonly の接続がタイムアウトしました".to_string());
     }
 
     let mut recvonly_builder =
@@ -215,7 +217,7 @@ async fn run_sendonly_recvonly_with_contexts(
 
     let mut recvonly = recvonly_builder
         .connect()
-        .map_err(|e| format!("failed to build recvonly client: {e}"))?;
+        .map_err(|e| format!("recvonly クライアントの生成に失敗しました: {e}"))?;
 
     let result = async {
         if recvonly
@@ -223,7 +225,7 @@ async fn run_sendonly_recvonly_with_contexts(
             .await
             .is_err()
         {
-            return Err("recvonly connection timed out".to_string());
+            return Err("recvonly の接続がタイムアウトしました".to_string());
         }
 
         if recvonly
@@ -231,7 +233,7 @@ async fn run_sendonly_recvonly_with_contexts(
             .await
             .is_err()
         {
-            return Err("recvonly did not receive tracks".to_string());
+            return Err("recvonly がトラックを受信しませんでした".to_string());
         }
 
         sendonly
@@ -243,7 +245,7 @@ async fn run_sendonly_recvonly_with_contexts(
                 Duration::from_secs(15),
             )
             .await
-            .map_err(|_| "sendonly stats did not reach expected values".to_string())?;
+            .map_err(|_| "sendonly の統計情報が期待した値に達しませんでした".to_string())?;
         recvonly
             .wait_stats(
                 |stats| {
@@ -254,7 +256,7 @@ async fn run_sendonly_recvonly_with_contexts(
                 Duration::from_secs(15),
             )
             .await
-            .map_err(|_| "recvonly stats did not reach expected values".to_string())?;
+            .map_err(|_| "recvonly の統計情報が期待した値に達しませんでした".to_string())?;
 
         Ok(())
     }
@@ -266,16 +268,16 @@ async fn run_sendonly_recvonly_with_contexts(
 }
 
 async fn run_sendrecv_with_codec(codec_type: VideoCodecType) {
-    let urls = signaling_urls().expect("TEST_SIGNALING_URLS is required");
+    let urls = signaling_urls().expect("TEST_SIGNALING_URLS が必須です");
     let codec_label = codec_label(codec_type);
     let expected_mime_type = codec_mime_type(codec_type);
     let channel_id = test_channel_id(&format!("vpl-{codec_label}-sendrecv"));
 
-    let context1 = create_vpl_context().expect("failed to create client1 context");
+    let context1 = create_vpl_context().expect("client1 のコンテキスト生成に失敗しました");
     let mut capturer1 = FakeVideoCapturer::new(FakeVideoCapturerConfig::default())
-        .expect("failed to create FakeVideoCapturer for client1");
-    let (video_track1, audio_track1) =
-        build_sender_tracks(&context1, &mut capturer1).expect("failed to build client1 tracks");
+        .expect("client1 の FakeVideoCapturer 生成に失敗しました");
+    let (video_track1, audio_track1) = build_sender_tracks(&context1, &mut capturer1)
+        .expect("client1 のトラック生成に失敗しました");
 
     let mut builder1 =
         SoraTestConnection::builder(context1, urls.clone(), channel_id.clone(), Role::SendRecv)
@@ -288,18 +290,18 @@ async fn run_sendrecv_with_codec(codec_type: VideoCodecType) {
         builder1 = builder1.metadata(build_metadata_with_access_token(&token));
     }
 
-    let mut client1 = builder1.connect().expect("failed to build client1");
+    let mut client1 = builder1.connect().expect("client1 の構築に失敗しました");
 
     client1
         .wait_for_connect(Duration::from_secs(10))
         .await
-        .expect("client1 connection timed out");
+        .expect("client1 の接続がタイムアウトしました");
 
-    let context2 = create_vpl_context().expect("failed to create client2 context");
+    let context2 = create_vpl_context().expect("client2 のコンテキスト生成に失敗しました");
     let mut capturer2 = FakeVideoCapturer::new(FakeVideoCapturerConfig::default())
-        .expect("failed to create FakeVideoCapturer for client2");
-    let (video_track2, audio_track2) =
-        build_sender_tracks(&context2, &mut capturer2).expect("failed to build client2 tracks");
+        .expect("client2 の FakeVideoCapturer 生成に失敗しました");
+    let (video_track2, audio_track2) = build_sender_tracks(&context2, &mut capturer2)
+        .expect("client2 のトラック生成に失敗しました");
 
     let mut builder2 = SoraTestConnection::builder(context2, urls, channel_id, Role::SendRecv)
         .sender_video_track(video_track2)
@@ -311,20 +313,20 @@ async fn run_sendrecv_with_codec(codec_type: VideoCodecType) {
         builder2 = builder2.metadata(build_metadata_with_access_token(&token));
     }
 
-    let mut client2 = builder2.connect().expect("failed to build client2");
+    let mut client2 = builder2.connect().expect("client2 の構築に失敗しました");
 
     client2
         .wait_for_connect(Duration::from_secs(10))
         .await
-        .expect("client2 connection timed out");
+        .expect("client2 の接続がタイムアウトしました");
     client1
         .wait_for_video_track(Duration::from_secs(10))
         .await
-        .expect("client1 did not receive tracks");
+        .expect("client1 がトラックを受信しませんでした");
     client2
         .wait_for_video_track(Duration::from_secs(10))
         .await
-        .expect("client2 did not receive tracks");
+        .expect("client2 がトラックを受信しませんでした");
 
     client1
         .wait_stats(
@@ -338,7 +340,7 @@ async fn run_sendrecv_with_codec(codec_type: VideoCodecType) {
             Duration::from_secs(15),
         )
         .await
-        .expect("client1 stats did not reach expected values");
+        .expect("client1 の統計情報が期待した値に達しませんでした");
     client2
         .wait_stats(
             |stats| {
@@ -351,16 +353,16 @@ async fn run_sendrecv_with_codec(codec_type: VideoCodecType) {
             Duration::from_secs(15),
         )
         .await
-        .expect("client2 stats did not reach expected values");
+        .expect("client2 の統計情報が期待した値に達しませんでした");
 
     client1
         .disconnect_and_wait(Duration::from_secs(10))
         .await
-        .expect("failed to disconnect client1");
+        .expect("client1 の切断に失敗しました");
     client2
         .disconnect_and_wait(Duration::from_secs(10))
         .await
-        .expect("failed to disconnect client2");
+        .expect("client2 の切断に失敗しました");
 }
 
 #[tokio::test]
@@ -373,8 +375,10 @@ async fn test_vpl_sendonly_recvonly() {
 
     let mut failures = Vec::new();
     for codec_type in codec_types {
-        let sendonly_context = create_vpl_context().expect("failed to create sendonly context");
-        let recvonly_context = create_vpl_context().expect("failed to create recvonly context");
+        let sendonly_context =
+            create_vpl_context().expect("sendonly のコンテキスト生成に失敗しました");
+        let recvonly_context =
+            create_vpl_context().expect("recvonly のコンテキスト生成に失敗しました");
         match run_sendonly_recvonly_with_contexts(
             sendonly_context,
             recvonly_context,
@@ -385,7 +389,7 @@ async fn test_vpl_sendonly_recvonly() {
         {
             Ok(()) => {
                 eprintln!(
-                    "vpl sendonly/recvonly passed for {}",
+                    "vpl の sendonly/recvonly が {} で成功しました",
                     codec_label(codec_type)
                 );
             }
@@ -395,7 +399,7 @@ async fn test_vpl_sendonly_recvonly() {
 
     assert!(
         failures.is_empty(),
-        "vpl sendonly/recvonly failures:\n{}",
+        "vpl の sendonly/recvonly で失敗しました:\n{}",
         failures.join("\n")
     );
 }
@@ -424,15 +428,16 @@ async fn test_vpl_decoder_only_recvonly() {
     for codec_type in codec_types {
         if !default_context_supports_encoder(codec_type) {
             eprintln!(
-                "default context does not support encoder for {}, skipping",
+                "既定のコンテキストが {} のエンコーダーをサポートしていないためスキップします",
                 codec_label(codec_type)
             );
             continue;
         }
 
         let sendonly_context =
-            SoraConnectionContext::new().expect("failed to create default sendonly context");
-        let recvonly_context = create_vpl_context().expect("failed to create recvonly context");
+            SoraConnectionContext::new().expect("既定の sendonly コンテキストの生成に失敗しました");
+        let recvonly_context =
+            create_vpl_context().expect("recvonly のコンテキスト生成に失敗しました");
         run_sendonly_recvonly_with_contexts(
             sendonly_context,
             recvonly_context,
@@ -442,7 +447,7 @@ async fn test_vpl_decoder_only_recvonly() {
         .await
         .unwrap_or_else(|error| {
             panic!(
-                "vpl decoder-only recvonly failed for {}: {error}",
+                "vpl のデコーダーのみの recvonly が {} で失敗しました: {error}",
                 codec_label(codec_type)
             )
         });
@@ -460,15 +465,16 @@ async fn test_vpl_encoder_only_sendonly() {
     for codec_type in codec_types {
         if !default_context_supports_decoder(codec_type) {
             eprintln!(
-                "default context does not support decoder for {}, skipping",
+                "既定のコンテキストが {} のデコーダーをサポートしていないためスキップします",
                 codec_label(codec_type)
             );
             continue;
         }
 
-        let sendonly_context = create_vpl_context().expect("failed to create sendonly context");
+        let sendonly_context =
+            create_vpl_context().expect("sendonly のコンテキスト生成に失敗しました");
         let recvonly_context =
-            SoraConnectionContext::new().expect("failed to create default recvonly context");
+            SoraConnectionContext::new().expect("既定の recvonly コンテキストの生成に失敗しました");
         run_sendonly_recvonly_with_contexts(
             sendonly_context,
             recvonly_context,
@@ -478,7 +484,7 @@ async fn test_vpl_encoder_only_sendonly() {
         .await
         .unwrap_or_else(|error| {
             panic!(
-                "vpl encoder-only sendonly failed for {}: {error}",
+                "vpl のエンコーダーのみの sendonly が {} で失敗しました: {error}",
                 codec_label(codec_type)
             )
         });

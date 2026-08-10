@@ -88,7 +88,7 @@ mod tests {
                 capability
                     .create_video_encoder(env.as_ref(), format.as_ref())
                     .is_some(),
-                "encoder must be created for a supported format",
+                "サポートされているフォーマットでエンコーダーが生成されなければなりません",
             );
         }
 
@@ -98,7 +98,7 @@ mod tests {
                 capability
                     .create_video_decoder(env.as_ref(), format.as_ref())
                     .is_some(),
-                "decoder must be created for a supported format",
+                "サポートされているフォーマットでデコーダーが生成されなければなりません",
             );
         }
     }
@@ -113,11 +113,11 @@ mod tests {
                 let name = format.name().ok()?;
                 VideoCodecType::try_from(name.as_str()).ok()
             })
-            .expect("at least one encoder codec must be supported");
+            .expect("エンコーダーコーデックが少なくとも 1 つはサポートされている必要があります");
         let requested = SdpVideoFormat::new(
             codec_type
                 .as_str()
-                .expect("known codec must have valid codec name"),
+                .expect("既知のコーデックは有効なコーデック名を持っている必要があります"),
         );
         let resolved = capability.resolve_sdp_format(CodecDirection::Encoder, requested.as_ref());
         assert!(resolved.is_some());

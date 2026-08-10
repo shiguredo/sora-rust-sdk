@@ -77,21 +77,21 @@ mod tests {
     fn internal_apple_capability_is_available() {
         assert!(
             InternalAppleVideoCodecCapability::new().is_some(),
-            "InternalAppleVideoCodecCapability must be available on Apple platforms",
+            "InternalAppleVideoCodecCapability は Apple プラットフォームで利用可能でなければなりません",
         );
     }
 
     #[test]
     fn internal_apple_capability_has_expected_implementation_name() {
         let capability = InternalAppleVideoCodecCapability::new()
-            .expect("InternalAppleVideoCodecCapability must be available");
+            .expect("InternalAppleVideoCodecCapability は利用可能でなければなりません");
         assert_eq!(capability.get_implementation().name(), "internal-apple");
     }
 
     #[test]
     fn internal_apple_capability_supports_h264_h265() {
         let capability = InternalAppleVideoCodecCapability::new()
-            .expect("InternalAppleVideoCodecCapability must be available");
+            .expect("InternalAppleVideoCodecCapability は利用可能でなければなりません");
         assert!(capability.is_supported(CodecDirection::Encoder, VideoCodecType::H264));
         assert!(capability.is_supported(CodecDirection::Decoder, VideoCodecType::H264));
 
@@ -104,7 +104,7 @@ mod tests {
     #[test]
     fn internal_apple_capability_creates_supported_encoder_and_decoder() {
         let capability = InternalAppleVideoCodecCapability::new()
-            .expect("InternalAppleVideoCodecCapability must be available");
+            .expect("InternalAppleVideoCodecCapability は利用可能でなければなりません");
 
         let encoder_formats = capability.get_supported_formats(CodecDirection::Encoder);
         let env = shiguredo_webrtc::Environment::new();
@@ -113,7 +113,7 @@ mod tests {
                 capability
                     .create_video_encoder(env.as_ref(), format.as_ref())
                     .is_some(),
-                "encoder must be created for a supported format",
+                "サポートされているフォーマットでエンコーダーが生成されなければなりません",
             );
         }
 
@@ -123,7 +123,7 @@ mod tests {
                 capability
                     .create_video_decoder(env.as_ref(), format.as_ref())
                     .is_some(),
-                "decoder must be created for a supported format",
+                "サポートされているフォーマットでデコーダーが生成されなければなりません",
             );
         }
     }
@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn internal_apple_capability_create_video_encoder_uses_simulcast_adapter() {
         let capability = InternalAppleVideoCodecCapability::new()
-            .expect("InternalAppleVideoCodecCapability must be available");
+            .expect("InternalAppleVideoCodecCapability は利用可能でなければなりません");
         let Some(format) = capability
             .get_supported_formats(CodecDirection::Encoder)
             .into_iter()
@@ -142,7 +142,7 @@ mod tests {
         let env = shiguredo_webrtc::Environment::new();
         let encoder = capability
             .create_video_encoder(env.as_ref(), format.as_ref())
-            .expect("encoder must be created for supported format");
+            .expect("サポートされているフォーマットでエンコーダーが生成されなければなりません");
         let info = encoder.get_encoder_info();
         let implementation_name = info
             .implementation_name()
