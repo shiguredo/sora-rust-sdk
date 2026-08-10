@@ -252,44 +252,46 @@ fn prepare_mp4_state(args: &Args) -> Result<Option<(Mp4SampleReader, VideoCodecT
     }
 }
 
+/// [VideoCodecType] からシグナリング用の [sora_sdk::Video] を生成する。
+///
+/// [VideoCodecType::Generic] や [VideoCodecType::Unknown] の場合はエラーになる
+fn video_from_codec_type(
+    codec_type: VideoCodecType,
+    bit_rate: Option<u32>,
+) -> Result<sora_sdk::Video> {
+    match codec_type {
+        VideoCodecType::Vp8 => Ok(sora_sdk::Video::new_vp8(bit_rate)),
+        VideoCodecType::Vp9 => Ok(sora_sdk::Video::new_vp9(bit_rate, None)),
+        VideoCodecType::Av1 => Ok(sora_sdk::Video::new_av1(bit_rate, None)),
+        VideoCodecType::H264 => Ok(sora_sdk::Video::new_h264(bit_rate, None)),
+        VideoCodecType::H265 => Ok(sora_sdk::Video::new_h265(bit_rate, None)),
+        VideoCodecType::Generic | VideoCodecType::Unknown(_) => {
+            Err(io::Error::other(format!("unsupported video codec type: {codec_type:?}")).into())
+        }
+    }
+}
+
 fn apply_video_options(
     mut builder: SoraConnectionBuilder,
     args: &Args,
     mp4_codec_type: Option<VideoCodecType>,
 ) -> Result<SoraConnectionBuilder> {
-    // mp4_codec_type があったらそれを優先して利用する。
-    // ない場合は args.video_codec_type を利用する。
-    let video_codec_type = match mp4_codec_type {
-        Some(codec_type) => codec_type.as_str().map(|name| name.to_ascii_lowercase()),
-        None => args.video_codec_type.clone(),
-    };
+    // MP4 使用時は MP4 から検出した実際のコーデックを使う (--video-codec-type とは併用不可)。
+    let video_codec_type = mp4_codec_type.or(args.video_codec_type);
 
     let video_bit_rate = args.video_bit_rate;
     if let Some(video) = args.video {
         if video {
-            let video_setting = match video_codec_type.as_deref() {
-                Some("vp8") => sora_sdk::Video::new_vp8(video_bit_rate),
-                Some("vp9") => sora_sdk::Video::new_vp9(video_bit_rate, None),
-                Some("av1") => sora_sdk::Video::new_av1(video_bit_rate, None),
-                Some("h264") => sora_sdk::Video::new_h264(video_bit_rate, None),
-                Some("h265") => sora_sdk::Video::new_h265(video_bit_rate, None),
+            let video_setting = match video_codec_type {
+                Some(codec_type) => video_from_codec_type(codec_type, video_bit_rate)?,
                 None => sora_sdk::Video::new_bool(true),
-                _ => sora_sdk::Video::new_bool(true),
             };
             builder = builder.video(video_setting);
         } else {
             builder = builder.video(sora_sdk::Video::new_bool(false));
         }
-    } else if let Some(ref codec) = video_codec_type {
-        let video_setting = match codec.as_str() {
-            "vp8" => sora_sdk::Video::new_vp8(video_bit_rate),
-            "vp9" => sora_sdk::Video::new_vp9(video_bit_rate, None),
-            "av1" => sora_sdk::Video::new_av1(video_bit_rate, None),
-            "h264" => sora_sdk::Video::new_h264(video_bit_rate, None),
-            "h265" => sora_sdk::Video::new_h265(video_bit_rate, None),
-            _ => sora_sdk::Video::new_bool(true),
-        };
-        builder = builder.video(video_setting);
+    } else if let Some(codec_type) = video_codec_type {
+        builder = builder.video(video_from_codec_type(codec_type, video_bit_rate)?);
     }
     Ok(builder)
 }
@@ -530,6 +532,7 @@ fn build_and_run_connection(
 
     // --input-mp4 が指定されている場合は MP4 を読み込んでパススルーの準備をする
     let mp4_state = prepare_mp4_state(args)?;
+    let mp4_codec_type = mp4_state.as_ref().map(|(_, codec_type)| *codec_type);
 
     #[cfg(feature = "media-device")]
     let adm_config = if let Some(external_adm) = &external_adm {
@@ -542,7 +545,7 @@ fn build_and_run_connection(
 
     let context_config = build_context_config(
         adm_config,
-        mp4_state.as_ref().map(|(_, codec_type)| *codec_type),
+        mp4_codec_type,
         args.openh264_path.as_deref(),
         args.video_codec_implementation.clone(),
     )?;
@@ -567,7 +570,6 @@ fn build_and_run_connection(
         None
     };
 
-    let mp4_codec_type = mp4_state.as_ref().map(|(_, codec_type)| *codec_type);
     let builder = build_connection_builder(context.clone(), args, event_tx, mp4_codec_type)?;
     let (builder, video_capturer) =
         attach_sender_tracks(builder, &context, args, mp4_state.map(|(reader, _)| reader))?;

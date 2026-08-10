@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::io;
 
-use shiguredo_webrtc::rtc_log_info;
+use shiguredo_webrtc::{VideoCodecType, rtc_log_info};
 use sora_sdk::Role;
 
 use crate::error::Result;
@@ -12,7 +12,7 @@ pub(crate) struct Args {
     pub(crate) role: Role,
     pub(crate) audio: Option<bool>,
     pub(crate) video: Option<bool>,
-    pub(crate) video_codec_type: Option<String>,
+    pub(crate) video_codec_type: Option<VideoCodecType>,
     pub(crate) video_codec_implementation: VideoCodecImplementationSelections,
     pub(crate) video_bit_rate: Option<u32>,
     pub(crate) input_mp4: Option<String>,
@@ -292,11 +292,15 @@ pub(crate) fn parse_args(mut args: noargs::RawArgs) -> Result<Args> {
             _ => Err("video は true または false で指定してください"),
         })?;
 
-    let video_codec_type: Option<String> = noargs::opt("video-codec-type")
+    let video_codec_type: Option<VideoCodecType> = noargs::opt("video-codec-type")
         .doc("映像コーデック (vp8/vp9/av1/h264/h265)")
         .take(&mut args)
         .present_and_then(|o| match o.value() {
-            "vp8" | "vp9" | "av1" | "h264" | "h265" => Ok(o.value().to_string()),
+            "vp8" => Ok(VideoCodecType::Vp8),
+            "vp9" => Ok(VideoCodecType::Vp9),
+            "av1" => Ok(VideoCodecType::Av1),
+            "h264" => Ok(VideoCodecType::H264),
+            "h265" => Ok(VideoCodecType::H265),
             _ => Err("video-codec-type は vp8/vp9/av1/h264/h265 で指定してください"),
         })?;
 
@@ -453,15 +457,6 @@ pub(crate) fn parse_args(mut args: noargs::RawArgs) -> Result<Args> {
         .take(&mut args)
         .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
 
-    // MP4 の実 codec をシグナリングで自動明示するため、codec type の明示指定は併用できない。
-    if input_mp4.is_some() && video_codec_type.is_some() {
-        return Err(noargs::Error::other(
-            &args,
-            "--input-mp4 and --video-codec-type cannot be used together",
-        )
-        .into());
-    }
-
     if let Some(help) = args.finish()? {
         print!("{}", help);
         std::process::exit(0);
@@ -507,6 +502,14 @@ pub(crate) fn parse_args(mut args: noargs::RawArgs) -> Result<Args> {
 }
 
 pub(crate) fn validate_args(args: &Args) -> Result<()> {
+    // --input-mp4 を指定した場合は MP4 ファイルの実際のコーデックをシグナリング時に
+    // 渡すようになっているため、--video-codec-type と併用することはできない。
+    if args.input_mp4.is_some() && args.video_codec_type.is_some() {
+        return Err(
+            io::Error::other("--input-mp4 and --video-codec-type cannot be used together").into(),
+        );
+    }
+
     // OpenH264 は実装選択とライブラリパスがセットで必要。
     let openh264_selected = args
         .video_codec_implementation

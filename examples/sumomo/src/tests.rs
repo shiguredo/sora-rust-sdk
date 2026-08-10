@@ -206,7 +206,7 @@ fn parse_args_accepts_mp4_without_video_codec_implementation() {
 }
 
 #[test]
-fn parse_args_rejects_mp4_with_video_codec_type() {
+fn validate_args_rejects_mp4_with_video_codec_type() {
     let raw_args = make_raw_args(&[
         "sumomo",
         "--signaling-url",
@@ -220,15 +220,60 @@ fn parse_args_rejects_mp4_with_video_codec_type() {
         "--video-codec-type",
         "h264",
     ]);
-    let result = crate::args::parse_args(raw_args);
-    assert!(
-        result.is_err(),
-        "MP4 と codec type の併用は失敗するはずです"
-    );
-    let err = result.err().expect("エラーは必ず存在するはずです");
+    let args =
+        crate::args::parse_args(raw_args).expect("MP4 と codec type のパースは成功するはずです");
+    let err = validate_args(&args).expect_err("MP4 と codec type の併用は失敗するはずです");
     let message = err.to_string();
     assert!(
         message.contains("--input-mp4 and --video-codec-type cannot be used together"),
+        "エラーメッセージが期待と異なります: {message}"
+    );
+}
+
+#[test]
+fn video_from_codec_type_builds_codec_specific_video() {
+    let bit_rate = Some(30000);
+    assert_eq!(
+        video_from_codec_type(shiguredo_webrtc::VideoCodecType::Vp8, bit_rate)
+            .expect("vp8 は Video を生成できるはずです"),
+        sora_sdk::Video::new_vp8(bit_rate)
+    );
+    assert_eq!(
+        video_from_codec_type(shiguredo_webrtc::VideoCodecType::Vp9, bit_rate)
+            .expect("vp9 は Video を生成できるはずです"),
+        sora_sdk::Video::new_vp9(bit_rate, None)
+    );
+    assert_eq!(
+        video_from_codec_type(shiguredo_webrtc::VideoCodecType::Av1, bit_rate)
+            .expect("av1 は Video を生成できるはずです"),
+        sora_sdk::Video::new_av1(bit_rate, None)
+    );
+    assert_eq!(
+        video_from_codec_type(shiguredo_webrtc::VideoCodecType::H264, bit_rate)
+            .expect("h264 は Video を生成できるはずです"),
+        sora_sdk::Video::new_h264(bit_rate, None)
+    );
+    assert_eq!(
+        video_from_codec_type(shiguredo_webrtc::VideoCodecType::H265, bit_rate)
+            .expect("h265 は Video を生成できるはずです"),
+        sora_sdk::Video::new_h265(bit_rate, None)
+    );
+}
+
+#[test]
+fn video_from_codec_type_rejects_unknown_codec() {
+    let err = video_from_codec_type(shiguredo_webrtc::VideoCodecType::Generic, None)
+        .expect_err("Generic はエラーになるはずです");
+    let message = err.to_string();
+    assert!(
+        message.contains("unsupported video codec type"),
+        "エラーメッセージが期待と異なります: {message}"
+    );
+    let err = video_from_codec_type(shiguredo_webrtc::VideoCodecType::Unknown(0), None)
+        .expect_err("Unknown はエラーになるはずです");
+    let message = err.to_string();
+    assert!(
+        message.contains("unsupported video codec type"),
         "エラーメッセージが期待と異なります: {message}"
     );
 }
