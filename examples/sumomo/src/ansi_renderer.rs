@@ -1,12 +1,10 @@
 use std::fmt::Write as FmtWrite;
 use std::io;
-use std::io::Write as IoWrite;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
-use shiguredo_webrtc::{
-    I420Buffer, LibyuvFourcc, VideoFrameRef, VideoSinkHandler, convert_from_i420, rtc_log_info,
-};
+use shiguredo_webrtc::{I420Buffer, LibyuvFourcc, convert_from_i420};
+
+use crate::error::{AppError, Result};
+use crate::video::I420Frame;
 
 /// ANSI 描画用の簡易レンダラー。
 pub(crate) struct AnsiRenderer {
@@ -22,26 +20,10 @@ impl AnsiRenderer {
         }
     }
 
-    pub(crate) fn render(&self, frame: VideoFrameRef) {
-        render_frame(frame, self.width, self.height);
-    }
-}
-
-pub(crate) struct AnsiTrackSinkHandler {
-    pub(crate) renderer: Arc<AnsiRenderer>,
-    pub(crate) first_frame: Arc<AtomicBool>,
-    pub(crate) track_id_for_log: String,
-}
-
-impl VideoSinkHandler for AnsiTrackSinkHandler {
-    fn on_frame(&mut self, frame: VideoFrameRef<'_>) {
-        if !self.first_frame.swap(true, Ordering::Relaxed) {
-            rtc_log_info!(
-                "ビデオ フレームを受信しました: track_id={}",
-                self.track_id_for_log
-            );
-        }
-        self.renderer.render(frame);
+    /// I420 フレームを ANSI エスケープシーケンスで描画する。
+    pub(crate) fn render_frame(&self, frame: &I420Frame) -> Result<()> {
+        let mut stdout = io::stdout();
+        render_frame(frame, self.width, self.height, &mut stdout)
     }
 }
 
@@ -52,21 +34,32 @@ fn rgb_to_ansi256(r: u8, g: u8, b: u8) -> i32 {
     16 + (r6 * 36) + (g6 * 6) + b6
 }
 
-fn render_frame(frame: VideoFrameRef, width: i32, height: i32) {
-    let mut src = frame.buffer();
-    let Some(src_i420) = src.to_i420() else {
-        return;
-    };
+/// ANSI 出力を writer へ書き込む helper。
+///
+/// write / flush の error を呼び出し元へ伝播する。
+pub(crate) fn write_ansi_output(writer: &mut dyn io::Write, output: &str) -> Result<()> {
+    writer.write_all(output.as_bytes())?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn render_frame(
+    frame: &I420Frame,
+    width: i32,
+    height: i32,
+    writer: &mut dyn io::Write,
+) -> Result<()> {
+    let src_i420 = frame.to_buffer();
     let mut scaled = I420Buffer::new(width, height);
     scaled.scale_from(&src_i420);
 
     let width_u = width.max(0) as usize;
     let height_u = height.max(0) as usize;
     let Some(dst_stride) = width_u.checked_mul(4) else {
-        return;
+        return Err(AppError::Ansi("width overflow".to_string()));
     };
     let Some(dst_bytes) = dst_stride.checked_mul(height_u) else {
-        return;
+        return Err(AppError::Ansi("height overflow".to_string()));
     };
     let mut image = vec![0u8; dst_bytes];
     if !convert_from_i420(
@@ -82,7 +75,7 @@ fn render_frame(frame: VideoFrameRef, width: i32, height: i32) {
         height,
         LibyuvFourcc::Argb,
     ) {
-        return;
+        return Err(AppError::Ansi("failed to convert I420 to ARGB".to_string()));
     }
     let capacity = width_u.saturating_mul(height_u).saturating_mul(20);
     let mut output = String::with_capacity(capacity);
@@ -117,7 +110,5 @@ fn render_frame(frame: VideoFrameRef, width: i32, height: i32) {
         output.push_str("\x1b[0m\n");
     }
 
-    let mut stdout = io::stdout();
-    let _ = stdout.write_all(output.as_bytes());
-    let _ = stdout.flush();
+    write_ansi_output(writer, &output)
 }

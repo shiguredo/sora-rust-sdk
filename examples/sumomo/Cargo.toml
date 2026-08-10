@@ -26,6 +26,10 @@ tokio = {
 }
 
 [dev-dependencies]
+# access_token (JWT) の HMAC-SHA256 署名に利用
+aws-lc-rs.workspace = true
+# JWT の Base64URL エンコードに利用
+base64ct = "1.8"
 serial_test = "4.0"
 
 [features]

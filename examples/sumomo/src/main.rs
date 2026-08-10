@@ -10,6 +10,7 @@ mod fake;
 mod raw_player_renderer;
 #[cfg(test)]
 mod tests;
+mod video;
 mod video_codec_list;
 mod video_device;
 
@@ -17,14 +18,11 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-#[cfg(feature = "raw-player")]
-use std::sync::atomic::Ordering;
-#[cfg(feature = "raw-player")]
-use std::thread;
+use std::time::Duration;
 
 #[cfg(feature = "media-device")]
 use adm::SumomoAdm;
-use ansi_renderer::{AnsiRenderer, AnsiTrackSinkHandler};
+use ansi_renderer::AnsiRenderer;
 use args::Args;
 use args::{
     VideoCodecImplementationSelection, VideoCodecImplementationSelections, parse_args,
@@ -35,10 +33,10 @@ use audio_device::AudioDeviceCapturer;
 use error::{AppError, Result};
 use fake::{FakeVideoCapturer, FakeVideoCapturerConfig};
 #[cfg(feature = "raw-player")]
-use raw_player_renderer::{I420Frame, RawPlayerRenderer, RawPlayerTrackSinkHandler};
+use raw_player_renderer::RawPlayerRenderer;
 use rustls_pki_types::pem::PemObject;
 use shiguredo_webrtc::{
-    VideoCodecType, VideoSink, VideoSinkWants, log, rtc_log_info, rtc_log_warning,
+    VideoCodecType, VideoSink, VideoSinkWants, VideoTrack, log, rtc_log_info, rtc_log_warning,
 };
 #[cfg(feature = "amf")]
 use sora_sdk::AmfVideoCodecCapability;
@@ -54,9 +52,10 @@ use sora_sdk::{
     InternalVideoCodecCapability, Mp4PassthroughVideoCodecCapability, Mp4SampleReader,
     Mp4VideoCapturer, Openh264VideoCodecCapability, SoraConnection, SoraConnectionBuilder,
     SoraConnectionContext, SoraConnectionContextConfig, SoraConnectionEventHandler,
-    VideoCodecCapability, VideoCodecPreference,
+    SoraConnectionHandle, VideoCodecCapability, VideoCodecPreference,
 };
 use tokio::sync::mpsc;
+use video::{I420Frame, VideoFrameSinkHandler, VideoRenderer};
 use video_codec_list::run_video_codec_list;
 #[cfg(test)]
 pub(crate) use video_codec_list::{
@@ -74,22 +73,11 @@ enum AppEvent {
     OnRemoveTrack(shiguredo_webrtc::RtpReceiver),
 }
 
-trait AppEventSender: Clone + Send + 'static {
-    fn send_event(&self, event: AppEvent);
-}
-
-impl AppEventSender for mpsc::Sender<AppEvent> {
-    fn send_event(&self, event: AppEvent) {
-        let _ = self.try_send(event);
-    }
-}
-
-#[cfg(feature = "raw-player")]
-impl AppEventSender for std::sync::mpsc::Sender<AppEvent> {
-    fn send_event(&self, event: AppEvent) {
-        let _ = self.send(event);
-    }
-}
+/// 終了処理全体に与える application-level timeout。
+///
+/// SDK の既定値である WebSocket close 3 秒と DataChannel close 5 秒の合計を収め、
+/// 接続開始時の 30 秒 timeout より短く local 終了要求を bound する値。
+const CONNECTION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn add_video_codec_capability(
     context_config: &mut SoraConnectionContextConfig,
@@ -234,6 +222,7 @@ fn build_context_config(
 
 struct TrackEntry {
     sink: VideoSink,
+    video_track: VideoTrack,
 }
 
 fn prepare_mp4_state(args: &Args) -> Result<Option<(Mp4SampleReader, VideoCodecType)>> {
@@ -312,43 +301,45 @@ fn apply_common_builder_options(
     Ok(builder)
 }
 
-struct AppEventHandler<T: AppEventSender> {
-    event_tx: T,
+struct AppEventHandler {
+    event_tx: mpsc::Sender<AppEvent>,
 }
 
-impl<T: AppEventSender> SoraConnectionEventHandler for AppEventHandler<T> {
+impl SoraConnectionEventHandler for AppEventHandler {
     fn on_notify(&mut self, text: &str) {
-        self.event_tx.send_event(AppEvent::Notify(text.to_string()));
+        let _ = self.event_tx.try_send(AppEvent::Notify(text.to_string()));
     }
 
     fn on_push(&mut self, text: &str) {
-        self.event_tx.send_event(AppEvent::Push(text.to_string()));
+        let _ = self.event_tx.try_send(AppEvent::Push(text.to_string()));
     }
 
     fn on_track(&mut self, transceiver: shiguredo_webrtc::RtpTransceiver) {
-        self.event_tx.send_event(AppEvent::OnTrack(transceiver));
+        let _ = self.event_tx.try_send(AppEvent::OnTrack(transceiver));
     }
 
     fn on_remove_track(&mut self, receiver: shiguredo_webrtc::RtpReceiver) {
-        self.event_tx.send_event(AppEvent::OnRemoveTrack(receiver));
+        let _ = self.event_tx.try_send(AppEvent::OnRemoveTrack(receiver));
     }
 }
 
-fn build_connection_builder<T>(
+fn build_connection_builder(
     context: Arc<SoraConnectionContext>,
     args: &Args,
-    event_tx: T,
-) -> Result<SoraConnectionBuilder>
-where
-    T: AppEventSender,
-{
-    let builder = SoraConnection::builder(
+    event_tx: mpsc::Sender<AppEvent>,
+) -> Result<SoraConnectionBuilder> {
+    let mut builder = SoraConnection::builder(
         context,
         args.signaling_urls.clone(),
         args.channel_id.clone(),
         args.role,
         AppEventHandler { event_tx },
     );
+    if let Some(metadata) = &args.metadata {
+        // --metadata は JSON 文字列を受け取り、Sora の認証メタデータとして送信する。
+        let metadata = metadata.parse::<sora_sdk::JsonString>()?;
+        builder = builder.metadata(metadata);
+    }
     apply_common_builder_options(builder, args)
 }
 
@@ -463,7 +454,7 @@ fn handle_on_track_event<F>(
     let sink = build_sink(track_id.clone());
     let wants = VideoSinkWants::new();
     video_track.add_or_update_sink(&sink, &wants);
-    tracks.insert(track_id, TrackEntry { sink });
+    tracks.insert(track_id, TrackEntry { sink, video_track });
 }
 
 fn handle_on_remove_track_event(
@@ -493,151 +484,111 @@ fn handle_on_remove_track_event(
     rtc_log_info!("Video track removed: track_id={}", track_id);
 }
 
-#[cfg(feature = "raw-player")]
-fn run_with_raw_player(args: Args) -> Result<()> {
-    log::log_to_debug(log::Severity::Warning);
-    log::enable_timestamps();
-    log::enable_threads();
+/// 受信 track の sink を外して callback source を停止する。
+///
+/// connection を構築し、`run()` を別タスクとして開始する。
+///
+/// capturer は run タスク内で保持され、run 完了時に drop される。
+/// disconnect に使う [SoraConnectionHandle] と、run の完了を待つ `JoinHandle` を返す。
+fn build_and_run_connection(
+    args: &Args,
+    event_tx: mpsc::Sender<AppEvent>,
+) -> Result<(
+    SoraConnectionHandle,
+    tokio::task::JoinHandle<sora_sdk::Result<()>>,
+)> {
+    // --audio-input-device が指定された場合は SumomoAdm を使用する
+    #[cfg(feature = "media-device")]
+    let external_adm = if args.audio_input_device.is_some() {
+        Some(SumomoAdm::new())
+    } else {
+        None
+    };
 
-    let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<I420Frame>(2);
-    let (event_tx, event_rx) = std::sync::mpsc::channel::<AppEvent>();
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop_for_thread = stop.clone();
-    let stop_for_renderer = stop.clone();
+    // --input-mp4 が指定されている場合は MP4 を読み込んでパススルーの準備をする
+    let mp4_state = prepare_mp4_state(args)?;
 
-    let handle = thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("Tokio ランタイムの作成に失敗しました");
+    #[cfg(feature = "media-device")]
+    let adm_config = if let Some(external_adm) = &external_adm {
+        sora_sdk::AdmConfig::UseExternal(external_adm.audio_device_module())
+    } else {
+        sora_sdk::AdmConfig::NoAudioDevice
+    };
+    #[cfg(not(feature = "media-device"))]
+    let adm_config = sora_sdk::AdmConfig::NoAudioDevice;
 
-        let _ = rt.block_on(async move {
-            let mp4_state = prepare_mp4_state(&args)?;
+    let context_config = build_context_config(
+        adm_config,
+        mp4_state.as_ref().map(|(_, codec_type)| *codec_type),
+        args.openh264_path.as_deref(),
+        args.video_codec_implementation.clone(),
+    )?;
+    let context = SoraConnectionContext::new_with_config(context_config)?;
 
-            #[cfg(feature = "media-device")]
-            let external_adm = if args.audio_input_device.is_some() {
-                Some(SumomoAdm::new())
-            } else {
-                None
-            };
-            #[cfg(feature = "media-device")]
-            let adm_config = if external_adm.is_some() {
-                sora_sdk::AdmConfig::UseExternal(external_adm.as_ref().unwrap().audio_device_module())
-            } else {
-                sora_sdk::AdmConfig::NoAudioDevice
-            };
-            #[cfg(not(feature = "media-device"))]
-            let adm_config = sora_sdk::AdmConfig::NoAudioDevice;
+    // --audio-input-device が指定された場合は AudioDeviceCapturer を使用する
+    #[cfg(feature = "media-device")]
+    let audio_capturer = if let Some(ref device_id) = args.audio_input_device {
+        let state = external_adm
+            .as_ref()
+            .expect("BUG: external_adm が None です")
+            .state();
+        let mut capturer = AudioDeviceCapturer::new(Some(device_id.clone()), state)?;
+        capturer.start()?;
+        rtc_log_info!("Started audio input device: {}", device_id);
+        Some(capturer)
+    } else {
+        None
+    };
 
-            let context_config = build_context_config(
-                adm_config,
-                mp4_state.as_ref().map(|(_, codec_type)| *codec_type),
-                args.openh264_path.as_deref(),
-                args.video_codec_implementation.clone(),
-            )?;
-            let context = SoraConnectionContext::new_with_config(context_config)?;
+    let builder = build_connection_builder(context.clone(), args, event_tx)?;
+    let (builder, video_capturer) =
+        attach_sender_tracks(builder, &context, args, mp4_state.map(|(reader, _)| reader))?;
 
-            #[cfg(feature = "media-device")]
-            let mut _audio_capturer = if let Some(ref device_id) = args.audio_input_device {
-                let state = external_adm
-                    .as_ref()
-                    .expect("BUG: external_adm が None です")
-                    .state();
-                let mut capturer = AudioDeviceCapturer::new(Some(device_id.clone()), state)?;
-                capturer.start()?;
-                rtc_log_info!("Started audio input device: {}", device_id);
-                Some(capturer)
-            } else {
-                None
-            };
-
-            let builder = build_connection_builder(context.clone(), &args, event_tx.clone())?;
-            let (builder, mut _video_capturer) =
-                attach_sender_tracks(builder, &context, &args, mp4_state.map(|(reader, _)| reader))?;
-
-            let (connection, _handle) = builder.build()?;
-            let mut tracks: HashMap<String, TrackEntry> = HashMap::new();
-            let mut run = Box::pin(connection.run());
-            let duration_sleep = args.duration.map(|secs| {
-                rtc_log_info!("Will disconnect after {} seconds", secs);
-                tokio::time::sleep(std::time::Duration::from_secs(secs))
-            });
-            tokio::pin!(duration_sleep);
-
-            loop {
-                if stop_for_thread.load(Ordering::Relaxed) {
-                    break;
-                }
-
-                tokio::select! {
-                    result = &mut run => {
-                        stop_for_thread.store(true, Ordering::Relaxed);
-                        return result.map_err(AppError::Sora);
-                    }
-                    _ = async { duration_sleep.as_mut().as_pin_mut().unwrap().await }, if duration_sleep.is_some() => {
-                        rtc_log_info!("Specified duration elapsed, disconnecting");
-                        stop_for_thread.store(true, Ordering::Relaxed);
-                        break;
-                    }
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {
-                        while let Ok(event) = event_rx.try_recv() {
-                            match event {
-                                AppEvent::Notify(text) => {
-                                    rtc_log_info!("Received notify: {}", text);
-                                }
-                                AppEvent::Push(text) => {
-                                    rtc_log_info!("Received push: {}", text);
-                                }
-                                AppEvent::OnTrack(transceiver) => {
-                                    handle_on_track_event(&mut tracks, transceiver, true, |track_id| {
-                                        let frame_tx = frame_tx.clone();
-                                        let first_frame = Arc::new(AtomicBool::new(false));
-                                        VideoSink::new_with_handler(Box::new(RawPlayerTrackSinkHandler {
-                                            frame_tx,
-                                            first_frame,
-                                            track_id_for_log: track_id,
-                                        }))
-                                    });
-                                }
-                                AppEvent::OnRemoveTrack(receiver) => {
-                                    handle_on_remove_track_event(&mut tracks, receiver);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            Ok(())
-        });
+    let (connection, handle) = builder.build()?;
+    let run_handle = tokio::spawn(async move {
+        // capturer は run タスク内で保持し、run 完了時に drop する。
+        #[cfg(feature = "media-device")]
+        let _audio_capturer = audio_capturer;
+        let _video_capturer = video_capturer;
+        connection.run().await
     });
-
-    let mut raw_player_renderer = RawPlayerRenderer::new("Sumomo - Video", 640, 480)?;
-
-    let mut frame_count = 0u64;
-    while raw_player_renderer.is_running() && !stop_for_renderer.load(Ordering::Relaxed) {
-        raw_player_renderer.poll_events();
-
-        while let Ok(frame) = frame_rx.try_recv() {
-            frame_count += 1;
-            if frame_count == 1 {
-                rtc_log_info!(
-                    "raw_player: 最初のフレームを受信しました: {}x{}",
-                    frame.width,
-                    frame.height
-                );
-            }
-            raw_player_renderer.render(&frame);
-        }
-
-        thread::sleep(std::time::Duration::from_millis(1));
-    }
-
-    stop.store(true, Ordering::Relaxed);
-    let _ = handle.join();
-    raw_player::quit();
-    Ok(())
+    Ok((handle, run_handle))
 }
 
+/// connection を終了する。
+///
+/// `run()` が先に完了している場合は disconnect を送らず、その結果を返す。
+/// それ以外は disconnect command を送って `run()` の完了を、`deadline` の
+/// 内側で待つ。`run()` は別タスクで動いているため、disconnect を先に await しても
+/// command が処理されて deadlock しない。
+async fn shutdown_connection(
+    handle: SoraConnectionHandle,
+    run_handle: tokio::task::JoinHandle<sora_sdk::Result<()>>,
+    deadline: tokio::time::Instant,
+) -> Result<()> {
+    if run_handle.is_finished() {
+        let result = run_handle.await.map_err(|_| AppError::WorkerPanic)?;
+        return result.map_err(AppError::Sora);
+    }
+
+    tokio::time::timeout_at(deadline, async {
+        handle.disconnect().await?;
+        let result = run_handle.await.map_err(|_| AppError::WorkerPanic)?;
+        result.map_err(AppError::Sora)
+    })
+    .await
+    .map_err(|_| AppError::ConnectionShutdownTimeout)?
+}
+
+/// duration が指定されている場合はタイマーを設定する。
+fn create_duration_sleep(args: &Args) -> Option<tokio::time::Sleep> {
+    args.duration.map(|secs| {
+        rtc_log_info!("Will disconnect after {} seconds", secs);
+        tokio::time::sleep(Duration::from_secs(secs))
+    })
+}
+
+/// 受信 track の sink を外してから、最初に観測した renderer error を primary として
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let args = parse_args(noargs::raw_args())?;
@@ -658,88 +609,43 @@ async fn main() -> Result<()> {
         return list_devices();
     }
 
+    // レンダラーを生成する。raw-player は SDL を、それ以外は ANSI を使う。
     #[cfg(feature = "raw-player")]
-    if args.use_raw_player {
-        return run_with_raw_player(args);
-    }
+    let mut renderer = if args.use_raw_player {
+        VideoRenderer::RawPlayer(RawPlayerRenderer::new("Sumomo - Video", 640, 480)?)
+    } else {
+        VideoRenderer::Ansi(AnsiRenderer::new())
+    };
+    #[cfg(not(feature = "raw-player"))]
+    let mut renderer = VideoRenderer::Ansi(AnsiRenderer::new());
 
-    let renderer = Arc::new(AnsiRenderer::new());
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(32);
+    let (frame_tx, mut frame_rx) = mpsc::channel::<I420Frame>(2);
 
-    // --audio-input-device が指定された場合は SumomoAdm を使用する
-    #[cfg(feature = "media-device")]
-    let external_adm = if args.audio_input_device.is_some() {
-        Some(SumomoAdm::new())
-    } else {
-        None
-    };
-
-    // --input-mp4 が指定されている場合は MP4 を読み込んでパススルーの準備をする
-    let mp4_state = prepare_mp4_state(&args)?;
-
-    #[cfg(feature = "media-device")]
-    let adm_config = if external_adm.is_some() {
-        sora_sdk::AdmConfig::UseExternal(external_adm.as_ref().unwrap().audio_device_module())
-    } else {
-        sora_sdk::AdmConfig::NoAudioDevice
-    };
-    #[cfg(not(feature = "media-device"))]
-    let adm_config = sora_sdk::AdmConfig::NoAudioDevice;
-
-    let context_config = build_context_config(
-        adm_config,
-        mp4_state.as_ref().map(|(_, codec_type)| *codec_type),
-        args.openh264_path.as_deref(),
-        args.video_codec_implementation.clone(),
-    )?;
-    let context = SoraConnectionContext::new_with_config(context_config)?;
-
-    // --audio-input-device が指定された場合は AudioDeviceCapturer を使用する
-    #[cfg(feature = "media-device")]
-    let mut _audio_capturer = if let Some(ref device_id) = args.audio_input_device {
-        let state = external_adm
-            .as_ref()
-            .expect("BUG: external_adm が None です")
-            .state();
-        let mut capturer = AudioDeviceCapturer::new(Some(device_id.clone()), state)?;
-        capturer.start()?;
-        rtc_log_info!("Started audio input device: {}", device_id);
-        Some(capturer)
-    } else {
-        None
-    };
-
-    let builder = build_connection_builder(context.clone(), &args, event_tx.clone())?;
-    let (builder, mut _video_capturer) = attach_sender_tracks(
-        builder,
-        &context,
-        &args,
-        mp4_state.map(|(reader, _)| reader),
-    )?;
-
-    let (connection, _handle) = builder.build()?;
-    let renderer_for_events = renderer.clone();
+    let (handle, mut run_handle) = build_and_run_connection(&args, event_tx.clone())?;
     let mut tracks: HashMap<String, TrackEntry> = HashMap::new();
-    let mut run = Box::pin(connection.run());
 
     // duration が指定されている場合はタイマーを設定
-    let duration_sleep = args.duration.map(|secs| {
-        rtc_log_info!("Will disconnect after {} seconds", secs);
-        tokio::time::sleep(std::time::Duration::from_secs(secs))
-    });
+    let duration_sleep = create_duration_sleep(&args);
     tokio::pin!(duration_sleep);
 
+    // run 完了 (server 起因)、duration 経過、event channel close、renderer error の
+    // いずれかを検出したらループを抜ける。
+    let mut renderer_error: Option<AppError> = None;
+    let mut frame_count = 0u64;
     loop {
         tokio::select! {
-            result = &mut run => {
-                return result.map_err(AppError::Sora);
+            _ = &mut run_handle => {
+                // server 起因で run() が先に完了した場合も shutdown_connection が結果を返す。
+                break;
             }
-            _ = async { duration_sleep.as_mut().as_pin_mut().unwrap().await }, if duration_sleep.is_some() => {
+            _ = async { duration_sleep.as_mut().as_pin_mut().unwrap().await }, if duration_sleep.is_some() && renderer_error.is_none() => {
                 rtc_log_info!("Specified duration elapsed, disconnecting");
                 break;
             }
             event = event_rx.recv() => {
                 let Some(event) = event else {
+                    // 通常の event channel が閉じた場合は終了処理へ進む
                     break;
                 };
                 match event {
@@ -751,9 +657,10 @@ async fn main() -> Result<()> {
                     }
                     AppEvent::OnTrack(transceiver) => {
                         handle_on_track_event(&mut tracks, transceiver, false, |track_id| {
+                            let frame_tx = frame_tx.clone();
                             let first_frame = Arc::new(AtomicBool::new(false));
-                            VideoSink::new_with_handler(Box::new(AnsiTrackSinkHandler {
-                                renderer: renderer_for_events.clone(),
+                            VideoSink::new_with_handler(Box::new(VideoFrameSinkHandler {
+                                frame_tx,
                                 first_frame,
                                 track_id_for_log: track_id,
                             }))
@@ -764,8 +671,46 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+            frame = frame_rx.recv() => {
+                let Some(frame) = frame else {
+                    // frame channel が閉じた場合は終了処理へ進む
+                    break;
+                };
+                frame_count += 1;
+                if frame_count == 1 {
+                    rtc_log_info!(
+                        "first frame received: {}x{}",
+                        frame.width,
+                        frame.height
+                    );
+                }
+                if let Err(err) = renderer.render_frame(&frame) {
+                    // renderer の render error を main loop で検出し、primary error として保持する。
+                    renderer_error = Some(err);
+                    break;
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(10)) => {
+                // raw-player では SDL の window close / Escape を検出する。
+                renderer.poll_events();
+                if !renderer.is_running() {
+                    break;
+                }
+            }
         }
     }
-    run.await?;
-    Ok(())
+
+    let deadline = tokio::time::Instant::now() + CONNECTION_SHUTDOWN_TIMEOUT;
+    let shutdown_result = shutdown_connection(handle, run_handle, deadline).await;
+
+    // 受信 track の sink を外して callback source を停止する。
+    for entry in tracks.values_mut() {
+        entry.video_track.remove_sink(&entry.sink);
+    }
+
+    // 最初に観測した renderer error を primary として返す。
+    match renderer_error {
+        Some(err) => Err(err),
+        None => shutdown_result,
+    }
 }

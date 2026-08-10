@@ -160,14 +160,19 @@ mock / stub、fake subprocess runner、test 専用の分岐、実装を差し替
 - read-only の実 OS file へ ANSI output helper から書き込み、write error が伝播する
 - 実 `I420Frame` を `AnsiTrackSinkHandler` へ渡して write error を発生させ、専用 channel の最初の error を main の result arbitration helper が renderer error として分類する
 - `raw_player_renderer.rs` 内の test で実 `I420Frame` に invalid size を設定し、SDL dummy driver の実 `RawPlayerRenderer::render` が error を返す
-- SDL の実 event queue へ Quit / WindowClose event を投入し、renderer loop の停止要求、worker completion、join までを検証する
 - SDL owner の drop が texture → renderer → window → quit の順で完了し、部分初期化 error 後にも再初期化できる
+
+raw_player の公開 API に `SDL_PushEvent` が存在しないため、SDL の event queue への Quit / WindowClose event 投入による renderer loop 停止要求のテストは行わない。
+renderer loop の停止要求と worker の終了は、実 thread を使う別項目 (worker completion guard の Release store、Acquire load、join、`WorkerPanic` 変換) で検証する。
 
 ### CLI integration test
 
 `examples/sumomo/tests/termination.rs` から Cargo が提供する実 `CARGO_BIN_EXE_sumomo` を child process として起動する。
-sumomo には metadata option がなく既存 `TEST_SECRET_KEY` を渡せないため、credential や secret query を含まない公開 test Sora を指す `TEST_SUMOMO_SIGNALING_URLS` と random channel ID を使って実 Sora へ接続する。
-CI repository variable が未設定なら skip せず設定不足で失敗させる。
+sumomo に `--metadata` オプションを追加し、e2e-tests と共有する `TEST_SIGNALING_URLS` と `TEST_SECRET_KEY` で認証付きの実 Sora へ接続する。
+`TEST_SECRET_KEY` がある場合は access_token (JWT) を生成し、`--metadata '{"access_token":"<jwt>"}'` を child argv に渡す。
+未設定の場合は access_token なしで接続する。
+channel ID は `TEST_CHANNEL_ID_PREFIX` (デフォルト `sumomo-test`) + random 8 bytes hex + `TEST_CHANNEL_ID_SUFFIX` で構成し、ログや Sora 側でどのテストの接続かを識別できるようにする。
+`TEST_SIGNALING_URLS` が未設定なら skip せず設定不足で失敗させる。
 公開 endpoint 値は sumomo の正式な `--signaling-url` 入力として child argv にだけ渡し、test の assertion / panic message へ埋め込まない。
 実行ごとに 30 秒の process timeout を設け、timeout 時は child を kill / wait して test を失敗させる。
 application の duration 1 秒 + shutdown 最大 10 秒と、test harness の 30 秒強制 kill を別の deadline として検証する。
@@ -197,7 +202,7 @@ cargo clippy -p sumomo --features raw-player --all-targets -- -D warnings
 SDL_VIDEODRIVER=dummy cargo test -p sumomo --features raw-player
 ```
 
-workflow top-level `env` に `TEST_SUMOMO_SIGNALING_URLS: ${{ vars.TEST_SUMOMO_SIGNALING_URLS }}` を追加し、通常 matrix、self-hosted、raw-player 独立 job の全 `cargo test` から利用できるようにする。
+workflow top-level `env` には `TEST_SIGNALING_URLS`、`TEST_SECRET_KEY`、`TEST_CHANNEL_ID_PREFIX`、`TEST_CHANNEL_ID_SUFFIX` が既に設定されており、sumomo の CLI integration test はこれらをそのまま利用する。
 workflow の command text へ値を展開せず、test process が環境変数から読み取って child argv を構築する。
 値を assertion / panic message に出さない。
 job timeout を 15 分、各 CLI child timeout を 30 秒にする。
@@ -206,13 +211,13 @@ job timeout を 15 分、各 CLI child timeout を 30 秒にする。
 
 - `examples/sumomo/src/main.rs`
 - `examples/sumomo/src/error.rs`
+- `examples/sumomo/src/args.rs`
 - `examples/sumomo/src/ansi_renderer.rs`
 - `examples/sumomo/src/raw_player_renderer.rs`
 - `examples/sumomo/src/tests.rs`
 - `examples/sumomo/tests/termination.rs`
 - `examples/sumomo/Cargo.toml`
 - `.github/workflows/ci.yml`
-- `CHANGES.md`
 
 `src/video_codecs/mp4.rs` は本 issue の変更対象に含めず、prerequisite の issue 0098 だけで変更する。
 
@@ -235,7 +240,6 @@ job timeout を 15 分、各 CLI child timeout を 30 秒にする。
 - `cargo test --workspace` が成功する
 - `cargo clippy -p sumomo --features raw-player --all-targets -- -D warnings` が成功する
 - `SDL_VIDEODRIVER=dummy cargo test -p sumomo --features raw-player` が成功する
-- `CHANGES.md` の `develop` セクションへ `[FIX]` と担当者 `@voluntas` を追記する
 - comment と test assertion message は日本語、production error / log は英語にする
 
 ## 参考

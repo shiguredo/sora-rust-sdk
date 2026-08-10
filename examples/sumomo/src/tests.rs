@@ -2,7 +2,6 @@ use super::*;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 use sora_sdk::CodecDirection;
 use sora_sdk::Role;
-
 fn test_args(
     video_codec_implementation: VideoCodecImplementationSelections,
     openh264_path: Option<&str>,
@@ -27,6 +26,7 @@ fn test_args(
         client_key: None,
         ca_cert: None,
         duration: None,
+        metadata: None,
         turn_tls_insecure: false,
         turn_tls_ca_cert: None,
         use_libcamera: false,
@@ -585,4 +585,109 @@ fn build_context_config_manual_order_prefers_later_selection_on_apple() {
             );
         }
     }
+}
+
+/// `run_handle` のタスクが panic した場合、shutdown_connection が WorkerPanic を
+/// 返すことを検証する。
+#[tokio::test]
+async fn shutdown_connection_converts_task_panic_to_worker_panic() {
+    let context = SoraConnectionContext::new().expect("context の作成に失敗しました");
+    let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(32);
+    let builder = SoraConnection::builder(
+        context,
+        vec!["wss://127.0.0.1:1/signaling".to_string()],
+        "test-channel".to_string(),
+        Role::RecvOnly,
+        AppEventHandler { event_tx },
+    );
+    let (connection, handle) = builder.build().expect("connection の build に失敗しました");
+
+    // run タスクが panic する。is_finished() が true になるため、
+    // shutdown_connection は disconnect を送らず run_handle.await の JoinError を WorkerPanic に変換する。
+    let run_handle = tokio::spawn(async {
+        panic!("intentional panic for test");
+    });
+    let _keep_connection = connection;
+
+    // panic タスクが実行されて is_finished() が true になるまで待つ。
+    while !run_handle.is_finished() {
+        tokio::task::yield_now().await;
+    }
+
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(50);
+    let result = shutdown_connection(handle, run_handle, deadline).await;
+    assert!(matches!(result, Err(AppError::WorkerPanic)));
+}
+
+/// 実 connection を build し、run を開始しない状態で shutdown_connection が
+/// application deadline で timeout することを検証する。
+///
+/// `disconnect()` は run() が command を処理して初めて ack を返すため、
+/// run を開始しないと ack が返らず timeout する。
+#[tokio::test]
+async fn shutdown_connection_times_out() {
+    let context = SoraConnectionContext::new().expect("context の作成に失敗しました");
+    let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(32);
+    let builder = SoraConnection::builder(
+        context,
+        vec!["wss://127.0.0.1:1/signaling".to_string()],
+        "test-channel".to_string(),
+        Role::RecvOnly,
+        AppEventHandler { event_tx },
+    );
+    let (connection, handle) = builder.build().expect("connection の build に失敗しました");
+
+    // run() を開始せず、完了しない run_handle を渡す。
+    // connection を保持したまま (drop しない) なので command channel は開いたまま。
+    // run() が command_rx を poll しないため disconnect の ack が返らず timeout する。
+    let run_handle = tokio::spawn(async {
+        std::future::pending::<()>().await;
+        Ok::<(), sora_sdk::Error>(())
+    });
+    let _keep_connection = connection;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(50);
+    let result = shutdown_connection(handle, run_handle, deadline).await;
+    assert!(matches!(result, Err(AppError::ConnectionShutdownTimeout)));
+}
+
+/// read-only の実 OS file へ ANSI output helper から書き込み、write error が伝播する。
+#[test]
+fn write_ansi_output_fails_on_readonly_file() {
+    let path = std::env::temp_dir().join(format!(
+        "sumomo-ansi-write-{}-{}.txt",
+        std::process::id(),
+        "write",
+    ));
+    std::fs::write(&path, "test").expect("temp file write failed");
+    let mut perms = std::fs::metadata(&path)
+        .expect("metadata failed")
+        .permissions();
+    perms.set_readonly(true);
+    std::fs::set_permissions(&path, perms).expect("set readonly failed");
+
+    let file = std::fs::File::open(&path).expect("open readonly file failed");
+    let mut writer = file;
+    let result = ansi_renderer::write_ansi_output(&mut writer, "output");
+    assert!(
+        matches!(result, Err(AppError::Io(_))),
+        "write error は AppError::Io として伝播する必要があります: {result:?}"
+    );
+
+    // 後片付け用に明示的な権限 (owner rw, group/other r) へ戻してから削除する。
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("restore permissions failed");
+    }
+    #[cfg(not(unix))]
+    {
+        let mut perms = std::fs::metadata(&path)
+            .expect("metadata failed")
+            .permissions();
+        perms.set_readonly(false);
+        std::fs::set_permissions(&path, perms).expect("unset readonly failed");
+    }
+    std::fs::remove_file(&path).expect("remove temp file failed");
 }
