@@ -303,8 +303,8 @@ impl Mp4SampleReader {
             if sample.composition_time_offset.unwrap_or(0) != 0 {
                 return Err(Mp4Error::UnsupportedCompositionTimeOffset {
                     index: samples.len(),
-                    // 通常はビデオトラックの最初のサンプルで sample_entry から確定済みだが、
-                    // sample_entry が付与されない異常入力に備えて Generic を返す。
+                    // 通常はビデオトラックの最初のサンプルでサンプルエントリーから確定済みだが、
+                    // サンプルエントリーが付与されない異常入力に備えて Generic を返す。
                     codec_type: track_info
                         .as_ref()
                         .map(|info| info.codec_type)

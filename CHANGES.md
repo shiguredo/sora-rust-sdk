@@ -19,6 +19,6 @@
   - @voluntas
 - [FIX] MP4 の `length_size_minus_one` が reserved 値のときに panic せずエラーを返すようにする
   - @voluntas
-- [FIX] 非ゼロの composition time offset (B frame) を含む MP4 を reader 初期化時に拒否する
-  - 今までは composition time offset を無視して decode order のまま送信していた
+- [FIX] 非ゼロの composition time offset (B フレーム) を含む MP4 を `Mp4SampleReader` の初期化時に拒否する
+  - 今までは composition time offset を無視してデコード順のまま送信していた
   - @sile
