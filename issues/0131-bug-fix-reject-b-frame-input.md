@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-10
 - Branch: feature/fix-reject-b-frame-input
 - Polished: 2026-08-10
 
@@ -42,3 +42,16 @@ B frame の正しい表示時刻を保証する対応（presentation timestamp �
 - `cargo clippy --workspace --all-targets -- -D warnings` が成功する
 - `CHANGES.md` の develop セクションに `[FIX]` を追記する
 - production log は英語、コメントとテストの assertion message は日本語にする
+
+## 解決方法
+
+- `Mp4Error::UnsupportedCompositionTimeOffset` を追加し、`Mp4SampleReader::new_inner` のサンプルループで非ゼロの composition time offset を含む sample を検出して拒否するようにした
+  - エラーには sample index (0 始まり) と codec 名を含め、ユーザーが原因を特定できるようにした
+  - `composition_time_offset` が `None` または `Some(0)` の sample は従来どおり受理する
+- B フレームを含む H.264 MP4 fixture を ffmpeg 7.1.1 で生成し、`testdata/red-bframe-320x320-h264.mp4` として追加した
+  - 生成コマンド、ffmpeg version、H.264 profile、timescale、composition time offset をテストコメントに記録した
+- 既存の H.264 fixture も `src/video_codecs/testdata/` からリポジトリルートの `testdata/` へ移動し、`archive-` プレフィックスを外して `red-320x320-h264.mp4` に改名した
+- テストを追加した
+  - B frame fixture が `UnsupportedCompositionTimeOffset` エラーで拒否されること
+  - ctts ボックスの全 offset を 0 にパッチした MP4 が受理されること
+- `CHANGES.md` の develop セクションに `[FIX]` を追記した
