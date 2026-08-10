@@ -24,14 +24,14 @@ B frame の正しい表示時刻を保証する対応（presentation timestamp �
 - エラーには sample index と codec 名を含め、ユーザーが原因を特定できるようにする
 - 新エラー variant `UnsupportedCompositionTimeOffset` を `Mp4Error` に追加する
 - 既存 fixture（ctts なし、DTS == PTS）は従来どおり受理する
-- テスト用に B frame を含む小さな H.264 MP4 fixture を `src/video_codecs/testdata/` に追加する
+- テスト用に B frame を含む小さな H.264 MP4 fixture を `testdata/` に追加する
   - fixture は ffmpeg で生成し、生成コマンドと version、H.264 profile をテストコメントに記録する
   - CI で ffmpeg を起動しない
 
 ## 変更対象
 
 - `src/video_codecs/mp4.rs`
-- `src/video_codecs/testdata/` の B frame fixture
+- `testdata/` の B frame fixture
 - `CHANGES.md`
 
 ## 完了条件

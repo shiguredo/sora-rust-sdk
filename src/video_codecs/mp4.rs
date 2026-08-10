@@ -1004,7 +1004,7 @@ mod tests {
 
     #[test]
     fn sample_reader_reads_fixture_h264_mp4() {
-        let fixture = include_bytes!("testdata/archive-red-320x320-h264.mp4");
+        let fixture = include_bytes!("../../testdata/red-320x320-h264.mp4");
         let tmp_name = format!(
             "sora-sdk-mp4-test-{}-{}.mp4",
             std::process::id(),
@@ -1060,7 +1060,7 @@ mod tests {
     // 0xFF (値 3) から 0xFE (値 2) に書き換えて不正な MP4 を作成する。
     #[test]
     fn sample_reader_rejects_invalid_length_size_minus_one() {
-        let fixture = include_bytes!("testdata/archive-red-320x320-h264.mp4");
+        let fixture = include_bytes!("../../testdata/red-320x320-h264.mp4");
         let mut patched = fixture.to_vec();
 
         // avcC ボックスの lengthSizeMinusOne バイト (オフセット 0x6ea) を
@@ -1109,7 +1109,7 @@ mod tests {
     // Mp4SampleReader::new が panic せず Err を返すことを確認する。
     #[test]
     fn sample_reader_rejects_truncated_mp4_with_oversized_input_position() {
-        let fixture = include_bytes!("testdata/archive-red-320x320-h264.mp4");
+        let fixture = include_bytes!("../../testdata/red-320x320-h264.mp4");
         let truncated = &fixture[..128];
 
         let tmp_name = format!(
@@ -1137,7 +1137,7 @@ mod tests {
 
     #[test]
     fn sample_reader_rejects_inconsistent_sample_table_offset_exceeds_file_size() {
-        let fixture = include_bytes!("testdata/archive-red-320x320-h264.mp4");
+        let fixture = include_bytes!("../../testdata/red-320x320-h264.mp4");
         let mut patched = fixture.to_vec();
         let file_size = patched.len();
 
@@ -1187,12 +1187,12 @@ mod tests {
     // フィクスチャは次のコマンドで生成した (ffmpeg 7.1.1):
     //   ffmpeg -y -v error -f lavfi -i "color=red:size=320x320:rate=25:duration=2" \
     //     -c:v libx264 -preset medium -bf 2 -g 50 -b:v 50k -maxrate 50k -bufsize 100k \
-    //     -pix_fmt yuv420p archive-red-bframe-320x320-h264.mp4
+    //     -pix_fmt yuv420p red-bframe-320x320-h264.mp4
     // H.264 High Profile Level 2.1、timescale=12800 で、B frame の先頭 reorder により
     // 最初の sample (index 0) の composition time offset が 1024 になる。
     #[test]
     fn sample_reader_rejects_b_frame_fixture() {
-        let fixture = include_bytes!("testdata/archive-red-bframe-320x320-h264.mp4");
+        let fixture = include_bytes!("../../testdata/red-bframe-320x320-h264.mp4");
 
         let tmp_name = format!(
             "sora-sdk-mp4-test-bframe-{}-{}.mp4",
@@ -1238,7 +1238,7 @@ mod tests {
     // フィクスチャ差し替えを検出するため、パッチ前に最初のエントリの offset が 1024 であることを確認する。
     #[test]
     fn sample_reader_accepts_zero_composition_time_offset_fixture() {
-        let fixture = include_bytes!("testdata/archive-red-bframe-320x320-h264.mp4");
+        let fixture = include_bytes!("../../testdata/red-bframe-320x320-h264.mp4");
         let mut patched = fixture.to_vec();
 
         // ctts ボックスの全エントリの sample_offset を 0 に書き換える。
