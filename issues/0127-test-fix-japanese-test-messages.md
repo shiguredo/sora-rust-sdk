@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-10
 - Model: deepseek-v4-flash
 - Branch: feature/fix-japanese-test-messages
 - Polished: {YYYY-MM-DD}
@@ -39,3 +39,15 @@ AGENTS.md の「テストのログメッセージは全て日本語にするこ�
 - `e2e-tests/` 配下のテストコード
 - `src/` 配下のテストモジュール
 - `examples/sumomo/src/tests.rs`
+
+## 解決方法
+
+`feature/fix-japanese-test-messages` ブランチでテストコードの英語メッセージを日本語に統一し、PR #47 で develop にマージした。
+
+- `e2e-tests/` 配下のテストコード (assert / expect / panic / skip / 進捗メッセージ) を日本語に書き換えた
+- `e2e-tests/src/lib.rs` の panic メッセージを日本語に書き換えた
+- `src/` 配下のテストモジュールの expect / panic メッセージを日本語に書き換えた
+- `examples/sumomo/src/tests.rs` の expect / panic メッセージを日本語に書き換えた
+- テスト内で使用するコード識別子・型名・エラーメッセージの引用はそのまま残した
+- プロダクションコードのログ・エラーメッセージは変更していない
+- `cargo test --workspace` が成功することを確認した
