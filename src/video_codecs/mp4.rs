@@ -300,6 +300,42 @@ fn sample_count_within_limit(index: usize) -> bool {
     index < MAX_SAMPLE_COUNT_PER_TRACK
 }
 
+/// サンプルデータのファイル内範囲を検査付きで検証する。
+///
+/// `offset` を `usize` へ検査付きで変換し、終端を `checked_add` で計算して
+/// ファイルサイズを超えないことを検証する。
+/// 変換、加算、ファイル範囲のいずれかに失敗した場合は `InconsistentSampleTable` を返す。
+fn sample_data_range(
+    offset: u64,
+    size: usize,
+    file_len: usize,
+    index: usize,
+) -> Result<std::ops::Range<usize>> {
+    let start = usize::try_from(offset).map_err(|_| Mp4Error::InconsistentSampleTable {
+        index,
+        offset,
+        size,
+        file_size: file_len,
+    })?;
+    let end = start
+        .checked_add(size)
+        .ok_or(Mp4Error::InconsistentSampleTable {
+            index,
+            offset,
+            size,
+            file_size: file_len,
+        })?;
+    if end > file_len {
+        return Err(Mp4Error::InconsistentSampleTable {
+            index,
+            offset,
+            size,
+            file_size: file_len,
+        });
+    }
+    Ok(start..end)
+}
+
 /// 各フレームの累積再生時刻テーブルを構築する。
 ///
 /// `cumulative_us[0] = 0`、`cumulative_us[i] = フレーム 0..i の合計再生時間 (マイクロ秒)`。
@@ -427,34 +463,15 @@ impl Mp4SampleReader {
             // サンプルデータのファイル内範囲を検査付きで検証する。
             // data_offset の usize 変換、終端の checked_add、ファイル末尾の超過を
             // すべてこの時点で検証し、検証済みの Range を保持する。
-            let data_offset = sample.data_offset;
-            let data_size = sample.data_size;
-            let start =
-                usize::try_from(data_offset).map_err(|_| Mp4Error::InconsistentSampleTable {
-                    index: samples.len(),
-                    offset: data_offset,
-                    size: data_size,
-                    file_size: file_data.len(),
-                })?;
-            let end = start
-                .checked_add(data_size)
-                .ok_or(Mp4Error::InconsistentSampleTable {
-                    index: samples.len(),
-                    offset: data_offset,
-                    size: data_size,
-                    file_size: file_data.len(),
-                })?;
-            if end > file_data.len() {
-                return Err(Mp4Error::InconsistentSampleTable {
-                    index: samples.len(),
-                    offset: data_offset,
-                    size: data_size,
-                    file_size: file_data.len(),
-                });
-            }
+            let data_range = sample_data_range(
+                sample.data_offset,
+                sample.data_size,
+                file_data.len(),
+                samples.len(),
+            )?;
 
             samples.push(Mp4SampleMeta {
-                data_range: start..end,
+                data_range,
                 is_keyframe: sample.keyframe,
                 duration: sample.duration,
             });
@@ -1611,6 +1628,80 @@ mod tests {
         assert!(
             !sample_count_within_limit(MAX_SAMPLE_COUNT_PER_TRACK),
             "1 sample 超過 (index = MAX) は拒否されるべきです"
+        );
+    }
+
+    // sample_data_range が、空 sample、EOF ちょうど、EOF 1 byte 超過、
+    // 正常範囲、加算 overflow の各入力に対して正しい range または error を返すことを確認する。
+    #[test]
+    fn sample_data_range_returns_checked_range() {
+        assert_eq!(
+            sample_data_range(0, 0, 100, 0).unwrap(),
+            0..0,
+            "空 sample は受理されるべきです"
+        );
+        assert_eq!(
+            sample_data_range(0, 100, 100, 0).unwrap(),
+            0..100,
+            "EOF ちょうどは受理されるべきです"
+        );
+        assert_eq!(
+            sample_data_range(50, 50, 100, 0).unwrap(),
+            50..100,
+            "範囲内の入力はそのままの range になるべきです"
+        );
+    }
+
+    // sample_data_range が、終端がファイルサイズを超える場合に
+    // InconsistentSampleTable を返すことを確認する。
+    #[test]
+    fn sample_data_range_rejects_end_beyond_file() {
+        let result = sample_data_range(0, 101, 100, 0);
+        assert!(
+            matches!(
+                result,
+                Err(Mp4Error::InconsistentSampleTable {
+                    index: 0,
+                    offset: 0,
+                    size: 101,
+                    file_size: 100,
+                })
+            ),
+            "InconsistentSampleTable を期待しましたが、実際は: {result:?}"
+        );
+    }
+
+    // sample_data_range が、start + size の加算が overflow する場合に
+    // InconsistentSampleTable を返すことを確認する。
+    #[test]
+    fn sample_data_range_rejects_range_overflow() {
+        let result = sample_data_range(10, usize::MAX, 100, 3);
+        assert!(
+            matches!(
+                result,
+                Err(Mp4Error::InconsistentSampleTable {
+                    index: 3,
+                    offset: 10,
+                    size: usize::MAX,
+                    file_size: 100,
+                })
+            ),
+            "InconsistentSampleTable を期待しましたが、実際は: {result:?}"
+        );
+    }
+
+    // 32 bit target では、offset が usize に収まらない場合に
+    // InconsistentSampleTable を返すことを確認する。
+    #[cfg(target_pointer_width = "32")]
+    #[test]
+    fn sample_data_range_rejects_offset_conversion_overflow_on_32bit() {
+        let result = sample_data_range(u32::MAX as u64 + 1, 0, 100, 5);
+        assert!(
+            matches!(
+                result,
+                Err(Mp4Error::InconsistentSampleTable { index: 5, .. })
+            ),
+            "InconsistentSampleTable を期待しましたが、実際は: {result:?}"
         );
     }
 
