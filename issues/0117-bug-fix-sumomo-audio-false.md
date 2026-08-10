@@ -5,7 +5,7 @@
 - Completed: {YYYY-MM-DD}
 - Model: deepseek-v4-flash
 - Branch: feature/fix-sumomo-audio-false
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-08-10
 
 ## 目的
 
@@ -20,12 +20,13 @@
 ## 設計方針
 
 - `attach_sender_tracks` で `args.audio` を確認し、false の場合は音声トラックを添付しない
-- 映像側と同様の分岐形式に揃える
+- 映像側と同様に `args.audio.unwrap_or(true)` で判定する分岐形式に揃える
+- `--audio false` 指定時は音声キャプチャーの起動も行わない（映像側の `--video false` と同じ扱いで、`--audio-input-device` との併用指定はエラーにしない）
 
 ## 完了条件
 
-- `--audio false` 指定時に音声トラックが添付されない
-- 音声の詳細指定 (`--audio-opus-*` 等) がある場合は従来どおり添付される
+- `--audio false` 指定時に音声トラックが添付されず、SDP に音声 m-line が含まれない
+- `--audio false` 指定時は音声キャプチャーが起動されない
 - `--audio true` / 未指定時の挙動が変わらない
 - `cargo test --workspace` が成功する
 - production log は英語、コメントとテストの assertion message は日本語にする
@@ -33,4 +34,6 @@
 ## 変更対象
 
 - `examples/sumomo/src/main.rs`
+  - `attach_sender_tracks`: 音声トラック添付の分岐を追加する（`main` と `run_with_raw_player` の両方から呼ばれるため、この 1 箇所で両パスに効く）
+  - `main` と `run_with_raw_player`: 音声キャプチャー (`AudioDeviceCapturer`) と外部 ADM (`SumomoAdm`) の生成・起動に `--audio false` の分岐を追加する
 - `CHANGES.md`
