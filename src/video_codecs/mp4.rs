@@ -368,7 +368,7 @@ pub struct Mp4SampleReader {
     track_info: Mp4VideoTrackInfo,
     /// 各サンプルのメタデータ。
     /// サンプルデータのファイル内範囲は検証済み。
-    /// timestamp と duration は MP4 のタイムスケール単位。
+    /// duration は MP4 のタイムスケール単位。
     samples: Vec<Mp4SampleMeta>,
     /// 各フレームの累積再生時刻 (マイクロ秒)。
     /// cumulative_us[0] = 0, cumulative_us[i] = フレーム 0..i の合計再生時間。
@@ -935,7 +935,7 @@ pub struct Mp4VideoCapturer {
 }
 
 /// deadline 待機の結果。
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WaitResult {
     /// stop flag が設定された。
     Stopped,
@@ -1786,5 +1786,87 @@ mod tests {
             matches!(result, WaitResult::Stopped),
             "stop による停止を期待しましたが、実際は: {result:?}"
         );
+    }
+
+    // wait_until が、unpark だけでは deadline 前に Ready を返さず、
+    // ループで deadline と stop flag を再評価することを確認する。
+    //
+    // unpark token は最初の park_timeout で消費されるため、タイミングに依存せず
+    // テストスレッドは park し直し、Ready は返らない。
+    #[test]
+    fn wait_until_rechecks_deadline_after_spurious_wakeup() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        let stop_clone = stop.clone();
+        let barrier_clone = barrier.clone();
+        let handle = thread::spawn(move || {
+            // wait_until を呼ぶ直前まで到達したことを通知する。
+            barrier_clone.wait();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            let result = wait_until(&stop_clone, deadline);
+            done_tx.send(result).expect("終了通知の送信に失敗しました");
+        });
+
+        // テストスレッドが wait_until を呼ぶ直前まで到達するのを待つ。
+        barrier.wait();
+        // stop を設定せずに unpark する (spurious wakeup 相当)。
+        // ループが deadline を再評価して park し直すため、Ready は返らないはず。
+        handle.thread().unpark();
+        let timed_out = done_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err();
+        assert!(timed_out, "unpark だけでは Ready を返すべきではありません");
+        // その後 stop を設定して unpark すると終了する。
+        stop.store(true, Ordering::Release);
+        handle.thread().unpark();
+
+        let result = done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("待機中のスレッドは 5 秒以内に終了するべきです");
+        assert!(
+            matches!(result, WaitResult::Stopped),
+            "stop による停止を期待しましたが、実際は: {result:?}"
+        );
+    }
+
+    // 実 fixture の累積再生時刻が、duration と timescale から求まる期待値と一致することを確認する。
+    //
+    // fixture は 25 sample、duration 512、timescale 12800 のため、
+    // cumulative_us[i] = i * 512 * 1_000_000 / 12800 = i * 40_000 になる。
+    #[test]
+    fn sample_reader_builds_expected_cumulative_us() {
+        let fixture = include_bytes!("../../testdata/red-320x320-h264.mp4");
+
+        let tmp_name = format!(
+            "sora-sdk-mp4-test-cumulative-{}-{}.mp4",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("システム時刻は UNIX_EPOCH より後である必要があります")
+                .as_nanos()
+        );
+        let tmp_path = std::env::temp_dir().join(tmp_name);
+
+        std::fs::write(&tmp_path, fixture).expect("一時フィクスチャの書き込みに失敗しました");
+
+        let reader = Mp4SampleReader::new(
+            tmp_path
+                .to_str()
+                .expect("パスは有効な UTF-8 である必要があります"),
+        )
+        .expect("フィクスチャ MP4 のパースに失敗しました");
+
+        let _ = std::fs::remove_file(&tmp_path);
+
+        assert_eq!(reader.len(), 25, "フィクスチャのサンプル数が移動しています");
+        for i in 0..=reader.len() {
+            assert_eq!(
+                reader.cumulative_duration_us(i),
+                i as u64 * 40_000,
+                "フレーム {i} の累積再生時刻が期待値と一致するべきです"
+            );
+        }
     }
 }
