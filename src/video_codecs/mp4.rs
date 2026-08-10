@@ -797,6 +797,32 @@ pub struct Mp4VideoCapturer {
     thread_handle: Option<thread::JoinHandle<()>>,
 }
 
+/// deadline 待機の結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaitResult {
+    /// 停止フラグが設定された。
+    Stopped,
+    /// deadline に到達した。
+    Ready,
+}
+
+/// 停止フラグを確認しながら deadline まで待機する。
+///
+/// `thread::park_timeout` を使い、`Drop` 側の `unpark` で待機を中断できるようにする。
+/// 明示的な `unpark` なしの予期しない起床でフレームを早く送らないよう、待機後に deadline と停止フラグを再評価する。
+fn wait_until(stop: &AtomicBool, deadline: std::time::Instant) -> WaitResult {
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return WaitResult::Stopped;
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return WaitResult::Ready;
+        }
+        thread::park_timeout(deadline - now);
+    }
+}
+
 impl Mp4VideoCapturer {
     /// [Mp4SampleReader] から動画データを読み込み、新しい `Mp4VideoCapturer` を生成する。
     ///
@@ -846,11 +872,20 @@ impl Mp4VideoCapturer {
                     // 次のフレームの絶対送信時刻まで待機する。
                     // cumulative_duration_us(i+1) は「フレーム 0 から i までの合計再生時間」を返す。
                     // loop_start からのオフセットとして使うことで、累積ドリフトを防止する。
+                    // deadline の計算がオーバーフローした場合は、panic や飽和を避けて正常停止する。
                     let next_frame_time_us = reader.cumulative_duration_us(i + 1);
-                    let target = loop_start + std::time::Duration::from_micros(next_frame_time_us);
-                    let now = std::time::Instant::now();
-                    if target > now {
-                        thread::sleep(target - now);
+                    let target = match loop_start
+                        .checked_add(std::time::Duration::from_micros(next_frame_time_us))
+                    {
+                        Some(target) => target,
+                        None => {
+                            rtc_log_warning!("MP4: loop deadline overflow, stopping feeder thread");
+                            return;
+                        }
+                    };
+                    match wait_until(&stop_clone, target) {
+                        WaitResult::Stopped => return,
+                        WaitResult::Ready => {}
                     }
                 }
 
@@ -875,6 +910,8 @@ impl Drop for Mp4VideoCapturer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(handle) = self.thread_handle.take() {
+            // 待機中のフィーダースレッドを unpark で即座に起こしてから join する。
+            handle.thread().unpark();
             let _ = handle.join();
         }
     }
@@ -1298,5 +1335,106 @@ mod tests {
             }
             Err(e) => panic!("offset 0 の MP4 は Ok を期待しましたが、実際は: {e}"),
         }
+    }
+
+    // wait_until が、停止フラグ設定済みなら park せずに即座に Stopped を返すことを確認する。
+    #[test]
+    fn wait_until_stops_immediately_when_stop_is_set() {
+        let stop = AtomicBool::new(true);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        assert!(
+            matches!(wait_until(&stop, deadline), WaitResult::Stopped),
+            "停止フラグ設定済みなら即座に Stopped を返すべきです"
+        );
+    }
+
+    // wait_until が、deadline 到達済みなら park せずに即座に Ready を返すことを確認する。
+    #[test]
+    fn wait_until_ready_when_deadline_passed() {
+        let stop = AtomicBool::new(false);
+        let deadline = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        assert!(
+            matches!(wait_until(&stop, deadline), WaitResult::Ready),
+            "deadline 到達済みなら即座に Ready を返すべきです"
+        );
+    }
+
+    // 実 thread で park_timeout 中の wait が stop + unpark により終了することを確認する。
+    //
+    // barrier でテストスレッドが wait_until を呼ぶ直前まで到達したことを同期し、
+    // Drop と同じ stop / unpark / join の順序で待機を終了させる。
+    #[test]
+    fn wait_until_interrupted_by_unpark() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        let stop_clone = stop.clone();
+        let barrier_clone = barrier.clone();
+        let handle = thread::spawn(move || {
+            // wait_until を呼ぶ直前まで到達したことを通知する。
+            barrier_clone.wait();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            let result = wait_until(&stop_clone, deadline);
+            done_tx.send(result).expect("終了通知の送信に失敗しました");
+        });
+
+        // テストスレッドが wait_until を呼ぶ直前まで到達するのを待つ。
+        barrier.wait();
+        // Drop と同じ順序で stop を設定してから unpark する。
+        // park 中なら unpark で即座に起床し、park 前なら stop チェックで終了する。
+        stop.store(true, Ordering::Release);
+        handle.thread().unpark();
+
+        let result = done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("待機中のスレッドは 5 秒以内に終了するべきです");
+        assert!(
+            matches!(result, WaitResult::Stopped),
+            "stop による停止を期待しましたが、実際は: {result:?}"
+        );
+    }
+
+    // wait_until が、unpark だけでは deadline 前に Ready を返さず、
+    // ループで deadline と停止フラグを再評価することを確認する。
+    //
+    // unpark token は最初の park_timeout で消費されるため、タイミングに依存せず
+    // テストスレッドは park し直し、Ready は返らない。
+    #[test]
+    fn wait_until_rechecks_deadline_after_spurious_wakeup() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        let stop_clone = stop.clone();
+        let barrier_clone = barrier.clone();
+        let handle = thread::spawn(move || {
+            // wait_until を呼ぶ直前まで到達したことを通知する。
+            barrier_clone.wait();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            let result = wait_until(&stop_clone, deadline);
+            done_tx.send(result).expect("終了通知の送信に失敗しました");
+        });
+
+        // テストスレッドが wait_until を呼ぶ直前まで到達するのを待つ。
+        barrier.wait();
+        // stop を設定せずに unpark する (明示的な unpark なしの予期しない起床に相当)。
+        // ループが deadline を再評価して park し直すため、Ready は返らないはず。
+        handle.thread().unpark();
+        let timed_out = done_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err();
+        assert!(timed_out, "unpark だけでは Ready を返すべきではありません");
+        // その後 stop を設定して unpark すると終了する。
+        stop.store(true, Ordering::Release);
+        handle.thread().unpark();
+
+        let result = done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("待機中のスレッドは 5 秒以内に終了するべきです");
+        assert!(
+            matches!(result, WaitResult::Stopped),
+            "stop による停止を期待しましたが、実際は: {result:?}"
+        );
     }
 }
