@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-10
 - Model: deepseek-v4-flash
 - Branch: feature/fix-sumomo-audio-false
 - Polished: 2026-08-10
@@ -37,3 +37,10 @@
   - `attach_sender_tracks`: 音声トラック添付の分岐を追加する（`main` と `run_with_raw_player` の両方から呼ばれるため、この 1 箇所で両パスに効く）
   - `main` と `run_with_raw_player`: 音声キャプチャー (`AudioDeviceCapturer`) と外部 ADM (`SumomoAdm`) の生成・起動に `--audio false` の分岐を追加する
 - `CHANGES.md`
+
+## 解決方法
+
+- `examples/sumomo/src/args.rs` に `Args::audio_enabled()` を追加し、`--audio false` の判定を 1 箇所にまとめた
+- `attach_sender_tracks` (`examples/sumomo/src/main.rs`) の音声トラック添付に `args.role.wants_send() && audio_enabled` の分岐を追加し、`--audio false` 時に `sender_audio_track` を設定しないようにした
+- `main` と `run_with_raw_player` で、`--audio false` 指定時は音声キャプチャー (`AudioDeviceCapturer`) の生成・起動と外部 ADM (`SumomoAdm`) の生成をスキップするようにした
+- `CHANGES.md` の develop セクションに `[FIX]` エントリを追加した
