@@ -56,6 +56,23 @@ pub enum Mp4Error {
         /// 実際のファイルサイズ (バイト単位)。
         file_size: usize,
     },
+    /// デマルチプレクサが要求する入力範囲の加算が overflow する。
+    InputRangeOverflow {
+        /// デマルチプレクサが要求したファイル内位置。
+        position: u64,
+        /// デマルチプレクサが要求した入力サイズ。
+        size: usize,
+    },
+    /// ビデオサンプル数が上限を超えている。
+    SampleCountLimitExceeded {
+        /// 問題のサンプルインデックス (0 始まり、ビデオサンプル内の連番)。
+        index: usize,
+    },
+    /// 累積 duration または microseconds 変換が overflow する。
+    DurationOverflow {
+        /// 問題のサンプルインデックス (0 始まり、ビデオサンプル内の連番)。
+        index: usize,
+    },
     /// サンプルテーブル (stsz / stco / co64) に不整合があり、
     /// サンプルのオフセットがファイル範囲外になっている。
     InconsistentSampleTable {
@@ -105,6 +122,21 @@ impl std::fmt::Display for Mp4Error {
                     "入力位置がファイルサイズ範囲外です: position={position}, file_size={file_size}"
                 )
             }
+            Self::InputRangeOverflow { position, size } => {
+                write!(
+                    f,
+                    "入力範囲の加算がオーバーフローしました: position={position} size={size}"
+                )
+            }
+            Self::SampleCountLimitExceeded { index } => {
+                write!(f, "サンプル数が上限を超えました: sample={index}")
+            }
+            Self::DurationOverflow { index } => {
+                write!(
+                    f,
+                    "累積 duration または microseconds 変換がオーバーフローしました: sample={index}"
+                )
+            }
             Self::InconsistentSampleTable {
                 index,
                 offset,
@@ -136,6 +168,9 @@ impl std::error::Error for Mp4Error {
             | Self::UnsupportedVideoCodec
             | Self::InvalidNalLengthSize(_)
             | Self::InputPositionOutOfRange { .. }
+            | Self::InputRangeOverflow { .. }
+            | Self::SampleCountLimitExceeded { .. }
+            | Self::DurationOverflow { .. }
             | Self::InconsistentSampleTable { .. }
             | Self::UnsupportedCompositionTimeOffset { .. } => None,
         }
@@ -208,6 +243,84 @@ struct Mp4VideoTrackInfo {
     nal_length_size: u8,
 }
 
+/// MP4 のビデオサンプルのメタデータ。
+///
+/// サンプルデータのファイル内範囲は reader 初期化時に検証済みの `Range<usize>` を保持する。
+struct Mp4SampleMeta {
+    /// サンプルデータのファイル内範囲。
+    data_range: std::ops::Range<usize>,
+    /// キーフレームかどうか。
+    is_keyframe: bool,
+    /// サンプルの長さ (MP4 のタイムスケール単位)。
+    duration: u32,
+}
+
+/// 1 トラックあたりのビデオサンプル数の上限。
+///
+/// 120 fps を 24 時間保持できる件数 (120 * 60 * 60 * 24) であり、
+/// 全サンプルの metadata をメモリに展開する reader の上限として使用する。
+const MAX_SAMPLE_COUNT_PER_TRACK: usize = 10_368_000;
+
+/// デマルチプレクサが要求する入力の位置とサイズから、ファイル内の slice range を求める。
+///
+/// `position` を `usize` へ検査付きで変換し、終端を `checked_add` で計算する。
+/// 変換できない場合や開始位置がファイルサイズを超える場合は `InputPositionOutOfRange`、
+/// 加算が overflow する場合は `InputRangeOverflow` を返す。
+/// 終端がファイルサイズを超える場合はファイル末尾へ丸め、truncated input の最終判定は
+/// デマルチプレクサに委ねる。
+fn required_input_range(
+    position: u64,
+    size: Option<usize>,
+    file_len: usize,
+) -> Result<std::ops::Range<usize>> {
+    let start = usize::try_from(position).map_err(|_| Mp4Error::InputPositionOutOfRange {
+        position,
+        file_size: file_len,
+    })?;
+    if start > file_len {
+        return Err(Mp4Error::InputPositionOutOfRange {
+            position,
+            file_size: file_len,
+        });
+    }
+    let end = match size {
+        Some(size) => start
+            .checked_add(size)
+            .map(|end| end.min(file_len))
+            .ok_or(Mp4Error::InputRangeOverflow { position, size })?,
+        None => file_len,
+    };
+    Ok(start..end)
+}
+
+/// サンプル数が上限以内かどうかを返す。
+///
+/// `MAX_SAMPLE_COUNT_PER_TRACK` ちょうどまでは受理し、1 超過から拒否する。
+fn sample_count_within_limit(index: usize) -> bool {
+    index < MAX_SAMPLE_COUNT_PER_TRACK
+}
+
+/// 各フレームの累積再生時刻テーブルを構築する。
+///
+/// `cumulative_us[0] = 0`、`cumulative_us[i] = フレーム 0..i の合計再生時間 (マイクロ秒)`。
+/// 累積 duration の加算と microseconds 変換の乗算は checked arithmetic で行い、
+/// overflow した場合は `DurationOverflow` を返す。
+fn build_cumulative_us(durations: &[u32], timescale: u64) -> Result<Vec<u64>> {
+    let mut cumulative_us = Vec::new();
+    let mut acc: u64 = 0;
+    cumulative_us.push(0);
+    for (index, &duration) in durations.iter().enumerate() {
+        acc = acc
+            .checked_add(duration as u64)
+            .ok_or(Mp4Error::DurationOverflow { index })?;
+        let micros = acc
+            .checked_mul(1_000_000)
+            .ok_or(Mp4Error::DurationOverflow { index })?;
+        cumulative_us.push(micros / timescale);
+    }
+    Ok(cumulative_us)
+}
+
 /// MP4 ファイルからビデオサンプルを読み出すリーダー。
 ///
 /// コンストラクタでファイル全体をメモリに読み込み、全サンプルのメタデータを事前解析する。
@@ -217,10 +330,10 @@ pub struct Mp4SampleReader {
     /// MP4 ファイル全体のバイトデータ。
     file_data: Vec<u8>,
     track_info: Mp4VideoTrackInfo,
-    /// 各サンプルのメタデータ: (data_offset, data_size, keyframe, timestamp, duration)。
-    /// data_offset と data_size は file_data 内の位置を指す。
+    /// 各サンプルのメタデータ。
+    /// サンプルデータのファイル内範囲は検証済み。
     /// timestamp と duration は MP4 のタイムスケール単位。
-    samples: Vec<(u64, usize, bool, u64, u32)>,
+    samples: Vec<Mp4SampleMeta>,
     /// 各フレームの累積再生時刻 (マイクロ秒)。
     /// cumulative_us[0] = 0, cumulative_us[i] = フレーム 0..i の合計再生時間。
     /// 長さは samples.len() + 1 で、末尾が動画全体の長さ。
@@ -247,19 +360,9 @@ impl Mp4SampleReader {
         // required_input() が要求する範囲のデータを順次渡すことで、
         // ボックス構造の解析が進む。
         while let Some(required) = demuxer.required_input() {
-            let start = required.position as usize;
-            if start > file_data.len() {
-                return Err(Mp4Error::InputPositionOutOfRange {
-                    position: required.position,
-                    file_size: file_data.len(),
-                });
-            }
-            let end = match required.size {
-                Some(size) => (start + size).min(file_data.len()),
-                None => file_data.len(),
-            };
+            let range = required_input_range(required.position, required.size, file_data.len())?;
             let data = file_data
-                .get(start..end)
+                .get(range)
                 .ok_or(Mp4Error::InputPositionOutOfRange {
                     position: required.position,
                     file_size: file_data.len(),
@@ -312,13 +415,49 @@ impl Mp4SampleReader {
                 });
             }
 
-            samples.push((
-                sample.data_offset,
-                sample.data_size,
-                sample.keyframe,
-                sample.timestamp,
-                sample.duration,
-            ));
+            // サンプル数の上限を検証する。
+            // stts は run-length 形式であり、1 entry だけで巨大なサンプル数を表現できるため、
+            // ループでサンプル数を数えて上限超過を検出する。
+            if !sample_count_within_limit(samples.len()) {
+                return Err(Mp4Error::SampleCountLimitExceeded {
+                    index: samples.len(),
+                });
+            }
+
+            // サンプルデータのファイル内範囲を検査付きで検証する。
+            // data_offset の usize 変換、終端の checked_add、ファイル末尾の超過を
+            // すべてこの時点で検証し、検証済みの Range を保持する。
+            let data_offset = sample.data_offset;
+            let data_size = sample.data_size;
+            let start =
+                usize::try_from(data_offset).map_err(|_| Mp4Error::InconsistentSampleTable {
+                    index: samples.len(),
+                    offset: data_offset,
+                    size: data_size,
+                    file_size: file_data.len(),
+                })?;
+            let end = start
+                .checked_add(data_size)
+                .ok_or(Mp4Error::InconsistentSampleTable {
+                    index: samples.len(),
+                    offset: data_offset,
+                    size: data_size,
+                    file_size: file_data.len(),
+                })?;
+            if end > file_data.len() {
+                return Err(Mp4Error::InconsistentSampleTable {
+                    index: samples.len(),
+                    offset: data_offset,
+                    size: data_size,
+                    file_size: file_data.len(),
+                });
+            }
+
+            samples.push(Mp4SampleMeta {
+                data_range: start..end,
+                is_keyframe: sample.keyframe,
+                duration: sample.duration,
+            });
         }
 
         let track_info = track_info.ok_or(Mp4Error::NoVideoSamples)?;
@@ -327,34 +466,13 @@ impl Mp4SampleReader {
             return Err(Mp4Error::NoVideoSamples);
         }
 
-        let file_size = file_data.len();
-        for (index, &(data_offset, data_size, _, _, _)) in samples.iter().enumerate() {
-            let data_size_u64 = data_size as u64;
-            if data_offset
-                .checked_add(data_size_u64)
-                .is_none_or(|end| end > file_size as u64)
-            {
-                return Err(Mp4Error::InconsistentSampleTable {
-                    index,
-                    offset: data_offset,
-                    size: data_size,
-                    file_size,
-                });
-            }
-        }
-
         // 累積再生時刻テーブルを事前計算する。
         // フレームペーシングで「次のフレームをいつ送るべきか」を O(1) で求めるため。
         // thread::sleep の相対待ちでは処理時間の累積ドリフトが発生するが、
         // このテーブルを使って Instant ベースの絶対時刻待ちを行うことで防止する。
         let timescale = track_info.timescale as u64;
-        let mut cumulative_us = Vec::new();
-        let mut acc: u64 = 0;
-        cumulative_us.push(0);
-        for &(_, _, _, _, duration) in &samples {
-            acc += duration as u64;
-            cumulative_us.push((acc * 1_000_000) / timescale);
-        }
+        let durations: Vec<u32> = samples.iter().map(|sample| sample.duration).collect();
+        let cumulative_us = build_cumulative_us(&durations, timescale)?;
 
         Ok(Self {
             file_data,
@@ -517,13 +635,15 @@ impl Mp4SampleReader {
     /// VP8/VP9/AV1 の場合:
     /// - MP4 から抽出したデータをそのまま使用する。
     fn get_sample(&self, index: usize) -> Mp4EncodedSample {
-        let (data_offset, data_size, keyframe, _, _) = self.samples[index];
-        let raw_data = &self.file_data[data_offset as usize..data_offset as usize + data_size];
+        let sample = &self.samples[index];
+        let raw_data = &self.file_data[sample.data_range.clone()];
 
         let data = match self.track_info.codec_type {
             VideoCodecType::H264 | VideoCodecType::H265 => {
                 let mut annex_b = Vec::new();
-                if keyframe && let Some(ref ps) = self.track_info.parameter_sets {
+                if sample.is_keyframe
+                    && let Some(ref ps) = self.track_info.parameter_sets
+                {
                     annex_b.extend_from_slice(ps);
                 }
                 annex_b.extend_from_slice(&length_prefixed_nalu_to_annex_b(
@@ -537,7 +657,7 @@ impl Mp4SampleReader {
 
         Mp4EncodedSample {
             data,
-            is_keyframe: keyframe,
+            is_keyframe: sample.is_keyframe,
             width: self.track_info.width as u32,
             height: self.track_info.height as u32,
             codec_type: self.track_info.codec_type,
@@ -797,6 +917,32 @@ pub struct Mp4VideoCapturer {
     thread_handle: Option<thread::JoinHandle<()>>,
 }
 
+/// deadline 待機の結果。
+#[derive(Debug, PartialEq, Eq)]
+enum WaitResult {
+    /// stop flag が設定された。
+    Stopped,
+    /// deadline に到達した。
+    Ready,
+}
+
+/// stop flag を確認しながら deadline まで待機する。
+///
+/// `thread::park_timeout` を使い、`Drop` 側の `unpark` で待機を中断できるようにする。
+/// spurious wakeup でフレームを早く送らないよう、待機後に deadline と stop flag を再評価する。
+fn wait_until(stop: &AtomicBool, deadline: std::time::Instant) -> WaitResult {
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return WaitResult::Stopped;
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return WaitResult::Ready;
+        }
+        thread::park_timeout(deadline - now);
+    }
+}
+
 impl Mp4VideoCapturer {
     /// [Mp4SampleReader] から動画データを読み込み、新しい `Mp4VideoCapturer` を生成する。
     ///
@@ -846,11 +992,20 @@ impl Mp4VideoCapturer {
                     // 次のフレームの絶対送信時刻まで待機する。
                     // cumulative_duration_us(i+1) は「フレーム 0 から i までの合計再生時間」を返す。
                     // loop_start からのオフセットとして使うことで、累積ドリフトを防止する。
+                    // deadline の計算が overflow した場合は、panic や飽和を避けて正常停止する。
                     let next_frame_time_us = reader.cumulative_duration_us(i + 1);
-                    let target = loop_start + std::time::Duration::from_micros(next_frame_time_us);
-                    let now = std::time::Instant::now();
-                    if target > now {
-                        thread::sleep(target - now);
+                    let target = match loop_start
+                        .checked_add(std::time::Duration::from_micros(next_frame_time_us))
+                    {
+                        Some(target) => target,
+                        None => {
+                            rtc_log_warning!("MP4: loop deadline overflow, stopping feeder thread");
+                            return;
+                        }
+                    };
+                    match wait_until(&stop_clone, target) {
+                        WaitResult::Stopped => return,
+                        WaitResult::Ready => {}
                     }
                 }
 
@@ -875,6 +1030,8 @@ impl Drop for Mp4VideoCapturer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(handle) = self.thread_handle.take() {
+            // 待機中のフィーダースレッドを unpark で即座に起こしてから join する。
+            handle.thread().unpark();
             let _ = handle.join();
         }
     }
@@ -1298,5 +1455,245 @@ mod tests {
             }
             Err(e) => panic!("offset 0 の MP4 は Ok を期待しましたが、実際は: {e}"),
         }
+    }
+
+    // required_input_range が、開始位置 0、EOF ちょうど、EOF 1 byte 超過、
+    // 範囲内、size == None の各入力に対して正しい range を返すことを確認する。
+    #[test]
+    fn required_input_range_returns_checked_range() {
+        assert_eq!(required_input_range(0, None, 100).unwrap(), 0..100);
+        assert_eq!(
+            required_input_range(0, Some(100), 100).unwrap(),
+            0..100,
+            "EOF ちょうどは受理されるべきです"
+        );
+        assert_eq!(
+            required_input_range(0, Some(101), 100).unwrap(),
+            0..100,
+            "EOF 1 byte 超過はファイル末尾へ丸められるべきです"
+        );
+        assert_eq!(
+            required_input_range(50, Some(50), 100).unwrap(),
+            50..100,
+            "範囲内の入力はそのままの range になるべきです"
+        );
+        assert_eq!(
+            required_input_range(100, Some(0), 100).unwrap(),
+            100..100,
+            "EOF ちょうどの開始位置は空の range になるべきです"
+        );
+    }
+
+    // required_input_range が、position がファイルサイズを超える場合に
+    // InputPositionOutOfRange を返すことを確認する。
+    #[test]
+    fn required_input_range_rejects_position_beyond_file() {
+        let result = required_input_range(u64::MAX, None, 100);
+        assert!(
+            matches!(
+                result,
+                Err(Mp4Error::InputPositionOutOfRange {
+                    position: u64::MAX,
+                    file_size: 100,
+                })
+            ),
+            "InputPositionOutOfRange を期待しましたが、実際は: {result:?}"
+        );
+    }
+
+    // required_input_range が、start + size の加算が overflow する場合に
+    // InputRangeOverflow を返すことを確認する。
+    #[test]
+    fn required_input_range_rejects_range_overflow() {
+        let result = required_input_range(10, Some(usize::MAX), 100);
+        assert!(
+            matches!(
+                result,
+                Err(Mp4Error::InputRangeOverflow {
+                    position: 10,
+                    size: usize::MAX,
+                })
+            ),
+            "InputRangeOverflow を期待しましたが、実際は: {result:?}"
+        );
+    }
+
+    // 32 bit target では、position が usize に収まらない場合に
+    // InputPositionOutOfRange を返すことを確認する。
+    #[cfg(target_pointer_width = "32")]
+    #[test]
+    fn required_input_range_rejects_position_conversion_overflow_on_32bit() {
+        let result = required_input_range(u32::MAX as u64 + 1, None, 100);
+        assert!(
+            matches!(result, Err(Mp4Error::InputPositionOutOfRange { .. })),
+            "InputPositionOutOfRange を期待しましたが、実際は: {result:?}"
+        );
+    }
+
+    // moov ボックスの size を 64 bit largesize 形式の u64::MAX へ書き換え、
+    // reader が panic せず InputRangeOverflow エラーを返すことを確認する。
+    //
+    // crate は largesize の u64 を usize へ変換した後、ファイル内位置が 0 より大きい
+    // RequiredInput (position > 0, size == usize::MAX) を返すため、
+    // SDK 側の start + size の加算が overflow して InputRangeOverflow になる。
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn sample_reader_rejects_moov_largesize_overflow() {
+        let fixture = include_bytes!("../../testdata/red-320x320-h264.mp4");
+        let mut patched = fixture.to_vec();
+
+        let moov_offset = patched
+            .windows(4)
+            .position(|w| w == b"moov")
+            .expect("fixture に moov ボックスが必要です");
+        let size_field = moov_offset - 4;
+        // moov がファイルの最後のボックスであることを確認する。
+        let moov_size = u32::from_be_bytes(
+            patched[size_field..size_field + 4]
+                .try_into()
+                .expect("moov box size は 4 バイトで読める必要があります"),
+        ) as usize;
+        assert_eq!(
+            moov_size,
+            fixture.len() - size_field,
+            "fixture の moov box はファイルの最後にあるべきです"
+        );
+        // size フィールドを 1 (largesize 使用) に書き換える。
+        patched[size_field..size_field + 4].copy_from_slice(&1u32.to_be_bytes());
+        // moov の type の後に largesize (u64::MAX) を挿入する。
+        patched.splice(moov_offset + 4..moov_offset + 4, u64::MAX.to_be_bytes());
+
+        let tmp_name = format!(
+            "sora-sdk-mp4-test-largesize-{}-{}.mp4",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("システム時刻は UNIX_EPOCH より後である必要があります")
+                .as_nanos()
+        );
+        let tmp_path = std::env::temp_dir().join(tmp_name);
+
+        std::fs::write(&tmp_path, &patched).expect("一時フィクスチャの書き込みに失敗しました");
+
+        let result = Mp4SampleReader::new(
+            tmp_path
+                .to_str()
+                .expect("パスは有効な UTF-8 である必要があります"),
+        );
+
+        let _ = std::fs::remove_file(&tmp_path);
+
+        match result {
+            Err(crate::error::Error::Mp4 { source }) => {
+                assert!(
+                    matches!(
+                        source,
+                        Mp4Error::InputRangeOverflow {
+                            position: 1247,
+                            size: usize::MAX,
+                        }
+                    ),
+                    "InputRangeOverflow エラーを期待しましたが、実際は: {source:?}"
+                );
+            }
+            Err(e) => panic!("Mp4 エラーを期待しましたが、実際は: {e}"),
+            Ok(_) => panic!("Err を期待しましたが、Ok でした"),
+        }
+    }
+
+    // サンプル数が上限ちょうどまでは受理され、1 超過から拒否されることを確認する。
+    #[test]
+    fn sample_count_within_limit_accepts_limit_and_rejects_over() {
+        assert!(
+            sample_count_within_limit(MAX_SAMPLE_COUNT_PER_TRACK - 1),
+            "上限ちょうど (index = MAX - 1) は受理されるべきです"
+        );
+        assert!(
+            !sample_count_within_limit(MAX_SAMPLE_COUNT_PER_TRACK),
+            "1 sample 超過 (index = MAX) は拒否されるべきです"
+        );
+    }
+
+    // build_cumulative_us が、duration と timescale から期待どおりの
+    // 累積再生時刻テーブルを構築することを確認する。
+    #[test]
+    fn build_cumulative_us_returns_expected_values() {
+        // timescale=1000、duration=[1000, 500, 500] なら
+        // 累積は 1000ms, 1500ms, 2000ms = 1,000,000us, 1,500,000us, 2,000,000us になる。
+        let durations = [1000, 500, 500];
+        let result = build_cumulative_us(&durations, 1000).expect("正常入力は Ok になるべきです");
+        assert_eq!(result, vec![0, 1_000_000, 1_500_000, 2_000_000]);
+    }
+
+    // build_cumulative_us が、累積 duration または microseconds 変換が overflow する
+    // 入力に対して DurationOverflow を返すことを確認する。
+    #[test]
+    fn build_cumulative_us_rejects_overflow() {
+        // duration = u32::MAX を 4295 個累積すると、microseconds 変換 (× 1_000_000) が
+        // u64 の上限を超える。
+        let durations = vec![u32::MAX; 4295];
+        let result = build_cumulative_us(&durations, 12800);
+        assert!(
+            matches!(result, Err(Mp4Error::DurationOverflow { .. })),
+            "DurationOverflow を期待しましたが、実際は: {result:?}"
+        );
+    }
+
+    // wait_until が、stop flag 設定済みなら park せずに即座に Stopped を返すことを確認する。
+    #[test]
+    fn wait_until_stops_immediately_when_stop_is_set() {
+        let stop = AtomicBool::new(true);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        assert!(
+            matches!(wait_until(&stop, deadline), WaitResult::Stopped),
+            "stop 設定済みなら即座に Stopped を返すべきです"
+        );
+    }
+
+    // wait_until が、deadline 到達済みなら park せずに即座に Ready を返すことを確認する。
+    #[test]
+    fn wait_until_ready_when_deadline_passed() {
+        let stop = AtomicBool::new(false);
+        let deadline = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        assert!(
+            matches!(wait_until(&stop, deadline), WaitResult::Ready),
+            "deadline 到達済みなら即座に Ready を返すべきです"
+        );
+    }
+
+    // 実 thread で park_timeout 中の wait が stop + unpark により終了することを確認する。
+    //
+    // barrier でテストスレッドが wait_until を呼ぶ直前まで到達したことを同期し、
+    // Drop と同じ stop / unpark / join の順序で待機を終了させる。
+    #[test]
+    fn wait_until_interrupted_by_unpark() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        let stop_clone = stop.clone();
+        let barrier_clone = barrier.clone();
+        let handle = thread::spawn(move || {
+            // wait_until を呼ぶ直前まで到達したことを通知する。
+            barrier_clone.wait();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            let result = wait_until(&stop_clone, deadline);
+            done_tx.send(result).expect("終了通知の送信に失敗しました");
+        });
+
+        // テストスレッドが wait_until を呼ぶ直前まで到達するのを待つ。
+        barrier.wait();
+        // Drop と同じ順序で stop を設定してから unpark する。
+        // park 中なら unpark で即座に起床し、park 前なら stop チェックで終了する。
+        stop.store(true, Ordering::Release);
+        handle.thread().unpark();
+
+        let result = done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("待機中のスレッドは 5 秒以内に終了するべきです");
+        assert!(
+            matches!(result, WaitResult::Stopped),
+            "stop による停止を期待しましたが、実際は: {result:?}"
+        );
     }
 }

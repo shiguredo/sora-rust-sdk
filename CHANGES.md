@@ -22,3 +22,7 @@
 - [FIX] 非ゼロの composition time offset (B フレーム) を含む MP4 を `Mp4SampleReader` の初期化時に拒否する
   - 今までは composition time offset を無視してデコード順のまま送信していた
   - @sile
+- [FIX] MP4 の算術 overflow と capturer の停止遅延を解消する
+  - 今までは入力範囲・サンプル範囲・累積 duration の演算が未検査で overflow 時に panic または wraparound していた
+  - 今までは長いフレーム間隔の待機中に停止シグナルを確認できず、破棄時に join が長時間停止していた
+  - @sile
