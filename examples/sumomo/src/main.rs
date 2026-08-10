@@ -395,7 +395,8 @@ fn attach_sender_tracks(
     args: &Args,
     mp4_reader: Option<Mp4SampleReader>,
 ) -> Result<(SoraConnectionBuilder, Option<VideoCapturerHolder>)> {
-    let video_enabled = args.video.unwrap_or(true);
+    let video_enabled = args.video_enabled();
+    let audio_enabled = args.audio_enabled();
     let mut video_capturer = None;
     if args.role.wants_send() && video_enabled {
         let mut capturer = create_video_capturer(args, mp4_reader)?;
@@ -405,7 +406,7 @@ fn attach_sender_tracks(
         video_capturer = Some(capturer);
     }
 
-    if args.role.wants_send() {
+    if args.role.wants_send() && audio_enabled {
         let audio_source = context.create_audio_source()?;
         let audio_track = context.create_audio_track(&audio_source)?;
         builder = builder.sender_audio_track(audio_track);
@@ -497,9 +498,9 @@ fn build_and_run_connection(
     SoraConnectionHandle,
     tokio::task::JoinHandle<sora_sdk::Result<()>>,
 )> {
-    // --audio-input-device が指定された場合は SumomoAdm を使用する
+    // 音声が有効で、--audio-input-device が指定された場合は SumomoAdm を使用する
     #[cfg(feature = "media-device")]
-    let external_adm = if args.audio_input_device.is_some() {
+    let external_adm = if args.audio_enabled() && args.audio_input_device.is_some() {
         Some(SumomoAdm::new())
     } else {
         None
@@ -525,17 +526,21 @@ fn build_and_run_connection(
     )?;
     let context = SoraConnectionContext::new_with_config(context_config)?;
 
-    // --audio-input-device が指定された場合は AudioDeviceCapturer を使用する
+    // 音声が有効で、--audio-input-device が指定された場合は AudioDeviceCapturer を使用する
     #[cfg(feature = "media-device")]
-    let audio_capturer = if let Some(ref device_id) = args.audio_input_device {
-        let state = external_adm
-            .as_ref()
-            .expect("BUG: external_adm が None です")
-            .state();
-        let mut capturer = AudioDeviceCapturer::new(Some(device_id.clone()), state)?;
-        capturer.start()?;
-        rtc_log_info!("Started audio input device: {}", device_id);
-        Some(capturer)
+    let audio_capturer = if args.audio_enabled() {
+        if let Some(ref device_id) = args.audio_input_device {
+            let state = external_adm
+                .as_ref()
+                .expect("BUG: external_adm が None です")
+                .state();
+            let mut capturer = AudioDeviceCapturer::new(Some(device_id.clone()), state)?;
+            capturer.start()?;
+            rtc_log_info!("Started audio input device: {}", device_id);
+            Some(capturer)
+        } else {
+            None
+        }
     } else {
         None
     };

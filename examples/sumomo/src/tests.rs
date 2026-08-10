@@ -57,15 +57,15 @@ fn make_raw_args(values: &[&str]) -> noargs::RawArgs {
 
 #[test]
 fn parse_video_codec_implementation_auto() {
-    let parsed = VideoCodecImplementationSelections::parse("auto")
-        .expect("auto must be parsed successfully");
+    let parsed =
+        VideoCodecImplementationSelections::parse("auto").expect("auto はパースに成功するはずです");
     assert_eq!(parsed, VideoCodecImplementationSelections::Auto);
 }
 
 #[test]
 fn parse_video_codec_implementation_multiple() {
     let parsed = VideoCodecImplementationSelections::parse("internal-apple,internal")
-        .expect("manual list must be parsed successfully");
+        .expect("手動リストはパースに成功するはずです");
     assert_eq!(
         parsed,
         VideoCodecImplementationSelections::Manual(vec![
@@ -78,7 +78,7 @@ fn parse_video_codec_implementation_multiple() {
 #[test]
 fn parse_video_codec_implementation_rejects_auto_mix() {
     let err = VideoCodecImplementationSelections::parse("auto,amf")
-        .expect_err("auto mixed list must fail");
+        .expect_err("auto 混在リストは失敗するはずです");
     assert_eq!(
         err,
         "video-codec-implementation auto cannot be combined with other implementations"
@@ -87,8 +87,8 @@ fn parse_video_codec_implementation_rejects_auto_mix() {
 
 #[test]
 fn parse_video_codec_implementation_rejects_duplicate() {
-    let err =
-        VideoCodecImplementationSelections::parse("amf,amf").expect_err("duplicate list must fail");
+    let err = VideoCodecImplementationSelections::parse("amf,amf")
+        .expect_err("重複リストは失敗するはずです");
     assert_eq!(
         err,
         "video-codec-implementation must not contain duplicate implementations"
@@ -98,7 +98,7 @@ fn parse_video_codec_implementation_rejects_duplicate() {
 #[test]
 fn parse_video_codec_implementation_rejects_empty_entry() {
     let err = VideoCodecImplementationSelections::parse("amf,,nvcodec")
-        .expect_err("empty entry must fail");
+        .expect_err("空エントリは失敗するはずです");
     assert_eq!(
         err,
         "video-codec-implementation must not contain empty entries"
@@ -107,8 +107,8 @@ fn parse_video_codec_implementation_rejects_empty_entry() {
 
 #[test]
 fn parse_video_codec_implementation_rejects_unknown_value() {
-    let err =
-        VideoCodecImplementationSelections::parse("unknown").expect_err("unknown value must fail");
+    let err = VideoCodecImplementationSelections::parse("unknown")
+        .expect_err("未知の値は失敗するはずです");
     assert_eq!(
         err,
         "video-codec-implementation must be auto/internal/internal-apple/amf/nvcodec/vpl/v4l2/openh264"
@@ -118,7 +118,7 @@ fn parse_video_codec_implementation_rejects_unknown_value() {
 #[test]
 fn parse_video_codec_implementation_accepts_vpl() {
     let parsed =
-        VideoCodecImplementationSelections::parse("vpl").expect("vpl must be parsed successfully");
+        VideoCodecImplementationSelections::parse("vpl").expect("vpl はパースに成功するはずです");
     assert_eq!(
         parsed,
         VideoCodecImplementationSelections::Manual(vec![VideoCodecImplementationSelection::Vpl,])
@@ -127,8 +127,8 @@ fn parse_video_codec_implementation_accepts_vpl() {
 
 #[test]
 fn parse_video_codec_implementation_accepts_v4l2() {
-    let parsed = VideoCodecImplementationSelections::parse("v4l2")
-        .expect("v4l2 must be parsed successfully");
+    let parsed =
+        VideoCodecImplementationSelections::parse("v4l2").expect("v4l2 はパースに成功するはずです");
     assert_eq!(
         parsed,
         VideoCodecImplementationSelections::Manual(vec![VideoCodecImplementationSelection::V4l2,])
@@ -152,7 +152,7 @@ fn parse_args_accepts_multiple_libcamera_controls() {
         "Contrast=1.5",
     ]);
     let args = crate::args::parse_args(raw_args)
-        .expect("multiple libcamera controls must be parsed successfully");
+        .expect("複数の libcamera コントロールはパースに成功するはずです");
     assert!(args.use_libcamera);
     assert_eq!(
         args.libcamera_controls,
@@ -180,9 +180,9 @@ fn parse_args_rejects_invalid_libcamera_control_format() {
     let result = crate::args::parse_args(raw_args);
     assert!(
         result.is_err(),
-        "invalid libcamera control format must fail"
+        "不正な libcamera コントロール形式は失敗するはずです"
     );
-    let err = result.err().expect("error must exist");
+    let err = result.err().expect("エラーは必ず存在するはずです");
     assert!(
         err.to_string()
             .contains("--libcamera-control must be KEY=VALUE")
@@ -227,7 +227,7 @@ fn validate_args_rejects_openh264_without_path() {
         ]),
         None,
     );
-    let err = validate_args(&args).expect_err("missing openh264 path must fail");
+    let err = validate_args(&args).expect_err("openh264 パスが無い場合は失敗するはずです");
     assert!(
         err.to_string()
             .contains("--video-codec-implementation openh264 requires --openh264-path")
@@ -242,7 +242,7 @@ fn validate_args_rejects_openh264_path_without_openh264() {
         ]),
         Some("/tmp/libopenh264.so"),
     );
-    let err = validate_args(&args).expect_err("unexpected openh264 path must fail");
+    let err = validate_args(&args).expect_err("予期しない openh264 パスは失敗するはずです");
     assert!(
         err.to_string()
             .contains("--openh264-path requires --video-codec-implementation to include openh264")
@@ -255,7 +255,7 @@ fn validate_args_rejects_openh264_path_with_auto() {
         VideoCodecImplementationSelections::Auto,
         Some("/tmp/libopenh264.so"),
     );
-    let err = validate_args(&args).expect_err("auto with openh264 path must fail");
+    let err = validate_args(&args).expect_err("auto と openh264 パスの併用は失敗するはずです");
     assert!(
         err.to_string()
             .contains("--openh264-path requires --video-codec-implementation to include openh264")
@@ -266,7 +266,8 @@ fn validate_args_rejects_openh264_path_with_auto() {
 fn validate_args_rejects_libcamera_control_without_libcamera() {
     let mut args = test_args(VideoCodecImplementationSelections::Auto, None);
     args.libcamera_controls = vec![("Brightness".to_string(), "0.2".to_string())];
-    let err = validate_args(&args).expect_err("libcamera control without libcamera must fail");
+    let err = validate_args(&args)
+        .expect_err("libcamera なしの libcamera コントロールは失敗するはずです");
     assert!(
         err.to_string()
             .contains("--libcamera-control requires --libcamera")
@@ -293,13 +294,17 @@ fn validate_args_accepts_libcamera_native_with_libcamera() {
     assert!(validate_args(&args).is_ok());
 }
 
-#[cfg(feature = "media-device")]
+// 併用不可チェックは libcamera が有効なときだけ到達する。
+// libcamera 無効時は validate_args_rejects_libcamera_when_feature_is_disabled が
+// 「libcamera が無効」エラーを検証する。
+#[cfg(all(feature = "media-device", feature = "libcamera"))]
 #[test]
 fn validate_args_rejects_libcamera_with_video_input_device() {
     let mut args = test_args(VideoCodecImplementationSelections::Auto, None);
     args.use_libcamera = true;
     args.video_input_device = Some("/dev/video0".to_string());
-    let err = validate_args(&args).expect_err("libcamera with video-input-device must fail");
+    let err =
+        validate_args(&args).expect_err("libcamera と video-input-device の併用は失敗するはずです");
     assert!(
         err.to_string()
             .contains("--libcamera and --video-input-device cannot be used together")
@@ -311,7 +316,7 @@ fn validate_args_rejects_libcamera_with_video_input_device() {
 fn validate_args_rejects_libcamera_when_feature_is_disabled() {
     let mut args = test_args(VideoCodecImplementationSelections::Auto, None);
     args.use_libcamera = true;
-    let err = validate_args(&args).expect_err("libcamera must fail when feature is disabled");
+    let err = validate_args(&args).expect_err("機能が無効な場合は libcamera は失敗するはずです");
     assert!(err.to_string().contains(
         "libcamera is not enabled in this build. Rebuild sumomo with --features libcamera"
     ));
@@ -324,7 +329,7 @@ fn validate_args_rejects_vpl_when_feature_is_disabled() {
         VideoCodecImplementationSelections::Manual(vec![VideoCodecImplementationSelection::Vpl]),
         None,
     );
-    let err = validate_args(&args).expect_err("vpl must fail when feature is disabled");
+    let err = validate_args(&args).expect_err("機能が無効な場合は vpl は失敗するはずです");
     assert!(
         err.to_string()
             .contains("VPL is not enabled in this build. Rebuild sumomo with --features vpl")
@@ -338,7 +343,7 @@ fn validate_args_rejects_v4l2_when_feature_is_disabled() {
         VideoCodecImplementationSelections::Manual(vec![VideoCodecImplementationSelection::V4l2]),
         None,
     );
-    let err = validate_args(&args).expect_err("v4l2 must fail when feature is disabled");
+    let err = validate_args(&args).expect_err("機能が無効な場合は v4l2 は失敗するはずです");
     assert!(
         err.to_string()
             .contains("V4L2 is not enabled in this build. Rebuild sumomo with --features v4l2")
@@ -354,7 +359,7 @@ fn build_context_config_auto_uses_default_capabilities() {
         None,
         VideoCodecImplementationSelections::Auto,
     )
-    .expect("auto config must be built");
+    .expect("auto 設定は構築できるはずです");
 
     let default_config = SoraConnectionContextConfig::default();
     assert_eq!(capability_names(&config), capability_names(&default_config));
@@ -375,7 +380,7 @@ fn build_context_config_manual_internal_only() {
             VideoCodecImplementationSelection::Internal,
         ]),
     )
-    .expect("manual config must be built");
+    .expect("manual 設定は構築できるはずです");
     let names = capability_names(&config);
     assert_eq!(names, vec!["internal".to_string()]);
     assert!(
@@ -396,7 +401,7 @@ fn collect_video_codec_list_report_marks_internal_selected_in_auto() {
         .capabilities
         .iter()
         .find(|capability| capability.implementation == "internal")
-        .expect("internal capability must exist");
+        .expect("internal capability は必ず存在するはずです");
     assert!(internal.selected);
     assert!(internal.available);
 }
@@ -415,7 +420,7 @@ fn collect_video_codec_list_report_marks_openh264_reason_without_path() {
         .capabilities
         .iter()
         .find(|capability| capability.implementation == "openh264")
-        .expect("openh264 capability must exist");
+        .expect("openh264 capability は必ず存在するはずです");
     assert!(openh264.selected);
     assert!(!openh264.available);
     assert!(
@@ -544,7 +549,7 @@ fn build_context_config_rejects_internal_apple_on_unsupported_platform() {
         ]),
     );
     match result {
-        Ok(_) => panic!("internal-apple must fail on unsupported platform"),
+        Ok(_) => panic!("internal-apple はサポート外のプラットフォームでは失敗するはずです"),
         Err(err) => {
             assert!(
                 err.to_string()
@@ -575,7 +580,7 @@ fn build_context_config_manual_order_prefers_later_selection_on_apple() {
                     CodecDirection::Encoder,
                     shiguredo_webrtc::VideoCodecType::H264,
                 )
-                .expect("h264 encoder preference must exist");
+                .expect("h264 エンコーダーの preference は必ず存在するはずです");
             assert_eq!(preference.implementation().name(), "internal-apple");
         }
         Err(err) => {

@@ -304,8 +304,7 @@ fn input_mp4_duration_exits_zero() {
 
     // repository の MP4 fixture のパスを解決する。
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let mp4_path = std::path::Path::new(manifest_dir)
-        .join("../../src/video_codecs/testdata/archive-red-320x320-h264.mp4");
+    let mp4_path = std::path::Path::new(manifest_dir).join("../../testdata/red-320x320-h264.mp4");
     let mp4_path = mp4_path
         .canonicalize()
         .expect("MP4 fixture の解決に失敗しました");

@@ -18,7 +18,7 @@ Medium。特定の CLI option 組み合わせが必要だが、接続成功後�
 ## 現状
 
 `build_context_config` は MP4 passthrough preference を先に追加し、後から手動 codec implementation を merge する。
-同一 codec の後勝ち規則により、実 codec を encoder 方向でサポートする手動 implementation を指定した場合（Manual）は passthrough が上書きされる。
+`VideoCodecPreference::merge` は方向・codec が一致する既存エントリの implementation を上書きする後勝ち規則のため、実 codec を encoder 方向でサポートする手動 implementation を指定した場合（Manual）は preference の実装指定が passthrough へ上書きされる。`video_codec_capabilities` には passthrough と手動の両方の capability が残るが、preference の実装指定が置き換わることで encoder 選択が手動 implementation になる。
 `prepare_mp4_state` が取得した実 codec と CLI の video codec type は独立して扱われ、`--video-codec-type` が実 codec と異なっても接続前に失敗しない。
 
 ## 設計方針
@@ -110,7 +110,7 @@ codec 決定の helper、`build_context_config` の呼び出し側、既存の `
 - `video_send_enabled` の単体テストで、SendOnly / SendRecv / RecvOnly と `--video` の None / true / false の組み合わせを検証する
 - `apply_video_options` の helper 優先配線を確認する。helper 単体テストで `Err`（codec 不一致）の生成を検証し、`apply_video_options` の `Some` / `Err` 優先配線は `SoraConnectionBuilder` が opaque なため code review で確認する（実コンテキストを起動して配線だけを検証する重量級テストは追加しない）
 - `build_context_config` のテストで、Auto + MP4 で passthrough が選択されること、映像送信無効時（`video_send_enabled == false`）に Manual + MP4 でも拒否されず従来どおり構築されることを検証する（手動拒否は判定 helper の単体テストで担保する。実 MP4 は下記と同じ H.264 fixture を reader として使う。`build_context_config` の手動拒否の配線（実 codec の渡し方・`video_send_enabled` によるゲート）は `apply_video_options` と同様に code review で確認する）
-- 実 MP4 を使ったテストで、`prepare_mp4_state` から得た実 codec を helper に渡すと、シグナリング codec と一致する Video が得られることを検証する（既存の H.264 fixture `src/video_codecs/testdata/archive-red-320x320-h264.mp4` を `examples/sumomo/src/tests.rs` から `include_bytes!` の相対パス `../../../src/video_codecs/testdata/archive-red-320x320-h264.mp4` で参照し一時ファイルへ書き出して `Mp4SampleReader` に渡す。`src/video_codecs/mp4.rs` の既存テストと同方式）
+- 実 MP4 を使ったテストで、`prepare_mp4_state` から得た実 codec を helper に渡すと、シグナリング codec と一致する Video が得られることを検証する（既存の H.264 fixture `testdata/red-320x320-h264.mp4` を `examples/sumomo/src/tests.rs` から `include_bytes!` の相対パス `../../../testdata/red-320x320-h264.mp4` で参照し一時ファイルへ書き出して `Mp4SampleReader` に渡す。`src/video_codecs/mp4.rs` の既存テストと同方式）
 - `cargo test --workspace` と `cargo clippy --workspace --all-targets -- -D warnings` が成功する
 - `cargo clippy -p sumomo --features raw-player --all-targets -- -D warnings` が成功する
 - `CHANGES.md` の develop セクションへ `[FIX]` と担当者 `@voluntas` を追記する

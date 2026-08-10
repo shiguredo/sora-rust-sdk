@@ -212,7 +212,7 @@ presentation timestamp の値順は B frame により loop 内で非単調にな
 
 ### test fixture
 
-実際に B frame を含み、DTS と PTS が異なる小さな H.264 MP4 fixture を `src/video_codecs/testdata/` に追加する。
+実際に B frame を含み、DTS と PTS が異なる小さな H.264 MP4 fixture を `testdata/` に追加する。
 fixture はリポジトリへ commit し、生成に使用した ffmpeg の version と command、H.264 profile、期待する `profile-level-id`、DTS、composition time offset、PTS、timescale をテストコメントへ記録する。
 CI で ffmpeg を起動したり、ネットワークから fixture を取得したりしない。
 fixture の payload が decode order であることは demux 結果の sample index と timestamp で検証し、画素の presentation order を外部 decoder の挙動だけに依存して判定しない。
@@ -222,7 +222,7 @@ fixture の payload が decode order であることは demux 結果の sample i
 - `src/video_codecs/mp4.rs`
 - `src/video_codec_preference.rs`
 - `src/video_codec.rs`
-- `src/video_codecs/testdata/` の B frame fixture
+- `testdata/` の B frame fixture
 - `examples/sumomo/src/main.rs`
 - `examples/sumomo/src/tests.rs`
 - `CHANGES.md`
@@ -302,3 +302,10 @@ fixture の payload が decode order であることは demux 結果の sample i
 - `cargo clippy --workspace --all-targets -- -D warnings` が成功する
 - `CHANGES.md` の develop セクションに `[FIX]` を追記する
 - production log は英語、コメントとテストの assertion message は日本語にする
+
+## pending にした理由
+
+- B frame 対応は libwebrtc の `VideoStreamEncoder::OnFrame` が入力 RTP timestamp を `90 * ntp_time_ms` で上書きする制約を回避する必要があり、reader / capturer / encoder の全体改修と profile-level-id negotiation を含む大規模な作業になる
+- 現時点では B frame 入り MP4 を送信する需要がなく、優先度が低い
+- B frame 入力を明確に拒否する対応（非ゼロ composition time offset の検出）は別 issue で先に実施する
+- 対応再開時は本 issue の設計方針をそのまま実装の起点にできる

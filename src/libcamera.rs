@@ -1452,7 +1452,7 @@ mod tests {
         ];
 
         let buffer = copy_i420_planes_to_buffer(&planes, 4, 2)
-            .expect("copy_i420_planes_to_buffer should succeed");
+            .expect("copy_i420_planes_to_buffer は成功するはずです");
 
         assert_eq!(&buffer.y_data()[..8], &[0_u8, 1, 2, 3, 4, 5, 6, 7]);
         assert_eq!(&buffer.u_data()[..2], &[10_u8, 11]);
@@ -1464,7 +1464,7 @@ mod tests {
         let planes = vec![vec![0_u8, 1, 2, 3, 4, 5, 6, 7], vec![10_u8, 11, 12, 13]];
 
         let buffer = copy_nv12_planes_to_buffer(&planes, 4, 2)
-            .expect("copy_nv12_planes_to_buffer should succeed");
+            .expect("copy_nv12_planes_to_buffer は成功するはずです");
 
         assert_eq!(&buffer.y_data()[..8], &[0_u8, 1, 2, 3, 4, 5, 6, 7]);
         assert_eq!(&buffer.uv_data()[..4], &[10_u8, 11, 12, 13]);
@@ -1474,7 +1474,7 @@ mod tests {
     fn copy_i420_planes_to_buffer_rejects_insufficient_planes() {
         let planes = vec![vec![0_u8; 8], vec![0_u8; 2]];
         let err = match copy_i420_planes_to_buffer(&planes, 4, 2) {
-            Ok(_) => panic!("copy_i420_planes_to_buffer should fail"),
+            Ok(_) => panic!("copy_i420_planes_to_buffer は失敗するはずです"),
             Err(err) => err,
         };
         assert!(format!("{err}").contains("invalid i420 frame metadata"));
@@ -1484,7 +1484,7 @@ mod tests {
     fn copy_i420_planes_to_buffer_rejects_invalid_stride() {
         let planes = vec![vec![0_u8; 7], vec![0_u8; 2], vec![0_u8; 2]];
         let err = match copy_i420_planes_to_buffer(&planes, 4, 2) {
-            Ok(_) => panic!("copy_i420_planes_to_buffer should fail"),
+            Ok(_) => panic!("copy_i420_planes_to_buffer は失敗するはずです"),
             Err(err) => err,
         };
         assert!(format!("{err}").contains("invalid i420 y stride"));
@@ -1494,7 +1494,7 @@ mod tests {
     fn copy_nv12_planes_to_buffer_rejects_invalid_stride() {
         let planes = vec![vec![0_u8; 8], vec![0_u8; 3]];
         let err = match copy_nv12_planes_to_buffer(&planes, 4, 4) {
-            Ok(_) => panic!("copy_nv12_planes_to_buffer should fail"),
+            Ok(_) => panic!("copy_nv12_planes_to_buffer は失敗するはずです"),
             Err(err) => err,
         };
         assert!(format!("{err}").contains("invalid nv12 uv stride"));
@@ -1632,7 +1632,7 @@ mod tests {
         let mut mapped = CapturedFrameBuffers::Mapped(Vec::with_capacity(1));
         match &mut mapped {
             CapturedFrameBuffers::Mapped(mapped_buffers) => mapped_buffers.push(Vec::new()),
-            CapturedFrameBuffers::Native(_) => panic!("mapped variant expected"),
+            CapturedFrameBuffers::Native(_) => panic!("mapped バリアントを期待しました"),
         }
         let native_view = match &mapped {
             CapturedFrameBuffers::Native(native_infos) => native_infos.first(),
@@ -1648,7 +1648,7 @@ mod tests {
                     size: 4,
                 });
             }
-            CapturedFrameBuffers::Mapped(_) => panic!("native variant expected"),
+            CapturedFrameBuffers::Mapped(_) => panic!("native バリアントを期待しました"),
         }
         let mapped_view = match &native {
             CapturedFrameBuffers::Mapped(mapped_buffers) => mapped_buffers.first(),

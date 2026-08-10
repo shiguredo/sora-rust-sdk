@@ -40,7 +40,7 @@ fn skip_if_codec_not_fully_supported(codec_type: VideoCodecType, codec_name: &st
     if is_codec_fully_supported(codec_type) {
         return false;
     }
-    println!("SKIP: {codec_name} encoder/decoder is not fully supported");
+    println!("SKIP: {codec_name} の encoder/decoder が完全にサポートされていません");
     true
 }
 
