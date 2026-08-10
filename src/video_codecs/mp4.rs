@@ -70,9 +70,8 @@ pub enum Mp4Error {
     },
     /// 非ゼロの composition time offset を含むビデオサンプルが存在する。
     ///
-    /// decode order と表示時刻が異なる映像 (B frame 等) を、decode order のまま
-    /// 単調増加の RTP timestamp で送信すると受信側の表示順序が壊れるため、
-    /// 現在の送信経路では受理しない。
+    /// B フレーム等のデコード順と表示順が異なる映像をデコード順のまま送信すると、
+    /// 受信側の表示順序が壊れるため、現在の送信経路では受理しない。
     UnsupportedCompositionTimeOffset {
         /// 問題のサンプルインデックス (0 始まり、ビデオサンプル内の連番)。
         index: usize,
@@ -120,7 +119,7 @@ impl std::fmt::Display for Mp4Error {
             Self::UnsupportedCompositionTimeOffset { index, codec_type } => {
                 write!(
                     f,
-                    "サンプルの composition time offset が非ゼロです: sample={index} codec={codec_type:?} (B frame には未対応)"
+                    "サンプルの composition time offset が非ゼロです: sample={index} codec={codec_type:?} (B フレームには未対応)"
                 )
             }
         }
@@ -300,7 +299,7 @@ impl Mp4SampleReader {
                 track_info = Some(Self::extract_track_info(entry, timescale)?);
             }
 
-            // 非ゼロの composition time offset は decode order と表示時刻が一致しないため拒否する。
+            // 非ゼロの composition time offset はデコード順と表示時刻が一致しないため拒否する。
             if sample.composition_time_offset.unwrap_or(0) != 0 {
                 return Err(Mp4Error::UnsupportedCompositionTimeOffset {
                     index: samples.len(),
@@ -1181,14 +1180,14 @@ mod tests {
         );
     }
 
-    // 非ゼロの composition time offset (B frame) を含む MP4 を入力した場合に、
+    // 非ゼロの composition time offset (B フレーム) を含む MP4 を入力した場合に、
     // Mp4SampleReader::new が panic せず UnsupportedCompositionTimeOffset エラーを返すことを確認する。
     //
     // フィクスチャは次のコマンドで生成した (ffmpeg 7.1.1):
     //   ffmpeg -y -v error -f lavfi -i "color=red:size=320x320:rate=25:duration=2" \
     //     -c:v libx264 -preset medium -bf 2 -g 50 -b:v 50k -maxrate 50k -bufsize 100k \
     //     -pix_fmt yuv420p red-bframe-320x320-h264.mp4
-    // H.264 High Profile Level 2.1、timescale=12800 で、B frame の先頭 reorder により
+    // H.264 High Profile Level 2.1、timescale=12800 で、B フレームの先頭 reorder により
     // 最初の sample (index 0) の composition time offset が 1024 になる。
     #[test]
     fn sample_reader_rejects_b_frame_fixture() {
