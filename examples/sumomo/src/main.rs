@@ -212,6 +212,12 @@ fn build_context_config(
     }
 
     // MP4 使用時は送信 (Encoder) に passthrough のみを使い、受信 (Decoder) は選択された実装を維持する。
+    //
+    // passthrough capability は必ず上の Manual / Auto の capability 追加より後に追加すること。
+    // VideoCodecPreference::merge は後勝ち規則 (方向・codec が一致する既存エントリの
+    // implementation を上書きする) のため、この順序が「MP4 の実 codec の Encoder が
+    // passthrough になる」ことの不変条件になっている。順序が変わると下のフィルタで
+    // Encoder エントリが 0 件になり、MP4 送信が静かに成立しなくなる。
     if let Some(codec_type) = mp4_codec_type {
         let passthrough_capability: Box<dyn VideoCodecCapability> =
             Box::new(Mp4PassthroughVideoCodecCapability::new(codec_type));
@@ -277,13 +283,18 @@ fn apply_video_options(
     mp4_codec_type: Option<VideoCodecType>,
 ) -> Result<SoraConnectionBuilder> {
     // MP4 使用時は MP4 から検出した実際のコーデックを使う (--video-codec-type とは併用不可)。
-    let video_codec_type = mp4_codec_type.or(args.video_codec_type);
+    // ただし、受信専用 (RecvOnly) では MP4 のコーデックを利用せず、--video-codec-type に従う。
+    // `--input-mp4` は送信専用のオプションであるため、RecvOnly 時の `video` の設定へ波及させない。
+    let video_codec_type = if args.role.wants_send() {
+        mp4_codec_type.or(args.video_codec_type)
+    } else {
+        args.video_codec_type
+    };
 
-    let video_bit_rate = args.video_bit_rate;
     if let Some(video) = args.video {
         if video {
             let video_setting = match video_codec_type {
-                Some(codec_type) => video_from_codec_type(codec_type, video_bit_rate)?,
+                Some(codec_type) => video_from_codec_type(codec_type, args.video_bit_rate)?,
                 None => sora_sdk::Video::new_bool(true),
             };
             builder = builder.video(video_setting);
@@ -291,7 +302,7 @@ fn apply_video_options(
             builder = builder.video(sora_sdk::Video::new_bool(false));
         }
     } else if let Some(codec_type) = video_codec_type {
-        builder = builder.video(video_from_codec_type(codec_type, video_bit_rate)?);
+        builder = builder.video(video_from_codec_type(codec_type, args.video_bit_rate)?);
     }
     Ok(builder)
 }
