@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-29
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-10
 - Model: GPT-5
 - Branch: feature/fix-sumomo-client-auth
 - Polished: 2026-08-06
@@ -55,3 +55,9 @@ SDK 本体の `client_cert` は certificate と key をペアで受け取るた�
 - `--client-cert` / `--client-key` の help 文言に両方指定が必要な旨が記載されている
 - 新規に追加する error は英語、新規に追加するテストのコメントと assertion message は日本語にする（既存の記述の書き換えは含まない）
 - `CHANGES.md` の develop セクションへ `[FIX]` と担当者 `@voluntas` を追記する
+
+## 解決方法
+
+`examples/sumomo/src/args.rs` の `validate_args` に `--client-cert` と `--client-key` の pair 条件検査を追加し、片側だけの指定を接続開始前にエラーにするようにした。エラーは既存の `validate_args` と同じ英語 + オプション名形式 (`--client-cert and --client-key must be specified together`) で返す。
+
+`--client-cert` / `--client-key` の help 文言に両方指定が必要な旨を追記し、`examples/sumomo/src/tests.rs` に argument validation のテストを追加した。テストでは片側指定の拒否（エラーが期待メッセージと完全一致することと、certificate / key の内容がエラーに含まれないことを検証）・両方指定の受理・両方未指定の受理を確認する。

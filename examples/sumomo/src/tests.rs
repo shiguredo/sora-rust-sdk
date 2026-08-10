@@ -209,6 +209,60 @@ fn parse_args_accepts_libcamera_native_flag() {
 }
 
 #[test]
+fn validate_args_rejects_client_cert_without_client_key() {
+    let mut args = test_args(VideoCodecImplementationSelections::Auto, None);
+    // エラーが期待メッセージと完全一致することを検証する。
+    // 完全一致なので、certificate の内容 (CERT-SECRET-DATA) がエラーに含まれないことも保証される。
+    args.client_cert = Some("CERT-SECRET-DATA".to_string());
+    let err = match validate_args(&args) {
+        Err(AppError::Io(err)) => err,
+        Err(other) => panic!("AppError::Io が返るはずです: {other:?}"),
+        Ok(_) => panic!("certificate 単独指定は失敗するはずです"),
+    };
+    assert_eq!(
+        err.to_string(),
+        "--client-cert and --client-key must be specified together"
+    );
+}
+
+#[test]
+fn validate_args_rejects_client_key_without_client_cert() {
+    let mut args = test_args(VideoCodecImplementationSelections::Auto, None);
+    // エラーが期待メッセージと完全一致することを検証する。
+    // 完全一致なので、private key の内容 (KEY-SECRET-DATA) がエラーに含まれないことも保証される。
+    args.client_key = Some("KEY-SECRET-DATA".to_string());
+    let err = match validate_args(&args) {
+        Err(AppError::Io(err)) => err,
+        Err(other) => panic!("AppError::Io が返るはずです: {other:?}"),
+        Ok(_) => panic!("private key 単独指定は失敗するはずです"),
+    };
+    assert_eq!(
+        err.to_string(),
+        "--client-cert and --client-key must be specified together"
+    );
+}
+
+#[test]
+fn validate_args_accepts_client_cert_and_client_key() {
+    let mut args = test_args(VideoCodecImplementationSelections::Auto, None);
+    args.client_cert = Some("CERT-DATA".to_string());
+    args.client_key = Some("KEY-DATA".to_string());
+    assert!(
+        validate_args(&args).is_ok(),
+        "certificate と private key の両方指定は成功するはずです"
+    );
+}
+
+#[test]
+fn validate_args_accepts_no_client_cert_or_key() {
+    let args = test_args(VideoCodecImplementationSelections::Auto, None);
+    assert!(
+        validate_args(&args).is_ok(),
+        "certificate と private key の両方未指定は成功するはずです"
+    );
+}
+
+#[test]
 fn validate_args_accepts_openh264_with_path() {
     let args = test_args(
         VideoCodecImplementationSelections::Manual(vec![
