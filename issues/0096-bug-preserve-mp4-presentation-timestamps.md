@@ -302,3 +302,10 @@ fixture の payload が decode order であることは demux 結果の sample i
 - `cargo clippy --workspace --all-targets -- -D warnings` が成功する
 - `CHANGES.md` の develop セクションに `[FIX]` を追記する
 - production log は英語、コメントとテストの assertion message は日本語にする
+
+## pending にした理由
+
+- B frame 対応は libwebrtc の `VideoStreamEncoder::OnFrame` が入力 RTP timestamp を `90 * ntp_time_ms` で上書きする制約を回避する必要があり、reader / capturer / encoder の全体改修と profile-level-id negotiation を含む大規模な作業になる
+- 現時点では B frame 入り MP4 を送信する需要がなく、優先度が低い
+- B frame 入力を明確に拒否する対応（非ゼロ composition time offset の検出）は別 issue で先に実施する
+- 対応再開時は本 issue の設計方針をそのまま実装の起点にできる
