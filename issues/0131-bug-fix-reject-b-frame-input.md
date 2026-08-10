@@ -4,7 +4,7 @@
 - Created: 2026-08-10
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-reject-b-frame-input
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-08-10
 
 ## 目的
 
