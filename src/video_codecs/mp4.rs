@@ -806,10 +806,16 @@ enum WaitResult {
     Ready,
 }
 
+/// 停止フラグの確認間隔の上限。
+///
+/// フレーム間隔の待機をこの時間ずつに分割して `thread::sleep` し、
+/// 停止フラグの確認を挟むことで、停止までの最大遅延をこの値に制限する。
+const MAX_SLEEP_DURATION: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// 停止フラグを確認しながら deadline まで待機する。
 ///
-/// `thread::park_timeout` を使い、`Drop` 側の `unpark` で待機を中断できるようにする。
-/// 明示的な `unpark` なしの予期しない起床でフレームを早く送らないよう、待機後に deadline と停止フラグを再評価する。
+/// `thread::sleep` を `MAX_SLEEP_DURATION` ずつに分割して呼び、停止フラグの確認を挟む。
+/// 停止までの最大遅延は `MAX_SLEEP_DURATION` に制限される。
 fn wait_until(stop: &AtomicBool, deadline: std::time::Instant) -> WaitResult {
     loop {
         if stop.load(Ordering::Acquire) {
@@ -819,7 +825,7 @@ fn wait_until(stop: &AtomicBool, deadline: std::time::Instant) -> WaitResult {
         if now >= deadline {
             return WaitResult::Ready;
         }
-        thread::park_timeout(deadline - now);
+        thread::sleep((deadline - now).min(MAX_SLEEP_DURATION));
     }
 }
 
@@ -910,8 +916,8 @@ impl Drop for Mp4VideoCapturer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(handle) = self.thread_handle.take() {
-            // 待機中のフィーダースレッドを unpark で即座に起こしてから join する。
-            handle.thread().unpark();
+            // フィーダースレッドは最大 MAX_SLEEP_DURATION ごとに停止フラグを確認するため、
+            // join は停止フラグ設定後すぐに完了する。
             let _ = handle.join();
         }
     }
@@ -1359,19 +1365,20 @@ mod tests {
         );
     }
 
-    // 実 thread で park_timeout 中の wait が stop + unpark により終了することを確認する。
+    // 実 thread で待機中の wait が、stop 設定から最大 MAX_SLEEP_DURATION 以内に
+    // 終了することを確認する。
     //
     // barrier でテストスレッドが wait_until を呼ぶ直前まで到達したことを同期し、
-    // Drop と同じ stop / unpark / join の順序で待機を終了させる。
+    // stop 設定後の終了を recv_timeout のタイムアウトで検証する。
     #[test]
-    fn wait_until_interrupted_by_unpark() {
+    fn wait_until_stops_within_sleep_limit() {
         let stop = Arc::new(AtomicBool::new(false));
         let barrier = Arc::new(std::sync::Barrier::new(2));
         let (done_tx, done_rx) = std::sync::mpsc::channel();
 
         let stop_clone = stop.clone();
         let barrier_clone = barrier.clone();
-        let handle = thread::spawn(move || {
+        thread::spawn(move || {
             // wait_until を呼ぶ直前まで到達したことを通知する。
             barrier_clone.wait();
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
@@ -1381,57 +1388,12 @@ mod tests {
 
         // テストスレッドが wait_until を呼ぶ直前まで到達するのを待つ。
         barrier.wait();
-        // Drop と同じ順序で stop を設定してから unpark する。
-        // park 中なら unpark で即座に起床し、park 前なら stop チェックで終了する。
+        // stop を設定すると、wait_until は最大 MAX_SLEEP_DURATION の待機後に停止する。
         stop.store(true, Ordering::Release);
-        handle.thread().unpark();
 
         let result = done_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("待機中のスレッドは 5 秒以内に終了するべきです");
-        assert!(
-            matches!(result, WaitResult::Stopped),
-            "stop による停止を期待しましたが、実際は: {result:?}"
-        );
-    }
-
-    // wait_until が、unpark だけでは deadline 前に Ready を返さず、
-    // ループで deadline と停止フラグを再評価することを確認する。
-    //
-    // unpark token は最初の park_timeout で消費されるため、タイミングに依存せず
-    // テストスレッドは park し直し、Ready は返らない。
-    #[test]
-    fn wait_until_rechecks_deadline_after_spurious_wakeup() {
-        let stop = Arc::new(AtomicBool::new(false));
-        let barrier = Arc::new(std::sync::Barrier::new(2));
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-
-        let stop_clone = stop.clone();
-        let barrier_clone = barrier.clone();
-        let handle = thread::spawn(move || {
-            // wait_until を呼ぶ直前まで到達したことを通知する。
-            barrier_clone.wait();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-            let result = wait_until(&stop_clone, deadline);
-            done_tx.send(result).expect("終了通知の送信に失敗しました");
-        });
-
-        // テストスレッドが wait_until を呼ぶ直前まで到達するのを待つ。
-        barrier.wait();
-        // stop を設定せずに unpark する (明示的な unpark なしの予期しない起床に相当)。
-        // ループが deadline を再評価して park し直すため、Ready は返らないはず。
-        handle.thread().unpark();
-        let timed_out = done_rx
-            .recv_timeout(std::time::Duration::from_millis(100))
-            .is_err();
-        assert!(timed_out, "unpark だけでは Ready を返すべきではありません");
-        // その後 stop を設定して unpark すると終了する。
-        stop.store(true, Ordering::Release);
-        handle.thread().unpark();
-
-        let result = done_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("待機中のスレッドは 5 秒以内に終了するべきです");
+            .recv_timeout(MAX_SLEEP_DURATION + std::time::Duration::from_millis(100))
+            .expect("待機中のスレッドは停止フラグ設定から 200ms 以内に終了するべきです");
         assert!(
             matches!(result, WaitResult::Stopped),
             "stop による停止を期待しましたが、実際は: {result:?}"
