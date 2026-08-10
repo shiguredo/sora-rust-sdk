@@ -49,10 +49,10 @@ use sora_sdk::V4l2VideoCodecCapability;
 #[cfg(feature = "vpl")]
 use sora_sdk::VplVideoCodecCapability;
 use sora_sdk::{
-    InternalVideoCodecCapability, Mp4PassthroughVideoCodecCapability, Mp4SampleReader,
-    Mp4VideoCapturer, Openh264VideoCodecCapability, SoraConnection, SoraConnectionBuilder,
-    SoraConnectionContext, SoraConnectionContextConfig, SoraConnectionEventHandler,
-    SoraConnectionHandle, VideoCodecCapability, VideoCodecPreference,
+    CodecDirection, InternalVideoCodecCapability, Mp4PassthroughVideoCodecCapability,
+    Mp4SampleReader, Mp4VideoCapturer, Openh264VideoCodecCapability, PreferenceCodec,
+    SoraConnection, SoraConnectionBuilder, SoraConnectionContext, SoraConnectionContextConfig,
+    SoraConnectionEventHandler, SoraConnectionHandle, VideoCodecCapability, VideoCodecPreference,
 };
 use tokio::sync::mpsc;
 use video::{I420Frame, VideoFrameSinkHandler, VideoRenderer};
@@ -94,19 +94,6 @@ fn build_context_config(
     openh264_path: Option<&str>,
     video_codec_implementation: VideoCodecImplementationSelections,
 ) -> Result<SoraConnectionContextConfig> {
-    // MP4 使用時は passthrough のみを利用し、他の codec 実装は追加しない。
-    if let Some(codec_type) = mp4_codec_type {
-        let mut context_config = SoraConnectionContextConfig {
-            adm_config,
-            video_codec_preference: VideoCodecPreference::default(),
-            video_codec_capabilities: Vec::new(),
-        };
-        let passthrough_capability: Box<dyn VideoCodecCapability> =
-            Box::new(Mp4PassthroughVideoCodecCapability::new(codec_type));
-        add_video_codec_capability(&mut context_config, passthrough_capability);
-        return Ok(context_config);
-    }
-
     let mut context_config = match video_codec_implementation {
         VideoCodecImplementationSelections::Auto => SoraConnectionContextConfig {
             adm_config,
@@ -222,6 +209,29 @@ fn build_context_config(
                 }
             }
         }
+    }
+
+    // MP4 使用時は送信 (Encoder) に passthrough のみを使い、受信 (Decoder) は選択された実装を維持する。
+    if let Some(codec_type) = mp4_codec_type {
+        let passthrough_capability: Box<dyn VideoCodecCapability> =
+            Box::new(Mp4PassthroughVideoCodecCapability::new(codec_type));
+        let passthrough_implementation = passthrough_capability.get_implementation();
+        add_video_codec_capability(&mut context_config, passthrough_capability);
+
+        // Encoder 方向は MP4 の実 codec の passthrough だけを残し、
+        // 他の codec 実装の Encoder エントリが送信に使われないように除去する。
+        // Decoder 方向は選択された実装をそのまま維持して受信デコードに使う。
+        let codecs: Vec<PreferenceCodec> = context_config
+            .video_codec_preference
+            .codecs()
+            .iter()
+            .filter(|codec| {
+                codec.direction() == CodecDirection::Decoder
+                    || codec.implementation() == &passthrough_implementation
+            })
+            .cloned()
+            .collect();
+        context_config.video_codec_preference = VideoCodecPreference::new(codecs);
     }
 
     Ok(context_config)

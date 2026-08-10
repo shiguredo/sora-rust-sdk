@@ -453,15 +453,6 @@ pub(crate) fn parse_args(mut args: noargs::RawArgs) -> Result<Args> {
         .take(&mut args)
         .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
 
-    // MP4 では passthrough のみを使うため、codec 実装の明示指定は併用できない。
-    if input_mp4.is_some() && video_codec_implementation.is_some() {
-        return Err(noargs::Error::other(
-            &args,
-            "--input-mp4 and --video-codec-implementation cannot be used together",
-        )
-        .into());
-    }
-
     // MP4 の実 codec をシグナリングで自動明示するため、codec type の明示指定は併用できない。
     if input_mp4.is_some() && video_codec_type.is_some() {
         return Err(noargs::Error::other(
@@ -516,13 +507,6 @@ pub(crate) fn parse_args(mut args: noargs::RawArgs) -> Result<Args> {
 }
 
 pub(crate) fn validate_args(args: &Args) -> Result<()> {
-    // mp4 passthrough と OpenH264 ライブラリ指定は排他的。
-    if args.input_mp4.is_some() && args.openh264_path.is_some() {
-        return Err(
-            io::Error::other("--input-mp4 and --openh264-path cannot be used together").into(),
-        );
-    }
-
     // OpenH264 は実装選択とライブラリパスがセットで必要。
     let openh264_selected = args
         .video_codec_implementation
