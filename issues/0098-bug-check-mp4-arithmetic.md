@@ -6,6 +6,7 @@
 - Model: GPT-5
 - Branch: feature/fix-mp4-arithmetic
 - Polished: 2026-07-30
+- Updated: 2026-08-10
 
 ## 目的
 
@@ -17,23 +18,26 @@
 
 High。
 攻撃者が直接送るネットワーク入力ではないが、公開 API へ渡す小さなローカル MP4 ファイルの box large size、`stts`、`ctts`、`stco` / `co64` を書き換えるだけで到達できる。
-SDK が metadata を受け取る前の依存 crate 内でも発生し、debug build の panic と release build の wraparound で挙動が変わる。
+SDK が metadata を受け取る前の依存 crate 内の未検査演算は `shiguredo_mp4 2026.4.0` で解消済みだが、SDK 側の未検査演算は debug build の panic と release build の wraparound で挙動が変わる。
 さらに、overflow しない巨大な frame duration でも `thread::sleep` 中は stop flag を確認できず、`Drop::join` が長時間停止する。
 
 ## 現状
 
-### `shiguredo_mp4 2026.3.0`
+### `shiguredo_mp4 2026.4.0`
 
-SDK が `Mp4FileDemuxer::tracks()` / `next_sample()` から値を受け取る前に、固定中の `shiguredo_mp4 2026.3.0` には次の未検査演算がある。
+起票時点の `2026.3.0` で指摘した未検査演算のうち、次は固定中の `2026.4.0` で実装済みである。
 
-- `demux_mp4_file.rs` が `BoxHeader::box_size` の `u64` を `usize` へ `as` 変換する
-- `SampleTableAccessor::new` が `stts` の sample count と累積 duration を未検査で加算する
-- `SampleTableAccessor::new` が `ctts` の sample count を未検査で加算する
-- `SampleTableAccessor::new` が `stco` / `co64` の chunk offset に sample size を未検査で加算する
-- `SampleAccessor::timestamp` が基準 timestamp に sample index 分の duration を未検査で加算する
-- `get_sample_by_timestamp` が sample timestamp に duration を未検査で加算する
+- `BoxHeader::box_size` の `u64` から `usize` への変換は `usize::try_from` と error 化された
+- `stts` / `ctts` の累積 sample count は `checked_add` と `SampleTableAccessorError::SampleCountOverflow` で検証される
+- chunk 内の offset への sample size の加算は `checked_add` と `SampleDataOffsetOverflow` で検証される
+- 累積 duration と `SampleAccessor::timestamp` は、Σ sample count <= `u32::MAX` なら総 duration < `u64::MAX` となる invariant 証明により infallible のまま維持される
 
-SDK 側だけを checked arithmetic 化しても、その検査へ到達する前に依存 crate が panic または wraparound し得る。
+一方、次は `2026.4.0` では実装されていない。
+
+- sample 数の業務上限（`MAX_SAMPLE_COUNT_PER_TRACK`）
+- `try_reserve_exact` による allocation の事前確保
+
+sample 数の業務上限は汎用ライブラリの関心事ではないため SDK 側で検証する方針とし、`try_reserve_exact` は入力デコード時の事前割り当てを禁止する時雨堂の Rust 規約に反するため導入しない。
 
 ### `sora-rust-sdk`
 
@@ -50,68 +54,23 @@ feeder thread は deadline まで `thread::sleep` し、`Drop` は stop flag の
 closed issue 0048 は通常の 30 fps なら停止待ちが約 1 frame 分であるため対応不要としたが、malformed input 由来の巨大な duration では同じ前提が成立しない。
 本 issue では arithmetic error の防御をすり抜けた場合にも破棄を停止させない多層防御として、0048 の判断を見直す。
 
-## 実装順と repository 境界
-
-### prerequisite 1: issue 0096
-
-issue 0096 を本 issue より先に実装する。
-0096 は SDK 内の decode-order duration 累積、microseconds 変換、presentation span / stride、`Instant` deadline、loop epoch、RTP timestamp の checked arithmetic と feeder 開始前検証を所有する。
-
-本 issue は 0096 の timeline helper と error を再利用し、同じ duration 上限や deadline helper を再設計しない。
-0096 実装後のコードを監査し、SDK 内の sample duration と `Instant` 算術に unchecked な `+`、`*`、`as` が残っていないことだけを完了条件にする。
-0096 が未実装なら本 issue の SDK branch を開始しない。
-
-### prerequisite 2: `shiguredo_mp4 2026.4.0`
-
-upstream `shiguredo_mp4` repository に専用 issue を作成し、別 branch / PR で後述の安全化と test を実装してから `2026.4.0` として release する。
-2026-07-30 時点の crates.io 最新版は `2026.3.0` であり、現行の `~2026.3` requirement は安全でない `2026.3.0` を許容する。
-公開 error API と demuxer の安全性契約を変更するため、patch requirement で下限だけをずらさず、新しい minor 系を使用する。
-
-本 repository の branch は upstream release 後に `Cargo.toml` を `shiguredo_mp4 = "~2026.4"` へ更新し、`Cargo.lock` が `2026.4.0` 以上かつ `2026.5.0` 未満を解決することを確認する。
-upstream issue / PR / release が未完了の間は、本 issue を pending として完了扱いにしない。
-upstream の source や test を sora-rust-sdk の 1 issue / 1 branch へ混在させない。
-
 ## 設計方針
 
 ### `shiguredo_mp4` の安全化
 
-upstream issue は、少なくとも次の演算を checked arithmetic と検査付き変換へ変更する。
-失敗は sample index と演算対象を含む `SampleTableAccessorError` または `DemuxError` の具体的な variant とし、panic、wraparound、saturating arithmetic で処理を継続しない。
+`shiguredo_mp4 2026.4.0` で実装済みであり、本 issue の対応対象から外す。
 
-- `BoxHeader::box_size.get()` の `u64` から `usize` への変換
-- `stts` entry の累積 sample count
-- `sample_delta * sample_count` と累積 duration
-- `ctts` entry の累積 sample count
-- chunk 内の `data_offset + sample_size`
-- sample timestamp の基準 timestamp、duration、sample index による計算
-- sample timestamp と duration から求める比較終端
+- `BoxHeader::box_size` の `u64` から `usize` への検査付き変換
+- `stts` / `ctts` の累積 sample count の `checked_add` と `SampleCountOverflow`
+- chunk 内の offset への sample size 加算の `checked_add` と `SampleDataOffsetOverflow`
+- `SampleTableAccessorError` の具体的 variant と `DemuxError` からの source chain 伝播
+- 累積 duration と `SampleAccessor::timestamp` の invariant 証明（Σ sample count <= `u32::MAX` なら総 duration < `u64::MAX`）
 
-同じ `SampleTableAccessor` から MP4 file demuxer の `tracks()` / `next_sample()` 経路で到達する count、index、offset、timestamp 演算を全数監査し、同型の未検査演算を残さない。
+### sample count 上限
 
-`stts` は run-length 形式であり、小さな box でも大きな sample count を表現できる。
-`MAX_SAMPLE_COUNT_PER_TRACK = 10_368_000` を設け、上限値ちょうどを受理し、1 sample 超過を `SampleCountLimitExceeded` error で拒否する。
-これは 120 fps を 24 時間保持できる件数であり、現在の全 sample metadata を memory に展開する file demuxer の上限として使用する。
-`stts` の累積 sample count を checked arithmetic で求めてこの上限を検証し、`ctts`、`stsz`、`stsc` の count 一貫性も確認してから、sample 数に比例する allocation と loop を開始する。
-既存の sample-scaled `Vec` は `try_reserve_exact` で必要容量を先に確保し、allocation failure も `SampleTableAccessorError` として返す。
-
-全 sample の timestamp と比較終端を展開した新しい `Vec` は追加しない。
-`SampleTableAccessor::new` は `stts` entry ごとに、run の基準 timestamp、`sample_delta * sample_count`、最終 sample timestamp、最終比較終端を checked arithmetic で検証し、既存の圧縮 table を維持する。
-総 sample count が `u32` 以下なら、各 duration も `u32` であるため、総 duration の数学的上限は `(u32::MAX)^2 < u64::MAX` となる。
-`SampleAccessor::timestamp() -> u64` と `get_sample_by_timestamp() -> Option<_>` は infallible のまま維持し、この invariant の範囲内で既存の圧縮 table から計算する。
-`checked_*().expect("validated")`、`unwrap`、sample ごとの timestamp table は追加しない。
-上限検証と run 単位の証明を production comment に記録する。
-
-upstream test は巨大な allocation や巨大な実ファイルを作らず、synthetic な `StblBox` と小さな box header で次を検証する。
-
-- `stts` / `ctts` sample count の上限ちょうどと 1 超過
-- `MAX_SAMPLE_COUNT_PER_TRACK` ちょうどの受理と 1 sample 超過の拒否を、sample 数分の allocation や反復を行う前に確認する
-- synthetic な count を受け取る allocation helper が容量確保失敗を具体的な error にする
-- 数個の `stts` entry だけで、総 sample count が `u32` に収まる場合の総 duration、run の最終 timestamp、比較終端が `u64` に収まる数学的最大境界を確認する
-- `co64` offset と sample size の加算 overflow
-- large-size box の `u64` / `usize` 境界
-  - 64 bit target では `u64::MAX` の変換成功後に後続の range 加算が error になる
-  - 32 bit target の conditional test では `u32::MAX + 1` の変換を error にする
-- debug / release profile のどちらでも同じ error になること
+`Mp4SampleReader` は全 sample の metadata を `Vec` に展開し、`next_sample()` を sample 数分ループするため、sample 数に比例するメモリと処理時間を制限する。
+`MAX_SAMPLE_COUNT_PER_TRACK = 10_368_000`（120 fps を 24 時間保持できる件数）を設け、上限値ちょうどを受理し、1 sample 超過を拒否する。
+`stts` は run-length 形式であり、1 entry だけで巨大な sample 数を表現できるため、`next_sample()` のループで sample 数を数え、上限超過を検出した時点で sample index を含む error を返す。
 
 ### required input range
 
@@ -145,7 +104,7 @@ issue 0062 で定めた「reader 初期化時に全 sample を検証し、`get_s
 spurious wakeup または過去の unpark token で frame を早く送らないよう、wait helper は次を loop する。
 
 1. stop flag を `Acquire` で読み、設定済みなら停止結果を返す
-2. 0096 の checked deadline と `Instant::now()` から残り時間を求め、deadline 到達済みなら送信継続結果を返す
+2. checked deadline と `Instant::now()` から残り時間を求め、deadline 到達済みなら送信継続結果を返す
 3. 残り時間を `park_timeout` する
 4. wakeup 後に 1 へ戻り、deadline と stop flag を再評価する
 
@@ -172,7 +131,7 @@ mock / stub、sleep、外部 command、ネットワークを使わず、pure hel
 - 既存 H.264 fixture の `moov` header を 64 bit `largesize` 形式の `u64::MAX` へ書き換え、`position > 0` かつ `size == usize::MAX` となる入力で reader が panic せず input range overflow error を返すことを確認する
 - sample range helper で、空 sample、EOF ちょうど、EOF 1 byte 超過、`usize::MAX` 近傍の offset / size と加算 overflow を確認する
 - malformed MP4 は `catch_unwind` で panic の不在だけを確認せず、具体的な error variant、sample index、position、size を検証する
-- 0096 の既知 fixture について、sample payload、送信順序、全 deadline が変わらないことを確認する
+- 既存の composition time offset が 0 の fixture (`testdata/red-320x320-h264.mp4` 等) について、sample payload、送信順序、全 deadline が変わらないことを確認する
 - stop 設定済みの wait helper が park せず停止し、spurious wakeup 相当の再評価で deadline 前に送信継続を返さないことを確認する
 - 実 thread の barrier test で、park 中の wait が stop + unpark により終了し、`recv_timeout` まで `join` を停止させないことを確認する
 
@@ -181,23 +140,17 @@ fixture を byte patch する場合は、書き換え前の box type、box size�
 ## 変更対象
 
 - `src/video_codecs/mp4.rs`
-- `Cargo.toml`
-- `Cargo.lock`
 - `CHANGES.md`
-
-upstream `shiguredo_mp4` の source と test は prerequisite の別 issue / branch / PR で変更し、本 issue の commit には含めない。
 
 ## 完了条件
 
-- upstream の専用 issue / PR が、対象算術の checked arithmetic、具体的な error、境界 test を実装している
-- `shiguredo_mp4 2026.4.0` が公開済みである
-- `Cargo.toml` が `shiguredo_mp4 = "~2026.4"`、`Cargo.lock` が `2026.4.0` 以上かつ `2026.5.0` 未満を解決している
 - required input の `position` を `usize::try_from` し、`start + size` を `checked_add` してから slice range を構築する
 - required input range の変換または加算に失敗すると、panic や clamp ではなく対応する `Mp4Error` を返す
 - sample の offset を reader 初期化時に `usize` へ検査付き変換し、`checked_add` 済みの range を `samples` に保持する
 - `get_sample` に `as usize` と未検査の range 加算が残っていない
 - sample range が変換不能、加算 overflow、またはファイル範囲外の場合に `InconsistentSampleTable` を返す
-- 0096 が所有する SDK 内の duration、microseconds、deadline、loop epoch 算術に未検査の `+`、`*`、`as` が残っていない
+- SDK 内の duration 累積、microseconds 変換、deadline 算術に未検査の `+`、`*`、`as` が残っていない
+- `MAX_SAMPLE_COUNT_PER_TRACK` ちょうどの sample 数を受理し、1 sample 超過を sample index を含む error で拒否する
 - feeder thread の待機を stop signal で中断でき、`Drop` が sample duration の残り時間だけ停止しない
 - large-size box、sample range、stop / unpark の境界 test が具体的な error と終了結果を検証する
 - 通常 fixture の sample payload、送信順序、deadline が従来どおりである
@@ -211,11 +164,11 @@ upstream `shiguredo_mp4` の source と test は prerequisite の別 issue / bra
 ## 参考
 
 - `src/video_codecs/mp4.rs`
-- `issues/0096-bug-preserve-mp4-presentation-timestamps.md`
+- `issues/pending/0096-bug-preserve-mp4-presentation-timestamps.md`
 - `issues/closed/0048-bug-fix-mp4-capturer-stop-latency.md`
 - `issues/closed/0061-bug-fix-mp4-demuxer-required-input-oob.md`
 - `issues/closed/0062-bug-fix-mp4-get-sample-oob-panic.md`
-- `shiguredo_mp4 2026.3.0` の `src/auxiliary.rs`
-- `shiguredo_mp4 2026.3.0` の `src/demux_mp4_file.rs`
+- `shiguredo_mp4 2026.4.0` の `src/auxiliary.rs`
+- `shiguredo_mp4 2026.4.0` の `src/demux_mp4_file.rs`
 - Rust standard library `std::primitive::usize::checked_add`
 - Rust standard library `std::time::Instant::checked_add`
