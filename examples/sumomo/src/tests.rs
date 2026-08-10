@@ -136,6 +136,106 @@ fn parse_video_codec_implementation_accepts_v4l2() {
 }
 
 #[test]
+fn parse_args_rejects_mp4_with_video_codec_implementation_manual() {
+    let raw_args = make_raw_args(&[
+        "sumomo",
+        "--signaling-url",
+        "wss://example.com/signaling",
+        "--channel-id",
+        "test-channel",
+        "--role",
+        "sendonly",
+        "--input-mp4",
+        "/tmp/video.mp4",
+        "--video-codec-implementation",
+        "internal",
+    ]);
+    let result = crate::args::parse_args(raw_args);
+    assert!(result.is_err(), "MP4 と codec 実装の併用は失敗するはずです");
+    let err = result.err().expect("エラーは必ず存在するはずです");
+    let message = err.to_string();
+    assert!(
+        message.contains("--input-mp4 and --video-codec-implementation cannot be used together"),
+        "エラーメッセージが期待と異なります: {message}"
+    );
+}
+
+#[test]
+fn parse_args_rejects_mp4_with_video_codec_implementation_auto() {
+    let raw_args = make_raw_args(&[
+        "sumomo",
+        "--signaling-url",
+        "wss://example.com/signaling",
+        "--channel-id",
+        "test-channel",
+        "--role",
+        "sendonly",
+        "--input-mp4",
+        "/tmp/video.mp4",
+        "--video-codec-implementation",
+        "auto",
+    ]);
+    let result = crate::args::parse_args(raw_args);
+    assert!(result.is_err(), "MP4 と auto 明示の併用は失敗するはずです");
+    let err = result.err().expect("エラーは必ず存在するはずです");
+    let message = err.to_string();
+    assert!(
+        message.contains("--input-mp4 and --video-codec-implementation cannot be used together"),
+        "エラーメッセージが期待と異なります: {message}"
+    );
+}
+
+#[test]
+fn parse_args_accepts_mp4_without_video_codec_implementation() {
+    let raw_args = make_raw_args(&[
+        "sumomo",
+        "--signaling-url",
+        "wss://example.com/signaling",
+        "--channel-id",
+        "test-channel",
+        "--role",
+        "sendonly",
+        "--input-mp4",
+        "/tmp/video.mp4",
+    ]);
+    let args = crate::args::parse_args(raw_args).expect("MP4 のみの指定はパースに成功するはずです");
+    assert_eq!(args.input_mp4.as_deref(), Some("/tmp/video.mp4"));
+    assert_eq!(
+        args.video_codec_implementation,
+        VideoCodecImplementationSelections::Auto
+    );
+    assert_eq!(args.video_codec_type, None);
+}
+
+#[test]
+fn parse_args_rejects_mp4_with_video_codec_type() {
+    let raw_args = make_raw_args(&[
+        "sumomo",
+        "--signaling-url",
+        "wss://example.com/signaling",
+        "--channel-id",
+        "test-channel",
+        "--role",
+        "sendonly",
+        "--input-mp4",
+        "/tmp/video.mp4",
+        "--video-codec-type",
+        "h264",
+    ]);
+    let result = crate::args::parse_args(raw_args);
+    assert!(
+        result.is_err(),
+        "MP4 と codec type の併用は失敗するはずです"
+    );
+    let err = result.err().expect("エラーは必ず存在するはずです");
+    let message = err.to_string();
+    assert!(
+        message.contains("--input-mp4 and --video-codec-type cannot be used together"),
+        "エラーメッセージが期待と異なります: {message}"
+    );
+}
+
+#[test]
 fn parse_args_accepts_multiple_libcamera_controls() {
     let raw_args = make_raw_args(&[
         "sumomo",
@@ -389,6 +489,30 @@ fn build_context_config_manual_internal_only() {
             .codecs()
             .iter()
             .any(|codec| codec.implementation().name() == "internal")
+    );
+}
+
+// MP4 使用時は passthrough のみを利用し、他の codec 実装 (internal 等) が混ざらないことを確認する。
+#[serial_test::serial]
+#[test]
+fn build_context_config_mp4_uses_only_passthrough() {
+    let config = build_context_config(
+        sora_sdk::AdmConfig::NoAudioDevice,
+        Some(shiguredo_webrtc::VideoCodecType::H264),
+        None,
+        VideoCodecImplementationSelections::Auto,
+    )
+    .expect("MP4 設定は構築できるはずです");
+
+    let names = capability_names(&config);
+    assert_eq!(names, vec!["mp4-passthrough".to_string()]);
+    // preference にも passthrough のみが含まれることを確認する。
+    assert!(
+        config
+            .video_codec_preference
+            .codecs()
+            .iter()
+            .all(|codec| { codec.implementation().name() == "mp4-passthrough" })
     );
 }
 

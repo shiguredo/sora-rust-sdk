@@ -453,6 +453,24 @@ pub(crate) fn parse_args(mut args: noargs::RawArgs) -> Result<Args> {
         .take(&mut args)
         .present_and_then(|o| Ok::<_, &str>(o.value().to_string()))?;
 
+    // MP4 では passthrough のみを使うため、codec 実装の明示指定は併用できない。
+    if input_mp4.is_some() && video_codec_implementation.is_some() {
+        return Err(noargs::Error::other(
+            &args,
+            "--input-mp4 and --video-codec-implementation cannot be used together",
+        )
+        .into());
+    }
+
+    // MP4 の実 codec をシグナリングで自動明示するため、codec type の明示指定は併用できない。
+    if input_mp4.is_some() && video_codec_type.is_some() {
+        return Err(noargs::Error::other(
+            &args,
+            "--input-mp4 and --video-codec-type cannot be used together",
+        )
+        .into());
+    }
+
     if let Some(help) = args.finish()? {
         print!("{}", help);
         std::process::exit(0);

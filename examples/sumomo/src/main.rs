@@ -94,6 +94,19 @@ fn build_context_config(
     openh264_path: Option<&str>,
     video_codec_implementation: VideoCodecImplementationSelections,
 ) -> Result<SoraConnectionContextConfig> {
+    // MP4 使用時は passthrough のみを利用し、他の codec 実装は追加しない。
+    if let Some(codec_type) = mp4_codec_type {
+        let mut context_config = SoraConnectionContextConfig {
+            adm_config,
+            video_codec_preference: VideoCodecPreference::default(),
+            video_codec_capabilities: Vec::new(),
+        };
+        let passthrough_capability: Box<dyn VideoCodecCapability> =
+            Box::new(Mp4PassthroughVideoCodecCapability::new(codec_type));
+        add_video_codec_capability(&mut context_config, passthrough_capability);
+        return Ok(context_config);
+    }
+
     let mut context_config = match video_codec_implementation {
         VideoCodecImplementationSelections::Auto => SoraConnectionContextConfig {
             adm_config,
@@ -105,12 +118,6 @@ fn build_context_config(
             video_codec_capabilities: Vec::new(),
         },
     };
-
-    if let Some(codec_type) = mp4_codec_type {
-        let passthrough_capability: Box<dyn VideoCodecCapability> =
-            Box::new(Mp4PassthroughVideoCodecCapability::new(codec_type));
-        add_video_codec_capability(&mut context_config, passthrough_capability);
-    }
 
     match video_codec_implementation {
         VideoCodecImplementationSelections::Auto => {}
@@ -235,11 +242,22 @@ fn prepare_mp4_state(args: &Args) -> Result<Option<(Mp4SampleReader, VideoCodecT
     }
 }
 
-fn apply_video_options(mut builder: SoraConnectionBuilder, args: &Args) -> SoraConnectionBuilder {
+fn apply_video_options(
+    mut builder: SoraConnectionBuilder,
+    args: &Args,
+    mp4_codec_type: Option<VideoCodecType>,
+) -> Result<SoraConnectionBuilder> {
+    // mp4_codec_type があったらそれを優先して利用する。
+    // ない場合は args.video_codec_type を利用する。
+    let video_codec_type = match mp4_codec_type {
+        Some(codec_type) => codec_type.as_str().map(|name| name.to_ascii_lowercase()),
+        None => args.video_codec_type.clone(),
+    };
+
     let video_bit_rate = args.video_bit_rate;
     if let Some(video) = args.video {
         if video {
-            let video_setting = match args.video_codec_type.as_deref() {
+            let video_setting = match video_codec_type.as_deref() {
                 Some("vp8") => sora_sdk::Video::new_vp8(video_bit_rate),
                 Some("vp9") => sora_sdk::Video::new_vp9(video_bit_rate, None),
                 Some("av1") => sora_sdk::Video::new_av1(video_bit_rate, None),
@@ -252,7 +270,7 @@ fn apply_video_options(mut builder: SoraConnectionBuilder, args: &Args) -> SoraC
         } else {
             builder = builder.video(sora_sdk::Video::new_bool(false));
         }
-    } else if let Some(ref codec) = args.video_codec_type {
+    } else if let Some(ref codec) = video_codec_type {
         let video_setting = match codec.as_str() {
             "vp8" => sora_sdk::Video::new_vp8(video_bit_rate),
             "vp9" => sora_sdk::Video::new_vp9(video_bit_rate, None),
@@ -262,41 +280,6 @@ fn apply_video_options(mut builder: SoraConnectionBuilder, args: &Args) -> SoraC
             _ => sora_sdk::Video::new_bool(true),
         };
         builder = builder.video(video_setting);
-    }
-    builder
-}
-
-fn apply_common_builder_options(
-    mut builder: SoraConnectionBuilder,
-    args: &Args,
-) -> Result<SoraConnectionBuilder> {
-    if let Some(audio) = args.audio {
-        builder = builder.audio(sora_sdk::Audio::new_bool(audio));
-    }
-    builder = apply_video_options(builder, args);
-    if let Some(data_channel_signaling) = args.data_channel_signaling {
-        builder = builder.data_channel_signaling(data_channel_signaling);
-    }
-    if let Some(ignore_disconnect_websocket) = args.ignore_disconnect_websocket {
-        builder = builder.ignore_disconnect_websocket(ignore_disconnect_websocket);
-    }
-    if let Some(simulcast) = args.simulcast {
-        builder = builder.simulcast(simulcast);
-    }
-    builder = builder.insecure(args.insecure);
-    if let (Some(cert), Some(key)) = (args.client_cert.clone(), args.client_key.clone()) {
-        builder = builder.client_cert(cert, key);
-    }
-    if let Some(ca) = args.ca_cert.clone() {
-        builder = builder.ca_cert(ca);
-    }
-    if args.turn_tls_insecure {
-        builder = builder.turn_tls_insecure(true);
-    }
-    if let Some(ref ca_cert_path) = args.turn_tls_ca_cert {
-        let pem_data = std::fs::read(ca_cert_path)?;
-        let cert = rustls_pki_types::CertificateDer::from_pem_slice(&pem_data)?;
-        builder = builder.turn_tls_ca_cert(cert.to_vec());
     }
     Ok(builder)
 }
@@ -327,6 +310,7 @@ fn build_connection_builder(
     context: Arc<SoraConnectionContext>,
     args: &Args,
     event_tx: mpsc::Sender<AppEvent>,
+    mp4_codec_type: Option<VideoCodecType>,
 ) -> Result<SoraConnectionBuilder> {
     let mut builder = SoraConnection::builder(
         context,
@@ -340,7 +324,35 @@ fn build_connection_builder(
         let metadata = metadata.parse::<sora_sdk::JsonString>()?;
         builder = builder.metadata(metadata);
     }
-    apply_common_builder_options(builder, args)
+    if let Some(audio) = args.audio {
+        builder = builder.audio(sora_sdk::Audio::new_bool(audio));
+    }
+    builder = apply_video_options(builder, args, mp4_codec_type)?;
+    if let Some(data_channel_signaling) = args.data_channel_signaling {
+        builder = builder.data_channel_signaling(data_channel_signaling);
+    }
+    if let Some(ignore_disconnect_websocket) = args.ignore_disconnect_websocket {
+        builder = builder.ignore_disconnect_websocket(ignore_disconnect_websocket);
+    }
+    if let Some(simulcast) = args.simulcast {
+        builder = builder.simulcast(simulcast);
+    }
+    builder = builder.insecure(args.insecure);
+    if let (Some(cert), Some(key)) = (args.client_cert.clone(), args.client_key.clone()) {
+        builder = builder.client_cert(cert, key);
+    }
+    if let Some(ca) = args.ca_cert.clone() {
+        builder = builder.ca_cert(ca);
+    }
+    if args.turn_tls_insecure {
+        builder = builder.turn_tls_insecure(true);
+    }
+    if let Some(ref ca_cert_path) = args.turn_tls_ca_cert {
+        let pem_data = std::fs::read(ca_cert_path)?;
+        let cert = rustls_pki_types::CertificateDer::from_pem_slice(&pem_data)?;
+        builder = builder.turn_tls_ca_cert(cert.to_vec());
+    }
+    Ok(builder)
 }
 
 fn create_video_capturer(
@@ -545,7 +557,8 @@ fn build_and_run_connection(
         None
     };
 
-    let builder = build_connection_builder(context.clone(), args, event_tx)?;
+    let mp4_codec_type = mp4_state.as_ref().map(|(_, codec_type)| *codec_type);
+    let builder = build_connection_builder(context.clone(), args, event_tx, mp4_codec_type)?;
     let (builder, video_capturer) =
         attach_sender_tracks(builder, &context, args, mp4_state.map(|(reader, _)| reader))?;
 
