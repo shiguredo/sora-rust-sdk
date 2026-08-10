@@ -198,14 +198,14 @@ RTP packetization は固定 libwebrtc の `RtpPacketizerAv1` に委ねる。
 
 ### test fixture
 
-非空の `configOBUs` と、Sequence Header OBU を含む複数の sync sample を持つ小さな AV1 MP4 fixture を `src/video_codecs/testdata/` に追加する。
+非空の `configOBUs` と、Sequence Header OBU を含む複数の sync sample を持つ小さな AV1 MP4 fixture を `testdata/` に追加する。
 fixture はリポジトリへ commit し、生成に使用した encoder / muxer の version と command、AV1CodecConfigurationRecord の期待 field、`configOBUs` の OBU type と byte 列、各 sample の OBU type 列と sync flag をテストコメントへ記録する。
 CI で外部 command を起動したり、ネットワークから fixture を取得したりしない。
 
 ## 変更対象
 
 - `src/video_codecs/mp4.rs`
-- `src/video_codecs/testdata/` の AV1 fixture
+- `testdata/` の AV1 fixture
 - `CHANGES.md`
 
 ## 完了条件

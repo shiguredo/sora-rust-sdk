@@ -212,7 +212,7 @@ presentation timestamp の値順は B frame により loop 内で非単調にな
 
 ### test fixture
 
-実際に B frame を含み、DTS と PTS が異なる小さな H.264 MP4 fixture を `src/video_codecs/testdata/` に追加する。
+実際に B frame を含み、DTS と PTS が異なる小さな H.264 MP4 fixture を `testdata/` に追加する。
 fixture はリポジトリへ commit し、生成に使用した ffmpeg の version と command、H.264 profile、期待する `profile-level-id`、DTS、composition time offset、PTS、timescale をテストコメントへ記録する。
 CI で ffmpeg を起動したり、ネットワークから fixture を取得したりしない。
 fixture の payload が decode order であることは demux 結果の sample index と timestamp で検証し、画素の presentation order を外部 decoder の挙動だけに依存して判定しない。
@@ -222,7 +222,7 @@ fixture の payload が decode order であることは demux 結果の sample i
 - `src/video_codecs/mp4.rs`
 - `src/video_codec_preference.rs`
 - `src/video_codec.rs`
-- `src/video_codecs/testdata/` の B frame fixture
+- `testdata/` の B frame fixture
 - `examples/sumomo/src/main.rs`
 - `examples/sumomo/src/tests.rs`
 - `CHANGES.md`
