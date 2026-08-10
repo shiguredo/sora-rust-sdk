@@ -56,7 +56,7 @@ pub enum Mp4Error {
         /// 実際のファイルサイズ (バイト単位)。
         file_size: usize,
     },
-    /// デマルチプレクサが要求する入力範囲の加算が overflow する。
+    /// デマルチプレクサが要求する入力範囲の加算がオーバーフローする。
     InputRangeOverflow {
         /// デマルチプレクサが要求したファイル内位置。
         position: u64,
@@ -68,7 +68,7 @@ pub enum Mp4Error {
         /// 問題のサンプルインデックス (0 始まり、ビデオサンプル内の連番)。
         index: usize,
     },
-    /// 累積 duration または microseconds 変換が overflow する。
+    /// 累積再生時間またはマイクロ秒変換がオーバーフローする。
     DurationOverflow {
         /// 問題のサンプルインデックス (0 始まり、ビデオサンプル内の連番)。
         index: usize,
@@ -134,7 +134,7 @@ impl std::fmt::Display for Mp4Error {
             Self::DurationOverflow { index } => {
                 write!(
                     f,
-                    "累積 duration または microseconds 変換がオーバーフローしました: sample={index}"
+                    "累積再生時間またはマイクロ秒変換がオーバーフローしました: sample={index}"
                 )
             }
             Self::InconsistentSampleTable {
@@ -261,11 +261,11 @@ struct Mp4SampleMeta {
 /// 全サンプルの metadata をメモリに展開する reader の上限として使用する。
 const MAX_SAMPLE_COUNT_PER_TRACK: usize = 10_368_000;
 
-/// デマルチプレクサが要求する入力の位置とサイズから、ファイル内の slice range を求める。
+/// デマルチプレクサが要求する入力の位置とサイズから、ファイル内のスライス範囲を求める。
 ///
 /// `position` を `usize` へ検査付きで変換し、終端を `checked_add` で計算する。
 /// 変換できない場合や開始位置がファイルサイズを超える場合は `InputPositionOutOfRange`、
-/// 加算が overflow する場合は `InputRangeOverflow` を返す。
+/// 加算がオーバーフローする場合は `InputRangeOverflow` を返す。
 /// 終端がファイルサイズを超える場合はファイル末尾へ丸め、truncated input の最終判定は
 /// デマルチプレクサに委ねる。
 fn required_input_range(
@@ -339,8 +339,8 @@ fn sample_data_range(
 /// 各フレームの累積再生時刻テーブルを構築する。
 ///
 /// `cumulative_us[0] = 0`、`cumulative_us[i] = フレーム 0..i の合計再生時間 (マイクロ秒)`。
-/// 累積 duration の加算と microseconds 変換の乗算は checked arithmetic で行い、
-/// overflow した場合は `DurationOverflow` を返す。
+/// 累積再生時間の加算とマイクロ秒変換の乗算は checked arithmetic で行い、
+/// オーバーフローした場合は `DurationOverflow` を返す。
 fn build_cumulative_us(durations: &[u32], timescale: u64) -> Result<Vec<u64>> {
     let mut cumulative_us = Vec::new();
     let mut acc: u64 = 0;
@@ -937,16 +937,16 @@ pub struct Mp4VideoCapturer {
 /// deadline 待機の結果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WaitResult {
-    /// stop flag が設定された。
+    /// 停止フラグが設定された。
     Stopped,
     /// deadline に到達した。
     Ready,
 }
 
-/// stop flag を確認しながら deadline まで待機する。
+/// 停止フラグを確認しながら deadline まで待機する。
 ///
 /// `thread::park_timeout` を使い、`Drop` 側の `unpark` で待機を中断できるようにする。
-/// spurious wakeup でフレームを早く送らないよう、待機後に deadline と stop flag を再評価する。
+/// 明示的な `unpark` なしの予期しない起床でフレームを早く送らないよう、待機後に deadline と停止フラグを再評価する。
 fn wait_until(stop: &AtomicBool, deadline: std::time::Instant) -> WaitResult {
     loop {
         if stop.load(Ordering::Acquire) {
@@ -1009,7 +1009,7 @@ impl Mp4VideoCapturer {
                     // 次のフレームの絶対送信時刻まで待機する。
                     // cumulative_duration_us(i+1) は「フレーム 0 から i までの合計再生時間」を返す。
                     // loop_start からのオフセットとして使うことで、累積ドリフトを防止する。
-                    // deadline の計算が overflow した場合は、panic や飽和を避けて正常停止する。
+                    // deadline の計算がオーバーフローした場合は、panic や飽和を避けて正常停止する。
                     let next_frame_time_us = reader.cumulative_duration_us(i + 1);
                     let target = match loop_start
                         .checked_add(std::time::Duration::from_micros(next_frame_time_us))
@@ -1474,30 +1474,30 @@ mod tests {
         }
     }
 
-    // required_input_range が、開始位置 0、EOF ちょうど、EOF 1 byte 超過、
-    // 範囲内、size == None の各入力に対して正しい range を返すことを確認する。
+    // required_input_range が、開始位置 0、ファイル末尾ちょうど、ファイル末尾 1 バイト超過、
+    // 範囲内、size == None の各入力に対して正しい範囲を返すことを確認する。
     #[test]
     fn required_input_range_returns_checked_range() {
         assert_eq!(required_input_range(0, None, 100).unwrap(), 0..100);
         assert_eq!(
             required_input_range(0, Some(100), 100).unwrap(),
             0..100,
-            "EOF ちょうどは受理されるべきです"
+            "ファイル末尾ちょうどは受理されるべきです"
         );
         assert_eq!(
             required_input_range(0, Some(101), 100).unwrap(),
             0..100,
-            "EOF 1 byte 超過はファイル末尾へ丸められるべきです"
+            "ファイル末尾 1 バイト超過はファイル末尾へ丸められるべきです"
         );
         assert_eq!(
             required_input_range(50, Some(50), 100).unwrap(),
             50..100,
-            "範囲内の入力はそのままの range になるべきです"
+            "範囲内の入力はそのままの範囲になるべきです"
         );
         assert_eq!(
             required_input_range(100, Some(0), 100).unwrap(),
             100..100,
-            "EOF ちょうどの開始位置は空の range になるべきです"
+            "ファイル末尾ちょうどの開始位置は空の範囲になるべきです"
         );
     }
 
@@ -1518,7 +1518,7 @@ mod tests {
         );
     }
 
-    // required_input_range が、start + size の加算が overflow する場合に
+    // required_input_range が、start + size の加算がオーバーフローする場合に
     // InputRangeOverflow を返すことを確認する。
     #[test]
     fn required_input_range_rejects_range_overflow() {
@@ -1552,7 +1552,7 @@ mod tests {
     //
     // crate は largesize の u64 を usize へ変換した後、ファイル内位置が 0 より大きい
     // RequiredInput (position > 0, size == usize::MAX) を返すため、
-    // SDK 側の start + size の加算が overflow して InputRangeOverflow になる。
+    // SDK 側の start + size の加算がオーバーフローして InputRangeOverflow になる。
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn sample_reader_rejects_moov_largesize_overflow() {
@@ -1627,28 +1627,28 @@ mod tests {
         );
         assert!(
             !sample_count_within_limit(MAX_SAMPLE_COUNT_PER_TRACK),
-            "1 sample 超過 (index = MAX) は拒否されるべきです"
+            "1 サンプル超過 (index = MAX) は拒否されるべきです"
         );
     }
 
-    // sample_data_range が、空 sample、EOF ちょうど、EOF 1 byte 超過、
-    // 正常範囲、加算 overflow の各入力に対して正しい range または error を返すことを確認する。
+    // sample_data_range が、空サンプル、ファイル末尾ちょうど、ファイル末尾 1 バイト超過、
+    // 正常範囲、加算オーバーフローの各入力に対して正しい範囲または error を返すことを確認する。
     #[test]
     fn sample_data_range_returns_checked_range() {
         assert_eq!(
             sample_data_range(0, 0, 100, 0).unwrap(),
             0..0,
-            "空 sample は受理されるべきです"
+            "空サンプルは受理されるべきです"
         );
         assert_eq!(
             sample_data_range(0, 100, 100, 0).unwrap(),
             0..100,
-            "EOF ちょうどは受理されるべきです"
+            "ファイル末尾ちょうどは受理されるべきです"
         );
         assert_eq!(
             sample_data_range(50, 50, 100, 0).unwrap(),
             50..100,
-            "範囲内の入力はそのままの range になるべきです"
+            "範囲内の入力はそのままの範囲になるべきです"
         );
     }
 
@@ -1671,7 +1671,7 @@ mod tests {
         );
     }
 
-    // sample_data_range が、start + size の加算が overflow する場合に
+    // sample_data_range が、start + size の加算がオーバーフローする場合に
     // InconsistentSampleTable を返すことを確認する。
     #[test]
     fn sample_data_range_rejects_range_overflow() {
@@ -1705,7 +1705,7 @@ mod tests {
         );
     }
 
-    // build_cumulative_us が、duration と timescale から期待どおりの
+    // build_cumulative_us が、再生時間と timescale から期待どおりの
     // 累積再生時刻テーブルを構築することを確認する。
     #[test]
     fn build_cumulative_us_returns_expected_values() {
@@ -1716,11 +1716,11 @@ mod tests {
         assert_eq!(result, vec![0, 1_000_000, 1_500_000, 2_000_000]);
     }
 
-    // build_cumulative_us が、累積 duration または microseconds 変換が overflow する
+    // build_cumulative_us が、累積再生時間またはマイクロ秒変換がオーバーフローする
     // 入力に対して DurationOverflow を返すことを確認する。
     #[test]
     fn build_cumulative_us_rejects_overflow() {
-        // duration = u32::MAX を 4295 個累積すると、microseconds 変換 (× 1_000_000) が
+        // duration = u32::MAX を 4295 個累積すると、マイクロ秒変換 (× 1_000_000) が
         // u64 の上限を超える。
         let durations = vec![u32::MAX; 4295];
         let result = build_cumulative_us(&durations, 12800);
@@ -1730,7 +1730,7 @@ mod tests {
         );
     }
 
-    // wait_until が、stop flag 設定済みなら park せずに即座に Stopped を返すことを確認する。
+    // wait_until が、停止フラグ設定済みなら park せずに即座に Stopped を返すことを確認する。
     #[test]
     fn wait_until_stops_immediately_when_stop_is_set() {
         let stop = AtomicBool::new(true);
@@ -1789,7 +1789,7 @@ mod tests {
     }
 
     // wait_until が、unpark だけでは deadline 前に Ready を返さず、
-    // ループで deadline と stop flag を再評価することを確認する。
+    // ループで deadline と停止フラグを再評価することを確認する。
     //
     // unpark token は最初の park_timeout で消費されるため、タイミングに依存せず
     // テストスレッドは park し直し、Ready は返らない。
@@ -1811,7 +1811,7 @@ mod tests {
 
         // テストスレッドが wait_until を呼ぶ直前まで到達するのを待つ。
         barrier.wait();
-        // stop を設定せずに unpark する (spurious wakeup 相当)。
+        // stop を設定せずに unpark する (明示的な unpark なしの予期しない起床に相当)。
         // ループが deadline を再評価して park し直すため、Ready は返らないはず。
         handle.thread().unpark();
         let timed_out = done_rx
@@ -1831,7 +1831,7 @@ mod tests {
         );
     }
 
-    // 実 fixture の累積再生時刻が、duration と timescale から求まる期待値と一致することを確認する。
+    // 実 fixture の累積再生時刻が、再生時間と timescale から求まる期待値と一致することを確認する。
     //
     // fixture は 25 sample、duration 512、timescale 12800 のため、
     // cumulative_us[i] = i * 512 * 1_000_000 / 12800 = i * 40_000 になる。
