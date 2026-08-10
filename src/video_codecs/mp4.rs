@@ -805,19 +805,17 @@ const MAX_SLEEP_DURATION: std::time::Duration = std::time::Duration::from_millis
 
 /// 停止フラグを確認しながら deadline まで待機する。
 ///
-/// `thread::sleep` を `MAX_SLEEP_DURATION` ずつに分割して呼び、停止フラグの確認を挟む。
-/// 停止までの最大遅延は `MAX_SLEEP_DURATION` に制限される。
 /// 停止フラグが設定されたら `true`、deadline に到達したら `false` を返す。
 fn wait_until(stop: &AtomicBool, deadline: std::time::Instant) -> bool {
     loop {
         if stop.load(Ordering::Acquire) {
             return true;
         }
-        let now = std::time::Instant::now();
-        if now >= deadline {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
             return false;
         }
-        thread::sleep((deadline - now).min(MAX_SLEEP_DURATION));
+        thread::sleep(remaining.min(MAX_SLEEP_DURATION));
     }
 }
 
