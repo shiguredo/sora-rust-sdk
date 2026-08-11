@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-07-29
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-11
 - Model: GPT-5
 - Branch: feature/fix-sumomo-capture-format
 - Polished: 2026-08-07
@@ -81,3 +81,14 @@ media-device のテストは CI に job が無いためローカル検証のみ�
 - `cargo fmt --all --check` が成功する
 - `CHANGES.md` の develop セクションへ `[FIX]` と担当者 `@voluntas` を追記する
 - production log は英語、コメントとテストの assertion message は日本語にする
+
+## 解決方法
+
+PR #55 で対応した。video_device.rs に I420 / NV12 / YUY2 の frame 変換 helper（`convert_frame`）を追加し、callback は変換できない format や変換失敗を英語のエラーログ（レート制限付き）で報告して破棄するようにした。
+
+- `VideoCaptureConfig::pixel_format` は None のまま、バックエンドの既定ネゴシエーションに任せる
+- 変換 helper はパニックしない total な実装（I420Buffer::new 前に次元検証、split_at 前に全体長検証）
+- レート制限の判定を pure 関数（`should_log`）に切り出し、単体テストで初回出力・抑圧・間隔経過後の再出力を検証
+- `ConvertError` は Copy 可能な private 型にし、エラーログに pixel format 名・幅・高さ・バッファ長を含める
+- 単体テストで NV12 / YUY2 / I420 の変換内容（U / V を区別できる定数値）と失敗系（非対応 format・バッファ不足・uv_data なし・奇数幅 NV12）を検証
+- レート制限の wiring は pure 関数と helper の単体テストでは検証できないため、PR で code review の確認事項として明記した
