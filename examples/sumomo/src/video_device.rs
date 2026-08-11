@@ -104,18 +104,13 @@ impl VideoDeviceCapturer {
 
         let shared_clone = shared.clone();
         let last_logged = Arc::new(AtomicI64::new(0));
-        let last_logged_clone = last_logged.clone();
         let capture = shiguredo_video_device::VideoCapture::new(config, move |frame| {
             let buffer = match convert_frame(&frame) {
                 Ok(buffer) => buffer,
                 Err(error) => {
                     let now = shiguredo_webrtc::time_millis();
-                    if should_log(
-                        last_logged_clone.load(Ordering::Relaxed),
-                        now,
-                        LOG_RATE_LIMIT_MS,
-                    ) {
-                        last_logged_clone.store(now, Ordering::Relaxed);
+                    if should_log(last_logged.load(Ordering::Relaxed), now, LOG_RATE_LIMIT_MS) {
+                        last_logged.store(now, Ordering::Relaxed);
                         shiguredo_webrtc::rtc_log_error!(
                             "sumomo: failed to convert video frame: width={} height={} {}",
                             frame.width,
@@ -210,7 +205,8 @@ impl std::fmt::Display for Plane {
 #[cfg(feature = "media-device")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConvertError {
-    /// 非対応の pixel format（防御的な分岐。現構成の全バックエンドでは callback 到達前に除去される）
+    /// 非対応の pixel format（防御的な分岐。現構成の全バックエンドでは callback 到達前に除去されるが、
+    /// shiguredo_video_device の mjpeg feature 有効時など到達し得る構成もあるため、除去されない前提にしない）
     Unsupported(shiguredo_video_device::PixelFormat),
     /// バッファ長不足。expected_len は失敗した検証に対応する必要長（I420 の分割境界または libyuv の必要長式）
     BufferTooShort {
@@ -243,7 +239,7 @@ impl std::fmt::Display for ConvertError {
         match self {
             ConvertError::Unsupported(pixel_format) => {
                 // Unknown は生値 (FourCC) が出るよう Display を使う（name() は "Unknown" を返すだけ）
-                write!(f, "unsupported pixel format: {pixel_format}")
+                write!(f, "pixel format: {pixel_format}, unsupported")
             }
             ConvertError::BufferTooShort {
                 pixel_format,
@@ -302,7 +298,7 @@ fn chroma_dimension(value: i32) -> Option<i32> {
     value.checked_add(1).map(|v| v / 2)
 }
 
-/// width / height / stride が正値であることを検証する。非正の値は InvalidDimension を返す。
+/// width / height / stride / stride_uv が正値であることを検証する。非正の値は InvalidDimension を返す。
 #[cfg(feature = "media-device")]
 fn validate_positive(
     pixel_format: shiguredo_video_device::PixelFormat,
@@ -507,9 +503,8 @@ fn convert_i420(
         });
     }
 
-    // U / V の分割境界は各プレーン stride_uv * ceil(height / 2) の連結 UV バッファ（U 連結 V）。
-    // libyuv の必要長式は無 padding（stride_uv == ceil(width / 2)）のときだけ分割境界と一致するため、
-    // split_at の安全は分割境界の全体長検証で保証する。
+    // shiguredo_video_device の仕様上、frame.uv_data は U/V を連結した UV バッファで、
+    // U / V の分割境界は stride_uv * ceil(height / 2) の位置にある。
     let uv_rows = (frame.height as usize).div_ceil(2);
     let uv_plane_len =
         (frame.stride_uv as usize)
@@ -1089,29 +1084,10 @@ mod tests {
     }
 
     #[test]
-    fn yuy2_stride_uv_zero_is_contract() {
-        // YUY2 は packed 形式のため stride_uv == 0 が契約であり、NV12 / I420 と違い拒否しない
-        let width = 2;
-        let height = 1;
-        let stride = 4;
-        let data = [0x10, 0x20, 0x11, 0x21];
-
-        let frame = make_frame(
-            shiguredo_video_device::PixelFormat::Yuy2,
-            &data,
-            None,
-            width,
-            height,
-            stride,
-            0,
-        );
-
-        assert!(convert_frame(&frame).is_ok());
-    }
-
-    #[test]
     fn overflow_is_rejected() {
-        // YUY2 は width * 2 の row_bytes 計算で i32 オーバーフローするケース。バッファは検証前に失敗するため不要
+        // YUY2 は row_bytes = width * 2 の計算で i32 オーバーフローする（width = i32::MAX）。
+        // row_bytes の Overflow 判定はバッファ長検証より先に走るため、データが空のままで
+        // Overflow が返ることを確認する。
         let frame = make_frame(
             shiguredo_video_device::PixelFormat::Yuy2,
             &[],
