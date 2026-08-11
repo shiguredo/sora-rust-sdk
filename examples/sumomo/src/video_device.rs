@@ -319,9 +319,6 @@ fn validate_positive(
 /// video frame を I420Buffer へ変換する pure helper。
 ///
 /// 変換可能なのは NV12 / YUY2 / I420 のみで、それ以外は Unsupported で拒否する。
-/// callback は FFI 境界（V4L2 / AVF / PipeWire）または Rust thread（MF）から呼ばれるため、
-/// panic すると FFI 越えの abort や capture thread の永続喪失になる。本関数は検証済みの
-/// 長さ・次元のみで変換を行う total な関数であり、I420Buffer::new や split_at はパニックしない。
 #[cfg(feature = "media-device")]
 fn convert_frame(
     frame: &shiguredo_video_device::VideoFrame<'_>,
