@@ -357,6 +357,7 @@ pub(crate) enum OutgoingMessage {
     Candidate {
         candidate: String,
     },
+    Disconnect,
 }
 
 impl DisplayJson for OutgoingMessage {
@@ -464,6 +465,10 @@ impl DisplayJson for OutgoingMessage {
                 f.member("type", "candidate")?;
                 f.member("candidate", candidate)
             }),
+            OutgoingMessage::Disconnect => f.object(|f| {
+                f.member("type", "disconnect")?;
+                f.member("reason", "NO-ERROR")
+            }),
         }
     }
 }
@@ -538,10 +543,15 @@ impl OutgoingMessage {
             candidate: candidate.to_string(),
         }
     }
+    pub(crate) fn new_disconnect() -> Self {
+        Self::Disconnect
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use nojson::Json;
+
     use super::*;
 
     /// Close メッセージの parse が成功して code と reason を保持することを確認する。
@@ -620,5 +630,12 @@ mod tests {
     #[test]
     fn close_rejects_non_string_reason() {
         assert_close_parse_failed(r#"{"type":"close","code":1000,"reason":12345}"#);
+    }
+
+    /// Disconnect メッセージが `{"type":"disconnect","reason":"NO-ERROR"}` にシリアライズされることを確認する。
+    #[test]
+    fn disconnect_serializes_to_no_error() {
+        let text = Json(OutgoingMessage::new_disconnect()).to_string();
+        assert_eq!(text, r#"{"type":"disconnect","reason":"NO-ERROR"}"#);
     }
 }

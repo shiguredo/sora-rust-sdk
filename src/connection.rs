@@ -1000,12 +1000,55 @@ impl SoraConnection {
                     match command {
                         SoraConnectionCommand::Disconnect(ack_tx) => {
                             rtc_log_info!("Received disconnect request");
-                            // オープン中の DataChannel に対して close コールバックを呼ぶ
-                            for label in &opened_datachannels {
-                                rtc_log_info!("DataChannel '{}' closed", label);
-                                handler.on_data_channel_close(label);
+                            // disconnect メッセージを送信する。
+                            // 送信失敗は切断処理を中断させず、ログ (英語) に残すだけにする。
+                            let disconnect_message =
+                                Json(OutgoingMessage::new_disconnect()).to_string();
+                            // Sora クライアント要求仕様「アプリケーション経由の
+                            // "type": "disconnect" 送信後の終了処理」に基づき、
+                            // 実際に DataChannel シグナリングが有効な状態
+                            // (use_datachannel_signaling) なら signaling DataChannel 経由、
+                            // そうでなければ WebSocket 経由で送信する。
+                            // use_datachannel_signaling は他のシグナリング送信
+                            // (pong、stats 等) と同じ経路判定を使う。
+                            if use_datachannel_signaling {
+                                handler.on_signaling_message(
+                                    SignalingType::DataChannel,
+                                    SignalingDirection::Sent,
+                                    &disconnect_message,
+                                );
+                                if let Err(e) = self.send_signaling_message(&disconnect_message) {
+                                    rtc_log_error!(
+                                        "Failed to send disconnect message: {}",
+                                        e
+                                    );
+                                }
+                            } else if ws.state() == ConnectionState::Connected {
+                                handler.on_signaling_message(
+                                    SignalingType::WebSocket,
+                                    SignalingDirection::Sent,
+                                    &disconnect_message,
+                                );
+                                if let Err(e) = send_text(&mut ws, &disconnect_message) {
+                                    rtc_log_error!(
+                                        "Failed to send disconnect message: {}",
+                                        e
+                                    );
+                                }
                             }
-                            opened_datachannels.clear();
+
+                            // WebSocket シグナリングの場合は、オープン中の DataChannel に
+                            // 対して close コールバックを呼ぶ。
+                            // DataChannel シグナリングの場合は、run ループ終了後の
+                            // クローズ待機 (disconnect_wait_timeout) で close コールバックを
+                            // 通知するため、ここではクリアしない。
+                            if !use_datachannel_signaling {
+                                for label in &opened_datachannels {
+                                    rtc_log_info!("DataChannel '{}' closed", label);
+                                    handler.on_data_channel_close(label);
+                                }
+                                opened_datachannels.clear();
+                            }
                             let _ = ack_tx.send(());
                             break;
                         }
@@ -1360,7 +1403,8 @@ impl SoraConnection {
             }
         }
 
-        // DataChannel が使用されている場合、クローズ完了を待機する
+        // DataChannel シグナリングを利用している場合は、
+        // disconnect 送信の到達を確保しつつクローズ完了を待機する
         if use_datachannel_signaling && !opened_datachannels.is_empty() {
             let deadline = tokio::time::Instant::now() + disconnect_wait_timeout;
             while !opened_datachannels.is_empty() {
