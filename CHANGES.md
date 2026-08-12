@@ -13,10 +13,14 @@
 
 - [CHANGE] 最小対応 Rust バージョンを 1.93 に上げる
   - @voluntas
+- [CHANGE] Mp4Error の InputPositionOutOfRange と InconsistentSampleTable の file_size フィールドを usize から u64 に変更する
+  - @sile
 - [UPDATE] `shiguredo_webrtc` を 0.150.3 に上げ、Ubuntu 26.04 LTS に対応する
   - @voluntas
 - [UPDATE] `shiguredo_mp4` を 2026.4.0 に上げる
   - @voluntas
+- [UPDATE] MP4 読み込みをファイルベースに変更し、ファイル全体をメモリに保持しないようにする
+  - @sile
 - [FIX] MP4 の `length_size_minus_one` が reserved 値のときに panic せずエラーを返すようにする
   - @voluntas
 - [FIX] 非ゼロの composition time offset (B フレーム) を含む MP4 を `Mp4SampleReader` の初期化時に拒否する

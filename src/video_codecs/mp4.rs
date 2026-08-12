@@ -13,7 +13,7 @@
 //!                                         (native VideoFrameBuffer)
 //!
 //! 対応コーデック: H.264, H.265, VP8, VP9, AV1
-use std::io;
+use std::io::{self, BufReader, Read, Seek};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -26,7 +26,7 @@ use shiguredo_webrtc::{
     VideoEncoderEncodedImageCallbackResultError, VideoEncoderEncoderInfo, VideoEncoderHandler,
     VideoEncoderRateControlParametersRef, VideoEncoderSettingsRef, VideoFrame, VideoFrameBuffer,
     VideoFrameBufferHandler, VideoFrameRef, VideoFrameType, VideoFrameTypeVectorRef,
-    VideoTrackSource, rtc_log_info, rtc_log_warning,
+    VideoTrackSource, rtc_log_error, rtc_log_info, rtc_log_warning,
 };
 
 use crate::video_codec_capability::{
@@ -54,7 +54,7 @@ pub enum Mp4Error {
         /// デマルチプレクサが要求したファイル内位置。
         position: u64,
         /// 実際のファイルサイズ (バイト単位)。
-        file_size: usize,
+        file_size: u64,
     },
     /// サンプルテーブル (stsz / stco / co64) に不整合があり、
     /// サンプルのオフセットがファイル範囲外になっている。
@@ -66,7 +66,7 @@ pub enum Mp4Error {
         /// サンプルのデータサイズ。
         size: usize,
         /// 実際のファイルサイズ (バイト単位)。
-        file_size: usize,
+        file_size: u64,
     },
     /// 非ゼロの composition time offset を含むビデオサンプルが存在する。
     ///
@@ -222,12 +222,12 @@ struct Mp4SampleMeta {
 
 /// MP4 ファイルからビデオサンプルを読み出すリーダー。
 ///
-/// コンストラクタでファイル全体をメモリに読み込み、全サンプルのメタデータを事前解析する。
+/// コンストラクタでファイルを開き、全サンプルのメタデータを事前解析する。
 /// `get_sample()` でインデックス指定でサンプルを取得できる。
-/// ファイルデータを保持し続けるため、サンプル取得時にディスク I/O は発生しない。
+/// ファイルデータはメモリに保持せず、必要に応じてファイルから読み込む。
 pub struct Mp4SampleReader {
-    /// MP4 ファイル全体のバイトデータ。
-    file_data: Vec<u8>,
+    /// MP4 ファイルへの読み込みストリーム。
+    file: BufReader<std::fs::File>,
     track_info: Mp4VideoTrackInfo,
     /// 各サンプルのメタデータ。
     samples: Vec<Mp4SampleMeta>,
@@ -240,8 +240,6 @@ pub struct Mp4SampleReader {
 
 impl Mp4SampleReader {
     /// MP4 ファイルを読み込み、ビデオトラックの全サンプルを事前解析する。
-    ///
-    /// ファイル全体をメモリに保持するため、大きなファイルではメモリ使用量に注意。
     pub fn new(path: &str) -> crate::error::Result<Self> {
         Self::new_inner(path).map_err(crate::error::Error::from)
     }
@@ -249,7 +247,8 @@ impl Mp4SampleReader {
     fn new_inner(path: &str) -> Result<Self> {
         use shiguredo_mp4::demux::{Input, Mp4FileDemuxer};
 
-        let file_data = std::fs::read(path)?;
+        let mut file = BufReader::new(std::fs::File::open(path)?);
+        let file_size = file.get_ref().metadata()?.len();
 
         let mut demuxer = Mp4FileDemuxer::new();
 
@@ -257,26 +256,24 @@ impl Mp4SampleReader {
         // required_input() が要求する範囲のデータを順次渡すことで、
         // ボックス構造の解析が進む。
         while let Some(required) = demuxer.required_input() {
-            let start = required.position as usize;
-            if start > file_data.len() {
+            if required.position > file_size {
                 return Err(Mp4Error::InputPositionOutOfRange {
                     position: required.position,
-                    file_size: file_data.len(),
+                    file_size,
                 });
             }
-            let end = match required.size {
-                Some(size) => (start + size).min(file_data.len()),
-                None => file_data.len(),
-            };
-            let data = file_data
-                .get(start..end)
-                .ok_or(Mp4Error::InputPositionOutOfRange {
-                    position: required.position,
-                    file_size: file_data.len(),
-                })?;
+            // size が None ならファイル末尾までの範囲を要求する。
+            let remaining = file_size - required.position;
+            let size = usize::try_from(
+                required
+                    .size
+                    .map_or(remaining, |size| (size as u64).min(remaining)),
+            )
+            .map_err(|_| io::Error::other("required input size exceeds usize"))?;
+            let data = read_bytes_at(&mut file, required.position, size)?;
             demuxer.handle_input(Input {
                 position: required.position,
-                data,
+                data: &data,
             });
         }
 
@@ -336,13 +333,12 @@ impl Mp4SampleReader {
             return Err(Mp4Error::NoVideoSamples);
         }
 
-        let file_size = file_data.len();
         for (index, sample) in samples.iter().enumerate() {
             let data_size_u64 = sample.data_size as u64;
             if sample
                 .data_offset
                 .checked_add(data_size_u64)
-                .is_none_or(|end| end > file_size as u64)
+                .is_none_or(|end| end > file_size)
             {
                 return Err(Mp4Error::InconsistentSampleTable {
                     index,
@@ -367,7 +363,7 @@ impl Mp4SampleReader {
         }
 
         Ok(Self {
-            file_data,
+            file,
             track_info,
             samples,
             cumulative_us,
@@ -519,6 +515,8 @@ impl Mp4SampleReader {
 
     /// 指定インデックスのサンプルデータを取得する。
     ///
+    /// サンプルデータはファイルから読み込むため、I/O エラーを返し得る。
+    ///
     /// H.264/H.265 の場合:
     /// - MP4 内の AVCC/HVCC 形式 (4 バイト長さプレフィックス) を
     ///   Annex B 形式 (0x00000001 スタートコード) に変換する。
@@ -526,10 +524,9 @@ impl Mp4SampleReader {
     ///
     /// VP8/VP9/AV1 の場合:
     /// - MP4 から抽出したデータをそのまま使用する。
-    fn get_sample(&self, index: usize) -> Mp4EncodedSample {
+    fn get_sample(&mut self, index: usize) -> Result<Mp4EncodedSample> {
         let sample = &self.samples[index];
-        let raw_data = &self.file_data
-            [sample.data_offset as usize..sample.data_offset as usize + sample.data_size];
+        let raw_data = read_bytes_at(&mut self.file, sample.data_offset, sample.data_size)?;
 
         let data = match self.track_info.codec_type {
             VideoCodecType::H264 | VideoCodecType::H265 => {
@@ -540,21 +537,21 @@ impl Mp4SampleReader {
                     annex_b.extend_from_slice(ps);
                 }
                 annex_b.extend_from_slice(&length_prefixed_nalu_to_annex_b(
-                    raw_data,
+                    &raw_data,
                     self.track_info.nal_length_size,
                 ));
                 annex_b
             }
-            _ => raw_data.to_vec(),
+            _ => raw_data,
         };
 
-        Mp4EncodedSample {
+        Ok(Mp4EncodedSample {
             data,
             is_keyframe: sample.is_keyframe,
             width: self.track_info.width as u32,
             height: self.track_info.height as u32,
             codec_type: self.track_info.codec_type,
-        }
+        })
     }
 
     /// 先頭からフレーム index までの累積再生時間をマイクロ秒で返す。
@@ -562,6 +559,22 @@ impl Mp4SampleReader {
     fn cumulative_duration_us(&self, index: usize) -> u64 {
         self.cumulative_us[index]
     }
+}
+
+/// ファイルの指定位置から指定サイズのデータを読み込む。
+///
+/// ファイルベースの読み込みで seek + read_exact の組み合わせが必要な箇所は
+/// すべてこの関数に集約する。read_exact は要求サイズの読み込みを保証するため、
+/// ファイルが途中で縮小されている場合は I/O エラーを返す。
+fn read_bytes_at(
+    file: &mut BufReader<std::fs::File>,
+    position: u64,
+    size: usize,
+) -> Result<Vec<u8>> {
+    let mut data = vec![0; size];
+    file.seek(std::io::SeekFrom::Start(position))?;
+    file.read_exact(&mut data)?;
+    Ok(data)
 }
 
 /// 長さプレフィックス付き NAL ユニットを Annex B 形式に変換する。
@@ -840,7 +853,7 @@ impl Mp4VideoCapturer {
     ///
     /// 生成と同時に専用スレッドを起動し、MP4 のフレームタイミングに従って
     /// 映像フレームを WebRTC に供給する。動画末尾に達すると先頭に戻りループ再生する。
-    pub fn new(reader: Mp4SampleReader) -> crate::error::Result<Self> {
+    pub fn new(mut reader: Mp4SampleReader) -> crate::error::Result<Self> {
         let width = reader.track_info.width as i32;
         let height = reader.track_info.height as i32;
 
@@ -870,7 +883,14 @@ impl Mp4VideoCapturer {
                     let AdaptFrameResult { applied, .. } =
                         source.adapt_frame(width, height, timestamp_us);
                     if applied {
-                        let sample = reader.get_sample(i);
+                        // サンプルデータの読み込みに失敗したらフィーダースレッドを終了する。
+                        let sample = match reader.get_sample(i) {
+                            Ok(sample) => sample,
+                            Err(err) => {
+                                rtc_log_error!("MP4: failed to read sample: {err:?}");
+                                return;
+                            }
+                        };
                         let frame_buffer = VideoFrameBuffer::new_with_handler(Box::new(sample));
                         let ts =
                             aligner.translate(timestamp_us, shiguredo_webrtc::time_millis() * 1000);
@@ -1048,6 +1068,13 @@ mod tests {
         assert!(output.is_empty());
     }
 
+    // ファイルベースのサンプル読み込みが、フィクスチャに記録された
+    // オフセット・サイズで正しいデータを読み出せることを確認する。
+    //
+    // サンプル 0 はキーフレーム (offset=48, size=702) で、変換後データは
+    // parameter sets (SPS/PPS) とサンプル NAL データの連結になる。
+    // 期待値はフィクスチャの stco / stsz / avcC ボックスから直接計算するため、
+    // フィクスチャ差し替え時にも自動的に追従する。
     #[test]
     fn sample_reader_reads_fixture_h264_mp4() {
         let fixture = include_bytes!("../../testdata/red-320x320-h264.mp4");
@@ -1067,16 +1094,178 @@ mod tests {
             tmp_path
                 .to_str()
                 .expect("パスは有効な UTF-8 である必要があります"),
+        )
+        .expect("フィクスチャ MP4 のパースに失敗しました");
+        let mut reader = reader;
+        assert_eq!(reader.codec_type(), VideoCodecType::H264);
+        assert!(!reader.is_empty());
+        let sample = reader
+            .get_sample(0)
+            .expect("サンプルデータの読み込みに失敗しました");
+
+        // サンプル 0 のファイル内オフセットは stco ボックスの先頭エントリから求める。
+        // ボックス構造: size(4) + type(4) + version/flags(4) + entry_count(4) + [offset(4) * entry_count]
+        let stco_offset = fixture
+            .windows(4)
+            .position(|w| w == b"stco")
+            .expect("フィクスチャに stco ボックスが必要です");
+        let stco_entry_count = u32::from_be_bytes(
+            fixture[stco_offset + 8..stco_offset + 12]
+                .try_into()
+                .expect("stco の entry_count は 4 バイトで読める必要があります"),
+        );
+        assert_eq!(
+            stco_entry_count, 1,
+            "フィクスチャの stco エントリ数が移動しています"
+        );
+        let sample_offset = u32::from_be_bytes(
+            fixture[stco_offset + 12..stco_offset + 16]
+                .try_into()
+                .expect("stco の先頭エントリは 4 バイトで読める必要があります"),
+        );
+        assert_eq!(
+            sample_offset, 48,
+            "フィクスチャのサンプル 0 のオフセットが移動しています"
+        );
+
+        // サンプル 0 のデータサイズは stsz ボックスの先頭エントリから求める。
+        // ボックス構造: size(4) + type(4) + version/flags(4) + sample_size(4)
+        //               + sample_count(4) + [entry_size(4) * sample_count]
+        let stsz_offset = fixture
+            .windows(4)
+            .position(|w| w == b"stsz")
+            .expect("フィクスチャに stsz ボックスが必要です");
+        let sample_size = u32::from_be_bytes(
+            fixture[stsz_offset + 16..stsz_offset + 20]
+                .try_into()
+                .expect("stsz の先頭エントリは 4 バイトで読める必要があります"),
+        );
+        assert_eq!(
+            sample_size, 702,
+            "フィクスチャのサンプル 0 のサイズが移動しています"
+        );
+
+        // parameter sets (SPS/PPS) は avcC ボックスから抽出する。
+        // ボックス構造: size(4) + type(4) + version(1) + profile(1) + compat(1) + level(1)
+        //               + length_size_minus_one(1) + num_of_sps(1) + [sps_length(2) + sps]
+        //               + num_of_pps(1) + [pps_length(2) + pps]
+        // num_of_sps の上位 3 ビットは reserved (111) なのでマスクする。
+        let avcc_offset = fixture
+            .windows(4)
+            .position(|w| w == b"avcC")
+            .expect("フィクスチャに avcC ボックスが必要です");
+        let num_of_sps = (fixture[avcc_offset + 9] & 0x1f) as usize;
+        let sps_length = u16::from_be_bytes(
+            fixture[avcc_offset + 10..avcc_offset + 12]
+                .try_into()
+                .expect("sps_length は 2 バイトで読める必要があります"),
+        ) as usize;
+        let sps = &fixture[avcc_offset + 12..avcc_offset + 12 + sps_length];
+        let num_of_pps = fixture[avcc_offset + 12 + sps_length] as usize;
+        let pps_length = u16::from_be_bytes(
+            fixture[avcc_offset + 13 + sps_length..avcc_offset + 15 + sps_length]
+                .try_into()
+                .expect("pps_length は 2 バイトで読める必要があります"),
+        ) as usize;
+        let pps =
+            &fixture[avcc_offset + 15 + sps_length..avcc_offset + 15 + sps_length + pps_length];
+        assert_eq!(num_of_sps, 1, "フィクスチャの SPS 数が移動しています");
+        assert_eq!(num_of_pps, 1, "フィクスチャの PPS 数が移動しています");
+        assert_eq!(
+            sps[0], 0x67,
+            "フィクスチャの SPS の先頭バイトが移動しています"
+        );
+        assert_eq!(
+            pps[0], 0x68,
+            "フィクスチャの PPS の先頭バイトが移動しています"
+        );
+
+        // 変換後データは [start code(4) + SPS][start code(4) + PPS][サンプル NAL データ] の形式になる。
+        // サンプル NAL データは、stco/stsz が示す範囲の AVCC 形式データを
+        // 長さプレフィックス変換したものと一致する必要がある (変換は長さ 1:1)。
+        let sample_start = sample_offset as usize;
+        let sample_end = sample_start + sample_size as usize;
+        let expected_annex_b =
+            length_prefixed_nalu_to_annex_b(&fixture[sample_start..sample_end], 4);
+        let expected_len = 4 + sps_length + 4 + pps_length + expected_annex_b.len();
+        assert_eq!(
+            sample.data.len(),
+            expected_len,
+            "サンプル 0 のデータ長が期待値と異なります"
+        );
+        assert_eq!(
+            &sample.data[0..4],
+            &[0x00, 0x00, 0x00, 0x01],
+            "SPS のスタートコードがありません"
+        );
+        assert_eq!(
+            &sample.data[4..4 + sps_length],
+            sps,
+            "SPS が変換後データの先頭に現れるべきです"
+        );
+        assert_eq!(
+            &sample.data[4 + sps_length..8 + sps_length],
+            &[0x00, 0x00, 0x00, 0x01],
+            "PPS のスタートコードがありません"
+        );
+        assert_eq!(
+            &sample.data[8 + sps_length..8 + sps_length + pps_length],
+            pps,
+            "PPS が SPS の後に現れるべきです"
+        );
+        assert_eq!(
+            &sample.data[8 + sps_length + pps_length..],
+            expected_annex_b,
+            "サンプル NAL データがファイルから正しく読み込まれていません"
         );
 
         let _ = std::fs::remove_file(&tmp_path);
+    }
 
-        let reader = reader.expect("フィクスチャ MP4 のパースに失敗しました");
-        assert_eq!(reader.codec_type(), VideoCodecType::H264);
-        assert!(!reader.is_empty());
-        let sample = reader.get_sample(0);
-        assert!(sample.data.len() >= 4);
-        assert_eq!(&sample.data[0..4], &[0x00, 0x00, 0x00, 0x01]);
+    // リーダー構築後にファイルを 0 バイトへ縮小すると、
+    // get_sample のファイル読み込みが I/O エラーとして失敗することを確認する。
+    //
+    // read_exact は要求サイズの読み込みを保証するため、
+    // ファイルが縮小されていると UnexpectedEof が発生する。
+    // 縮小は別ハンドルから行う (std::fs::File::open は共有モードで開くため、
+    // Unix/Windows ともリーダーの保持するハンドルには影響しない)。
+    #[test]
+    fn sample_reader_get_sample_returns_io_error_after_file_truncation() {
+        let fixture = include_bytes!("../../testdata/red-320x320-h264.mp4");
+        let tmp_name = format!(
+            "sora-sdk-mp4-test-truncate-{}-{}.mp4",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("システム時刻は UNIX_EPOCH より後である必要があります")
+                .as_nanos()
+        );
+        let tmp_path = std::env::temp_dir().join(tmp_name);
+
+        std::fs::write(&tmp_path, fixture).expect("一時フィクスチャの書き込みに失敗しました");
+
+        let reader = Mp4SampleReader::new(
+            tmp_path
+                .to_str()
+                .expect("パスは有効な UTF-8 である必要があります"),
+        )
+        .expect("フィクスチャ MP4 のパースに失敗しました");
+        let mut reader = reader;
+
+        let file = std::fs::File::options()
+            .write(true)
+            .open(&tmp_path)
+            .expect("縮小用ハンドルのオープンに失敗しました");
+        file.set_len(0).expect("ファイルの縮小に失敗しました");
+        drop(file);
+
+        let result = reader.get_sample(0);
+        assert!(
+            matches!(result, Err(Mp4Error::Io(_))),
+            "縮小されたファイルからの読み込みは Io エラーになるべきです"
+        );
+
+        let _ = std::fs::remove_file(&tmp_path);
     }
 
     // validated_nal_length_size が有効な length_size_minus_one (0/1/3) を
