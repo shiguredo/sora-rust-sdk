@@ -58,16 +58,14 @@ async fn test_disconnect_message_is_sent_via_datachannel() {
         Some(WEBSOCKET_CLOSE_TIMEOUT),
     );
 
+    // DataChannel シグナリングへの切替は全 DataChannel の
+    // オープンと switched 受信の両方で確定するので、
+    // switched 受信して全チャネルがオープンするのを待つ。
     connection
         .wait_for_switched(Duration::from_secs(15))
         .await
         .expect("switched 通知の受信がタイムアウトしました");
 
-    // DataChannel シグナリングへの切替は全 DataChannel (signaling / stats / notify /
-    // push / rpc) のオープンと switched 受信の両方で確定する
-    // (is_datachannel_signaling_ready)。signaling だけを待って disconnect() を呼ぶと、
-    // 未確定のまま WebSocket 経路にフォールバックしてテストが不安定になるため、
-    // 全チャネルのオープンを待ってから切断する。
     for label in ["signaling", "stats", "notify", "push", "rpc"] {
         connection
             .wait_for_data_channel_open(|l| l == label, Duration::from_secs(15))

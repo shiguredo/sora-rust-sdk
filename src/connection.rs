@@ -1000,14 +1000,10 @@ impl SoraConnection {
                         SoraConnectionCommand::Disconnect(ack_tx) => {
                             rtc_log_info!("Received disconnect request");
                             // サーバーに切断を通知するため、disconnect メッセージを送信する。
-                            // 送信失敗は切断処理を中断させず、ログ (英語) に残すだけにする。
+                            // 送信失敗しても切断処理を中断せず、ログに残すだけにする。
                             let disconnect_message =
                                 Json(OutgoingMessage::new_disconnect()).to_string();
-                            // Sora クライアント要求仕様「アプリケーション経由の
-                            // "type": "disconnect" 送信後の終了処理」に基づき、
-                            // DataChannel シグナリングが有効な状態
-                            // (use_datachannel_signaling) なら signaling DataChannel 経由、
-                            // そうでなければ WebSocket 経由で送信する。
+                            // DataChannel または WebSocket 経由で disconnect メッセージを送信する。
                             if let Err(e) = self.send_signaling_message_with_notification(
                                 &mut *handler,
                                 &mut ws,
@@ -1383,9 +1379,8 @@ impl SoraConnection {
             }
         }
 
-        // DataChannel シグナリングを利用している場合は、クローズ完了を待機する。
-        // disconnect 送信の到達を保証するものではなく、サーバーが DataChannel を
-        // 閉じるまで disconnect_wait_timeout を上限に待つ。
+        // DataChannel シグナリングを利用している場合は、
+        // disconnect_wait_timeout を上限にクローズ完了を待機する。
         if use_datachannel_signaling && !opened_datachannels.is_empty() {
             let deadline = tokio::time::Instant::now() + disconnect_wait_timeout;
             while !opened_datachannels.is_empty() {
