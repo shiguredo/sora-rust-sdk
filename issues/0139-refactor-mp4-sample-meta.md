@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-10
 - Branch: feature/refactor-mp4-sample-meta
 - Polished: {YYYY-MM-DD}
 - Updated: 2026-08-10
@@ -30,3 +30,11 @@
 - `cargo test --workspace` が成功する
 - `cargo clippy --workspace --all-targets -- -D warnings` が成功する
 - コメントとテストの assertion message は日本語にする
+
+## 解決方法
+
+- `Mp4SampleMeta { data_offset, data_size, is_keyframe, duration }` 構造体を定義し、`samples` を `Vec<(u64, usize, bool, u64, u32)>` から `Vec<Mp4SampleMeta>` に変更した
+- `new_inner` のサンプルループ、一括検証ループ、`cumulative_us` 構築、`get_sample` の参照をフィールド参照に書き換えた
+- `timestamp` はどこからも参照されていなかったため削除した
+- `samples` フィールドの冗長なコメント（構造体側に記載済みの内容）を削除した
+- 動作の変更はなく、既存テスト（20 件）がすべて成功することを確認した
