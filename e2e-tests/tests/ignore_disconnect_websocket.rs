@@ -1,23 +1,13 @@
 use std::time::Duration;
 
 use e2e_tests::{
-    SoraTestConnection, SoraTestEvent, build_metadata_with_access_token, generate_channel_id,
-    load_env, secret_key, signaling_urls, verify_data_channel_label,
+    SoraTestEvent, build_recvonly_data_channel_signaling_connection, generate_channel_id, load_env,
+    signaling_urls, verify_data_channel_label,
 };
-use sora_sdk::{Role, SoraConnectionContext};
 
-fn build_recvonly_connection(urls: Vec<String>, channel_id: String) -> SoraTestConnection {
-    let context = SoraConnectionContext::new().expect("コンテキスト作成失敗");
-    let mut builder = SoraTestConnection::builder(context, urls, channel_id, Role::RecvOnly)
-        .data_channel_signaling(true)
-        .ignore_disconnect_websocket(true);
-    if let Some(token) = secret_key() {
-        builder = builder.metadata(build_metadata_with_access_token(&token));
-    }
-    builder
-        .connect()
-        .expect("SoraTestConnection の作成に失敗しました")
-}
+// タイムアウトは SDK デフォルト値 (disconnect_wait_timeout=5s, websocket_close_timeout=3s) を使う。
+const DISCONNECT_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+const WEBSOCKET_CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// `ignore_disconnect_websocket=true` で接続したとき、
 /// switched 後に WebSocket が閉じられても DataChannel シグナリングが継続することを確認する。
@@ -32,7 +22,12 @@ async fn test_recvonly_ignore_disconnect_websocket_keeps_signaling() {
 
     let urls = signaling_urls().expect("TEST_SIGNALING_URLS が必要");
     let channel_id = generate_channel_id();
-    let mut connection = build_recvonly_connection(urls, channel_id);
+    let mut connection = build_recvonly_data_channel_signaling_connection(
+        urls,
+        channel_id,
+        DISCONNECT_WAIT_TIMEOUT,
+        WEBSOCKET_CLOSE_TIMEOUT,
+    );
 
     connection
         .wait_for_switched(Duration::from_secs(15))

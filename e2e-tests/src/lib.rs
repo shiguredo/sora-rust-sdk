@@ -720,4 +720,7 @@ pub mod fake_video_capturer;
 pub mod stats;
 pub mod test_connection;
 pub use fake_video_capturer::{FakeVideoCapturer, FakeVideoCapturerConfig};
-pub use test_connection::{SoraTestConnection, SoraTestConnectionBuilder, SoraTestEvent};
+pub use test_connection::{
+    SoraTestConnection, SoraTestConnectionBuilder, SoraTestEvent,
+    build_recvonly_data_channel_signaling_connection,
+};

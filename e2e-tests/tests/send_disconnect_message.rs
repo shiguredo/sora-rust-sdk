@@ -1,8 +1,9 @@
 use std::time::Duration;
 
 use e2e_tests::{
-    SoraTestConnection, build_metadata_with_access_token, generate_channel_id, load_env,
-    secret_key, signaling_urls,
+    SoraTestConnection, build_metadata_with_access_token,
+    build_recvonly_data_channel_signaling_connection, generate_channel_id, load_env, secret_key,
+    signaling_urls,
 };
 use nojson::RawJson;
 use sora_sdk::{Role, SignalingDirection, SignalingType, SoraConnectionContext};
@@ -43,30 +44,19 @@ fn is_disconnect_message(text: &str) -> bool {
     reason == "NO-ERROR"
 }
 
-/// DataChannel シグナリングでの client disconnect 検証用の recvonly 接続を構築する。
-fn build_datachannel_connection(urls: Vec<String>, channel_id: String) -> SoraTestConnection {
-    let context = SoraConnectionContext::new().expect("コンテキスト作成失敗");
-    let mut builder = SoraTestConnection::builder(context, urls, channel_id, Role::RecvOnly)
-        .data_channel_signaling(true)
-        .ignore_disconnect_websocket(true)
-        .disconnect_wait_timeout(DISCONNECT_WAIT_TIMEOUT)
-        .websocket_close_timeout(WEBSOCKET_CLOSE_TIMEOUT);
-    if let Some(token) = secret_key() {
-        builder = builder.metadata(build_metadata_with_access_token(&token));
-    }
-    builder
-        .connect()
-        .expect("SoraTestConnection の作成に失敗しました")
-}
-
 /// `disconnect()` を呼んだとき、signaling DataChannel 経由で disconnect メッセージが送信されることを確認する。
 #[tokio::test]
-async fn disconnect_message_is_sent_via_datachannel() {
+async fn test_disconnect_message_is_sent_via_datachannel() {
     load_env();
 
     let urls = signaling_urls().expect("TEST_SIGNALING_URLS が必要");
     let channel_id = generate_channel_id();
-    let mut connection = build_datachannel_connection(urls, channel_id);
+    let mut connection = build_recvonly_data_channel_signaling_connection(
+        urls,
+        channel_id,
+        DISCONNECT_WAIT_TIMEOUT,
+        WEBSOCKET_CLOSE_TIMEOUT,
+    );
 
     connection
         .wait_for_switched(Duration::from_secs(15))
@@ -134,7 +124,7 @@ async fn disconnect_message_is_sent_via_datachannel() {
 
 /// `disconnect()` を呼んだとき、WebSocket 経由で disconnect メッセージが送信されることを確認する。
 #[tokio::test]
-async fn disconnect_message_is_sent_via_websocket() {
+async fn test_disconnect_message_is_sent_via_websocket() {
     load_env();
 
     let urls = signaling_urls().expect("TEST_SIGNALING_URLS が必要");
