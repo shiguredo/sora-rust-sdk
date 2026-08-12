@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-10
 - Branch: feature/fix-mp4-sample-count-limit
 - Polished: 2026-08-10
 
@@ -33,3 +33,9 @@
 - `cargo clippy --workspace --all-targets -- -D warnings` が成功する
 - `CHANGES.md` の develop セクションに `[FIX]` を追記する
 - コメントとテストの assertion message は日本語にする
+
+## 対応しない理由
+
+サンプル数のみの上限は、「壊れた MP4 で長時間処理が起きる」問題への対策として中途半端である。
+サンプル数が少なくてもサンプルの尺が長い場合に同様の長時間処理が起きるため、サンプル数だけを制限しても実質的な対策にならない。
+どのケースが問題になるかは個々の利用シーンに依存し、ライブラリで一律に制限するのは不適切なため、利用側で対処する方針とする。
