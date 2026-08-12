@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-10
 - Branch: feature/fix-mp4-deadline-overflow
 - Polished: {YYYY-MM-DD}
 
@@ -29,3 +29,10 @@
 - `cargo clippy --workspace --all-targets -- -D warnings` が成功する
 - `CHANGES.md` の develop セクションに `[FIX]` を追記する
 - production log は英語、コメントとテストの assertion message は日本語にする
+
+## 解決方法
+
+- `Mp4VideoCapturer` の feeder thread の deadline 計算を `loop_start + Duration::from_micros(...)` から `loop_start.checked_add(...)` に変更した
+  - `let-else` 構文でオーバーフローを検出し、英語の production log を残してフィーダースレッドを正常停止する
+  - オーバーフローが現実的には発生しない理由（再生時間が極めて長い破損入力のみ）と、テストを行わない旨をコメントに明記した
+- `CHANGES.md` の develop セクションに `[FIX]` を追記した
