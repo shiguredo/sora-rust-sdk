@@ -26,7 +26,7 @@ use shiguredo_webrtc::{
     VideoEncoderEncodedImageCallbackResultError, VideoEncoderEncoderInfo, VideoEncoderHandler,
     VideoEncoderRateControlParametersRef, VideoEncoderSettingsRef, VideoFrame, VideoFrameBuffer,
     VideoFrameBufferHandler, VideoFrameRef, VideoFrameType, VideoFrameTypeVectorRef,
-    VideoTrackSource, rtc_log_info, rtc_log_warning,
+    VideoTrackSource, rtc_log_error, rtc_log_info, rtc_log_warning,
 };
 
 use crate::video_codec_capability::{
@@ -247,7 +247,7 @@ impl Mp4SampleReader {
     fn new_inner(path: &str) -> Result<Self> {
         use shiguredo_mp4::demux::{Input, Mp4FileDemuxer};
 
-        let file = BufReader::new(std::fs::File::open(path)?);
+        let mut file = BufReader::new(std::fs::File::open(path)?);
         let file_size = file.get_ref().metadata()?.len();
 
         let mut demuxer = Mp4FileDemuxer::new();
@@ -262,18 +262,15 @@ impl Mp4SampleReader {
                     file_size,
                 });
             }
-            // required の位置から要求サイズのデータをファイルから読み込む。
             // size が None ならファイル末尾までの範囲を要求する。
-            let size = required.size.unwrap_or_else(|| {
-                usize::try_from(file_size - required.position).unwrap_or(usize::MAX)
-            });
-            let end = required.position.saturating_add(size as u64).min(file_size);
-            let mut data = vec![0; (end - required.position) as usize];
-            {
-                let mut file_ref = file.get_ref();
-                file_ref.seek(std::io::SeekFrom::Start(required.position))?;
-                file_ref.read_exact(&mut data)?;
-            }
+            let remaining = file_size - required.position;
+            let size = usize::try_from(
+                required
+                    .size
+                    .map_or(remaining, |size| (size as u64).min(remaining)),
+            )
+            .map_err(|_| io::Error::other("required input size exceeds usize"))?;
+            let data = read_bytes_at(&mut file, required.position, size)?;
             demuxer.handle_input(Input {
                 position: required.position,
                 data: &data,
@@ -527,14 +524,9 @@ impl Mp4SampleReader {
     ///
     /// VP8/VP9/AV1 の場合:
     /// - MP4 から抽出したデータをそのまま使用する。
-    fn get_sample(&self, index: usize) -> Result<Mp4EncodedSample> {
+    fn get_sample(&mut self, index: usize) -> Result<Mp4EncodedSample> {
         let sample = &self.samples[index];
-        let mut raw_data = vec![0; sample.data_size];
-        {
-            let mut file_ref = self.file.get_ref();
-            file_ref.seek(std::io::SeekFrom::Start(sample.data_offset))?;
-            file_ref.read_exact(&mut raw_data)?;
-        }
+        let raw_data = read_bytes_at(&mut self.file, sample.data_offset, sample.data_size)?;
 
         let data = match self.track_info.codec_type {
             VideoCodecType::H264 | VideoCodecType::H265 => {
@@ -567,6 +559,22 @@ impl Mp4SampleReader {
     fn cumulative_duration_us(&self, index: usize) -> u64 {
         self.cumulative_us[index]
     }
+}
+
+/// ファイルの指定位置から指定サイズのデータを読み込む。
+///
+/// ファイルベースの読み込みで seek + read_exact の組み合わせが必要な箇所は
+/// すべてこの関数に集約する。read_exact は要求サイズの読み込みを保証するため、
+/// ファイルが途中で縮小されている場合は I/O エラーを返す。
+fn read_bytes_at(
+    file: &mut BufReader<std::fs::File>,
+    position: u64,
+    size: usize,
+) -> Result<Vec<u8>> {
+    let mut data = vec![0; size];
+    file.seek(std::io::SeekFrom::Start(position))?;
+    file.read_exact(&mut data)?;
+    Ok(data)
 }
 
 /// 長さプレフィックス付き NAL ユニットを Annex B 形式に変換する。
@@ -845,7 +853,7 @@ impl Mp4VideoCapturer {
     ///
     /// 生成と同時に専用スレッドを起動し、MP4 のフレームタイミングに従って
     /// 映像フレームを WebRTC に供給する。動画末尾に達すると先頭に戻りループ再生する。
-    pub fn new(reader: Mp4SampleReader) -> crate::error::Result<Self> {
+    pub fn new(mut reader: Mp4SampleReader) -> crate::error::Result<Self> {
         let width = reader.track_info.width as i32;
         let height = reader.track_info.height as i32;
 
@@ -879,7 +887,7 @@ impl Mp4VideoCapturer {
                         let sample = match reader.get_sample(i) {
                             Ok(sample) => sample,
                             Err(err) => {
-                                rtc_log_warning!("MP4: failed to read sample: {err:?}");
+                                rtc_log_error!("MP4: failed to read sample: {err:?}");
                                 return;
                             }
                         };
@@ -1088,6 +1096,7 @@ mod tests {
                 .expect("パスは有効な UTF-8 である必要があります"),
         )
         .expect("フィクスチャ MP4 のパースに失敗しました");
+        let mut reader = reader;
         assert_eq!(reader.codec_type(), VideoCodecType::H264);
         assert!(!reader.is_empty());
         let sample = reader
@@ -1241,6 +1250,7 @@ mod tests {
                 .expect("パスは有効な UTF-8 である必要があります"),
         )
         .expect("フィクスチャ MP4 のパースに失敗しました");
+        let mut reader = reader;
 
         let file = std::fs::File::options()
             .write(true)
