@@ -7,7 +7,9 @@ use e2e_tests::{
 use nojson::RawJson;
 use sora_sdk::{Role, SignalingDirection, SignalingType, SoraConnectionContext};
 
-const DISCONNECT_WAIT_TIMEOUT: Duration = Duration::from_secs(3);
+// disconnect_wait_timeout は実到達検証の close 待機窓 (1 秒差) を広く取るため 10 秒にする。
+// 通常系はサーバーが速やかにチャネルを閉じるため実行時間には影響しない。
+const DISCONNECT_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 const WEBSOCKET_CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// クライアントが送信する disconnect メッセージかどうかを判定する。
@@ -101,9 +103,27 @@ async fn disconnect_message_is_sent_via_datachannel() {
         .await
         .expect("DataChannel 経由の disconnect メッセージが送信されませんでした");
 
+    // サーバーが disconnect を受信した証跡として、signaling DataChannel のクローズを待つ。
+    // 待機時間は disconnect_wait_timeout (10 秒) より短く設定する。サーバーが disconnect を
+    // 受信していればチャネルは速やかに閉じるが、未到達ならクローズ待機のタイムアウト
+    // フォールバック (10 秒後) でしか close が通知されないため、この待機は失敗する。
+    connection
+        .wait_for_data_channel_close(
+            |label| label == "signaling",
+            DISCONNECT_WAIT_TIMEOUT - Duration::from_secs(1),
+        )
+        .await
+        .expect(
+            "disconnect 送信後に signaling DataChannel が閉じられませんでした (サーバーに disconnect が到達していない可能性)",
+        );
+
     // disconnect 送信後の DataChannel クローズ待機と後始末を経て run が Ok(()) で終了する。
+    // クローズ待機 (最大 disconnect_wait_timeout) と WebSocket close handshake
+    // (最大 websocket_close_timeout) が直列に走るため、両方の予算に 1 秒の余裕を足す。
     let run_result = connection
-        .wait_for_run_finished(DISCONNECT_WAIT_TIMEOUT + Duration::from_secs(1))
+        .wait_for_run_finished(
+            DISCONNECT_WAIT_TIMEOUT + WEBSOCKET_CLOSE_TIMEOUT + Duration::from_secs(1),
+        )
         .await;
     assert!(
         run_result.is_ok(),
