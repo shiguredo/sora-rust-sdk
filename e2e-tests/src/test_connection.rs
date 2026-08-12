@@ -679,19 +679,24 @@ impl SoraTestConnection {
 ///
 /// 切断時に signaling DataChannel 経由の後始末を検証するテストで共通利用する。
 /// クローズ待機 (`disconnect_wait_timeout`) と WebSocket close handshake
-/// (`websocket_close_timeout`) はテストごとに指定する。
+/// (`websocket_close_timeout`) は `Some` で指定する。`None` なら SDK の
+/// デフォルト値が使われる。
 pub fn build_recvonly_data_channel_signaling_connection(
     urls: Vec<String>,
     channel_id: String,
-    disconnect_wait_timeout: Duration,
-    websocket_close_timeout: Duration,
+    disconnect_wait_timeout: Option<Duration>,
+    websocket_close_timeout: Option<Duration>,
 ) -> SoraTestConnection {
     let context = SoraConnectionContext::new().expect("コンテキスト作成失敗");
     let mut builder = SoraTestConnection::builder(context, urls, channel_id, Role::RecvOnly)
         .data_channel_signaling(true)
-        .ignore_disconnect_websocket(true)
-        .disconnect_wait_timeout(disconnect_wait_timeout)
-        .websocket_close_timeout(websocket_close_timeout);
+        .ignore_disconnect_websocket(true);
+    if let Some(timeout) = disconnect_wait_timeout {
+        builder = builder.disconnect_wait_timeout(timeout);
+    }
+    if let Some(timeout) = websocket_close_timeout {
+        builder = builder.websocket_close_timeout(timeout);
+    }
     if let Some(token) = crate::secret_key() {
         builder = builder.metadata(crate::build_metadata_with_access_token(&token));
     }

@@ -154,8 +154,8 @@ async fn server_close_message_terminates_run_while_websocket_connected() {
     let mut connection = build_recvonly_data_channel_signaling_connection(
         urls,
         channel_id.clone(),
-        DISCONNECT_WAIT_TIMEOUT,
-        WEBSOCKET_CLOSE_TIMEOUT,
+        Some(DISCONNECT_WAIT_TIMEOUT),
+        Some(WEBSOCKET_CLOSE_TIMEOUT),
     );
 
     connection
@@ -224,8 +224,8 @@ async fn server_close_message_terminates_run_after_websocket_closed() {
     let mut connection = build_recvonly_data_channel_signaling_connection(
         urls,
         channel_id.clone(),
-        DISCONNECT_WAIT_TIMEOUT,
-        WEBSOCKET_CLOSE_TIMEOUT,
+        Some(DISCONNECT_WAIT_TIMEOUT),
+        Some(WEBSOCKET_CLOSE_TIMEOUT),
     );
 
     connection

@@ -5,10 +5,6 @@ use e2e_tests::{
     signaling_urls, verify_data_channel_label,
 };
 
-// タイムアウトは SDK デフォルト値 (disconnect_wait_timeout=5s, websocket_close_timeout=3s) を使う。
-const DISCONNECT_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
-const WEBSOCKET_CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
-
 /// `ignore_disconnect_websocket=true` で接続したとき、
 /// switched 後に WebSocket が閉じられても DataChannel シグナリングが継続することを確認する。
 ///
@@ -22,12 +18,10 @@ async fn test_recvonly_ignore_disconnect_websocket_keeps_signaling() {
 
     let urls = signaling_urls().expect("TEST_SIGNALING_URLS が必要");
     let channel_id = generate_channel_id();
-    let mut connection = build_recvonly_data_channel_signaling_connection(
-        urls,
-        channel_id,
-        DISCONNECT_WAIT_TIMEOUT,
-        WEBSOCKET_CLOSE_TIMEOUT,
-    );
+    // タイムアウトは明示せず、SDK デフォルト値 (disconnect_wait_timeout /
+    // websocket_close_timeout) を使う。
+    let mut connection =
+        build_recvonly_data_channel_signaling_connection(urls, channel_id, None, None);
 
     connection
         .wait_for_switched(Duration::from_secs(15))

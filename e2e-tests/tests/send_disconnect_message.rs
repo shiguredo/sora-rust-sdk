@@ -54,8 +54,8 @@ async fn test_disconnect_message_is_sent_via_datachannel() {
     let mut connection = build_recvonly_data_channel_signaling_connection(
         urls,
         channel_id,
-        DISCONNECT_WAIT_TIMEOUT,
-        WEBSOCKET_CLOSE_TIMEOUT,
+        Some(DISCONNECT_WAIT_TIMEOUT),
+        Some(WEBSOCKET_CLOSE_TIMEOUT),
     );
 
     connection
