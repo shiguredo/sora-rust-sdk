@@ -938,13 +938,12 @@ impl SoraConnection {
                 Some(event) = self.event_rx.recv() => {
                     match event {
                         SoraEvent::SignalingMessage(message) => {
-                            if use_datachannel_signaling {
-                                handler.on_signaling_message(SignalingType::DataChannel, SignalingDirection::Sent, &message);
-                                self.send_signaling_message(&message)?;
-                            } else if ws.state() == ConnectionState::Connected {
-                                handler.on_signaling_message(SignalingType::WebSocket, SignalingDirection::Sent, &message);
-                                send_text(&mut ws, &message)?;
-                            }
+                            self.send_signaling_message_with_notification(
+                                &mut *handler,
+                                &mut ws,
+                                use_datachannel_signaling,
+                                &message,
+                            )?;
                         }
                         SoraEvent::DataChannelMessage { label, data } => {
                             match self
@@ -1009,30 +1008,13 @@ impl SoraConnection {
                             // DataChannel シグナリングが有効な状態
                             // (use_datachannel_signaling) なら signaling DataChannel 経由、
                             // そうでなければ WebSocket 経由で送信する。
-                            if use_datachannel_signaling {
-                                handler.on_signaling_message(
-                                    SignalingType::DataChannel,
-                                    SignalingDirection::Sent,
-                                    &disconnect_message,
-                                );
-                                if let Err(e) = self.send_signaling_message(&disconnect_message) {
-                                    rtc_log_error!(
-                                        "Failed to send disconnect message: {}",
-                                        e
-                                    );
-                                }
-                            } else if ws.state() == ConnectionState::Connected {
-                                handler.on_signaling_message(
-                                    SignalingType::WebSocket,
-                                    SignalingDirection::Sent,
-                                    &disconnect_message,
-                                );
-                                if let Err(e) = send_text(&mut ws, &disconnect_message) {
-                                    rtc_log_error!(
-                                        "Failed to send disconnect message: {}",
-                                        e
-                                    );
-                                }
+                            if let Err(e) = self.send_signaling_message_with_notification(
+                                &mut *handler,
+                                &mut ws,
+                                use_datachannel_signaling,
+                                &disconnect_message,
+                            ) {
+                                rtc_log_error!("Failed to send disconnect message: {}", e);
                             }
 
                             // WebSocket シグナリングの場合は、オープン中の DataChannel に
@@ -1870,6 +1852,37 @@ impl SoraConnection {
 
     fn send_signaling_message(&mut self, message: &str) -> Result<()> {
         self.send_datachannel_message("signaling", message)
+    }
+
+    /// シグナリングメッセージを通知し、経路に応じて送信する。
+    ///
+    /// DataChannel シグナリングが有効な状態 (use_datachannel_signaling) なら
+    /// signaling DataChannel 経由、そうでなければ WebSocket 経由で送信する。
+    /// 経路選択はこの関数に一元化し、呼び出し側はエラーの扱いだけを決める。
+    fn send_signaling_message_with_notification<R: RandomSource>(
+        &mut self,
+        handler: &mut dyn SoraConnectionEventHandler,
+        ws: &mut WebSocketClientConnection<R>,
+        use_datachannel_signaling: bool,
+        message: &str,
+    ) -> Result<()> {
+        if use_datachannel_signaling {
+            handler.on_signaling_message(
+                SignalingType::DataChannel,
+                SignalingDirection::Sent,
+                message,
+            );
+            self.send_signaling_message(message)
+        } else if ws.state() == ConnectionState::Connected {
+            handler.on_signaling_message(
+                SignalingType::WebSocket,
+                SignalingDirection::Sent,
+                message,
+            );
+            send_text(ws, message)
+        } else {
+            Ok(())
+        }
     }
 
     fn send_stats_message(&mut self, message: &str) -> Result<()> {
