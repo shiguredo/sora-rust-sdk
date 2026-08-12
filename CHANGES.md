@@ -13,6 +13,8 @@
 
 - [CHANGE] 最小対応 Rust バージョンを 1.93 に上げる
   - @voluntas
+- [CHANGE] Mp4Error の InputPositionOutOfRange と InconsistentSampleTable の file_size フィールドを usize から u64 に変更する
+  - @sile
 - [UPDATE] `shiguredo_webrtc` を 0.150.3 に上げ、Ubuntu 26.04 LTS に対応する
   - @voluntas
 - [UPDATE] `shiguredo_mp4` を 2026.4.0 に上げる
