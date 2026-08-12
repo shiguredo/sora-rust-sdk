@@ -892,11 +892,11 @@ impl SoraConnection {
 
         let mut redirect_location: Option<String> = None;
         let mut redirect = false;
-        let mut use_datachannel_signaling = false;
+        let mut use_data_channel_signaling = false;
         let mut websocket_closed = false;
         let mut switched_received = false;
         let mut switched_ignore_disconnect_websocket = false;
-        let mut opened_datachannels = HashSet::<String>::new();
+        let mut opened_data_channels = HashSet::<String>::new();
         let mut ws_disconnect_delay_start: Option<tokio::time::Instant> = None;
         const WS_DISCONNECT_DELAY: Duration = Duration::from_secs(10);
         let mut buf = vec![0u8; 8192];
@@ -919,7 +919,7 @@ impl SoraConnection {
                         Err(e) => return Err(e.into()),
                     };
                     if n == 0 {
-                        if switched_ignore_disconnect_websocket && use_datachannel_signaling {
+                        if switched_ignore_disconnect_websocket && use_data_channel_signaling {
                             rtc_log_info!("WebSocket closed; continuing DataChannel signaling");
                             websocket_closed = true;
                             // 期限切れ sleep_until で select! がスピンしないようリセットする
@@ -938,20 +938,20 @@ impl SoraConnection {
                 Some(event) = self.event_rx.recv() => {
                     match event {
                         SoraEvent::SignalingMessage(message) => {
-                            self.send_signaling_message_with_notification(
+                            self.send_message_for_signaling(
                                 &mut *handler,
                                 &mut ws,
-                                use_datachannel_signaling,
+                                use_data_channel_signaling,
                                 &message,
                             )?;
                         }
                         SoraEvent::DataChannelMessage { label, data } => {
                             match self
-                                .handle_datachannel_message(&mut *handler, &label, &data)
+                                .handle_data_channel_message(&mut *handler, &label, &data)
                                 .await?
                             {
-                                HandleDatachannelMessageResult::Continue => {}
-                                HandleDatachannelMessageResult::ServerClose {
+                                HandleDataChannelMessageResult::Continue => {}
+                                HandleDataChannelMessageResult::ServerClose {
                                     code,
                                     reason,
                                 } => {
@@ -982,7 +982,7 @@ impl SoraConnection {
                             rtc_log_info!("Registered DataChannel '{}'", label);
                             handler.on_data_channel(&label);
                             self.register_data_channel(channel, &event_tx);
-                            self.handle_datachannel_state(&mut *handler, &label, &mut opened_datachannels, &mut use_datachannel_signaling, switched_received);
+                            self.handle_data_channel_state(&mut *handler, &label, &mut opened_data_channels, &mut use_data_channel_signaling, switched_received);
                         }
                         SoraEvent::RpcTimeout { id } => {
                             if let Some(mut pending) = self.pending_rpc_responses.remove(&id) {
@@ -990,7 +990,7 @@ impl SoraConnection {
                             }
                         }
                         SoraEvent::DataChannelStateChange(label) => {
-                            self.handle_datachannel_state(&mut *handler, &label, &mut opened_datachannels, &mut use_datachannel_signaling, switched_received);
+                            self.handle_data_channel_state(&mut *handler, &label, &mut opened_data_channels, &mut use_data_channel_signaling, switched_received);
                         }
                     }
                 }
@@ -1004,10 +1004,10 @@ impl SoraConnection {
                             let disconnect_message =
                                 Json(OutgoingMessage::new_disconnect()).to_string();
                             // DataChannel または WebSocket 経由で disconnect メッセージを送信する。
-                            if let Err(e) = self.send_signaling_message_with_notification(
+                            if let Err(e) = self.send_message_for_signaling(
                                 &mut *handler,
                                 &mut ws,
-                                use_datachannel_signaling,
+                                use_data_channel_signaling,
                                 &disconnect_message,
                             ) {
                                 rtc_log_error!("Failed to send disconnect message: {}", e);
@@ -1018,12 +1018,12 @@ impl SoraConnection {
                             // DataChannel シグナリングの場合は、run ループ終了後の
                             // クローズ待機 (disconnect_wait_timeout) で close コールバックを
                             // 通知するため、ここではクリアしない。
-                            if !use_datachannel_signaling {
-                                for label in &opened_datachannels {
+                            if !use_data_channel_signaling {
+                                for label in &opened_data_channels {
                                     rtc_log_info!("DataChannel '{}' closed", label);
                                     handler.on_data_channel_close(label);
                                 }
-                                opened_datachannels.clear();
+                                opened_data_channels.clear();
                             }
                             let _ = ack_tx.send(());
                             break;
@@ -1040,7 +1040,7 @@ impl SoraConnection {
                         }
                         SoraConnectionCommand::SendRpcRequest { method, params, notification, timeout, response_tx } => {
                             let (message, rpc_id) = rpc::build_rpc_message(&mut self.rpc_id_counter, &method, params.as_ref(), notification);
-                            let result = self.send_datachannel_message("rpc", &message);
+                            let result = self.send_data_channel_message("rpc", message.as_bytes());
                             match result {
                                 Ok(()) => {
                                     if notification {
@@ -1119,7 +1119,7 @@ impl SoraConnection {
                             SignalingDirection::Sent,
                             &connect_text,
                         );
-                        send_text(&mut ws, &connect_text)?;
+                        self.send_websocket_message(&mut ws, &connect_text)?;
                     }
                     ConnectionEvent::TextMessage(text) => {
                         rtc_log_info!("[WebSocket] Received text message of {} bytes", text.len());
@@ -1154,7 +1154,7 @@ impl SoraConnection {
                                     SignalingDirection::Sent,
                                     &answer_text,
                                 );
-                                send_text(&mut ws, &answer_text)?;
+                                self.send_websocket_message(&mut ws, &answer_text)?;
                             }
                             IncomingMessageData::ReOffer { sdp, ice_servers } => {
                                 handler.on_signaling_message(
@@ -1170,7 +1170,7 @@ impl SoraConnection {
                                     SignalingDirection::Sent,
                                     &reanswer_text,
                                 );
-                                send_text(&mut ws, &reanswer_text)?;
+                                self.send_websocket_message(&mut ws, &reanswer_text)?;
                             }
                             IncomingMessageData::Ping { stats } => {
                                 if stats.unwrap_or(false) {
@@ -1198,14 +1198,14 @@ impl SoraConnection {
                                 switched_received = true;
                                 switched_ignore_disconnect_websocket = iws;
                                 handler.on_switched();
-                                if !use_datachannel_signaling
-                                    && is_datachannel_signaling_ready(
+                                if !use_data_channel_signaling
+                                    && is_data_channel_signaling_ready(
                                         switched_received,
                                         &self.data_channel_configs,
-                                        &opened_datachannels,
+                                        &opened_data_channels,
                                     )
                                 {
-                                    use_datachannel_signaling = true;
+                                    use_data_channel_signaling = true;
                                 }
                             }
                             IncomingMessageData::Redirect { location } => {
@@ -1254,15 +1254,15 @@ impl SoraConnection {
                 // switched フラグや DataChannel 状態が不整合を起こす。
                 switched_received = false;
                 switched_ignore_disconnect_websocket = false;
-                use_datachannel_signaling = false;
+                use_data_channel_signaling = false;
                 ws_disconnect_delay_start = None;
 
                 // 古い DataChannel の close 通知をユーザーに送る。
                 // クリア前に通知することでハンドラが確実に呼ばれる。
-                for label in &opened_datachannels {
+                for label in &opened_data_channels {
                     handler.on_data_channel_close(label);
                 }
-                opened_datachannels.clear();
+                opened_data_channels.clear();
                 self.data_channels.clear();
                 self.data_channel_configs.clear();
 
@@ -1326,10 +1326,10 @@ impl SoraConnection {
             // DataChannel シグナリングへの切替条件が揃ったら WebSocket を切断する
             if switched_ignore_disconnect_websocket
                 && !websocket_closed
-                && is_datachannel_signaling_ready(
+                && is_data_channel_signaling_ready(
                     switched_received,
                     &self.data_channel_configs,
-                    &opened_datachannels,
+                    &opened_data_channels,
                 )
             {
                 if ws_disconnect_delay_start.is_none() {
@@ -1350,7 +1350,7 @@ impl SoraConnection {
                 Ok(emitted) => emitted,
                 Err(e) => {
                     if switched_ignore_disconnect_websocket
-                        && use_datachannel_signaling
+                        && use_data_channel_signaling
                         && !websocket_closed
                     {
                         // switched 後の WebSocket I/O 失敗は DataChannel シグナリング継続のため吸収する
@@ -1366,7 +1366,7 @@ impl SoraConnection {
             };
 
             if close_emitted || ws.state() == ConnectionState::Closed {
-                if switched_ignore_disconnect_websocket && use_datachannel_signaling {
+                if switched_ignore_disconnect_websocket && use_data_channel_signaling {
                     if !websocket_closed {
                         rtc_log_info!("WebSocket closed; continuing DataChannel signaling");
                         websocket_closed = true;
@@ -1381,9 +1381,9 @@ impl SoraConnection {
 
         // DataChannel シグナリングを利用している場合は、
         // disconnect_wait_timeout を上限にクローズ完了を待機する。
-        if use_datachannel_signaling && !opened_datachannels.is_empty() {
+        if use_data_channel_signaling && !opened_data_channels.is_empty() {
             let deadline = tokio::time::Instant::now() + disconnect_wait_timeout;
-            while !opened_datachannels.is_empty() {
+            while !opened_data_channels.is_empty() {
                 let timeout_result = tokio::time::timeout_at(deadline, async {
                     while let Some(event) = self.event_rx.recv().await {
                         if let SoraEvent::DataChannelStateChange(label) = event {
@@ -1395,7 +1395,7 @@ impl SoraConnection {
                 .await;
                 match timeout_result {
                     Ok(label) if !label.is_empty() => {
-                        if opened_datachannels.remove(&label) {
+                        if opened_data_channels.remove(&label) {
                             rtc_log_info!("DataChannel '{}' closed", label);
                             handler.on_data_channel_close(&label);
                         }
@@ -1403,16 +1403,16 @@ impl SoraConnection {
                     _ => {
                         rtc_log_warning!(
                             "切断待機がタイムアウトしました (残り {} チャネル)",
-                            opened_datachannels.len()
+                            opened_data_channels.len()
                         );
                         // タイムアウトした残りチャネルにも close コールバックを通知する。
                         // サーバーが DataChannel を閉じないまま切断された場合でも、
                         // ユーザーへの close 通知が漏れないようにする。
-                        for label in &opened_datachannels {
+                        for label in &opened_data_channels {
                             rtc_log_info!("DataChannel '{}' closed", label);
                             handler.on_data_channel_close(label);
                         }
-                        opened_datachannels.clear();
+                        opened_data_channels.clear();
                         break;
                     }
                 }
@@ -1805,76 +1805,73 @@ impl SoraConnection {
         }
     }
 
-    fn is_datachannel_open(&self, label: &str) -> bool {
+    fn is_data_channel_open(&self, label: &str) -> bool {
         self.data_channels
             .get(label)
             .is_some_and(|m| m.channel.state() == DataChannelState::Open)
     }
 
-    fn is_datachannel_closed(&self, label: &str) -> bool {
+    fn is_data_channel_closed(&self, label: &str) -> bool {
         self.data_channels
             .get(label)
             .is_some_and(|m| m.channel.state() == DataChannelState::Closed)
     }
 
-    fn handle_datachannel_state(
+    fn handle_data_channel_state(
         &self,
         handler: &mut dyn SoraConnectionEventHandler,
         label: &str,
-        opened_datachannels: &mut HashSet<String>,
-        use_datachannel_signaling: &mut bool,
+        opened_data_channels: &mut HashSet<String>,
+        use_data_channel_signaling: &mut bool,
         switched_received: bool,
     ) {
-        if self.is_datachannel_open(label) && !opened_datachannels.contains(label) {
+        if self.is_data_channel_open(label) && !opened_data_channels.contains(label) {
             rtc_log_info!("DataChannel '{}' opened", label);
-            opened_datachannels.insert(label.to_string());
+            opened_data_channels.insert(label.to_string());
             handler.on_data_channel_open(label);
-            if !*use_datachannel_signaling
-                && is_datachannel_signaling_ready(
+            if !*use_data_channel_signaling
+                && is_data_channel_signaling_ready(
                     switched_received,
                     &self.data_channel_configs,
-                    opened_datachannels,
+                    opened_data_channels,
                 )
             {
-                *use_datachannel_signaling = true;
+                *use_data_channel_signaling = true;
             }
-        } else if self.is_datachannel_closed(label) && opened_datachannels.contains(label) {
+        } else if self.is_data_channel_closed(label) && opened_data_channels.contains(label) {
             rtc_log_info!("DataChannel '{}' closed", label);
-            opened_datachannels.remove(label);
+            opened_data_channels.remove(label);
             handler.on_data_channel_close(label);
         }
     }
 
-    fn send_signaling_message(&mut self, message: &str) -> Result<()> {
-        self.send_datachannel_message("signaling", message)
-    }
-
-    /// シグナリングメッセージを通知し、経路に応じて送信する。
+    /// 経路に応じてシグナリング用のメッセージを送信する。
     ///
-    /// DataChannel シグナリングが有効な状態 (use_datachannel_signaling) なら
+    /// 送信前に `handler.on_signaling_message` を呼んで通知する。
+    /// DataChannel シグナリングが有効な状態 (use_data_channel_signaling) なら
     /// signaling DataChannel 経由、そうでなければ WebSocket 経由で送信する。
     /// 経路選択はこの関数に一元化し、呼び出し側はエラーの扱いだけを決める。
-    fn send_signaling_message_with_notification<R: RandomSource>(
+    fn send_message_for_signaling<R: RandomSource>(
         &mut self,
         handler: &mut dyn SoraConnectionEventHandler,
         ws: &mut WebSocketClientConnection<R>,
-        use_datachannel_signaling: bool,
+        use_data_channel_signaling: bool,
         message: &str,
     ) -> Result<()> {
-        if use_datachannel_signaling {
+        if use_data_channel_signaling {
             handler.on_signaling_message(
                 SignalingType::DataChannel,
                 SignalingDirection::Sent,
                 message,
             );
-            self.send_signaling_message(message)
+            self.send_data_channel_message("signaling", message.as_bytes())
         } else if ws.state() == ConnectionState::Connected {
             handler.on_signaling_message(
                 SignalingType::WebSocket,
                 SignalingDirection::Sent,
                 message,
             );
-            send_text(ws, message)
+            self.send_websocket_message(ws, message)
         } else {
             rtc_log_warning!(
                 "No signaling path available (DataChannel signaling is disabled and WebSocket is not connected); message not sent"
@@ -1883,32 +1880,21 @@ impl SoraConnection {
         }
     }
 
-    fn send_stats_message(&mut self, message: &str) -> Result<()> {
-        self.send_datachannel_message("stats", message)
-    }
-
-    fn send_datachannel_message(&mut self, label: &str, message: &str) -> Result<()> {
-        let managed =
-            self.data_channels
-                .get_mut(label)
-                .ok_or_else(|| Error::DataChannelMissing {
-                    label: label.to_string(),
-                })?;
-
-        let data = if managed.compress {
-            compress_zlib(message.as_bytes())?
-        } else {
-            message.as_bytes().to_vec()
-        };
-
-        rtc_log_info!("Sent message to DataChannel '{}'", label);
-
-        if !managed.channel.send(&data, true) {
-            return Err(Error::DataChannelSendFailed);
-        }
+    /// WebSocket 経由でテキストメッセージを送信する。
+    fn send_websocket_message<R: RandomSource>(
+        &self,
+        ws: &mut WebSocketClientConnection<R>,
+        message: &str,
+    ) -> Result<()> {
+        rtc_log_info!("[WebSocket] Sent text message of {} bytes", message.len());
+        ws.send_text(message)?;
         Ok(())
     }
 
+    /// DataChannel 経由でバイナリメッセージを送信する。
+    ///
+    /// ラベルは送信先 DataChannel を指定する。テキストを送る場合は
+    /// `message.as_bytes()` で渡す。
     fn send_data_channel_message(&mut self, label: &str, data: &[u8]) -> Result<()> {
         let managed =
             self.data_channels
@@ -1924,7 +1910,7 @@ impl SoraConnection {
         };
 
         rtc_log_info!(
-            "DataChannel '{}' にバイナリメッセージを送信: {} bytes",
+            "Sent message to DataChannel '{}': {} bytes",
             label,
             send_data.len()
         );
@@ -1935,12 +1921,12 @@ impl SoraConnection {
         Ok(())
     }
 
-    async fn handle_datachannel_message(
+    async fn handle_data_channel_message(
         &mut self,
         handler: &mut dyn SoraConnectionEventHandler,
         label: &str,
         data: &[u8],
-    ) -> Result<HandleDatachannelMessageResult> {
+    ) -> Result<HandleDataChannelMessageResult> {
         // DataChannel の設定を検索
         let managed = self.data_channels.get(label);
         let compress = managed.is_some_and(|m| m.compress);
@@ -1959,7 +1945,7 @@ impl SoraConnection {
                         "Discarded malformed DataChannel message: label='{}' stage=zlib",
                         label
                     );
-                    return Ok(HandleDatachannelMessageResult::Continue);
+                    return Ok(HandleDataChannelMessageResult::Continue);
                 }
             }
         } else {
@@ -1999,7 +1985,7 @@ impl SoraConnection {
                             SignalingDirection::Sent,
                             &reanswer_text,
                         );
-                        self.send_signaling_message(&reanswer_text)?;
+                        self.send_data_channel_message("signaling", reanswer_text.as_bytes())?;
                     }
                     IncomingMessageData::Ping { stats } => {
                         let pong = if stats.unwrap_or(false) {
@@ -2014,14 +2000,17 @@ impl SoraConnection {
                             SignalingDirection::Sent,
                             &pong_text,
                         );
-                        self.send_signaling_message(&pong_text)?;
+                        self.send_data_channel_message("signaling", pong_text.as_bytes())?;
                     }
                     IncomingMessageData::ReqStats {} => {
                         // 統計情報を含む stats メッセージを送信（stats チャンネル経由）
                         let reports = self.get_stats().await;
                         if let Ok(reports) = reports {
                             let stats = OutgoingMessage::new_stats(reports);
-                            self.send_stats_message(&Json(stats).to_string())?;
+                            self.send_data_channel_message(
+                                "stats",
+                                Json(stats).to_string().as_bytes(),
+                            )?;
                         }
                     }
                     IncomingMessageData::Notify {} => {
@@ -2034,7 +2023,7 @@ impl SoraConnection {
                     // stats / push / notify label に届いた Close は接続を終了させず、
                     // 既存どおり unsupported message として扱う。
                     IncomingMessageData::Close { code, reason } if is_server_close_label(label) => {
-                        return Ok(HandleDatachannelMessageResult::ServerClose { code, reason });
+                        return Ok(HandleDataChannelMessageResult::ServerClose { code, reason });
                     }
                     _ => {
                         rtc_log_warning!("Received unsupported message via DataChannel");
@@ -2052,7 +2041,7 @@ impl SoraConnection {
                             "Discarded malformed RPC response: label='{}' stage=utf8",
                             label
                         );
-                        return Ok(HandleDatachannelMessageResult::Continue);
+                        return Ok(HandleDataChannelMessageResult::Continue);
                     }
                 };
                 rtc_log_verbose!(
@@ -2125,7 +2114,7 @@ impl SoraConnection {
             }
         }
 
-        Ok(HandleDatachannelMessageResult::Continue)
+        Ok(HandleDataChannelMessageResult::Continue)
     }
 }
 
@@ -2135,7 +2124,7 @@ impl SoraConnection {
 
 /// DataChannel の受信メッセージをどう扱うかを表す。
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum HandleDatachannelMessageResult {
+enum HandleDataChannelMessageResult {
     /// 通常どおり接続を継続する。
     Continue,
     /// Sora からの接続終了通知 (`signaling` label の `{"type":"close"}`)。
@@ -2153,7 +2142,7 @@ enum HandleDatachannelMessageResult {
 /// - WebSocket 経由で正式な `switched` メッセージを受信済み
 /// - Offer の `data_channels` が空でない
 /// - 全設定 DataChannel が Open 済み
-fn is_datachannel_signaling_ready(
+fn is_data_channel_signaling_ready(
     switched_received: bool,
     data_channel_configs: &[DataChannelConfig],
     opened_labels: &HashSet<String>,
@@ -2902,12 +2891,6 @@ async fn flush_ws_output<R: RandomSource>(
     Ok(false)
 }
 
-fn send_text<R: RandomSource>(ws: &mut WebSocketClientConnection<R>, text: &str) -> Result<()> {
-    rtc_log_info!("[WebSocket] Sent text message of {} bytes", text.len());
-    ws.send_text(text)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3381,51 +3364,51 @@ mod tests {
     }
 
     #[test]
-    fn datachannel_signaling_ready_is_false_without_switched() {
+    fn data_channel_signaling_ready_is_false_without_switched() {
         let configs = data_channel_config(&["signaling"]);
         let opened = opened_labels(&["signaling"]);
         assert!(
-            !is_datachannel_signaling_ready(false, &configs, &opened),
+            !is_data_channel_signaling_ready(false, &configs, &opened),
             "switched 未受信の場合は全設定チャンネルが Open 済みでも readiness は false"
         );
     }
 
     #[test]
-    fn datachannel_signaling_ready_is_false_with_partial_open() {
+    fn data_channel_signaling_ready_is_false_with_partial_open() {
         let configs = data_channel_config(&["signaling", "#messaging"]);
         let opened = opened_labels(&["signaling"]);
         assert!(
-            !is_datachannel_signaling_ready(true, &configs, &opened),
+            !is_data_channel_signaling_ready(true, &configs, &opened),
             "switched 受信済みでも一部の設定チャンネルが未 Open なら readiness は false"
         );
     }
 
     #[test]
-    fn datachannel_signaling_ready_is_true_with_all_open() {
+    fn data_channel_signaling_ready_is_true_with_all_open() {
         let configs = data_channel_config(&["signaling", "#messaging"]);
         let opened = opened_labels(&["signaling", "#messaging"]);
         assert!(
-            is_datachannel_signaling_ready(true, &configs, &opened),
+            is_data_channel_signaling_ready(true, &configs, &opened),
             "switched 受信済みかつ全設定チャンネルが Open 済みなら readiness は true"
         );
     }
 
     #[test]
-    fn datachannel_signaling_ready_is_false_with_empty_configs() {
+    fn data_channel_signaling_ready_is_false_with_empty_configs() {
         let configs = data_channel_config(&[]);
         let opened = opened_labels(&[]);
         assert!(
-            !is_datachannel_signaling_ready(true, &configs, &opened),
+            !is_data_channel_signaling_ready(true, &configs, &opened),
             "data_channels が空の構成では readiness は false"
         );
     }
 
     #[test]
-    fn datachannel_signaling_ready_is_false_after_redirect_reset() {
+    fn data_channel_signaling_ready_is_false_after_redirect_reset() {
         let configs = data_channel_config(&["signaling", "#messaging"]);
         let opened = opened_labels(&[]);
         assert!(
-            !is_datachannel_signaling_ready(false, &configs, &opened),
+            !is_data_channel_signaling_ready(false, &configs, &opened),
             "redirect 相当として switched と opened label を初期化すると readiness は false に戻る"
         );
     }
@@ -3493,7 +3476,7 @@ mod tests {
     }
 
     /// compress 有効の DataChannel を実 PeerConnection 経由で登録するテスト用ヘルパー。
-    fn register_compressed_datachannel(connection: &mut SoraConnection, label: &str) {
+    fn register_compressed_data_channel(connection: &mut SoraConnection, label: &str) {
         connection.data_channel_configs.push(DataChannelConfig {
             label: label.to_string(),
             compress: true,
@@ -3511,13 +3494,13 @@ mod tests {
     #[tokio::test]
     async fn zlib_failure_then_same_label_then_other_label() {
         let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
-        register_compressed_datachannel(&mut connection, "signaling");
-        register_compressed_datachannel(&mut connection, "push");
+        register_compressed_data_channel(&mut connection, "signaling");
+        register_compressed_data_channel(&mut connection, "push");
         let mut handler = RecordingHandler::default();
 
         // 1. zlib 展開に失敗する message
         let result = connection
-            .handle_datachannel_message(&mut handler, "signaling", &[0x00, 0x01, 0x02, 0x03])
+            .handle_data_channel_message(&mut handler, "signaling", &[0x00, 0x01, 0x02, 0x03])
             .await;
         assert!(
             result.is_ok(),
@@ -3531,7 +3514,7 @@ mod tests {
         // 2. 同じ label の正常 message
         let compressed = compress_zlib(b"{\"type\":\"notify\"}").expect("zlib 圧縮に失敗しました");
         let result = connection
-            .handle_datachannel_message(&mut handler, "signaling", &compressed)
+            .handle_data_channel_message(&mut handler, "signaling", &compressed)
             .await;
         assert!(result.is_ok(), "正常 message は Ok を返す必要があります");
         assert_eq!(
@@ -3541,7 +3524,7 @@ mod tests {
         // 3. 別 label の正常 message
         let compressed = compress_zlib(b"{\"type\":\"push\"}").expect("zlib 圧縮に失敗しました");
         let result = connection
-            .handle_datachannel_message(&mut handler, "push", &compressed)
+            .handle_data_channel_message(&mut handler, "push", &compressed)
             .await;
         assert!(
             result.is_ok(),
@@ -3556,7 +3539,7 @@ mod tests {
     #[tokio::test]
     async fn zlib_failure_is_discarded_per_message() {
         let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
-        register_compressed_datachannel(&mut connection, "signaling");
+        register_compressed_data_channel(&mut connection, "signaling");
 
         let valid = compress_zlib(b"{\"type\":\"notify\"}").expect("zlib 圧縮に失敗しました");
 
@@ -3575,7 +3558,7 @@ mod tests {
         for bad in [invalid_header, truncated, adler_mismatch, oversized] {
             let mut handler = RecordingHandler::default();
             let result = connection
-                .handle_datachannel_message(&mut handler, "signaling", &bad)
+                .handle_data_channel_message(&mut handler, "signaling", &bad)
                 .await;
             assert!(
                 result.is_ok(),
@@ -3590,7 +3573,7 @@ mod tests {
         // 同じ DataChannel と接続は維持される
         let mut handler = RecordingHandler::default();
         let result = connection
-            .handle_datachannel_message(&mut handler, "signaling", &valid)
+            .handle_data_channel_message(&mut handler, "signaling", &valid)
             .await;
         assert!(
             result.is_ok(),
@@ -3609,7 +3592,7 @@ mod tests {
         let data = [0xDE, 0xAD, 0xBE, 0xEF];
 
         let result = connection
-            .handle_datachannel_message(&mut handler, "#messaging", &data)
+            .handle_data_channel_message(&mut handler, "#messaging", &data)
             .await;
         assert!(
             result.is_ok(),
@@ -3637,7 +3620,7 @@ mod tests {
         let data = [0xFF, 0xFE, 0xFD];
 
         let result = connection
-            .handle_datachannel_message(&mut handler, "unknown-label", &data)
+            .handle_data_channel_message(&mut handler, "unknown-label", &data)
             .await;
         assert!(
             result.is_ok(),
@@ -3659,7 +3642,7 @@ mod tests {
         let mut handler = RecordingHandler::default();
 
         let result = connection
-            .handle_datachannel_message(&mut handler, "signaling", &[0xFF, 0xFE, 0xFD])
+            .handle_data_channel_message(&mut handler, "signaling", &[0xFF, 0xFE, 0xFD])
             .await;
         assert!(
             result.is_err(),
@@ -3681,7 +3664,7 @@ mod tests {
         let mut handler = RecordingHandler::default();
 
         let result = connection
-            .handle_datachannel_message(&mut handler, "signaling", b"this is not json")
+            .handle_data_channel_message(&mut handler, "signaling", b"this is not json")
             .await;
         assert!(
             result.is_err(),
@@ -3704,7 +3687,7 @@ mod tests {
         let message = br#"{"type":"re-offer","sdp":"this is not a valid SDP"}"#;
 
         let result = connection
-            .handle_datachannel_message(&mut handler, "signaling", message)
+            .handle_data_channel_message(&mut handler, "signaling", message)
             .await;
         assert!(
             result.is_err(),
@@ -3713,12 +3696,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ping_without_signaling_datachannel_returns_datachannel_missing() {
+    async fn ping_without_signaling_data_channel_returns_data_channel_missing() {
         let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
         let mut handler = RecordingHandler::default();
 
         let result = connection
-            .handle_datachannel_message(&mut handler, "signaling", br#"{"type":"ping"}"#)
+            .handle_data_channel_message(&mut handler, "signaling", br#"{"type":"ping"}"#)
             .await;
         assert!(
             matches!(
@@ -3788,7 +3771,7 @@ mod tests {
         let mut rx2 = insert_pending_rpc(&mut connection, 2);
 
         let result = connection
-            .handle_datachannel_message(
+            .handle_data_channel_message(
                 &mut handler,
                 "rpc",
                 br#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#,
@@ -3834,7 +3817,7 @@ mod tests {
         let mut rx2 = insert_pending_rpc(&mut connection, 2);
 
         let result = connection
-            .handle_datachannel_message(
+            .handle_data_channel_message(
                 &mut handler,
                 "rpc",
                 br#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"custom message","data":{"k":1}}}"#,
@@ -3888,7 +3871,7 @@ mod tests {
 
         // jsonrpc が不正だが id=1 は有効な u64 id のため、対応する pending へ通知される。
         let result = connection
-            .handle_datachannel_message(
+            .handle_data_channel_message(
                 &mut handler,
                 "rpc",
                 br#"{"jsonrpc":"2.0x","id":1,"result":null}"#,
@@ -3896,7 +3879,7 @@ mod tests {
             .await;
         assert!(
             result.is_ok(),
-            "protocol violation でも handle_datachannel_message は Ok を返す必要があります"
+            "protocol violation でも handle_data_channel_message は Ok を返す必要があります"
         );
 
         let result = rx1.await.expect("id=1 の pending が完了しませんでした");
@@ -3930,7 +3913,7 @@ mod tests {
 
         // id が String の正常 response は SDK の Request ID と相関できないため破棄される。
         let result = connection
-            .handle_datachannel_message(
+            .handle_data_channel_message(
                 &mut handler,
                 "rpc",
                 br#"{"jsonrpc":"2.0","id":"x","result":null}"#,
@@ -3970,7 +3953,7 @@ mod tests {
 
         // id=99 は pending に存在しない正常 response のため破棄される。
         let result = connection
-            .handle_datachannel_message(
+            .handle_data_channel_message(
                 &mut handler,
                 "rpc",
                 br#"{"jsonrpc":"2.0","id":99,"result":null}"#,
@@ -4002,7 +3985,7 @@ mod tests {
         connection.pending_rpc_responses.remove(&1);
 
         let result = connection
-            .handle_datachannel_message(
+            .handle_data_channel_message(
                 &mut handler,
                 "rpc",
                 br#"{"jsonrpc":"2.0","id":1,"result":null}"#,
@@ -4037,7 +4020,7 @@ mod tests {
 
         // 1 回目は id=1 の pending を完了する。
         let result = connection
-            .handle_datachannel_message(
+            .handle_data_channel_message(
                 &mut handler,
                 "rpc",
                 br#"{"jsonrpc":"2.0","id":1,"result":null}"#,
@@ -4055,7 +4038,7 @@ mod tests {
 
         // 2 回目は id=1 の pending が既に無いため破棄され、他を変更しない。
         let result = connection
-            .handle_datachannel_message(
+            .handle_data_channel_message(
                 &mut handler,
                 "rpc",
                 br#"{"jsonrpc":"2.0","id":1,"result":null}"#,
@@ -4083,7 +4066,7 @@ mod tests {
         // protocol violation
         let rx1 = insert_pending_rpc(&mut connection, 1);
         let result = connection
-            .handle_datachannel_message(
+            .handle_data_channel_message(
                 &mut handler,
                 "rpc",
                 br#"{"jsonrpc":"2.0x","id":1,"result":null}"#,
@@ -4102,7 +4085,7 @@ mod tests {
         // 同じ DataChannel の正常 response を処理できる。
         let rx2 = insert_pending_rpc(&mut connection, 2);
         let result = connection
-            .handle_datachannel_message(
+            .handle_data_channel_message(
                 &mut handler,
                 "rpc",
                 br#"{"jsonrpc":"2.0","id":2,"result":null}"#,
@@ -4120,7 +4103,7 @@ mod tests {
 
         // 別 DataChannel の正常 message を処理できる。
         let result = connection
-            .handle_datachannel_message(&mut handler, "push", br#"{"type":"push"}"#)
+            .handle_data_channel_message(&mut handler, "push", br#"{"type":"push"}"#)
             .await;
         assert!(
             result.is_ok(),
@@ -4142,13 +4125,13 @@ mod tests {
 
         // UTF-8 変換失敗は破棄され、Ok を返す。
         let result = connection
-            .handle_datachannel_message(&mut handler, "rpc", &[0xFF, 0xFE, 0xFD])
+            .handle_data_channel_message(&mut handler, "rpc", &[0xFF, 0xFE, 0xFD])
             .await;
         assert!(result.is_ok(), "UTF-8 error は Ok を返す必要があります");
 
         // JSON syntax error は破棄され、Ok を返す。
         let result = connection
-            .handle_datachannel_message(&mut handler, "rpc", b"this is not json")
+            .handle_data_channel_message(&mut handler, "rpc", b"this is not json")
             .await;
         assert!(
             result.is_ok(),
