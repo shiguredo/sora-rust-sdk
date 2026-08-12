@@ -230,8 +230,6 @@ pub struct Mp4SampleReader {
     file_data: Vec<u8>,
     track_info: Mp4VideoTrackInfo,
     /// 各サンプルのメタデータ。
-    /// data_offset と data_size は file_data 内の位置を指す。
-    /// timestamp と duration は MP4 のタイムスケール単位。
     samples: Vec<Mp4SampleMeta>,
     /// 各フレームの累積再生時刻 (マイクロ秒)。
     /// cumulative_us[0] = 0, cumulative_us[i] = フレーム 0..i の合計再生時間。
