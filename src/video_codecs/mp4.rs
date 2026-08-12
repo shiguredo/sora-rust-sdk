@@ -792,9 +792,34 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
 /// MP4 の末尾に到達すると先頭に戻りループ再生する。
 pub struct Mp4VideoCapturer {
     video_source: VideoTrackSource,
-    /// フィーダースレッドへの停止シグナル。
+    /// フィーダースレッドへの停止フラグ。
     stop: Arc<AtomicBool>,
     thread_handle: Option<thread::JoinHandle<()>>,
+}
+
+/// 停止フラグの確認間隔の上限。
+///
+/// フレーム間隔の待機をこの時間ずつに分割して `thread::sleep` し、
+/// 停止フラグの確認を挟むことで、停止までの最大遅延をこの値に制限する。
+/// 値自体に特別な意味はなく、停止までの最大遅延が実用上十分に小さく
+/// （100ms は体感できない程度）、かつ通常のフレーム間隔 (30 fps で約 33ms) の
+/// 待機を分割しない程度の値として選んだ。
+const MAX_SLEEP_DURATION: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// 停止フラグを確認しながら deadline まで待機する。
+///
+/// 停止フラグが設定されたら `true`、deadline に到達したら `false` を返す。
+fn wait_until_or_stop(stop: &AtomicBool, deadline: std::time::Instant) -> bool {
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return true;
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        thread::sleep(remaining.min(MAX_SLEEP_DURATION));
+    }
 }
 
 impl Mp4VideoCapturer {
@@ -848,9 +873,9 @@ impl Mp4VideoCapturer {
                     // loop_start からのオフセットとして使うことで、累積ドリフトを防止する。
                     let next_frame_time_us = reader.cumulative_duration_us(i + 1);
                     let target = loop_start + std::time::Duration::from_micros(next_frame_time_us);
-                    let now = std::time::Instant::now();
-                    if target > now {
-                        thread::sleep(target - now);
+                    // 停止フラグが設定されたらフィーダースレッドを終了する。
+                    if wait_until_or_stop(&stop_clone, target) {
+                        return;
                     }
                 }
 
@@ -875,6 +900,8 @@ impl Drop for Mp4VideoCapturer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(handle) = self.thread_handle.take() {
+            // フィーダースレッドは最大 MAX_SLEEP_DURATION ごとに停止フラグを確認するため、
+            // join は停止フラグ設定後すぐに完了する。
             let _ = handle.join();
         }
     }
@@ -1298,5 +1325,64 @@ mod tests {
             }
             Err(e) => panic!("offset 0 の MP4 は Ok を期待しましたが、実際は: {e}"),
         }
+    }
+
+    // deadline を 60 秒先に設定し、停止フラグ設定済みなら
+    // sleep せずに即座に true を返すことを確認する。
+    #[test]
+    fn wait_until_or_stop_stops_immediately_when_stop_is_set() {
+        let stop = AtomicBool::new(true);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        assert!(
+            wait_until_or_stop(&stop, deadline),
+            "停止フラグ設定済みなら即座に true を返すべきです"
+        );
+    }
+
+    // deadline を 1 秒前に設定し、到達済みなら sleep せずに即座に false を返すことを確認する。
+    #[test]
+    fn wait_until_or_stop_returns_false_when_deadline_passed() {
+        let stop = AtomicBool::new(false);
+        let deadline = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        assert!(
+            !wait_until_or_stop(&stop, deadline),
+            "deadline 到達済みなら即座に false を返すべきです"
+        );
+    }
+
+    // 実 thread で、sleep 中に stop フラグが設定された場合に
+    // 最大 MAX_SLEEP_DURATION 以内で終了することを確認する。
+    //
+    // barrier でテストスレッドの wait_until_or_stop 呼び出し直前までを同期し、
+    // 最初の stop チェックを通過して sleep に入るのを待ってから stop を設定する。
+    // これにより、sleep 中に stop が設定される経路を確実に実行する。
+    #[test]
+    fn wait_until_or_stop_stops_within_sleep_limit() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        let stop_clone = stop.clone();
+        let barrier_clone = barrier.clone();
+        thread::spawn(move || {
+            barrier_clone.wait();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            let result = wait_until_or_stop(&stop_clone, deadline);
+            done_tx.send(result).expect("終了通知の送信に失敗しました");
+        });
+
+        barrier.wait();
+        // テストスレッドが最初の stop チェックを通過して sleep に入るのを待ってから
+        // stop を設定する (sleep 中の stop 検出経路を確実に実行するためのタイミング調整)。
+        thread::sleep(MAX_SLEEP_DURATION / 2);
+        stop.store(true, Ordering::Release);
+
+        let stopped = done_rx
+            .recv_timeout(MAX_SLEEP_DURATION + std::time::Duration::from_millis(100))
+            .expect("待機中のスレッドは停止フラグ設定から MAX_SLEEP_DURATION に余裕を加えた時間以内に終了するべきです");
+        assert!(
+            stopped,
+            "stop による停止 (true) を期待しましたが、実際は: {stopped:?}"
+        );
     }
 }
