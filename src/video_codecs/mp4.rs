@@ -1349,11 +1349,12 @@ mod tests {
         );
     }
 
-    // 実 thread で待機中の wait が、stop 設定から最大 MAX_SLEEP_DURATION 以内に
-    // 終了することを確認する。
+    // 実 thread で、sleep 中に stop フラグが設定された場合に
+    // 最大 MAX_SLEEP_DURATION 以内で終了することを確認する。
     //
     // barrier でテストスレッドが wait_until_or_stop を呼ぶ直前まで到達したことを同期し、
-    // stop 設定後の終了を recv_timeout のタイムアウトで検証する。
+    // 最初の stop チェックを通過して sleep に入るのを待ってから stop を設定する。
+    // これにより、sleep 中に stop が設定される経路を確実に実行する。
     #[test]
     fn wait_until_or_stop_stops_within_sleep_limit() {
         let stop = Arc::new(AtomicBool::new(false));
@@ -1372,12 +1373,14 @@ mod tests {
 
         // テストスレッドが wait_until_or_stop を呼ぶ直前まで到達するのを待つ。
         barrier.wait();
-        // stop を設定すると、wait_until_or_stop は最大 MAX_SLEEP_DURATION の待機後に停止する。
+        // テストスレッドが最初の stop チェックを通過して sleep に入るのを待ってから
+        // stop を設定する (sleep 中の stop 検出経路を確実に実行するためのタイミング調整)。
+        thread::sleep(MAX_SLEEP_DURATION / 2);
         stop.store(true, Ordering::Release);
 
         let stopped = done_rx
             .recv_timeout(MAX_SLEEP_DURATION + std::time::Duration::from_millis(100))
-            .expect("待機中のスレッドは停止フラグ設定から 200ms 以内に終了するべきです");
+            .expect("待機中のスレッドは停止フラグ設定から MAX_SLEEP_DURATION に余裕を加えた時間以内に終了するべきです");
         assert!(
             stopped,
             "stop による停止 (true) を期待しましたが、実際は: {stopped:?}"

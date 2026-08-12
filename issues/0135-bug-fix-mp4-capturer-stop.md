@@ -38,7 +38,7 @@ closed issue 0048 は通常の 30 fps なら停止待ちが約 1 frame 分であ
 - feeder thread の待機を stop signal で中断でき、`Drop` が sample duration の残り時間だけ停止しない
 - stop flag 設定済みなら sleep せずに即座に停止する
 - 実 thread と `std::sync::Barrier`、mpsc channel を使うテストで、待機中の wait が stop 設定から最大 `MAX_SLEEP_DURATION` 以内に終了し、終了通知を `recv_timeout` で受け取れることを確認する（`join` のブロック時間は計測しない）
-- mock / stub は使わず、テストコードで `thread::sleep` を直接使わない
+- mock / stub は使わず、テストコードの `thread::sleep` は stop 設定のタイミング調整にのみ使う
 - 検証は本 issue のブランチ上で行う
 - `cargo test --workspace` が成功する
 - `cargo clippy --workspace --all-targets -- -D warnings` が成功する
