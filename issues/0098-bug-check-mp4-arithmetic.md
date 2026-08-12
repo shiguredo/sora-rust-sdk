@@ -133,7 +133,6 @@ fixture を byte patch する場合は、書き換え前の box type、box size�
 ## 対象外
 
 - `Mp4VideoCapturer` の停止可能な待機は issue 0135 で扱う
-- sample 数の上限は issue 0136 で扱う
 - feeder thread の deadline 計算の `checked_add` 化は issue 0137 で扱う
 - MP4 読み込みのファイルベース化は issue 0138 で扱う
 - サンプルメタデータの構造体化は issue 0139 で扱う
