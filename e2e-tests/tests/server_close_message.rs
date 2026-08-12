@@ -2,34 +2,16 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use e2e_tests::{
-    SoraTestConnection, SoraTestEvent, api_url, build_metadata_with_access_token,
-    disconnect_channel, generate_channel_id, load_env, secret_key, signaling_urls,
+    SoraTestConnection, SoraTestEvent, api_url, build_recvonly_data_channel_signaling_connection,
+    disconnect_channel, generate_channel_id, load_env, signaling_urls,
 };
 use nojson::RawJson;
-use sora_sdk::{Role, SignalingDirection, SignalingType, SoraConnectionContext};
+use sora_sdk::{SignalingDirection, SignalingType};
 
 // run task の終了待機はこの値 + websocket_close_timeout + 1 秒で判定する。
 // Sora 側から DataChannel が閉じられるのに十分な時間を確保する。
 const DISCONNECT_WAIT_TIMEOUT: Duration = Duration::from_secs(3);
 const WEBSOCKET_CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
-
-/// DisconnectChannel API E2E 用の recvonly 接続を構築する。
-///
-/// Sora 側で `data_channel_signaling_close_message=true` が設定されていることを前提とする。
-fn build_recvonly_connection(urls: Vec<String>, channel_id: String) -> SoraTestConnection {
-    let context = SoraConnectionContext::new().expect("コンテキスト作成失敗");
-    let mut builder = SoraTestConnection::builder(context, urls, channel_id, Role::RecvOnly)
-        .data_channel_signaling(true)
-        .ignore_disconnect_websocket(true)
-        .disconnect_wait_timeout(DISCONNECT_WAIT_TIMEOUT)
-        .websocket_close_timeout(WEBSOCKET_CLOSE_TIMEOUT);
-    if let Some(token) = secret_key() {
-        builder = builder.metadata(build_metadata_with_access_token(&token));
-    }
-    builder
-        .connect()
-        .expect("SoraTestConnection の作成に失敗しました")
-}
 
 /// 受信したテキストが DisconnectChannel API による Close メッセージかどうかを判定する。
 ///
@@ -169,7 +151,12 @@ async fn server_close_message_terminates_run_while_websocket_connected() {
     };
     let urls = signaling_urls().expect("TEST_SIGNALING_URLS が必要");
     let channel_id = generate_channel_id();
-    let mut connection = build_recvonly_connection(urls, channel_id.clone());
+    let mut connection = build_recvonly_data_channel_signaling_connection(
+        urls,
+        channel_id.clone(),
+        Some(DISCONNECT_WAIT_TIMEOUT),
+        Some(WEBSOCKET_CLOSE_TIMEOUT),
+    );
 
     connection
         .wait_for_switched(Duration::from_secs(15))
@@ -234,7 +221,12 @@ async fn server_close_message_terminates_run_after_websocket_closed() {
     };
     let urls = signaling_urls().expect("TEST_SIGNALING_URLS が必要");
     let channel_id = generate_channel_id();
-    let mut connection = build_recvonly_connection(urls, channel_id.clone());
+    let mut connection = build_recvonly_data_channel_signaling_connection(
+        urls,
+        channel_id.clone(),
+        Some(DISCONNECT_WAIT_TIMEOUT),
+        Some(WEBSOCKET_CLOSE_TIMEOUT),
+    );
 
     connection
         .wait_for_switched(Duration::from_secs(15))
