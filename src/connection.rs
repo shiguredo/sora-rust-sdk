@@ -1429,6 +1429,14 @@ impl SoraConnection {
                             "切断待機がタイムアウトしました (残り {} チャネル)",
                             opened_datachannels.len()
                         );
+                        // タイムアウトした残りチャネルにも close コールバックを通知する。
+                        // サーバーが DataChannel を閉じないまま切断された場合でも、
+                        // ユーザーへの close 通知が漏れないようにする。
+                        for label in &opened_datachannels {
+                            rtc_log_info!("DataChannel '{}' closed", label);
+                            handler.on_data_channel_close(label);
+                        }
+                        opened_datachannels.clear();
                         break;
                     }
                 }
