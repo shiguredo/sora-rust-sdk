@@ -1060,6 +1060,13 @@ mod tests {
         assert!(output.is_empty());
     }
 
+    // ファイルベースのサンプル読み込みが、フィクスチャに記録された
+    // オフセット・サイズで正しいデータを読み出せることを確認する。
+    //
+    // サンプル 0 はキーフレーム (offset=48, size=702) で、変換後データは
+    // parameter sets (SPS/PPS) とサンプル NAL データの連結になる。
+    // 期待値はフィクスチャの stco / stsz / avcC ボックスから直接計算するため、
+    // フィクスチャ差し替え時にも自動的に追従する。
     #[test]
     fn sample_reader_reads_fixture_h264_mp4() {
         let fixture = include_bytes!("../../testdata/red-320x320-h264.mp4");
@@ -1079,18 +1086,176 @@ mod tests {
             tmp_path
                 .to_str()
                 .expect("パスは有効な UTF-8 である必要があります"),
-        );
-
-        let _ = std::fs::remove_file(&tmp_path);
-
-        let reader = reader.expect("フィクスチャ MP4 のパースに失敗しました");
+        )
+        .expect("フィクスチャ MP4 のパースに失敗しました");
         assert_eq!(reader.codec_type(), VideoCodecType::H264);
         assert!(!reader.is_empty());
         let sample = reader
             .get_sample(0)
             .expect("サンプルデータの読み込みに失敗しました");
-        assert!(sample.data.len() >= 4);
-        assert_eq!(&sample.data[0..4], &[0x00, 0x00, 0x00, 0x01]);
+
+        // サンプル 0 のファイル内オフセットは stco ボックスの先頭エントリから求める。
+        // ボックス構造: size(4) + type(4) + version/flags(4) + entry_count(4) + [offset(4) * entry_count]
+        let stco_offset = fixture
+            .windows(4)
+            .position(|w| w == b"stco")
+            .expect("フィクスチャに stco ボックスが必要です");
+        let stco_entry_count = u32::from_be_bytes(
+            fixture[stco_offset + 8..stco_offset + 12]
+                .try_into()
+                .expect("stco の entry_count は 4 バイトで読める必要があります"),
+        );
+        assert_eq!(
+            stco_entry_count, 1,
+            "フィクスチャの stco エントリ数が移動しています"
+        );
+        let sample_offset = u32::from_be_bytes(
+            fixture[stco_offset + 12..stco_offset + 16]
+                .try_into()
+                .expect("stco の先頭エントリは 4 バイトで読める必要があります"),
+        );
+        assert_eq!(
+            sample_offset, 48,
+            "フィクスチャのサンプル 0 のオフセットが移動しています"
+        );
+
+        // サンプル 0 のデータサイズは stsz ボックスの先頭エントリから求める。
+        // ボックス構造: size(4) + type(4) + version/flags(4) + sample_size(4)
+        //               + sample_count(4) + [entry_size(4) * sample_count]
+        let stsz_offset = fixture
+            .windows(4)
+            .position(|w| w == b"stsz")
+            .expect("フィクスチャに stsz ボックスが必要です");
+        let sample_size = u32::from_be_bytes(
+            fixture[stsz_offset + 16..stsz_offset + 20]
+                .try_into()
+                .expect("stsz の先頭エントリは 4 バイトで読める必要があります"),
+        );
+        assert_eq!(
+            sample_size, 702,
+            "フィクスチャのサンプル 0 のサイズが移動しています"
+        );
+
+        // parameter sets (SPS/PPS) は avcC ボックスから抽出する。
+        // ボックス構造: size(4) + type(4) + version(1) + profile(1) + compat(1) + level(1)
+        //               + length_size_minus_one(1) + num_of_sps(1) + [sps_length(2) + sps]
+        //               + num_of_pps(1) + [pps_length(2) + pps]
+        // num_of_sps の上位 3 ビットは reserved (111) なのでマスクする。
+        let avcc_offset = fixture
+            .windows(4)
+            .position(|w| w == b"avcC")
+            .expect("フィクスチャに avcC ボックスが必要です");
+        let num_of_sps = (fixture[avcc_offset + 9] & 0x1f) as usize;
+        let sps_length = u16::from_be_bytes(
+            fixture[avcc_offset + 10..avcc_offset + 12]
+                .try_into()
+                .expect("sps_length は 2 バイトで読める必要があります"),
+        ) as usize;
+        let sps = &fixture[avcc_offset + 12..avcc_offset + 12 + sps_length];
+        let num_of_pps = fixture[avcc_offset + 12 + sps_length] as usize;
+        let pps_length = u16::from_be_bytes(
+            fixture[avcc_offset + 13 + sps_length..avcc_offset + 15 + sps_length]
+                .try_into()
+                .expect("pps_length は 2 バイトで読める必要があります"),
+        ) as usize;
+        let pps =
+            &fixture[avcc_offset + 15 + sps_length..avcc_offset + 15 + sps_length + pps_length];
+        assert_eq!(num_of_sps, 1, "フィクスチャの SPS 数が移動しています");
+        assert_eq!(num_of_pps, 1, "フィクスチャの PPS 数が移動しています");
+        assert_eq!(
+            sps[0], 0x67,
+            "フィクスチャの SPS の先頭バイトが移動しています"
+        );
+        assert_eq!(
+            pps[0], 0x68,
+            "フィクスチャの PPS の先頭バイトが移動しています"
+        );
+
+        // 変換後データは [start code(4) + SPS][start code(4) + PPS][サンプル NAL データ] の形式になる。
+        // サンプル NAL データは、stco/stsz が示す範囲の AVCC 形式データを
+        // 長さプレフィックス変換したものと一致する必要がある (変換は長さ 1:1)。
+        let sample_start = sample_offset as usize;
+        let sample_end = sample_start + sample_size as usize;
+        let expected_annex_b =
+            length_prefixed_nalu_to_annex_b(&fixture[sample_start..sample_end], 4);
+        let expected_len = 4 + sps_length + 4 + pps_length + expected_annex_b.len();
+        assert_eq!(
+            sample.data.len(),
+            expected_len,
+            "サンプル 0 のデータ長が期待値と異なります"
+        );
+        assert_eq!(
+            &sample.data[0..4],
+            &[0x00, 0x00, 0x00, 0x01],
+            "SPS のスタートコードがありません"
+        );
+        assert_eq!(
+            &sample.data[4..4 + sps_length],
+            sps,
+            "SPS が変換後データの先頭に現れるべきです"
+        );
+        assert_eq!(
+            &sample.data[4 + sps_length..8 + sps_length],
+            &[0x00, 0x00, 0x00, 0x01],
+            "PPS のスタートコードがありません"
+        );
+        assert_eq!(
+            &sample.data[8 + sps_length..8 + sps_length + pps_length],
+            pps,
+            "PPS が SPS の後に現れるべきです"
+        );
+        assert_eq!(
+            &sample.data[8 + sps_length + pps_length..],
+            expected_annex_b,
+            "サンプル NAL データがファイルから正しく読み込まれていません"
+        );
+
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+
+    // リーダー構築後にファイルを 0 バイトへ縮小すると、
+    // get_sample のファイル読み込みが I/O エラーとして失敗することを確認する。
+    //
+    // read_exact は要求サイズの読み込みを保証するため、
+    // ファイルが縮小されていると UnexpectedEof が発生する。
+    // 縮小は別ハンドルから行う (std::fs::File::open は共有モードで開くため、
+    // Unix/Windows ともリーダーの保持するハンドルには影響しない)。
+    #[test]
+    fn sample_reader_get_sample_returns_io_error_after_file_truncation() {
+        let fixture = include_bytes!("../../testdata/red-320x320-h264.mp4");
+        let tmp_name = format!(
+            "sora-sdk-mp4-test-truncate-{}-{}.mp4",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("システム時刻は UNIX_EPOCH より後である必要があります")
+                .as_nanos()
+        );
+        let tmp_path = std::env::temp_dir().join(tmp_name);
+
+        std::fs::write(&tmp_path, fixture).expect("一時フィクスチャの書き込みに失敗しました");
+
+        let reader = Mp4SampleReader::new(
+            tmp_path
+                .to_str()
+                .expect("パスは有効な UTF-8 である必要があります"),
+        )
+        .expect("フィクスチャ MP4 のパースに失敗しました");
+
+        let file = std::fs::File::options()
+            .write(true)
+            .open(&tmp_path)
+            .expect("縮小用ハンドルのオープンに失敗しました");
+        file.set_len(0).expect("ファイルの縮小に失敗しました");
+        drop(file);
+
+        let result = reader.get_sample(0);
+        assert!(
+            matches!(result, Err(Mp4Error::Io(_))),
+            "縮小されたファイルからの読み込みは Io エラーになるべきです"
+        );
+
+        let _ = std::fs::remove_file(&tmp_path);
     }
 
     // validated_nal_length_size が有効な length_size_minus_one (0/1/3) を
