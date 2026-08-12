@@ -873,7 +873,7 @@ impl Mp4VideoCapturer {
                     // loop_start からのオフセットとして使うことで、累積ドリフトを防止する。
                     let next_frame_time_us = reader.cumulative_duration_us(i + 1);
                     let target = loop_start + std::time::Duration::from_micros(next_frame_time_us);
-                    // 停止したらフィーダースレッドを終了する。
+                    // 停止フラグが設定されたらフィーダースレッドを終了する。
                     if wait_until_or_stop(&stop_clone, target) {
                         return;
                     }
