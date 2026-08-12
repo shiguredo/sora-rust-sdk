@@ -4,7 +4,7 @@
 - Created: 2026-08-10
 - Completed: {YYYY-MM-DD}
 - Branch: feature/refactor-mp4-file-based-reader
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-08-10
 
 ## 目的
 
@@ -15,20 +15,36 @@
 
 `Mp4SampleReader::new_inner` は `std::fs::read` でファイル全体を `Vec<u8>` に読み込む。
 doc コメントには「大きなファイルではメモリ使用量に注意」とあり、実際に必要ない範囲（mdat の大部分等）もメモリに保持する。
-また、`shiguredo_mp4` の demuxer は `handle_input(Input)` にデータを渡すストリーミング方式に対応しており、ファイル全体を読み込む必要は本来ない。
+
+`shiguredo_mp4` の demuxer は `required_input()` が要求する範囲を `handle_input()` で供給する方式のため、ファイル全体を読み込む必要はなく、要求された範囲だけを都度読み込めばよい。
+ただし、`handle_input` は要求範囲を一度に全て渡す必要がある（ストリーミング用途での使用は想定されていない）。
 
 ## 設計方針
 
-- `Mp4SampleReader` は `File` を保持し、demuxer の `required_input` の要求範囲を `seek + read` で都度読み込む
+- `Mp4SampleReader` は `BufReader<File>` を保持し、demuxer の `required_input` の要求範囲を `seek + read` で都度読み込む
 - サンプルデータも `get_sample` の際に `seek + read` で読み込む
-- `Mp4SampleMeta.data_range` を `Range<usize>` から `Range<u64>`（ファイル内の位置）に変更し、u64 → usize 変換を不要にする
-- フレームごとのディスク I/O がキャプチャ性能に与える影響を検証する
+- `Mp4SampleMeta` は変更しない（`data_offset: u64` + `data_size: usize` のまま。`data_size` の値域は stsz の `u32` に収まる）
+- `get_sample` は `seek + read` の失敗（ファイルの変更・削除等）を `Mp4Error` で返すように変更する
+  - 0098 の「`get_sample` を `Result` 化しない」方針は、メモリベースで slice のみを行う前提だったため、ファイルベース化に伴い見直す
+- `Mp4Error::InputPositionOutOfRange` と `InconsistentSampleTable` の `file_size` フィールドを `usize` から `u64` に変更する（ファイルサイズが `usize` に縛られないため）
+- パフォーマンス検証は行わない（I/O パターンが単純で、コードから I/O 回数が分かるため）
+
+## 0098 への影響
+
+本 issue の完了後、0098 の以下の項目が不要になる。
+
+- `required_input_range` の `usize` 変換（`File::seek(u64)` を使えるため）
+- `Mp4SampleMeta` の型変更（`Range<usize>` 化）
+- `get_sample` の `as usize` 除去（ファイルベースでは変換しないため）
+- 「`get_sample` を `Result` 化しない」API 方針の見直し（I/O 導入のため）
+
+0098 は `cumulative_us` の checked 化など、メモリベースに依存しない部分に集中する。
 
 ## 完了条件
 
-- 大きなファイルで、メモリ消費がファイルサイズに比例しないこと
-- ファイルサイズが `usize` の表現範囲に縛られないこと
-- `get_sample` の都度読み込みがキャプチャ性能に実用上の影響を与えないこと
+- 保持するメモリがサンプル数の metadata のみに比例し、ファイルサイズに依存しないこと（コードレビューで確認）
+- ファイルサイズが `usize` の表現範囲に縛られないこと（`data_offset` とエラー型の `file_size` が `u64` で表現されること）
+- `get_sample` が `seek + read` の失敗を `Mp4Error` で返し、capturer がエラー時に停止すること
 - `cargo test --workspace` が成功する
 - `cargo clippy --workspace --all-targets -- -D warnings` が成功する
 - `CHANGES.md` の develop セクションに追記する
