@@ -13,7 +13,7 @@
 //!                                         (native VideoFrameBuffer)
 //!
 //! 対応コーデック: H.264, H.265, VP8, VP9, AV1
-use std::io;
+use std::io::{self, BufReader, Read, Seek};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -54,7 +54,7 @@ pub enum Mp4Error {
         /// デマルチプレクサが要求したファイル内位置。
         position: u64,
         /// 実際のファイルサイズ (バイト単位)。
-        file_size: usize,
+        file_size: u64,
     },
     /// サンプルテーブル (stsz / stco / co64) に不整合があり、
     /// サンプルのオフセットがファイル範囲外になっている。
@@ -66,7 +66,7 @@ pub enum Mp4Error {
         /// サンプルのデータサイズ。
         size: usize,
         /// 実際のファイルサイズ (バイト単位)。
-        file_size: usize,
+        file_size: u64,
     },
     /// 非ゼロの composition time offset を含むビデオサンプルが存在する。
     ///
@@ -222,12 +222,12 @@ struct Mp4SampleMeta {
 
 /// MP4 ファイルからビデオサンプルを読み出すリーダー。
 ///
-/// コンストラクタでファイル全体をメモリに読み込み、全サンプルのメタデータを事前解析する。
+/// コンストラクタでファイルを開き、全サンプルのメタデータを事前解析する。
 /// `get_sample()` でインデックス指定でサンプルを取得できる。
-/// ファイルデータを保持し続けるため、サンプル取得時にディスク I/O は発生しない。
+/// ファイルデータはメモリに保持せず、必要に応じてファイルから読み込む。
 pub struct Mp4SampleReader {
-    /// MP4 ファイル全体のバイトデータ。
-    file_data: Vec<u8>,
+    /// MP4 ファイルへの読み込みストリーム。
+    file: BufReader<std::fs::File>,
     track_info: Mp4VideoTrackInfo,
     /// 各サンプルのメタデータ。
     samples: Vec<Mp4SampleMeta>,
@@ -240,8 +240,6 @@ pub struct Mp4SampleReader {
 
 impl Mp4SampleReader {
     /// MP4 ファイルを読み込み、ビデオトラックの全サンプルを事前解析する。
-    ///
-    /// ファイル全体をメモリに保持するため、大きなファイルではメモリ使用量に注意。
     pub fn new(path: &str) -> crate::error::Result<Self> {
         Self::new_inner(path).map_err(crate::error::Error::from)
     }
@@ -249,7 +247,8 @@ impl Mp4SampleReader {
     fn new_inner(path: &str) -> Result<Self> {
         use shiguredo_mp4::demux::{Input, Mp4FileDemuxer};
 
-        let file_data = std::fs::read(path)?;
+        let file = BufReader::new(std::fs::File::open(path)?);
+        let file_size = file.get_ref().metadata()?.len();
 
         let mut demuxer = Mp4FileDemuxer::new();
 
@@ -257,26 +256,27 @@ impl Mp4SampleReader {
         // required_input() が要求する範囲のデータを順次渡すことで、
         // ボックス構造の解析が進む。
         while let Some(required) = demuxer.required_input() {
-            let start = required.position as usize;
-            if start > file_data.len() {
+            if required.position > file_size {
                 return Err(Mp4Error::InputPositionOutOfRange {
                     position: required.position,
-                    file_size: file_data.len(),
+                    file_size,
                 });
             }
-            let end = match required.size {
-                Some(size) => (start + size).min(file_data.len()),
-                None => file_data.len(),
-            };
-            let data = file_data
-                .get(start..end)
-                .ok_or(Mp4Error::InputPositionOutOfRange {
-                    position: required.position,
-                    file_size: file_data.len(),
-                })?;
+            // required の位置から要求サイズのデータをファイルから読み込む。
+            // size が None ならファイル末尾までの範囲を要求する。
+            let size = required.size.unwrap_or_else(|| {
+                usize::try_from(file_size - required.position).unwrap_or(usize::MAX)
+            });
+            let end = required.position.saturating_add(size as u64).min(file_size);
+            let mut data = vec![0; (end - required.position) as usize];
+            {
+                let mut file_ref = file.get_ref();
+                file_ref.seek(std::io::SeekFrom::Start(required.position))?;
+                file_ref.read_exact(&mut data)?;
+            }
             demuxer.handle_input(Input {
                 position: required.position,
-                data,
+                data: &data,
             });
         }
 
@@ -336,13 +336,12 @@ impl Mp4SampleReader {
             return Err(Mp4Error::NoVideoSamples);
         }
 
-        let file_size = file_data.len();
         for (index, sample) in samples.iter().enumerate() {
             let data_size_u64 = sample.data_size as u64;
             if sample
                 .data_offset
                 .checked_add(data_size_u64)
-                .is_none_or(|end| end > file_size as u64)
+                .is_none_or(|end| end > file_size)
             {
                 return Err(Mp4Error::InconsistentSampleTable {
                     index,
@@ -367,7 +366,7 @@ impl Mp4SampleReader {
         }
 
         Ok(Self {
-            file_data,
+            file,
             track_info,
             samples,
             cumulative_us,
@@ -519,6 +518,8 @@ impl Mp4SampleReader {
 
     /// 指定インデックスのサンプルデータを取得する。
     ///
+    /// サンプルデータはファイルから読み込むため、I/O エラーを返し得る。
+    ///
     /// H.264/H.265 の場合:
     /// - MP4 内の AVCC/HVCC 形式 (4 バイト長さプレフィックス) を
     ///   Annex B 形式 (0x00000001 スタートコード) に変換する。
@@ -526,10 +527,14 @@ impl Mp4SampleReader {
     ///
     /// VP8/VP9/AV1 の場合:
     /// - MP4 から抽出したデータをそのまま使用する。
-    fn get_sample(&self, index: usize) -> Mp4EncodedSample {
+    fn get_sample(&self, index: usize) -> Result<Mp4EncodedSample> {
         let sample = &self.samples[index];
-        let raw_data = &self.file_data
-            [sample.data_offset as usize..sample.data_offset as usize + sample.data_size];
+        let mut raw_data = vec![0; sample.data_size];
+        {
+            let mut file_ref = self.file.get_ref();
+            file_ref.seek(std::io::SeekFrom::Start(sample.data_offset))?;
+            file_ref.read_exact(&mut raw_data)?;
+        }
 
         let data = match self.track_info.codec_type {
             VideoCodecType::H264 | VideoCodecType::H265 => {
@@ -540,21 +545,21 @@ impl Mp4SampleReader {
                     annex_b.extend_from_slice(ps);
                 }
                 annex_b.extend_from_slice(&length_prefixed_nalu_to_annex_b(
-                    raw_data,
+                    &raw_data,
                     self.track_info.nal_length_size,
                 ));
                 annex_b
             }
-            _ => raw_data.to_vec(),
+            _ => raw_data,
         };
 
-        Mp4EncodedSample {
+        Ok(Mp4EncodedSample {
             data,
             is_keyframe: sample.is_keyframe,
             width: self.track_info.width as u32,
             height: self.track_info.height as u32,
             codec_type: self.track_info.codec_type,
-        }
+        })
     }
 
     /// 先頭からフレーム index までの累積再生時間をマイクロ秒で返す。
@@ -870,7 +875,14 @@ impl Mp4VideoCapturer {
                     let AdaptFrameResult { applied, .. } =
                         source.adapt_frame(width, height, timestamp_us);
                     if applied {
-                        let sample = reader.get_sample(i);
+                        // サンプルデータの読み込みに失敗したらフィーダースレッドを終了する。
+                        let sample = match reader.get_sample(i) {
+                            Ok(sample) => sample,
+                            Err(err) => {
+                                rtc_log_warning!("MP4: failed to read sample: {err:?}");
+                                return;
+                            }
+                        };
                         let frame_buffer = VideoFrameBuffer::new_with_handler(Box::new(sample));
                         let ts =
                             aligner.translate(timestamp_us, shiguredo_webrtc::time_millis() * 1000);
@@ -1074,7 +1086,9 @@ mod tests {
         let reader = reader.expect("フィクスチャ MP4 のパースに失敗しました");
         assert_eq!(reader.codec_type(), VideoCodecType::H264);
         assert!(!reader.is_empty());
-        let sample = reader.get_sample(0);
+        let sample = reader
+            .get_sample(0)
+            .expect("サンプルデータの読み込みに失敗しました");
         assert!(sample.data.len() >= 4);
         assert_eq!(&sample.data[0..4], &[0x00, 0x00, 0x00, 0x01]);
     }
