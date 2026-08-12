@@ -1881,6 +1881,9 @@ impl SoraConnection {
             );
             send_text(ws, message)
         } else {
+            rtc_log_warning!(
+                "No signaling path available (DataChannel signaling is disabled and WebSocket is not connected); message not sent"
+            );
             Ok(())
         }
     }
