@@ -916,7 +916,23 @@ impl SoraConnection {
                     let n = match read {
                         Ok(n) => n,
                         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => 0,
-                        Err(e) => return Err(e.into()),
+                        Err(e) => {
+                            // switched 後の WebSocket 読み取りエラー (ECONNRESET 等) は、
+                            // DataChannel シグナリングが健全な限り吸収して接続を継続する。
+                            if switched_ignore_disconnect_websocket
+                                && use_data_channel_signaling
+                            {
+                                rtc_log_warning!(
+                                    "WebSocket read failed; continuing DataChannel signaling: {}",
+                                    e
+                                );
+                                websocket_closed = true;
+                                // 期限切れ sleep_until で select! がスピンしないようリセットする
+                                ws_disconnect_delay_start = None;
+                                continue;
+                            }
+                            return Err(e.into());
+                        }
                     };
                     if n == 0 {
                         if switched_ignore_disconnect_websocket && use_data_channel_signaling {
@@ -929,7 +945,23 @@ impl SoraConnection {
                             break;
                         }
                     } else {
-                        ws.feed_recv_buf(&buf[..n], now()?)?;
+                        if let Err(e) = ws.feed_recv_buf(&buf[..n], now()?) {
+                            // switched 後の WebSocket プロトコルエラー (不正なフレーム等) は、
+                            // DataChannel シグナリングが健全な限り吸収して接続を継続する。
+                            if switched_ignore_disconnect_websocket
+                                && use_data_channel_signaling
+                            {
+                                rtc_log_warning!(
+                                    "WebSocket frame processing failed; continuing DataChannel signaling: {}",
+                                    e
+                                );
+                                websocket_closed = true;
+                                // 期限切れ sleep_until で select! がスピンしないようリセットする
+                                ws_disconnect_delay_start = None;
+                                continue;
+                            }
+                            return Err(e.into());
+                        }
                     }
                 }
                 Some(timer_id) = timer_rx.recv() => {
@@ -1349,10 +1381,7 @@ impl SoraConnection {
             let close_emitted = match flush_ws_output(&mut ws, &mut stream, &mut timers).await {
                 Ok(emitted) => emitted,
                 Err(e) => {
-                    if switched_ignore_disconnect_websocket
-                        && use_data_channel_signaling
-                        && !websocket_closed
-                    {
+                    if switched_ignore_disconnect_websocket && use_data_channel_signaling {
                         // switched 後の WebSocket I/O 失敗は DataChannel シグナリング継続のため吸収する
                         rtc_log_warning!(
                             "flush WebSocket output failed; continuing DataChannel signaling: {}",
