@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-10
 - Branch: feature/fix-mp4-capturer-stop
 - Polished: 2026-08-10
 - Updated: 2026-08-10
@@ -45,3 +45,17 @@ closed issue 0048 は通常の 30 fps なら停止待ちが約 1 frame 分であ
 - `cargo clippy --workspace --all-targets -- -D warnings` が成功する
 - `CHANGES.md` の develop セクションに `[FIX]` を追記する
 - production log は英語、コメントとテストの assertion message は日本語にする
+
+## 解決方法
+
+- `wait_until_or_stop` helper を追加し、feeder thread の待機を `thread::sleep` から置き換えた
+  - `thread::sleep` を `MAX_SLEEP_DURATION`（100ms）ずつに分割して呼び、停止フラグの確認を挟む方式
+  - 停止フラグが設定されたら `true`、deadline に到達したら `false` を返す
+  - 停止までの最大遅延は `MAX_SLEEP_DURATION` に制限される
+- `Drop` は停止フラグを `Release` で保存して `join()` するだけで良くなった（`unpark` は不要）
+- deadline の計算 (`loop_start + Duration::from_micros(...)`) の `checked_add` 化は issue 0098 の対象に移した
+- テストを追加した
+  - 停止フラグ設定済みなら sleep せずに即座に `true` を返すこと
+  - deadline 到達済みなら sleep せずに即座に `false` を返すこと
+  - 実 thread で sleep 中に stop フラグが設定された場合に最大 `MAX_SLEEP_DURATION` 以内で終了すること
+- `CHANGES.md` の develop セクションに `[FIX]` を追記した
