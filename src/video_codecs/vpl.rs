@@ -221,7 +221,8 @@ fn handle_vpl_encode_callback(
         codec_specific_info.set_end_of_picture(true);
         // num_spatial_layers を設定しないと first_active_layer / num_spatial_layers が不整合でエラーになる
         codec_specific_info.set_vp9_num_spatial_layers(1);
-        codec_specific_info.set_vp9_temporal_idx(shiguredo_webrtc::no_temporal_idx().into());
+        codec_specific_info
+            .set_vp9_temporal_idx(shiguredo_webrtc::constants::no_temporal_idx().into());
         // 実機で動作確認したところ、以下の設定は必須ではないことが分かっている。
         // ただ他の実機や libwebrtc の仕様変更のことを考えると、
         // 一応明示しておいた方が安定しそうなので設定しておく。
