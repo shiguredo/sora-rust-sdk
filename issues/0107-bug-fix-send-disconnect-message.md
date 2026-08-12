@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-13
 - Model: deepseek-v4-flash
 - Branch: feature/fix-send-disconnect-message
 - Polished: {YYYY-MM-DD}
@@ -39,3 +39,12 @@ Sora クライアント要求仕様で定められた切断時の `"type": "disc
 - `src/connection.rs`
 - `src/signaling_types.rs`
 - `CHANGES.md`
+
+## 解決方法
+
+- `src/signaling_types.rs` の `OutgoingMessage` に `Disconnect` バリアントを追加し、`{"type":"disconnect","reason":"NO-ERROR"}` にシリアライズする `new_disconnect()` を追加した
+- `src/connection.rs` の `SoraConnectionCommand::Disconnect` 処理で、DataChannel シグナリング有効時 (`use_datachannel_signaling`) は `signaling` ラベルの DataChannel 経由、それ以外で WebSocket 接続中は WebSocket 経由で disconnect メッセージを送信するようにした
+- 送信失敗は接続終了処理を妨げず、英語のログを残して break する
+- DataChannel シグナリング時は run ループ終了後のクローズ待機 (`disconnect_wait_timeout`) で DataChannel のクローズを待ち、close コールバックを通知するようにした
+- `e2e-tests/tests/send_disconnect_message.rs` を追加し、DataChannel 経由と WebSocket 経由の両構成で disconnect メッセージの送信を検証した
+- `CHANGES.md` への記載は依頼により行わない
