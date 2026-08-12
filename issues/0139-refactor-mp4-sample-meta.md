@@ -5,6 +5,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/refactor-mp4-sample-meta
 - Polished: {YYYY-MM-DD}
+- Updated: 2026-08-10
 
 ## 目的
 
@@ -12,13 +13,14 @@
 
 ## 現状
 
-issue 0098 の対応後、`samples` は `(Range<usize>, bool, u32)` の 3 要素タプル（サンプルデータのファイル内範囲、キーフレームかどうか、サンプルの長さ）で保持される。
+`Mp4SampleReader::samples` は `(u64, usize, bool, u64, u32)` の 5 要素タプル（サンプルデータのファイル内オフセット、データサイズ、キーフレームかどうか、decode timestamp、サンプルの長さ）で保持される。
 タプルの添え字参照は意味が分かりにくく、フィールドが増えると壊れやすい。
 
 ## 設計方針
 
-- タプル `(Range<usize>, bool, u32)` を構造体 `Mp4SampleMeta { data_range, is_keyframe, duration }` に変更する（単純な置き換え）
-- 構築（`new_inner` のサンプルループ）と参照（`get_sample`、`build_cumulative_us` 用の duration 収集）をフィールド参照に書き換える
+- タプル `(u64, usize, bool, u64, u32)` を構造体 `Mp4SampleMeta { data_offset, data_size, is_keyframe, duration }` に変更する（単純な置き換え）
+  - `timestamp` はどこからも参照されていないため削除する
+- 構築（`new_inner` のサンプルループ）と参照（`get_sample`、`cumulative_us` 構築）をフィールド参照に書き換える
 - 動作の変更は行わない
 
 ## 完了条件
