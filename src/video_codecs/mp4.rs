@@ -208,6 +208,18 @@ struct Mp4VideoTrackInfo {
     nal_length_size: u8,
 }
 
+/// MP4 のビデオサンプルのメタデータ。
+struct Mp4SampleMeta {
+    /// サンプルデータのファイル内オフセット。
+    data_offset: u64,
+    /// サンプルデータのサイズ。
+    data_size: usize,
+    /// キーフレームかどうか。
+    is_keyframe: bool,
+    /// サンプルの長さ (MP4 のタイムスケール単位)。
+    duration: u32,
+}
+
 /// MP4 ファイルからビデオサンプルを読み出すリーダー。
 ///
 /// コンストラクタでファイル全体をメモリに読み込み、全サンプルのメタデータを事前解析する。
@@ -217,10 +229,8 @@ pub struct Mp4SampleReader {
     /// MP4 ファイル全体のバイトデータ。
     file_data: Vec<u8>,
     track_info: Mp4VideoTrackInfo,
-    /// 各サンプルのメタデータ: (data_offset, data_size, keyframe, timestamp, duration)。
-    /// data_offset と data_size は file_data 内の位置を指す。
-    /// timestamp と duration は MP4 のタイムスケール単位。
-    samples: Vec<(u64, usize, bool, u64, u32)>,
+    /// 各サンプルのメタデータ。
+    samples: Vec<Mp4SampleMeta>,
     /// 各フレームの累積再生時刻 (マイクロ秒)。
     /// cumulative_us[0] = 0, cumulative_us[i] = フレーム 0..i の合計再生時間。
     /// 長さは samples.len() + 1 で、末尾が動画全体の長さ。
@@ -312,13 +322,12 @@ impl Mp4SampleReader {
                 });
             }
 
-            samples.push((
-                sample.data_offset,
-                sample.data_size,
-                sample.keyframe,
-                sample.timestamp,
-                sample.duration,
-            ));
+            samples.push(Mp4SampleMeta {
+                data_offset: sample.data_offset,
+                data_size: sample.data_size,
+                is_keyframe: sample.keyframe,
+                duration: sample.duration,
+            });
         }
 
         let track_info = track_info.ok_or(Mp4Error::NoVideoSamples)?;
@@ -328,16 +337,17 @@ impl Mp4SampleReader {
         }
 
         let file_size = file_data.len();
-        for (index, &(data_offset, data_size, _, _, _)) in samples.iter().enumerate() {
-            let data_size_u64 = data_size as u64;
-            if data_offset
+        for (index, sample) in samples.iter().enumerate() {
+            let data_size_u64 = sample.data_size as u64;
+            if sample
+                .data_offset
                 .checked_add(data_size_u64)
                 .is_none_or(|end| end > file_size as u64)
             {
                 return Err(Mp4Error::InconsistentSampleTable {
                     index,
-                    offset: data_offset,
-                    size: data_size,
+                    offset: sample.data_offset,
+                    size: sample.data_size,
                     file_size,
                 });
             }
@@ -351,8 +361,8 @@ impl Mp4SampleReader {
         let mut cumulative_us = Vec::new();
         let mut acc: u64 = 0;
         cumulative_us.push(0);
-        for &(_, _, _, _, duration) in &samples {
-            acc += duration as u64;
+        for sample in &samples {
+            acc += sample.duration as u64;
             cumulative_us.push((acc * 1_000_000) / timescale);
         }
 
@@ -517,13 +527,16 @@ impl Mp4SampleReader {
     /// VP8/VP9/AV1 の場合:
     /// - MP4 から抽出したデータをそのまま使用する。
     fn get_sample(&self, index: usize) -> Mp4EncodedSample {
-        let (data_offset, data_size, keyframe, _, _) = self.samples[index];
-        let raw_data = &self.file_data[data_offset as usize..data_offset as usize + data_size];
+        let sample = &self.samples[index];
+        let raw_data = &self.file_data
+            [sample.data_offset as usize..sample.data_offset as usize + sample.data_size];
 
         let data = match self.track_info.codec_type {
             VideoCodecType::H264 | VideoCodecType::H265 => {
                 let mut annex_b = Vec::new();
-                if keyframe && let Some(ref ps) = self.track_info.parameter_sets {
+                if sample.is_keyframe
+                    && let Some(ref ps) = self.track_info.parameter_sets
+                {
                     annex_b.extend_from_slice(ps);
                 }
                 annex_b.extend_from_slice(&length_prefixed_nalu_to_annex_b(
@@ -537,7 +550,7 @@ impl Mp4SampleReader {
 
         Mp4EncodedSample {
             data,
-            is_keyframe: keyframe,
+            is_keyframe: sample.is_keyframe,
             width: self.track_info.width as u32,
             height: self.track_info.height as u32,
             codec_type: self.track_info.codec_type,
