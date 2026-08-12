@@ -792,7 +792,7 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
 /// MP4 の末尾に到達すると先頭に戻りループ再生する。
 pub struct Mp4VideoCapturer {
     video_source: VideoTrackSource,
-    /// フィーダースレッドへの停止シグナル。
+    /// フィーダースレッドへの停止フラグ。
     stop: Arc<AtomicBool>,
     thread_handle: Option<thread::JoinHandle<()>>,
 }
@@ -873,7 +873,7 @@ impl Mp4VideoCapturer {
                     // loop_start からのオフセットとして使うことで、累積ドリフトを防止する。
                     let next_frame_time_us = reader.cumulative_duration_us(i + 1);
                     let target = loop_start + std::time::Duration::from_micros(next_frame_time_us);
-                    // 停止フラグが設定されたら (true) feeder thread を終了する。
+                    // 停止したらフィーダースレッドを終了する。
                     if wait_until_or_stop(&stop_clone, target) {
                         return;
                     }
@@ -1327,7 +1327,8 @@ mod tests {
         }
     }
 
-    // wait_until_or_stop が、停止フラグ設定済みなら sleep せずに即座に true を返すことを確認する。
+    // deadline を 60 秒先に設定し、停止フラグ設定済みなら
+    // sleep せずに即座に true を返すことを確認する。
     #[test]
     fn wait_until_or_stop_stops_immediately_when_stop_is_set() {
         let stop = AtomicBool::new(true);
@@ -1338,9 +1339,9 @@ mod tests {
         );
     }
 
-    // wait_until_or_stop が、deadline 到達済みなら sleep せずに即座に false を返すことを確認する。
+    // deadline を 1 秒前に設定し、到達済みなら sleep せずに即座に false を返すことを確認する。
     #[test]
-    fn wait_until_or_stop_ready_when_deadline_passed() {
+    fn wait_until_or_stop_returns_false_when_deadline_passed() {
         let stop = AtomicBool::new(false);
         let deadline = std::time::Instant::now() - std::time::Duration::from_secs(1);
         assert!(
@@ -1352,7 +1353,7 @@ mod tests {
     // 実 thread で、sleep 中に stop フラグが設定された場合に
     // 最大 MAX_SLEEP_DURATION 以内で終了することを確認する。
     //
-    // barrier でテストスレッドが wait_until_or_stop を呼ぶ直前まで到達したことを同期し、
+    // barrier でテストスレッドの wait_until_or_stop 呼び出し直前までを同期し、
     // 最初の stop チェックを通過して sleep に入るのを待ってから stop を設定する。
     // これにより、sleep 中に stop が設定される経路を確実に実行する。
     #[test]
@@ -1364,14 +1365,12 @@ mod tests {
         let stop_clone = stop.clone();
         let barrier_clone = barrier.clone();
         thread::spawn(move || {
-            // wait_until_or_stop を呼ぶ直前まで到達したことを通知する。
             barrier_clone.wait();
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
             let result = wait_until_or_stop(&stop_clone, deadline);
             done_tx.send(result).expect("終了通知の送信に失敗しました");
         });
 
-        // テストスレッドが wait_until_or_stop を呼ぶ直前まで到達するのを待つ。
         barrier.wait();
         // テストスレッドが最初の stop チェックを通過して sleep に入るのを待ってから
         // stop を設定する (sleep 中の stop 検出経路を確実に実行するためのタイミング調整)。
