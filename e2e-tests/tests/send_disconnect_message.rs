@@ -71,11 +71,17 @@ async fn disconnect_message_is_sent_via_datachannel() {
         .await
         .expect("switched 通知の受信がタイムアウトしました");
 
-    // signaling DataChannel の open を待つ。
-    connection
-        .wait_for_data_channel_open(|label| label == "signaling", Duration::from_secs(15))
-        .await
-        .expect("signaling DataChannel の open が観測されませんでした");
+    // DataChannel シグナリングへの切替は全 DataChannel (signaling / stats / notify /
+    // push / rpc) のオープンと switched 受信の両方で確定する
+    // (is_datachannel_signaling_ready)。signaling だけを待って disconnect() を呼ぶと、
+    // 未確定のまま WebSocket 経路にフォールバックしてテストが不安定になるため、
+    // 全チャネルのオープンを待ってから切断する。
+    for label in ["signaling", "stats", "notify", "push", "rpc"] {
+        connection
+            .wait_for_data_channel_open(|l| l == label, Duration::from_secs(15))
+            .await
+            .unwrap_or_else(|_| panic!("DataChannel '{label}' の open が観測されませんでした"));
+    }
 
     // disconnect() を呼ぶと signaling DataChannel 経由で disconnect メッセージが送信される。
     connection
