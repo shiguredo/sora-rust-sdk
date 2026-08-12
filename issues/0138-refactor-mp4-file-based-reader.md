@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-12
 - Branch: feature/refactor-mp4-file-based-reader
 - Polished: 2026-08-10
 
@@ -49,3 +49,16 @@ doc コメントには「大きなファイルではメモリ使用量に注意�
 - `cargo clippy --workspace --all-targets -- -D warnings` が成功する
 - `CHANGES.md` の develop セクションに追記する
 - コメントとテストの assertion message は日本語にする
+
+## 解決方法
+
+`Mp4SampleReader` をファイルベースに変更し、ファイル全体をメモリに保持しないようにした。
+
+- `Mp4SampleReader` が `BufReader<File>` を保持し、demuxer の `required_input` が要求する範囲とサンプルデータを `seek + read_exact` で都度読み込む
+- `get_sample` を `&mut self` の `Result` 返しに変更し、ファイル読み込みの失敗を `Mp4Error::Io` で返す
+- `Mp4VideoCapturer` はサンプル読み込みの失敗時に `rtc_log_error` で記録してフィーダースレッドを終了する
+- `Mp4Error::InputPositionOutOfRange` と `InconsistentSampleTable` の `file_size` フィールドを `usize` から `u64` に変更する
+- `seek + read_exact` の組み合わせは `read_bytes_at` に集約し、required_input の読み込みサイズ計算は `usize::MAX` センチネルを廃止して `try_from` + エラー伝播に変更する（32 bit target での OOM 経路も解消）
+- `CHANGES.md` の develop セクションに `[CHANGE]`（`file_size` の `u64` 化）と `[UPDATE]`（ファイルベース化）を追記する
+- テストを追加・強化する（ファイル縮小後の I/O エラー経路、サンプルデータの内容一致検証、stco/stsz/avcC からの期待値計算）
+- `cargo test --workspace` と `cargo clippy --workspace --all-targets -- -D warnings` は成功する
