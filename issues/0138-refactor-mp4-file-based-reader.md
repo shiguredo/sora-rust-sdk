@@ -62,3 +62,4 @@ doc コメントには「大きなファイルではメモリ使用量に注意�
 - `CHANGES.md` の develop セクションに `[CHANGE]`（`file_size` の `u64` 化）と `[UPDATE]`（ファイルベース化）を追記する
 - テストを追加・強化する（ファイル縮小後の I/O エラー経路、サンプルデータの内容一致検証、stco/stsz/avcC からの期待値計算）
 - `cargo test --workspace` と `cargo clippy --workspace --all-targets -- -D warnings` は成功する
+  - e2e-tests のデータチャネル結合テストは `TEST_SIGNALING_URLS` が必要なため、ローカルでは実行しない（シグナリングサーバー未設定で失敗するのは本変更と無関係）
