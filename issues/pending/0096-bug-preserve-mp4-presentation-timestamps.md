@@ -45,6 +45,18 @@ RTP video timestamp の clock rate は RFC 3551 Section 5 に従い 90,000 Hz �
 H.264 の non-interleaved mode では RFC 6184 Sections 5.1、6.3 により、RTP sequence number の順序が decode order を表し、RTP timestamp が sampling time を表す。
 そのため B frame を presentation order へ並べ替えず、decode order の送信と非単調になり得る presentation timestamp を両立させる。
 
+## 前提
+
+本 issue は issue 0140 で導入する以下の基盤を前提とする。
+
+- `Mp4SampleReader` が required `SdpVideoFormat` を公開し、`Mp4PassthroughVideoCodecCapability::new(&Mp4SampleReader)` で capability を構築する
+- reader と capability・各 `Mp4EncodedSample`・encoder handler が private の bitstream identity を `Arc::clone` で共有し、`Mp4PassthroughEncoder` が `Arc::ptr_eq` で照合して不一致サンプルを `VideoCodecStatus::Error` にする
+- `Mp4PassthroughVideoCodecCapability::is_supported` が override され、bare `SdpVideoFormat` を `resolve_sdp_format` に通す経路を preference 生成・検証から排除する
+- `Mp4SampleReader::new_inner` が全 `sample.sample_entry` を `extract_track_info` に通し、`codec_type` / `width` / `height` / `nal_length_size` / `parameter_sets` / `timescale` の byte-for-byte 一致を検証する
+- `SoraVideoEncoderFactory::create` が `resolve_sdp_format` の返り値をそのまま `create_video_encoder` に渡す
+
+本 issue はこの基盤の上で、H.264 の profile-level-id 抽出と negotiation、および B frame の presentation timestamp / decode pacing / capture timeline / RTP timestamp 対応を追加する。
+
 ## 設計方針
 
 ### 対象範囲
@@ -67,24 +79,20 @@ H.264 の non-interleaved mode では RFC 6184 Sections 5.1、6.3 により、RT
   - required `profile-level-id` が固定 libwebrtc の parser で認識できない場合は、広告する前に unsupported H.264 profile / level error で reader 初期化を失敗させる
   - `packetization-mode=1` と抽出した `profile-level-id` を送信 bitstream の required format とし、暗黙の Baseline Profile へ fallback しない
 
-### reader と capability の結合
+### H.264 profile-level-id の抽出と format negotiation
 
-`Mp4SampleReader` は codec type だけでなく、検証済みの required `SdpVideoFormat` を公開する。
-`Mp4PassthroughVideoCodecCapability` は codec type だけを受け取る現行 constructor を廃止し、reader から構築する。
-reader、capability、各 `Mp4EncodedSample` は同じ private `Arc` stream identity を共有し、encoder handler は `Arc::ptr_eq` で照合する。
-異なる reader の sample が渡された場合は、codec configuration が偶然同じでも callback を呼ばず `VideoCodecStatus::Error` を返す。
+issue 0140 の reader / capability 結合基盤の上に、H.264 の required format と format negotiation を追加する。
 
-`get_supported_formats(Encoder)` は required format だけを送信 capability として返す。
-`Mp4PassthroughVideoCodecCapability` は `is_supported` を override し、bare format の解決を経由せず、Encoder かつ reader の codec type と一致する組み合わせを capability の有無として返す。
-H.264、H.265、VP8、VP9、AV1 の既存 passthrough encoder を維持し、Decoder は未対応のままにする。
+`Mp4SampleReader` は H.264 track に対して `required_sdp_format()` を bare `packetization-mode=1` から拡張し、`avcC` から抽出した `profile-level-id` も含める。
 
-`VideoCodecPreference::new_from_capability` と preference validation は、parameter なしの `SdpVideoFormat` を `resolve_sdp_format` へ渡して format negotiation の代用にせず、`is_supported` で codec type の利用可否を判定する。
-これにより bare `H264` は preference の生成・検証にだけ使われ、実 encoder factory の format 解決と混同しない。
+- `avcC` の `AVCProfileIndication`、`profile_compatibility`、`AVCLevelIndication` を RFC 6184 Section 8.1 の 6 桁 hexadecimal `profile-level-id` として組み立てる
+- 全 SPS の NAL header に続く profile、constraint、level の 3 byte が `avcC` と一致することを reader 初期化時に検証する
+- SPS が短い場合、または複数 SPS のいずれかが `avcC` と一致しない場合は invalid H.264 configuration error にする
+- required `profile-level-id` が固定 libwebrtc の parser で認識できない場合は、広告する前に unsupported H.264 profile / level error で reader 初期化を失敗させる
+- `packetization-mode=1` と抽出した `profile-level-id` を送信 bitstream の required format とし、暗黙の Baseline Profile へ fallback しない
 
-`resolve_sdp_format(Encoder, incoming)` は H.264 だけ RFC 6184 Section 8.1 の profile-level-id negotiation に従って incoming format を検証し、互換なら supported format へ置き換えず、検証済みの incoming format を返す。
-H.265、VP8、VP9、AV1 は reader の codec type と一致する場合に、既存の supported format と fuzzy match する挙動を維持する。
-`SoraVideoEncoderFactory::create` はこの戻り値を `create_video_encoder` へ渡すため、factory 経路でも negotiated parameter を保持する。
-`create_video_encoder` は検証済み format と required stream identity を handler へ渡し、name の一致だけでは生成しない。
+`resolve_sdp_format(Encoder, incoming)` は H.264 の incoming format を RFC 6184 Section 8.1 の profile-level-id negotiation に従って検証し、互換なら supported format へ置き換えず、検証済みの incoming format を返す。
+H.265、VP8、VP9、AV1 は issue 0140 の挙動（reader の codec type と一致する場合に既存 supported format と fuzzy match する）を維持し、本 issue では変更しない。
 
 format 解決では次を検証する。
 
@@ -108,20 +116,18 @@ profile-level-id は pure helper で parse し、normalized sub-profile と norm
 - Level 1b は通常の Level 1.1 と区別し、Level 1 と Level 1.1 の間に順序付ける
 - 通常 level は RFC 6184 が許す `level_idc` だけを normalized enum へ変換し、未知の値を単純な整数比較で受理しない
 
-`examples/sumomo` は reader から capability と preference を構築し、その後に同じ reader を capturer へ move する。
 送信先 decoder が required sub-profile と level を受信できない場合は codec negotiation を成立させず、実 bitstream と異なる profile へ downgrade しない。
 
-### sample description の一貫性
+### sample description の一貫性 (H.264 拡張)
 
-固定する `shiguredo_mp4` は、sample description が切り替わる sample で `sample.sample_entry` を返す。
-最初の sample entry だけを採用せず、以後の全 `Some(sample_entry)` も `extract_track_info` と同じ検査へ通す。
+issue 0140 で `Mp4SampleReader::new_inner` は全 `sample.sample_entry` を `extract_track_info` に通し、`codec_type` / `width` / `height` / `nal_length_size` / `parameter_sets` / `timescale` の byte-for-byte 一致を検証する。
 
-- codec type、width / height、NAL length size、parameter sets、required SDP format を最初の configuration と比較する
-- byte-for-byte 同一の sample entry の再掲は受理する
-- `avcC`、SPS / PPS、profile-level-id、解像度などのいずれかが変わる sample description は、sample index と相違項目を含む unsupported sample description error で reader 初期化時に拒否する
+本 issue では H.264 に固有の追加検証として、以下も最初の configuration と比較する。
 
-全 sample が同じ configuration であることを検証した後に private stream identity を生成する。
-これにより一つの reader 内で bitstream configuration が切り替わる入力も、最初の SDP / parameter sets のまま送出しない。
+- `avcC` box 全体の byte-for-byte 一致（issue 0140 の `parameter_sets` 一致は SPS / PPS の Annex B 化後のみを担保するため、`avcC` header と `length_size_minus_one` などを含む box 全体の一致を独立に確認する）
+- 抽出した `profile-level-id` の 3 byte の一致
+
+いずれかが変わる sample description は sample index と相違項目を含む sample description error で reader 初期化時に拒否する（issue 0140 の `Mp4Error::InconsistentSampleDescription` の相違項目に H.264 固有 field を追加する）。
 
 ### sample timeline
 
@@ -243,16 +249,11 @@ fixture の payload が decode order であることは demux 結果の sample i
   - Level 1、Level 1b、Level 1.1 の順序を確認する
   - `avcC` 由来の required format が固定 libwebrtc の未知 profile / level の場合は reader 初期化時に拒否する
   - 短い SPS、`avcC` と SPS の不一致、複数 SPS 間の不一致を reader 初期化時に拒否する
-  - codec configuration が同一でも capability と異なる reader identity の sample を encode すると `VideoCodecStatus::Error` を返し、callback を呼ばない
-- sample description test で次を確認する
-  - 同一 sample entry の再掲を受理する
-  - 2 個目以降の `avcC`、SPS / PPS、profile-level-id、解像度の各変更を sample index 付き error で拒否する
+- sample description test で、2 個目以降の `avcC` box 全体または抽出後の `profile-level-id` が変わる合成 fixture / synthetic table を sample index と相違項目付き error で拒否する（`codec_type` / `width` / `height` / `nal_length_size` / `parameter_sets` / `timescale` の基盤検証は issue 0140 で担保する）
 - 実 `Mp4PassthroughVideoCodecCapability`、`VideoCodecPreference::new_from_capability`、preference validation、`SoraVideoEncoderFactory` を通す test で次を確認する
-  - `is_supported` は Encoder かつ reader の codec type と一致する場合だけ true になり、bare codec name から preference を生成・検証できる
   - `resolve_sdp_format` は profile-level-id のない実 incoming format を拒否する
   - compatible higher level の negotiated format を parameter ごと保持して encoder handler へ渡す
   - incompatible sub-profile と lower level の negotiated format では encoder を生成しない
-  - H.265、VP8、VP9、AV1 reader は従来どおり encoder preference を生成し、既存 format から encoder を生成できる
 - pure timeline helper の table-driven test で次を確認する
   - 負の composition time offset と最小 PTS の正規化
   - `None` と `Some(0)` の同値性
@@ -309,3 +310,4 @@ fixture の payload が decode order であることは demux 結果の sample i
 - 現時点では B frame 入り MP4 を送信する需要がなく、優先度が低い
 - B frame 入力を明確に拒否する対応（非ゼロ composition time offset の検出）は別 issue で先に実施する
 - 対応再開時は本 issue の設計方針をそのまま実装の起点にできる
+- codec 非依存の reader / capability 結合基盤と sample entry 一貫性検証は issue 0140 に切り出し、AV1 対応（issue 0097）が本 issue の pending に巻き添えで止まらない構成にした
