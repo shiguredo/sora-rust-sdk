@@ -43,7 +43,7 @@ Please read <https://github.com/shiguredo/oss/blob/master/README.en.md> before u
 - OpenH264 による H.264 ソフトウェアエンコード/デコード対応
 - AMD AMF (Advanced Media Framework) によるハードウェアエンコード/デコード対応 (Windows / Linux)
 - NVIDIA Video Codec によるハードウェアエンコード/デコード対応 (Windows / Linux)
-- Intel VPL によるハードウェアエンコード/デコード対応 (Windows / Linux)
+- Intel VPL によるハードウェアエンコード/デコード対応 (Linux)
 - Raspberry Pi 向け libcamera による映像入力対応
 - Raspberry Pi 向け V4L2-M2M によるハードウェアエンコード/デコード対応
 - MP4 ファイルから無変換での音声・映像送信対応
@@ -60,7 +60,7 @@ Please read <https://github.com/shiguredo/oss/blob/master/README.en.md> before u
 | Apple VideoToolbox | macOS | H.264 / H.265 | H.264 / H.265 |
 | AMD AMF | Windows / Linux | H.264 / H.265 / AV1 | H.264 / H.265 / AV1 |
 | NVIDIA Video Codec | Windows / Linux | H.264 / H.265 / AV1 | H.264 / H.265 / AV1 / VP8 / VP9 |
-| Intel VPL | Windows / Linux | H.264 / H.265 / VP9 / AV1 | H.264 / H.265 / VP9 / AV1 |
+| Intel VPL | Linux | H.264 / H.265 / VP9 / AV1 | H.264 / H.265 / VP9 / AV1 |
 | V4L2-M2M | Raspberry Pi | H.264 | H.264 |
 
 ### MP4 無変換送信
