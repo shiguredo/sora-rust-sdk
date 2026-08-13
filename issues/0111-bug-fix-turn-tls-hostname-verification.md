@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-13
 - Model: deepseek-v4-flash
 - Branch: feature/fix-turn-tls-hostname-verification
 - Polished: {YYYY-MM-DD}
@@ -40,3 +40,11 @@
 - `src/error.rs` (必要に応じて)
 - 依存クレート (shiguredo-webrtc) のインターフェース (必要に応じて)
 - `CHANGES.md`
+
+## 解決方法
+
+**修正不要として closed にする。** 本 issue は `issues/closed/0069-bug-fix-turn-tls-san-verification-missing.md` と同一内容の重複であり、0069 の調査で以下の結論が得られているため対応しない。
+
+libwebrtc が TURN-TLS 接続時に OpenSSL の `X509_check_host()` で SAN 検証を既に行っている。カスタム `SSLCertificateVerifier` を設定しても、`BasicPacketSocketFactory::CreateClientTcpSocket()` (`basic_packet_socket_factory.cc:214`) が `ssl_adapter->StartSSL(remote_address.hostname())` でホスト名を SSL アダプタに渡し、`OpenSSLAdapter::ContinueSSL()` (`openssl_adapter.cc:396`) が `SSLPostConnectionCheck()` を呼んで `openssl::VerifyPeerCertMatchesHost(ssl, host) && cert_verified` の両方を要求する (`openssl_adapter.cc:773-774`)。`VerifyPeerCertMatchesHost()` (`openssl_utility.cc:215`) が `X509_check_host()` で SAN を検証し、ホスト名検証はバイパスされない。
+
+`src/connection.rs` の `TurnTlsCaCertVerifier::verify_chain` は当時の調査から変更がなく、上記の結論は現状のコードにも依然として適用される。
