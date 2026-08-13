@@ -78,15 +78,6 @@ pub enum Mp4Error {
         /// ビデオコーデック種別。
         codec_type: VideoCodecType,
     },
-    /// 累積再生時間のマイクロ秒変換で overflow が発生した。
-    ///
-    /// `acc * 1_000_000` が `u64` の表現範囲を超えるのは、累積 duration が
-    /// `u64::MAX / 1_000_000` を超える入力に限られる。
-    DurationOverflow {
-        /// overflow に達した時点で最後に加算したサンプルのインデックス
-        /// (0 始まり、ビデオサンプル内の連番)。
-        index: usize,
-    },
 }
 
 impl std::fmt::Display for Mp4Error {
@@ -131,12 +122,6 @@ impl std::fmt::Display for Mp4Error {
                     "サンプルの composition time offset が非ゼロです: sample={index} codec={codec_type:?} (B フレームには未対応)"
                 )
             }
-            Self::DurationOverflow { index } => {
-                write!(
-                    f,
-                    "累積再生時間のマイクロ秒変換でオーバーフローしました: sample={index}"
-                )
-            }
         }
     }
 }
@@ -152,8 +137,7 @@ impl std::error::Error for Mp4Error {
             | Self::InvalidNalLengthSize(_)
             | Self::InputPositionOutOfRange { .. }
             | Self::InconsistentSampleTable { .. }
-            | Self::UnsupportedCompositionTimeOffset { .. }
-            | Self::DurationOverflow { .. } => None,
+            | Self::UnsupportedCompositionTimeOffset { .. } => None,
         }
     }
 }
@@ -236,6 +220,31 @@ struct Mp4SampleMeta {
     duration: u32,
 }
 
+/// MP4 のタイムスケールで表した再生時刻。
+///
+/// マイクロ秒へ事前変換せず、タイムスケール単位 (tick) のまま保持する。
+/// 必要な時点で [`Mp4Duration::to_duration`] により [`std::time::Duration`] へ変換する。
+struct Mp4Duration {
+    /// タイムスケール単位の累積 duration。
+    ticks: u64,
+    /// 1 秒あたりのタイムスタンプ単位数。
+    timescale: u32,
+}
+
+impl Mp4Duration {
+    /// [`std::time::Duration`] に変換する。
+    ///
+    /// 商と剰余に分けて変換するため overflow しない:
+    /// - 秒: `ticks / timescale` は `u64` に収まる
+    /// - ナノ秒: `(ticks % timescale) * 1_000_000_000 / timescale` は
+    ///   分子が `timescale` 未満 * 1_000_000_000 のため 1_000_000_000 未満になる
+    fn to_duration(&self) -> std::time::Duration {
+        let secs = self.ticks / self.timescale as u64;
+        let nanos = (self.ticks % self.timescale as u64) * 1_000_000_000 / self.timescale as u64;
+        std::time::Duration::new(secs, nanos as u32)
+    }
+}
+
 /// MP4 ファイルからビデオサンプルを読み出すリーダー。
 ///
 /// コンストラクタでファイルを開き、全サンプルのメタデータを事前解析する。
@@ -247,11 +256,11 @@ pub struct Mp4SampleReader {
     track_info: Mp4VideoTrackInfo,
     /// 各サンプルのメタデータ。
     samples: Vec<Mp4SampleMeta>,
-    /// 各フレームの累積再生時刻 (マイクロ秒)。
-    /// cumulative_us[0] = 0, cumulative_us[i] = フレーム 0..i の合計再生時間。
+    /// 各フレームの累積再生時刻。
+    /// cumulative[0] = 0, cumulative[i] = フレーム 0..i の合計再生時間。
     /// 長さは samples.len() + 1 で、末尾が動画全体の長さ。
     /// フレームペーシングで絶対時刻ベースの待機に使用する。
-    cumulative_us: Vec<u64>,
+    cumulative: Vec<Mp4Duration>,
 }
 
 impl Mp4SampleReader {
@@ -369,27 +378,29 @@ impl Mp4SampleReader {
         // フレームペーシングで「次のフレームをいつ送るべきか」を O(1) で求めるため。
         // thread::sleep の相対待ちでは処理時間の累積ドリフトが発生するが、
         // このテーブルを使って Instant ベースの絶対時刻待ちを行うことで防止する。
-        let timescale = track_info.timescale as u64;
-        let mut cumulative_us = Vec::new();
+        // 時刻はマイクロ秒へ事前変換せず、タイムスケール単位 (tick) のまま保持する。
+        let timescale = track_info.timescale;
+        let mut cumulative = Vec::new();
         let mut acc: u64 = 0;
-        cumulative_us.push(0);
-        for (index, sample) in samples.iter().enumerate() {
+        cumulative.push(Mp4Duration {
+            ticks: 0,
+            timescale,
+        });
+        for sample in &samples {
             // 加算は shiguredo_mp4 が検証する invariant
             // (Σ sample count <= u32::MAX なら総 duration < u64::MAX) により overflow しない。
             acc += sample.duration as u64;
-            // マイクロ秒への変換は累積 duration が u64::MAX / 1_000_000 を超えると overflow する。
-            // overflow した場合は reader 初期化を DurationOverflow で失敗させる。
-            let us = acc
-                .checked_mul(1_000_000)
-                .ok_or(Mp4Error::DurationOverflow { index })?;
-            cumulative_us.push(us / timescale);
+            cumulative.push(Mp4Duration {
+                ticks: acc,
+                timescale,
+            });
         }
 
         Ok(Self {
             file,
             track_info,
             samples,
-            cumulative_us,
+            cumulative,
         })
     }
 
@@ -577,10 +588,10 @@ impl Mp4SampleReader {
         })
     }
 
-    /// 先頭からフレーム index までの累積再生時間をマイクロ秒で返す。
+    /// 先頭からフレーム index までの累積再生時間を返す。
     /// index=0 なら 0、index=len() なら動画全体の長さ。
-    fn cumulative_duration_us(&self, index: usize) -> u64 {
-        self.cumulative_us[index]
+    fn cumulative_duration(&self, index: usize) -> std::time::Duration {
+        self.cumulative[index].to_duration()
     }
 }
 
@@ -925,12 +936,10 @@ impl Mp4VideoCapturer {
                     }
 
                     // 次のフレームの絶対送信時刻まで待機する。
-                    // cumulative_duration_us(i+1) は「フレーム 0 から i までの合計再生時間」を返す。
+                    // cumulative_duration(i+1) は「フレーム 0 から i までの合計再生時間」を返す。
                     // loop_start からのオフセットとして使うことで、累積ドリフトを防止する。
-                    let next_frame_time_us = reader.cumulative_duration_us(i + 1);
-                    let Some(target) = loop_start
-                        .checked_add(std::time::Duration::from_micros(next_frame_time_us))
-                    else {
+                    let next_frame_time = reader.cumulative_duration(i + 1);
+                    let Some(target) = loop_start.checked_add(next_frame_time) else {
                         // 累積再生時間が Instant の表現範囲を超えるのは、再生時間が極めて長い破損入力に限られる。
                         // 実用上は発生しないが、発生した場合はログを残してフィーダースレッドを終了する。
                         rtc_log_warning!("MP4: loop deadline overflow, stopping feeder thread");
@@ -973,102 +982,6 @@ impl Drop for Mp4VideoCapturer {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // 既存 H.264 フィクスチャのボックス構造を流用して、
-    // 指定のサンプル数と duration を持つ合成 MP4 を組み立てる。
-    //
-    // stts は run-length 形式のため、1 エントリ {sample_count, sample_delta} で
-    // 任意のサンプル数と duration を表現できる。
-    // サンプルデータは stsz の constant モード (sample_size=1) で 1 バイトずつとし、
-    // オフセットやサイズの整合条件は shiguredo_mp4 の SampleTableAccessor の検証を
-    // 通る構成にする。
-    fn build_synthetic_mp4(sample_count: u32, sample_delta: u32) -> Vec<u8> {
-        let fixture = include_bytes!("../../testdata/red-320x320-h264.mp4");
-
-        let mut mp4 = Vec::new();
-        // ftyp はフィクスチャのものをそのまま使う。
-        mp4.extend_from_slice(&fixture[0..32]);
-
-        // mdat: サンプルデータは 1 バイトずつのダミー。
-        let mdat_payload_offset = mp4.len() + 8;
-        mp4.extend_from_slice(&(8 + sample_count).to_be_bytes());
-        mp4.extend_from_slice(b"mdat");
-        mp4.resize(mp4.len() + sample_count as usize, 0);
-
-        // moov 以下はフィクスチャのボックス (mvhd / tkhd / mdhd / hdlr / vmhd / dinf / stsd) を
-        // 流用し、stts / stsc / stsz / stco だけを再構築する。
-        let moov_size_pos = mp4.len();
-        mp4.extend_from_slice(&[0; 4]);
-        mp4.extend_from_slice(b"moov");
-        mp4.extend_from_slice(&fixture[1255..1363]); // mvhd
-
-        let trak_size_pos = mp4.len();
-        mp4.extend_from_slice(&[0; 4]);
-        mp4.extend_from_slice(b"trak");
-        mp4.extend_from_slice(&fixture[1371..1463]); // tkhd
-
-        let mdia_size_pos = mp4.len();
-        mp4.extend_from_slice(&[0; 4]);
-        mp4.extend_from_slice(b"mdia");
-        mp4.extend_from_slice(&fixture[1507..1539]); // mdhd
-        mp4.extend_from_slice(&fixture[1539..1584]); // hdlr
-
-        let minf_size_pos = mp4.len();
-        mp4.extend_from_slice(&[0; 4]);
-        mp4.extend_from_slice(b"minf");
-        mp4.extend_from_slice(&fixture[1592..1612]); // vmhd
-        mp4.extend_from_slice(&fixture[1612..1648]); // dinf
-
-        let stbl_size_pos = mp4.len();
-        mp4.extend_from_slice(&[0; 4]);
-        mp4.extend_from_slice(b"stbl");
-        mp4.extend_from_slice(&fixture[1656..1848]); // stsd (avc1 + avcC)
-
-        // stts
-        mp4.extend_from_slice(&24u32.to_be_bytes());
-        mp4.extend_from_slice(b"stts");
-        mp4.extend_from_slice(&[0, 0, 0, 0]); // version/flags
-        mp4.extend_from_slice(&1u32.to_be_bytes()); // entry_count
-        mp4.extend_from_slice(&sample_count.to_be_bytes());
-        mp4.extend_from_slice(&sample_delta.to_be_bytes());
-
-        // stsc
-        mp4.extend_from_slice(&28u32.to_be_bytes());
-        mp4.extend_from_slice(b"stsc");
-        mp4.extend_from_slice(&[0, 0, 0, 0]); // version/flags
-        mp4.extend_from_slice(&1u32.to_be_bytes()); // entry_count
-        mp4.extend_from_slice(&1u32.to_be_bytes()); // first_chunk
-        mp4.extend_from_slice(&sample_count.to_be_bytes()); // samples_per_chunk
-        mp4.extend_from_slice(&1u32.to_be_bytes()); // sample_description_index
-
-        // stsz (constant モード: sample_size が非ゼロ)
-        mp4.extend_from_slice(&20u32.to_be_bytes());
-        mp4.extend_from_slice(b"stsz");
-        mp4.extend_from_slice(&[0, 0, 0, 0]); // version/flags
-        mp4.extend_from_slice(&1u32.to_be_bytes()); // sample_size
-        mp4.extend_from_slice(&sample_count.to_be_bytes());
-
-        // stco
-        mp4.extend_from_slice(&20u32.to_be_bytes());
-        mp4.extend_from_slice(b"stco");
-        mp4.extend_from_slice(&[0, 0, 0, 0]); // version/flags
-        mp4.extend_from_slice(&1u32.to_be_bytes()); // entry_count
-        mp4.extend_from_slice(&(mdat_payload_offset as u32).to_be_bytes());
-
-        // コンテナボックスのサイズフィールドを埋める。
-        for size_pos in [
-            stbl_size_pos,
-            minf_size_pos,
-            mdia_size_pos,
-            trak_size_pos,
-            moov_size_pos,
-        ] {
-            let size = (mp4.len() - size_pos) as u32;
-            mp4[size_pos..size_pos + 4].copy_from_slice(&size.to_be_bytes());
-        }
-
-        mp4
-    }
 
     #[test]
     fn passthrough_capability_supports_only_selected_encoder_codec() {
@@ -1338,89 +1251,59 @@ mod tests {
             "サンプル NAL データがファイルから正しく読み込まれていません"
         );
 
-        // cumulative_us の全値が従来どおり (i * 40000 µs) であることを確認する。
+        // cumulative_duration の全値が従来どおり (i * 40000 µs) であることを確認する。
         // フィクスチャは 25 サンプル、duration 512、timescale 12800 のため、
         // 1 サンプルあたり 512 * 1_000_000 / 12800 = 40000 マイクロ秒になる。
         for i in 0..=reader.len() {
             assert_eq!(
-                reader.cumulative_duration_us(i),
-                i as u64 * 40000,
-                "cumulative_us[{i}] が期待値と異なります"
+                reader.cumulative_duration(i),
+                std::time::Duration::from_micros(i as u64 * 40000),
+                "cumulative_duration[{i}] が期待値と異なります"
             );
         }
 
         let _ = std::fs::remove_file(&tmp_path);
     }
 
-    // 累積再生時刻のマイクロ秒変換が overflow する duration を含む MP4 を
-    // Mp4SampleReader::new が DurationOverflow で拒否することを確認する。
-    //
-    // 合成 MP4 は全サンプルの duration を u32::MAX にしている。
-    // 4295 サンプルの累積 duration (4295 * u32::MAX) は u64::MAX / 1_000_000 を超えるため、
-    // 最後のサンプル (index 4294) の累積値で乗算 overflow する。
+    // Mp4Duration::to_duration が overflow せず正しい Duration を返すことを確認する。
     #[test]
-    fn sample_reader_rejects_duration_overflow() {
-        let mp4 = build_synthetic_mp4(4295, u32::MAX);
-        let tmp_name = format!(
-            "sora-sdk-mp4-test-duration-overflow-{}-{}.mp4",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("システム時刻は UNIX_EPOCH より後である必要があります")
-                .as_nanos()
-        );
-        let tmp_path = std::env::temp_dir().join(tmp_name);
-
-        std::fs::write(&tmp_path, &mp4).expect("一時フィクスチャの書き込みに失敗しました");
-
-        let result = Mp4SampleReader::new(
-            tmp_path
-                .to_str()
-                .expect("パスは有効な UTF-8 である必要があります"),
-        );
-
-        let _ = std::fs::remove_file(&tmp_path);
-
-        match result {
-            Err(crate::error::Error::Mp4 { source }) => {
-                assert!(
-                    matches!(source, Mp4Error::DurationOverflow { index: 4294 }),
-                    "DurationOverflow エラーを期待しましたが、実際は: {source:?}"
-                );
+    fn mp4_duration_converts_to_duration() {
+        // ticks=0 は 0 秒。
+        assert_eq!(
+            Mp4Duration {
+                ticks: 0,
+                timescale: 12800
             }
-            Err(e) => panic!("Mp4 エラーを期待しましたが、実際は: {e}"),
-            Ok(_) => panic!("Err を期待しましたが、Ok でした"),
-        }
-    }
-
-    // 累積 duration が u64::MAX / 1_000_000 直前の MP4 は overflow せず受理されることを確認する。
-    //
-    // 4294 サンプル * u32::MAX = 18442589564730 <= u64::MAX / 1_000_000 のため、
-    // マイクロ秒変換が overflow しない。
-    #[test]
-    fn sample_reader_accepts_maximum_duration_before_overflow() {
-        let mp4 = build_synthetic_mp4(4294, u32::MAX);
-        let tmp_name = format!(
-            "sora-sdk-mp4-test-duration-max-{}-{}.mp4",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("システム時刻は UNIX_EPOCH より後である必要があります")
-                .as_nanos()
+            .to_duration(),
+            std::time::Duration::ZERO
         );
-        let tmp_path = std::env::temp_dir().join(tmp_name);
-
-        std::fs::write(&tmp_path, &mp4).expect("一時フィクスチャの書き込みに失敗しました");
-
-        let reader = Mp4SampleReader::new(
-            tmp_path
-                .to_str()
-                .expect("パスは有効な UTF-8 である必要があります"),
-        )
-        .expect("閾値直前の MP4 は受理されるべきです");
-        assert_eq!(reader.len(), 4294);
-
-        let _ = std::fs::remove_file(&tmp_path);
+        // ticks == timescale はちょうど 1 秒。
+        assert_eq!(
+            Mp4Duration {
+                ticks: 12800,
+                timescale: 12800
+            }
+            .to_duration(),
+            std::time::Duration::from_secs(1)
+        );
+        // 割り切れない剰余: 1 tick = 1/12800 秒 = 78125 ナノ秒。
+        assert_eq!(
+            Mp4Duration {
+                ticks: 1,
+                timescale: 12800
+            }
+            .to_duration(),
+            std::time::Duration::from_nanos(78125)
+        );
+        // 巨大な ticks でも overflow しない (timescale=1 なら tick がそのまま秒になる)。
+        assert_eq!(
+            Mp4Duration {
+                ticks: u64::MAX,
+                timescale: 1
+            }
+            .to_duration(),
+            std::time::Duration::new(u64::MAX, 0)
+        );
     }
 
     // リーダー構築後にファイルを 0 バイトへ縮小すると、
