@@ -78,6 +78,17 @@ pub enum Mp4Error {
         /// ビデオコーデック種別。
         codec_type: VideoCodecType,
     },
+    /// 2 個目以降の sample entry が最初の configuration と一致しない。
+    ///
+    /// codec type、解像度、NAL 長サイズ、parameter sets のいずれかが変わる
+    /// sample description は本 SDK では受理しない。
+    /// byte-for-byte 完全一致の再掲は `shiguredo_mp4` 側で `None` に normalize されるため受理する。
+    InconsistentSampleDescription {
+        /// 相違が検出されたビデオサンプルの 0 始まりインデックス。
+        index: usize,
+        /// 相違した Mp4VideoTrackInfo の field 名。
+        fields: Vec<&'static str>,
+    },
 }
 
 impl std::fmt::Display for Mp4Error {
@@ -122,6 +133,12 @@ impl std::fmt::Display for Mp4Error {
                     "サンプルの composition time offset が非ゼロです: sample={index} codec={codec_type:?} (B フレームには未対応)"
                 )
             }
+            Self::InconsistentSampleDescription { index, fields } => {
+                write!(
+                    f,
+                    "サンプルエントリーが最初の設定と一致しません: sample={index} fields={fields:?}"
+                )
+            }
         }
     }
 }
@@ -137,7 +154,8 @@ impl std::error::Error for Mp4Error {
             | Self::InvalidNalLengthSize(_)
             | Self::InputPositionOutOfRange { .. }
             | Self::InconsistentSampleTable { .. }
-            | Self::UnsupportedCompositionTimeOffset { .. } => None,
+            | Self::UnsupportedCompositionTimeOffset { .. }
+            | Self::InconsistentSampleDescription { .. } => None,
         }
     }
 }
@@ -314,7 +332,11 @@ impl Mp4SampleReader {
         let timescale = video_track.timescale.get();
 
         // 全サンプルを順次読み出す。
-        // 最初のサンプルの sample_entry からコーデック情報 (解像度、parameter sets 等) を取得する。
+        // 最初のサンプルの sample_entry からコーデック情報 (解像度、parameter sets 等) を取得し、
+        // 以後の Some(sample_entry) も extract_track_info に通して、
+        // codec_type / width / height / nal_length_size / parameter_sets の
+        // byte-for-byte 一致を検証する。sample description が途中で切り替わる MP4 を
+        // silently 最初の configuration のまま送出しないためのゲート。
         let mut track_info: Option<Mp4VideoTrackInfo> = None;
         let mut samples = Vec::new();
 
@@ -324,11 +346,20 @@ impl Mp4SampleReader {
                 continue;
             }
 
-            // 最初のサンプルの sample_entry からコーデック情報を取得する。
-            if track_info.is_none()
-                && let Some(entry) = sample.sample_entry
-            {
-                track_info = Some(Self::extract_track_info(entry, timescale)?);
+            // sample_entry が付与されたサンプルではコーデック情報を確定または一貫性検証する。
+            if let Some(entry) = sample.sample_entry {
+                let info = Self::extract_track_info(entry, timescale)?;
+                if let Some(ref first) = track_info {
+                    let mismatched = collect_mismatched_track_info_fields(first, &info);
+                    if !mismatched.is_empty() {
+                        return Err(Mp4Error::InconsistentSampleDescription {
+                            index: samples.len(),
+                            fields: mismatched,
+                        });
+                    }
+                } else {
+                    track_info = Some(info);
+                }
             }
 
             // 非ゼロの composition time offset はデコード順と表示時刻が一致しないため拒否する。
@@ -600,6 +631,40 @@ impl Mp4SampleReader {
 /// ファイルベースの読み込みで seek + read_exact の組み合わせが必要な箇所は
 /// すべてこの関数に集約する。read_exact は要求サイズの読み込みを保証するため、
 /// ファイルが途中で縮小されている場合は I/O エラーを返す。
+/// 2 個の `Mp4VideoTrackInfo` を field 単位で比較し、相違する field 名を返す。
+///
+/// 検証対象は `codec_type` / `width` / `height` / `nal_length_size` /
+/// `parameter_sets` の 5 field。
+/// `timescale` は `mdhd` の track 単位属性で `SampleEntry` からは抽出されず、
+/// `extract_track_info` にはループ外の同一 scalar が毎回渡されるため、
+/// sample entry 間で変わり得ない値として比較対象に含めない。
+///
+/// codec 固有 field（H.264 の profile-level-id、AV1 の av1C / configOBUs など）
+/// の bit-identical 検証は、各 codec 固有の別対応で `Mp4VideoTrackInfo` を
+/// 拡張する形で加える。
+fn collect_mismatched_track_info_fields(
+    first: &Mp4VideoTrackInfo,
+    current: &Mp4VideoTrackInfo,
+) -> Vec<&'static str> {
+    let mut mismatched = Vec::new();
+    if first.codec_type != current.codec_type {
+        mismatched.push("codec_type");
+    }
+    if first.width != current.width {
+        mismatched.push("width");
+    }
+    if first.height != current.height {
+        mismatched.push("height");
+    }
+    if first.nal_length_size != current.nal_length_size {
+        mismatched.push("nal_length_size");
+    }
+    if first.parameter_sets != current.parameter_sets {
+        mismatched.push("parameter_sets");
+    }
+    mismatched
+}
+
 fn read_bytes_at(
     file: &mut BufReader<std::fs::File>,
     position: u64,
@@ -1025,6 +1090,77 @@ mod tests {
         let unresolved = capability
             .resolve_sdp_format(CodecDirection::Encoder, SdpVideoFormat::new("VP8").as_ref());
         assert!(unresolved.is_none());
+    }
+
+    #[test]
+    fn sample_description_consistency_check_reports_field_mismatches() {
+        // 実際に sample_entry の切り替わりが起きる合成 MP4 を用意するのが難しいため、
+        // 内部ヘルパー collect_mismatched_track_info_fields を table-driven に検証する。
+        let base = Mp4VideoTrackInfo {
+            codec_type: VideoCodecType::H264,
+            width: 320,
+            height: 320,
+            timescale: 1000,
+            parameter_sets: Some(vec![0x00, 0x00, 0x00, 0x01, 0x67]),
+            nal_length_size: 4,
+        };
+
+        // 完全一致は相違なし。
+        assert!(collect_mismatched_track_info_fields(&base, &base).is_empty());
+
+        // width だけ変えると width が相違として報告される。
+        let mut modified = Mp4VideoTrackInfo {
+            codec_type: base.codec_type,
+            width: base.width + 1,
+            height: base.height,
+            timescale: base.timescale,
+            parameter_sets: base.parameter_sets.clone(),
+            nal_length_size: base.nal_length_size,
+        };
+        assert_eq!(
+            collect_mismatched_track_info_fields(&base, &modified),
+            vec!["width"]
+        );
+
+        // parameter_sets だけを変えると parameter_sets が相違として報告される。
+        modified = Mp4VideoTrackInfo {
+            codec_type: base.codec_type,
+            width: base.width,
+            height: base.height,
+            timescale: base.timescale,
+            parameter_sets: Some(vec![0xff]),
+            nal_length_size: base.nal_length_size,
+        };
+        assert_eq!(
+            collect_mismatched_track_info_fields(&base, &modified),
+            vec!["parameter_sets"]
+        );
+
+        // codec_type / height / nal_length_size / parameter_sets を同時に変えると
+        // 相違リストに全 field が設計方針の記載順で並ぶ。
+        modified = Mp4VideoTrackInfo {
+            codec_type: VideoCodecType::H265,
+            width: base.width,
+            height: base.height + 1,
+            timescale: base.timescale,
+            parameter_sets: None,
+            nal_length_size: 2,
+        };
+        assert_eq!(
+            collect_mismatched_track_info_fields(&base, &modified),
+            vec!["codec_type", "height", "nal_length_size", "parameter_sets"]
+        );
+
+        // timescale だけを変えても比較対象外なので相違なし。
+        modified = Mp4VideoTrackInfo {
+            codec_type: base.codec_type,
+            width: base.width,
+            height: base.height,
+            timescale: base.timescale + 1,
+            parameter_sets: base.parameter_sets.clone(),
+            nal_length_size: base.nal_length_size,
+        };
+        assert!(collect_mismatched_track_info_fields(&base, &modified).is_empty());
     }
 
     #[test]
