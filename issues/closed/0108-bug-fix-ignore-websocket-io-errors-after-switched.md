@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-13
 - Model: deepseek-v4-flash
 - Branch: feature/fix-ignore-websocket-io-errors-after-switched
 - Polished: {YYYY-MM-DD}
@@ -40,3 +40,16 @@ RST 切断やプロトコルエラーは `ignore_disconnect_websocket=true` の�
 
 - `src/connection.rs`
 - `CHANGES.md`
+
+## 解決方法
+
+`src/connection.rs` の `SoraConnection::run` メインループで、WebSocket I/O エラーの吸収を経路間で統一した。
+
+- `stream.read` の非 `UnexpectedEof` エラー (ECONNRESET 等) を、`switched_ignore_disconnect_websocket && use_data_channel_signaling` が成立するときは吸収し、`websocket_closed = true` にして DataChannel シグナリングを継続する
+- `ws.feed_recv_buf` のエラー (WebSocket プロトコルエラー) も同じ条件で吸収し、`websocket_closed = true` にして継続する
+- `flush_ws_output` のエラー吸収条件から `!websocket_closed` を外し、read エラー吸収後に残る ping flush 失敗でも run() が終了しないようにした
+- 吸収時はいずれも英語の警告ログを出力する
+- 切替成立前 (`use_data_channel_signaling=false`) のエラーは従来どおり伝播し、通常の WebSocket のみ構成の挙動は変わらない
+- `cargo test --workspace` と、実 Sora サーバーを使う既存の `ignore_disconnect_websocket` / `server_close_message` e2e テストで回帰がないことを確認した
+
+CHANGES.md への変更履歴の追記は対象外とした。
