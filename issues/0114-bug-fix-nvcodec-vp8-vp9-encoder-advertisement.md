@@ -2,10 +2,18 @@
 
 - Priority: Medium
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-13
 - Model: deepseek-v4-flash
 - Branch: feature/fix-nvcodec-vp8-vp9-encoder-advertisement
 - Polished: {YYYY-MM-DD}
+
+## 解決方法
+
+対応不要のため closed にする。
+
+shiguredo_nvcodec は `VideoCodecType::to_encoder_codec()` が VP8 / VP9 / JPEG に対して `None` を返し、`probe_encoding()` がそれらのコーデックで `EncodingInfo::unsupported()` (supported: false) を返す。そのため `supported_codecs()` は VP8/VP9 をエンコード方向では絶対に supported にしない。
+
+本 issue の前提である「ハードウェアが VP8/VP9 のエンコード対応を報告し、SDK がそれをエンコード方向に広告する」経路は、SDK 側の `collect_supported_formats` が `info.encoding.supported` で分岐しているため発生しない。
 
 ## 目的
 
