@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-29
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-13
 - Model: GPT-5
 - Branch: feature/fix-mp4-duration-overflow
 - Polished: 2026-08-13
@@ -84,6 +84,15 @@ fixture を byte patch する場合は、書き換え前の box type、box size�
 - `cargo clippy --workspace --all-targets -- -D warnings` が成功する
 - `CHANGES.md` の develop セクションに `[FIX]` を追記する
 - production log は英語、コメントとテストの assertion message は日本語にする
+
+## 解決方法
+
+`Mp4SampleReader` の累積再生時刻を、タイムスケール単位 (tick) のまま保持する `Mp4Duration` に変更した。`std::time::Duration` への変換は商と剰余に分けて行い、秒 (`ticks / timescale`) とナノ秒 (`(ticks % timescale) * 1_000_000_000 / timescale`) のどちらも overflow しないことを、`shiguredo_mp4` の invariant（Σ sample count <= `u32::MAX` なら総 duration < `u64::MAX`）と合わせて検証した。
+
+- `src/video_codecs/mp4.rs` に `Mp4Duration` と `Mp4Duration::to_duration` を追加し、`cumulative` を tick 保持に変更した
+- `to_duration` が overflow せず正しい `Duration` を返すことを、ticks=0 / 1 秒ちょうど / 割り切れない剰余 / `u64::MAX` の巨大値 / ナノ秒の乗算上限 (`timescale=u32::MAX`) の境界で確認した
+- 既存 fixture の `cumulative_duration` 全値が従来どおり (`i * 40000 µs`) であることを確認した
+- `CHANGES.md` に `[FIX]` を追記した
 
 ## 参考
 
