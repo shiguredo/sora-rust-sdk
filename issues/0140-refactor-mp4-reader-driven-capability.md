@@ -25,13 +25,20 @@ issue 0097（High）と issue 0096（High）の双方が「reader が公開す�
 
 `VideoCodecCapability::is_supported` のデフォルト実装は、bare `SdpVideoFormat` を生成して `resolve_sdp_format` に渡し、解決可否で判定する。
 `resolve_sdp_format` のデフォルトは `get_supported_formats` との fuzzy match である。
-capability が required parameter を含む format を advertise すると、bare 生成では match せず `is_supported` が false になり、preference 判定側から見た「その codec type を送れる capability」の検出が破綻する。
+`VideoCodecPreference::new_from_capability` はすでに `capability.is_supported(direction, codec_type)` を経由して preference を生成する。
+一方で `validate_video_codec_preference` から呼ばれる `validate_codec` は、`is_supported` の結果を確認した後にさらに `capability.resolve_sdp_format(direction, bare SdpVideoFormat)` の解決可否を独立して検証する。
+capability が required parameter を含む format を advertise すると bare 生成では match せず、`is_supported` を override して true を返しても preference validation の bare format 解決検証で拒否されるため、実 encoder factory の format 解決経路と preference 判定経路の分離が崩れる。
+
+`SoraVideoEncoderFactory::create` はすでに `capability.resolve_sdp_format(direction, format)` の返り値を `capability.create_video_encoder(env, resolved.as_ref())` に渡す実装になっている（`SoraVideoDecoderFactory::create` も同様）。
+本 issue 時点で factory 経路の code 変更は不要だが、issue 0096 / 0097 が negotiated parameter の保持を本 issue の基盤の上に積むため、この pass-through を回帰テストと production コメントで固定する。
 
 `Mp4SampleReader::new_inner` の while ループは最初のサンプルの `Some(sample_entry)` からだけ `extract_track_info` を呼び、以後の `sample.sample_entry` を無視する。
 `shiguredo_mp4::demux::Sample::sample_entry` は sample description が切り替わるサンプルで再度 `Some` を返すが、現行実装は sample description の切り替わりを silently 最初の configuration のまま送り続ける。
 
 `Mp4PassthroughEncoder` は `callback` だけを保持し、入力 `VideoFrame` が正規の reader / capturer 経由の sample かどうかを識別しない。
 異なる reader の sample を差し込まれても callback を呼び、`EncodedImage` を組み立ててしまう。
+`Mp4EncodedSample` は `pub(crate)` struct のため、external code からは直接参照できない。
+本 issue で追加する bitstream identity field は同じ crate 可視性の枠内で保持し、`VideoFrameBuffer::as_native_ref::<Mp4EncodedSample>` は crate 内の `Mp4PassthroughEncoder` からのみ呼ばれる前提を維持する。
 
 ## 設計方針
 
@@ -87,7 +94,7 @@ external に露出せず、`Arc::ptr_eq` による同一 reader 判定にだけ�
 
 reader / capability / capturer は 1 対 1 対 1 で使い、複数 capability を 1 reader から派生させる helper は本 issue で追加しない。
 
-### `is_supported` の override
+### `is_supported` の override と preference validation の分離
 
 `Mp4PassthroughVideoCodecCapability` は `is_supported(direction, codec_type)` を override し、以下だけを判定する。
 
@@ -97,19 +104,29 @@ reader / capability / capturer は 1 対 1 対 1 で使い、複数 capability �
 デフォルト実装の「bare `SdpVideoFormat` を生成して `resolve_sdp_format` に通す」経路を経由しない。
 required parameter を持つ format を advertise しても、bare 生成による preference 判定の false 化を回避する。
 
-`VideoCodecPreference::new_from_capability` と preference validation は、bare codec name の `SdpVideoFormat` を `resolve_sdp_format` に投入して format negotiation の代用にせず、`is_supported` の結果だけを preference 生成・検証に使う。
-これにより bare `H264` / `AV1` を preference の生成・検証だけに使う経路と、実 encoder factory の format 解決経路を明確に分ける。
+`VideoCodecPreference::new_from_capability` はすでに `capability.is_supported` を経由するため本 issue で変更しない。
+override された `is_supported` の結果がそのまま preference 生成に使われることを test で確認する。
+
+`validate_video_codec_preference` から呼ばれる `validate_codec` は、現状 `is_supported` の判定に加えて `capability.resolve_sdp_format(direction, bare SdpVideoFormat)` の解決可否を独立して検証する。
+本 issue でこの追加検証を削除し、`is_supported` の結果を preference validation の source of truth にする。
+
+- `validate_codec` の bare `SdpVideoFormat` を組み立てて `resolve_sdp_format` に渡し、None なら reject する分岐を削除する
+- `is_supported == true` かつ `capability` の implementation 名が preference と一致することだけで validation を通過させる
+- `codec_capability_summary` の呼び出しなど、削除する分岐に紐づくヘルパーの参照が孤立した場合は同時に整理する
+- InternalVideoCodecCapability・InternalAppleVideoCodecCapability など、`is_supported` を override していない既存 capability は現行のデフォルト実装により従来どおり動作するため回帰しないことを test で確認する
+
+これにより bare codec name の `SdpVideoFormat` は preference の生成・検証だけに使われず、実 encoder factory の format 解決経路（`SoraVideoEncoderFactory::create` が negotiated 実 format を `resolve_sdp_format` に渡す経路）と明確に分離する。
 
 ### `resolve_sdp_format` と factory 経路
 
 本 issue では `resolve_sdp_format` の実装を変更せず、既存の `get_supported_formats` との fuzzy match 挙動を維持する。
 H.264 profile-level-id negotiation は issue 0096 で、AV1 profile / level / tier negotiation は issue 0097 で本 issue の基盤の上に追加する。
 
-`SoraVideoEncoderFactory::create` が `resolve_sdp_format` の返り値をそのまま `create_video_encoder` に渡し、negotiated parameter が factory 経路で失われないことを本 issue で明文化する。
-現状の factory 経路がすでに resolve 結果を渡しているならその挙動を production コメントで固定し、渡していない不整合があれば直す。
-本 issue 時点の required format には codec 固有 parameter が無いため観測できる差は出ないが、issue 0096 / 0097 の parameter 保持を担保する前提条件になる。
+`SoraVideoEncoderFactory::create` はすでに `capability.resolve_sdp_format(CodecDirection::Encoder, format)` の返り値を `capability.create_video_encoder(env, resolved.as_ref())` に渡す実装になっている。
+本 issue では code 変更を追加せず、この pass-through 挙動を回帰テストで固定し、依存 issue（0096 / 0097）が negotiated parameter の保持を前提にできるよう production コメントで明文化する。
+`SoraVideoDecoderFactory::create` も同様の pass-through 挙動になっているが、MP4 passthrough は Decoder 未対応なので Decoder factory は本 issue の回帰対象に含めない。
 
-`create_video_encoder` は現行の codec type 一致判定に加え、capability が保持する bitstream identity を handler の constructor 引数として渡す。
+`Mp4PassthroughVideoCodecCapability::create_video_encoder` は現行の codec type 一致判定に加え、capability が保持する bitstream identity を handler の constructor 引数として渡す。
 handler は前節の `Arc::ptr_eq` 判定を行う。
 
 ### sample entry の一貫性
@@ -137,7 +154,8 @@ codec 固有 field（H.264 の profile-level-id、AV1 の av1C / configOBUs な�
 ## 変更対象
 
 - `src/video_codecs/mp4.rs`
-- `src/video_codec_preference.rs`（`is_supported` 経路への切り替えが必要な場合のみ）
+- `src/video_codec_preference.rs`（`validate_codec` の bare `SdpVideoFormat` 検証を削除）
+- `src/video_codec.rs`（`SoraVideoEncoderFactory::create` の pass-through を production コメントで固定し、必要に応じて回帰テストを追加）
 - `examples/sumomo/src/main.rs`
 - `examples/sumomo/src/tests.rs`
 - `CHANGES.md`
@@ -148,15 +166,16 @@ codec 固有 field（H.264 の profile-level-id、AV1 の av1C / configOBUs な�
 - `Mp4PassthroughVideoCodecCapability::new` の signature が `&Mp4SampleReader` を受け取る形に変わる
 - `Mp4PassthroughVideoCodecCapability::get_supported_formats(Encoder)` の返り値が reader の `required_sdp_format()` と一致する
 - `Mp4PassthroughVideoCodecCapability::is_supported` が override され、`Encoder` かつ reader の codec type と一致する場合のみ true を返す test がある
-- `Mp4PassthroughVideoCodecCapability::is_supported` の判定が bare `SdpVideoFormat` の `resolve_sdp_format` 経路を経由しないことを確認する test がある（`resolve_sdp_format` を意図的に false 化しても `is_supported` が true を返す）
 - reader が private の bitstream identity を生成し、capability・各 `Mp4EncodedSample`・encoder handler で `Arc::clone` を共有する
 - `Mp4PassthroughEncoder` は入力 `VideoFrame` の sample identity を `Arc::ptr_eq` で照合し、不一致なら callback を呼ばず `VideoCodecStatus::Error` を返す test がある
 - codec configuration と codec_type が一致しても異なる reader / capability から生成した sample を渡すと `VideoCodecStatus::Error` になり、callback が呼ばれない test がある
 - `Mp4SampleReader::new_inner` は最初の `Some(sample_entry)` 以外にも `extract_track_info` を呼び、`codec_type` / `width` / `height` / `nal_length_size` / `parameter_sets` / `timescale` のいずれかが最初と異なる場合は sample index と相違項目を含む `Mp4Error::InconsistentSampleDescription` で失敗する
 - byte-for-byte 同一の sample entry の再掲は受理する合成 fixture / synthetic table test がある
 - 2 個目以降の sample entry で `avcC` / SPS / PPS / 解像度 / `nal_length_size` を変えた合成 fixture / synthetic table で reader 初期化が sample index 付き error で失敗する test がある
-- `VideoCodecPreference::new_from_capability` と preference validation が `is_supported` 経路を経由し、bare codec name の `SdpVideoFormat` を `resolve_sdp_format` に投入しない
-- `SoraVideoEncoderFactory::create` が `resolve_sdp_format` の返り値をそのまま `create_video_encoder` に渡すことを test と production コメントで固定する
+- `validate_video_codec_preference` から bare `SdpVideoFormat` の `resolve_sdp_format` 解決可否検証が削除され、`is_supported` の結果だけで preference validation が通過することを test で確認する
+- `VideoCodecPreference::new_from_capability` と `validate_video_codec_preference` を通す test で、`Mp4PassthroughVideoCodecCapability` から生成した preference が Encoder かつ reader の codec type と一致するエントリを持ち、validation を通過することを確認する
+- `InternalVideoCodecCapability`・`InternalAppleVideoCodecCapability` など `is_supported` を override していない既存 capability について、`validate_video_codec_preference` の変更前後で判定結果が変わらないことを test で確認する
+- `SoraVideoEncoderFactory::create` が `capability.resolve_sdp_format(direction, format)` の返り値をそのまま `capability.create_video_encoder(env, resolved.as_ref())` に渡す挙動を回帰テストで固定し、production コメントで明文化する
 - `examples/sumomo` が reader を先に構築してから `Mp4PassthroughVideoCodecCapability::new(&reader)` で capability を作り、その後に reader を capturer へ move する順序で動く
 - 既存の合成 fixture / real fixture の reader test が引き続き成功する
 - reader / capability / encoder handler の unit test は mock / stub、sleep、`#[ignore]`、外部 command、ネットワークを使用しない
