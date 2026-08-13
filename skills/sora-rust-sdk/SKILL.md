@@ -13,7 +13,7 @@ WebRTC SFU Sora のクライアントを Rust で実装するための SDK。シ
 - **複数ロール**: `sendonly` / `recvonly` / `sendrecv` をサポート。
 - **メディア機能**: マルチストリーム、サイマルキャスト、スポットライト、転送フィルター、シグナリング通知。
 - **コーデック**: VP8 / VP9 / AV1 / H.264 / H.265。OpenH264 / Apple VideoToolbox / AMD AMF / NVIDIA Video Codec / Intel VPL / V4L2-M2M のバックエンド統合。
-- **MP4 無変換送信**: `Mp4PassthroughVideoCodecCapability` で MP4 ファイルの音声・映像トラックをデコード/エンコードを挟まずに Sora へ送信。
+- **MP4 無変換送信**: `Mp4PassthroughVideoCodecCapability` で MP4 ファイルの映像トラックをデコード / エンコードを挟まずに Sora へ送信し、音声トラックは無視する。
 - **DataChannel メッセージング**: `#` プレフィックスのユーザー定義 DataChannel でバイナリ送受信。
 - **JSON-RPC 2.0 over DataChannel**: SDK が id 採番とエンベロープを担当。
 - **TURN-TLS**: 独自 CA 証明書 (DER) による検証。
@@ -28,7 +28,7 @@ WebRTC SFU Sora のクライアントを Rust で実装するための SDK。シ
 - 最小 Rust バージョン: 1.93
 - ライセンス: Apache-2.0
 - 対応 Sora: 2025.1.0 以降
-- 対応プラットフォーム: Ubuntu 22.04 / 24.04 (x86_64, arm64), macOS 15 / 26 (arm64), Windows 11 / Server 2025 (x86_64)
+- 対応プラットフォーム: Ubuntu 22.04 / 24.04 / 26.04 (x86_64, arm64), macOS 15 / 26 (arm64), Windows 11 / Server 2025 (x86_64), Raspberry Pi (Linux, arm64)
 
 `shiguredo_webrtc` クレートが提供する `AudioTrack` / `VideoTrack` / `VideoTrackSource` / `RtpTransceiver` / `RtpReceiver` / `IceServer` 等を直接受け取る公開 API があるため、利用側の `Cargo.toml` に `shiguredo_webrtc` を追加する必要がある。
 
@@ -36,11 +36,11 @@ WebRTC SFU Sora のクライアントを Rust で実装するための SDK。シ
 
 | feature | 既定 | 内容 |
 |---------|------|------|
-| `openh264` | 有効 | OpenH264 による H.264 ソフトウェアエンコード/デコード |
-| `amf` | 無効 | AMD AMF によるハードウェアエンコード/デコード (Windows / Linux) |
-| `nvcodec` | 無効 | NVIDIA Video Codec によるハードウェアエンコード/デコード (Windows / Linux) |
-| `vpl` | 無効 | Intel VPL によるハードウェアエンコード/デコード (Windows / Linux) |
-| `v4l2` | 無効 | V4L2-M2M によるハードウェアエンコード/デコード (Raspberry Pi) |
+| `openh264` | 有効 | OpenH264 による H.264 ソフトウェアエンコード / デコード |
+| `amf` | 無効 | AMD AMF によるハードウェアエンコード / デコード (Windows / Linux) |
+| `nvcodec` | 無効 | NVIDIA Video Codec によるハードウェアエンコード / デコード (Windows / Linux) |
+| `vpl` | 無効 | Intel VPL によるハードウェアエンコード / デコード (Linux) |
+| `v4l2` | 無効 | V4L2-M2M によるハードウェアエンコード / デコード (Raspberry Pi) |
 | `libcamera` | 無効 | libcamera による映像入力 (Raspberry Pi) |
 
 機能フラグは加算式。複数バックエンドを同時に有効化可能。フラグを有効にしても GPU / ドライバが無ければ各 `*::new()` がランタイムでエラーを返す。
@@ -151,7 +151,7 @@ WebSocket TLS は PEM、TURN-TLS は DER である点に注意。
 |----------|--------|------|
 | `selected_signaling_url()` | `Result<Option<String>>` | 最初に WebSocket 接続成功したシグナリング URL |
 | `connected_signaling_url()` | `Result<Option<String>>` | 現在接続中のシグナリング URL (リダイレクト後はリダイレクト先) |
-| `disconnect()` | `Result<()>` | 切断要求 |
+| `disconnect()` | `Result<()>` | Sora へ disconnect メッセージの送信を試みてから切断を開始する |
 | `send_message(label, data)` | `Result<()>` | SDK 内部用ラベル (`signaling`、`stats`、`push`、`notify`、`rpc`) および `#` プレフィックスのないラベル、Offer 応答の `data_channels` に含まれていないラベルを渡すと `Error::InvalidDataChannelLabel` を返す |
 | `send_rpc_request(method, params, options)` | `Result<Option<RpcResponse>>` | JSON-RPC 2.0 リクエスト送信 |
 | `get_stats()` | `Result<JsonString>` | PeerConnection の統計情報 (JSON) |
@@ -229,22 +229,22 @@ H.264 / H.265 の `b_frame: true` は Sora 側の `sora.conf` で対応する設
 | `CodecDirection` | encoder / decoder の方向。`as_str()` (`"Encoder"` / `"Decoder"`) / `as_label()` (`"encoder"` / `"decoder"`) を提供 |
 | `validate_video_codec_preference(&preference, &[Box<dyn VideoCodecCapability>])` | `new_with_config` 内部でも呼ばれる整合性チェック。preference と capabilities が一致しない場合 `Error::InvalidVideoCodecPreference` |
 | `SoraVideoEncoderFactory` / `SoraVideoDecoderFactory` | 内部で利用される factory (通常はユーザーが直接触らない) |
-| `AlignmentEncoderAdapter` | エンコーダーのアライメント補正アダプタ |
-| `SimulcastCapabilityHelper` | サイマルキャスト対応判定ヘルパー |
+| `AlignmentEncoderAdapter` | エンコーダーのアライメント補正アダプター |
+| `SimulcastCapabilityHelper` | `new(primary_factory)` / `new_with_builder(...)` で生成するサイマルキャスト対応ヘルパー。`get_supported_formats()` / `create_video_encoder(...)` を提供 |
 | `codec_type_from_format(&SdpVideoFormatRef)` | フォーマットから `VideoCodecType` を解決 |
 
 ### 標準のコーデックバックエンド
 
-| 型 | feature / 条件 | 用途 |
-|----|---------------|------|
-| `InternalVideoCodecCapability` | 常時 | libwebrtc 内蔵 (VP8 / VP9 / AV1 など) |
-| `InternalAppleVideoCodecCapability` | macOS / iOS | VideoToolbox による H.264 / H.265 |
-| `Mp4PassthroughVideoCodecCapability` | 常時 | MP4 ファイル無変換送信 |
-| `Openh264VideoCodecCapability` | `openh264` | OpenH264 ソフトウェア H.264 |
-| `AmfVideoCodecCapability` | `amf` | AMD AMF |
-| `NvCodecVideoCodecCapability` | `nvcodec` | NVIDIA Video Codec |
-| `VplVideoCodecCapability` | `vpl` | Intel VPL |
-| `V4l2VideoCodecCapability` | `v4l2` | V4L2-M2M (Raspberry Pi) |
+| 型 | feature / 条件 | 生成方法 | 用途 |
+|----|---------------|----------|------|
+| `InternalVideoCodecCapability` | 常時 | `new() -> Self` | libwebrtc 内蔵 (VP8 / VP9 / AV1 など) |
+| `InternalAppleVideoCodecCapability` | macOS / iOS | `new() -> Option<Self>` | VideoToolbox による H.264 / H.265 |
+| `Mp4PassthroughVideoCodecCapability` | 常時 | `new(VideoCodecType) -> Self` | MP4 ファイル無変換送信 |
+| `Openh264VideoCodecCapability` | `openh264` | `new(path) -> Result<Self>` | OpenH264 ソフトウェア H.264 |
+| `AmfVideoCodecCapability` | `amf` | `new() -> Result<Self>` | AMD AMF |
+| `NvCodecVideoCodecCapability` | `nvcodec` | `new() -> Result<Self>` / `new_with_device_id(i32) -> Result<Self>` | NVIDIA Video Codec |
+| `VplVideoCodecCapability` | `vpl` | `new() -> Result<Self>` | Intel VPL |
+| `V4l2VideoCodecCapability` | `v4l2` | `new() -> Result<Self>` | V4L2-M2M (Raspberry Pi) |
 
 新しい capability を加えるたびに、対応する `VideoCodecPreference` を `merge` して preference 側にも追加すること。`SoraConnectionContextConfig::default()` は Internal と (macOS/iOS 上では) InternalApple を自動登録する。
 
@@ -252,12 +252,21 @@ H.264 / H.265 の `b_frame: true` は Sora 側の `sora.conf` で対応する設
 
 | 型 | feature / 条件 | 説明 |
 |----|---------------|------|
-| `Mp4SampleReader` | 常時 | MP4 ファイルからサンプルを取得 |
-| `Mp4VideoCapturer` | 常時 | `VideoTrackSource` 互換のキャプチャ。`Mp4PassthroughVideoCodecCapability` と組で使う |
-| `Error::Mp4` | 常時 | MP4 関連のエラー |
+| `Mp4SampleReader` | 常時 | `new(path)` で MP4 ファイルを開いて映像サンプルのメタデータを解析する。サンプル本体は必要な時点でファイルから読み込む。`len()` / `is_empty()` / `codec_type()` を提供 |
+| `Mp4VideoCapturer` | 常時 | `new(reader)` で生成する `VideoTrackSource` 互換のキャプチャ。`Mp4PassthroughVideoCodecCapability` と組で使い、ファイル末尾から先頭へ戻ってループ再生する |
+| `Mp4Error` | 常時 | 公開 MP4 エラー型。I/O、デマルチプレクス、サンプルテーブル、NAL 長、非ゼロの composition time offset などのエラーを区別する |
+| `Error::Mp4 { source: Mp4Error }` | 常時 | `Mp4Error` を source として保持する SDK 共通エラー |
 | `LibcameraVideoCapturer` | `libcamera` | libcamera 経由の映像入力 |
 | `LibcameraVideoCapturerBuilder` | `libcamera` | 上記のビルダー |
 | `LibcameraNativeFrameBuffer` | `libcamera` | libcamera のフレームバッファ |
+
+MP4 入力は映像トラックだけを送信し、音声トラックを無視する。
+H.264 / H.265 / VP8 / VP9 / AV1 に対応する。
+非ゼロの composition time offset を持つ B フレーム入力は `Mp4Error::UnsupportedCompositionTimeOffset` で拒否する。
+
+`LibcameraVideoCapturer::builder()` は `camera_index()` / `width()` / `height()` / `native_frame_output()` / `control()` / `controls()` / `build()` を提供する。生成したキャプチャラーは `start()` / `stop()` / `video_source()` で制御する。
+
+`LibcameraNativeFrameBuffer` は `fd()` / `size()` / `stride()` / `raw_width()` / `raw_height()` / `scaled_width()` / `scaled_height()` / `is_i420()` / `is_nv12()` を提供する。
 
 ## DataChannel メッセージング / JSON-RPC 2.0
 
@@ -276,6 +285,9 @@ JSON-RPC 2.0 は SDK 側で `{ "jsonrpc": "2.0", "method": ..., "params": ..., "
 | `RpcResponse::Error` | `code: i32`, `message: String`, `data: Option<JsonString>` |
 
 `notification: true` の場合は SDK が id を発番せず、`Ok(None)` を即返す。
+応答は JSON-RPC 2.0 の Response Object として検証する。
+応答待機中の Request ID と対応付けられる不正応答は `Error::RpcProtocolViolation { id: Some(...) }` を返す。
+対応付けられない不正応答や未知の id を持つ応答はメッセージ単位で破棄し、接続を継続する。
 
 ## コード例
 
@@ -292,7 +304,7 @@ impl SoraConnectionEventHandler for MyEventHandler {
         println!("notify: {text}");
     }
     fn on_track(&mut self, transceiver: RtpTransceiver) {
-        println!("track: {:?}", transceiver.mid());
+        println!("track: {:?}", transceiver.receiver().track().id());
     }
 }
 
@@ -524,12 +536,12 @@ if let Some(url) = handle.selected_signaling_url().await? {
 | ネットワーク | `DnsResolve`, `NoResolvedAddress`, `TcpConnectTimeout`, `TcpConnect`, `TlsConfig`, `InvalidServerName`, `TlsConnectTimeout`, `TlsConnect`, `Websocket`, `Io`, `ProxyConnectUnexpectedTrailingData` |
 | シグナリング | `SignalingUrlsEmpty`, `AllSignalingUrlsFailed { errors }`, `UnsupportedMessageType`, `JsonParse` |
 | WebRTC | `Webrtc`, `PeerConnectionMissing`, `SetRemoteDescriptionTimeout`, `SetRemoteDescriptionResponseMissing`, `SetRemoteDescriptionFailed`, `AnswerTimeout`, `AnswerResponseMissing`, `AnswerFailed`, `SetLocalDescriptionTimeout`, `SetLocalDescriptionResponseMissing`, `SetLocalDescriptionFailed`, `SimulcastVideoSenderMissing`, `SimulcastSetParametersFailed`, `CandidateNotSupported` |
-| DataChannel / RPC | `DataChannelMissing`, `DataChannelSendFailed`, `Utf8DecodeFailed`, `RpcTimeout`, `InvalidDataChannelLabel`, `Redirected` |
+| DataChannel / RPC | `DataChannelMissing`, `DataChannelSendFailed`, `Utf8DecodeFailed`, `RpcTimeout`, `RpcProtocolViolation { id }`, `InvalidDataChannelLabel`, `Redirected` |
 | TLS 証明書 | `TurnTlsCaCert`, `ClientCertParse`, `ClientKeyParse`, `CaCertParse`, `ClientCertKeyIncomplete` |
 | コーデック | `InvalidVideoCodecCapability`, `InvalidVideoCodecPreference` |
 | 内部コマンド | `CommandSendFailed`, `CommandResponseMissing` |
 | バックエンド固有 (feature 付き) | `Libcamera`, `LibcameraMessage`, `Openh264`, `Amf { source }`, `AmfMessage`, `Vpl { source }`, `VplMessage`, `NvCodec { source }`, `NvCodecMessage`, `V4l2 { source }`, `V4l2Message` |
-| その他 | `Mp4 { source }`, `InvalidSystemTime { source }` |
+| その他 | `Mp4 { source: Mp4Error }`, `InvalidSystemTime { source }` |
 
 エラーメッセージ (`Display`) は日本語。ログメッセージは英語、というプロジェクト方針と分けて扱うこと。
 
@@ -544,5 +556,12 @@ if let Some(url) = handle.selected_signaling_url().await? {
 - **`VideoTrackSource` は本クレートでは作らない**: `shiguredo_webrtc` 側の capturer / source、もしくは本クレートの `Mp4VideoCapturer` / `LibcameraVideoCapturer` から生成する。
 - **`send_message` のラベル制約**: SDK 内部用ラベル（`signaling`、`stats`、`push`、`notify`、`rpc`）および `#` プレフィックスのないラベル、Offer 応答の `data_channels` に含まれていないラベルを渡すと `Error::InvalidDataChannelLabel` を返す。`on_message` は `#` プレフィックスのユーザー定義 DataChannel 専用。
 - **JSON-RPC の id は SDK が管理する**: 利用側が `id` を組み立てる必要はない。`params` の中身だけ渡す。
+- **DataChannel の展開後サイズ上限**: `compress: true` の DataChannel メッセージは zlib 展開後 16 MiB まで。
+  上限超過や不正な zlib ストリームはメッセージ単位で破棄し、接続を継続する。
+- **DataChannel シグナリングの切替条件**: WebSocket で `switched` を受信し、Offer の `data_channels` に含まれる全 DataChannel が Open になってから切り替える。
+- **DataChannel シグナリング中の Close**: `signaling` ラベルで Sora から `{"type": "close"}` を受信すると接続を終了する。
+  他のラベルで受信した Close は接続終了として扱わない。
+- **MP4 入力は映像専用**: 音声トラックは無視する。
+  B フレームなどの非ゼロ composition time offset を含む映像は受理しない。
 - **ロギングは `shiguredo_webrtc` の `rtc_log_*` マクロ**: SDK 内のログは libwebrtc 側 (`rtc_log_info!` / `rtc_log_warning!` / `rtc_log_error!`) に流れる。`log` / `tracing` クレートには依存していない。
 - **デフォルトの ADM は Dummy**: マイク入力が必要な場合は `AdmConfig::UseBuiltIn` か `UseExternal` を明示する。
