@@ -2765,7 +2765,7 @@ async fn connect_websocket(
         );
         let tcp_stream = connect_tcp(proxy.host(), proxy.port(), deadline).await?;
         let mut stream = ClientStream::new_plain(tcp_stream);
-        connect_http_proxy_tunnel(&mut stream, target, proxy).await?;
+        connect_http_proxy_tunnel(&mut stream, target, proxy, deadline).await?;
         if target.tls {
             let (tcp_stream, pending) = stream
                 .into_plain_parts()
@@ -2874,6 +2874,7 @@ async fn connect_http_proxy_tunnel(
     stream: &mut ClientStream,
     target: &SignalingTarget,
     proxy: &ParsedProxyInfo,
+    deadline: tokio::time::Instant,
 ) -> Result<()> {
     let request = build_proxy_connect_request(target, proxy)?;
     stream.write_all(&request).await?;
@@ -2882,7 +2883,14 @@ async fn connect_http_proxy_tunnel(
     decoder.set_request_method("CONNECT");
     let mut buf = vec![0u8; 8192];
     loop {
-        let n = stream.read(&mut buf).await?;
+        // CONNECT 応答を返さないプロキシで応答待ちが永久に続かないように、
+        // read を接続全体の期限 (deadline) で囲む。
+        let n = tokio::time::timeout_at(deadline, stream.read(&mut buf))
+            .await
+            .map_err(|_| Error::ProxyConnectTimeout {
+                host: proxy.host().to_string(),
+                port: proxy.port(),
+            })??;
         if n == 0 {
             return Err(Error::ProxyConnectResponseMissing);
         }
@@ -3219,6 +3227,70 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn connect_http_proxy_tunnel_times_out_when_proxy_never_responds() {
+        // CONNECT 応答を返さないプロキシを実 TCP リスナーで再現する。
+        // accept 後に CONNECT リクエストを読み込んだまま、応答を返さず接続を保持し続ける。
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("テスト用 TCP リスナーのバインドに失敗しました");
+        let listener_addr = listener
+            .local_addr()
+            .expect("テスト用 TCP リスナーのアドレス取得に失敗しました");
+        let proxy_hold_task = tokio::spawn(async move {
+            let (mut stream, _peer_addr) = listener
+                .accept()
+                .await
+                .expect("テスト用 TCP リスナーでの accept に失敗しました");
+            let mut buf = [0u8; 4096];
+            // CONNECT リクエストを受信した後、応答を返さずに接続を保持し続ける。
+            let _ = stream.read(&mut buf).await;
+            std::future::pending::<()>().await;
+        });
+
+        let target = SignalingTarget {
+            host: "sora.example.com".to_string(),
+            port: 443,
+            path: "/signaling".to_string(),
+            tls: true,
+        };
+        let proxy = ParsedProxyInfo {
+            host: listener_addr.ip().to_string(),
+            port: listener_addr.port(),
+            username: None,
+            password: None,
+            user_agent: "ua-test".to_string(),
+        };
+        let tcp_stream = tokio::net::TcpStream::connect(listener_addr)
+            .await
+            .expect("テスト用 TCP リスナーへの接続に失敗しました");
+        let mut stream = ClientStream::new_plain(tcp_stream);
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+        let err = connect_http_proxy_tunnel(&mut stream, &target, &proxy, deadline)
+            .await
+            .expect_err("CONNECT 応答待ちがタイムアウトする必要があります");
+        let message = err.to_string();
+        let expected_host = listener_addr.ip().to_string();
+        let expected_port = listener_addr.port();
+        let Error::ProxyConnectTimeout { host, port } = err else {
+            panic!("ProxyConnectTimeout が返る必要があります: {message}");
+        };
+        assert_eq!(
+            host, expected_host,
+            "ProxyConnectTimeout の host が期待値と一致しません: {message}"
+        );
+        assert_eq!(
+            port, expected_port,
+            "ProxyConnectTimeout の port が期待値と一致しません: {message}"
+        );
+        assert!(
+            message.contains(&format!("{expected_host}:{expected_port}")),
+            "タイムアウトメッセージに host:port が含まれていません: {message}"
+        );
+
+        proxy_hold_task.abort();
     }
 
     #[tokio::test(flavor = "current_thread")]

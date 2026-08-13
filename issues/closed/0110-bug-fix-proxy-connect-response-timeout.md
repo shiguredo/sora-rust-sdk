@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-13
 - Model: deepseek-v4-flash
 - Branch: feature/fix-proxy-connect-response-timeout
 - Polished: 2026-08-13
@@ -47,3 +47,11 @@ CONNECT 応答を返さない HTTP プロキシで `SoraConnection::run` が無�
 - `src/connection.rs`
 - `src/error.rs`
 - `CHANGES.md`
+
+## 解決方法
+
+`connect_http_proxy_tunnel` (`src/connection.rs`) に `deadline` 引数を追加し、CONNECT 応答待ちの `read` を `tokio::time::timeout_at` で囲むようにした。`deadline` は `connect_websocket` が計算し、`connect_tcp` / `connect_tls` と共有している値をそのまま渡す。これにより 1 接続の全体 (TCP 接続・CONNECT 応答待ち・TLS 接続) が `websocket_connection_timeout` の上限に収まる。
+
+タイムアウト時は新規エラーバリアント `Error::ProxyConnectTimeout { host, port }` を返す。`host` / `port` は接続先プロキシの値を格納し、Display は「プロキシ CONNECT 応答待ちがタイムアウトしました: {host}:{port}」とした。応答を受信する前に接続が閉じられた場合の `ProxyConnectResponseMissing` とは別事象として区別している。
+
+`connect_http_proxy_tunnel` は private 関数のため、`src/connection.rs` 内の `#[cfg(test)]` モジュールに実 TCP リスナーで accept 後に応答を返さないプロキシを再現する単体テストを追加し、`Error::ProxyConnectTimeout { host, port }` の返却とメッセージへの host:port の含有を検証した。
