@@ -897,9 +897,8 @@ impl SoraConnection {
         let mut switched_received = false;
         let mut switched_ignore_disconnect_websocket = false;
         let mut opened_data_channels = HashSet::<String>::new();
-        // 切替成立後の WebSocket 切断待機 (WS_DISCONNECT_DELAY) の開始時刻を保持する。
-        // WebSocket を破棄した時点で None にリセットする。リセットしないと期限切れの
-        // sleep_until が select! で即座に解決し続けスピンするため。
+        // DataChannel シグナリングへの切替後、WebSocket を自発的に閉じるまでの
+        // 待機 (WS_DISCONNECT_DELAY) の開始時刻。設定・リセットはループ冒頭で行う。
         let mut ws_disconnect_delay_start: Option<tokio::time::Instant> = None;
         const WS_DISCONNECT_DELAY: Duration = Duration::from_secs(10);
         let mut buf = vec![0u8; 8192];
@@ -912,6 +911,25 @@ impl SoraConnection {
         let mut server_close_received = false;
 
         'run_loop: loop {
+            // 期限切れの値を sleep_until で持つと即 Ready になりビジーループしてしまうため、
+            // 切断待機の開始時刻を毎イテレーション再計算する。
+            // resolve_ws_disconnect_delay_start() は、WS close 送信後や、
+            // 切替条件が不成立になった場合に None を返す。
+            // ws_disconnect_delay_start が None だと pending 処理に入るため
+            // ビジーループが回避できる。
+            ws_disconnect_delay_start = resolve_ws_disconnect_delay_start(
+                ws_disconnect_delay_start,
+                ws.state() == ConnectionState::Connected,
+                switched_ignore_disconnect_websocket
+                    && !websocket_closed
+                    && is_data_channel_signaling_ready(
+                        switched_received,
+                        &self.data_channel_configs,
+                        &opened_data_channels,
+                    ),
+                tokio::time::Instant::now(),
+            );
+
             tokio::select! {
                 read = stream.read(&mut buf), if !websocket_closed => {
                     // ピアが close_notify を送らずに TCP を閉じた場合 UnexpectedEof になるため、
@@ -926,7 +944,6 @@ impl SoraConnection {
                                     e
                                 );
                                 websocket_closed = true;
-                                ws_disconnect_delay_start = None;
                                 continue;
                             }
                             return Err(e.into());
@@ -936,7 +953,6 @@ impl SoraConnection {
                         if switched_ignore_disconnect_websocket && use_data_channel_signaling {
                             rtc_log_info!("WebSocket closed; continuing DataChannel signaling");
                             websocket_closed = true;
-                            ws_disconnect_delay_start = None;
                             continue;
                         } else {
                             rtc_log_info!("Connection closed");
@@ -950,7 +966,6 @@ impl SoraConnection {
                                     e
                                 );
                                 websocket_closed = true;
-                                ws_disconnect_delay_start = None;
                                 continue;
                             }
                             return Err(e.into());
@@ -1100,7 +1115,8 @@ impl SoraConnection {
                         }
                     }
                 }
-                // WebSocket 切断待機中は期限まで待機
+                // 切断待機中 (開始時刻が設定されている間) は WS_DISCONNECT_DELAY 秒待つ。
+                // 未設定なら pending で何もしない。
                 _ = async {
                     if let Some(start) = ws_disconnect_delay_start {
                         tokio::time::sleep_until(start + WS_DISCONNECT_DELAY).await;
@@ -1295,7 +1311,6 @@ impl SoraConnection {
                 switched_received = false;
                 switched_ignore_disconnect_websocket = false;
                 use_data_channel_signaling = false;
-                ws_disconnect_delay_start = None;
 
                 // 古い DataChannel の close 通知をユーザーに送る。
                 // クリア前に通知することでハンドラが確実に呼ばれる。
@@ -1371,17 +1386,11 @@ impl SoraConnection {
                     &self.data_channel_configs,
                     &opened_data_channels,
                 )
+                && let Some(start) = ws_disconnect_delay_start
+                && start.elapsed() >= WS_DISCONNECT_DELAY
+                && ws.state() == ConnectionState::Connected
             {
-                if ws_disconnect_delay_start.is_none() {
-                    ws_disconnect_delay_start = Some(tokio::time::Instant::now());
-                }
-
-                if let Some(start) = ws_disconnect_delay_start
-                    && start.elapsed() >= WS_DISCONNECT_DELAY
-                    && ws.state() == ConnectionState::Connected
-                {
-                    ws.close(CloseCode::NORMAL, "switching to datachannel")?;
-                }
+                ws.close(CloseCode::NORMAL, "switching to datachannel")?;
             }
 
             // websocket_closed=true の間は ws を破棄済みとして扱うため、
@@ -1412,7 +1421,6 @@ impl SoraConnection {
                     if switched_ignore_disconnect_websocket && use_data_channel_signaling {
                         rtc_log_info!("WebSocket closed; continuing DataChannel signaling");
                         websocket_closed = true;
-                        ws_disconnect_delay_start = None;
                         continue;
                     } else {
                         break;
@@ -2201,6 +2209,23 @@ fn is_data_channel_signaling_ready(
 ) -> bool {
     let expected = data_channel_configs.len();
     expected > 0 && switched_received && opened_labels.len() >= expected
+}
+
+/// WebSocket 切断待機の開始時刻を返す。
+///
+/// `ws_connected` が false (close 送信後) か `switching_ready` が false (切替条件不成立) のときは
+/// `None` を返す。それ以外は引数の開始時刻を維持し、未設定なら `now` で初期化する。
+fn resolve_ws_disconnect_delay_start(
+    ws_disconnect_delay_start: Option<tokio::time::Instant>,
+    ws_connected: bool,
+    switching_ready: bool,
+    now: tokio::time::Instant,
+) -> Option<tokio::time::Instant> {
+    if !ws_connected || !switching_ready {
+        None
+    } else {
+        ws_disconnect_delay_start.or(Some(now))
+    }
 }
 
 /// 指定した DataChannel label で受信した Close メッセージを server Close として
@@ -4203,6 +4228,56 @@ mod tests {
             matches!(rx1.try_recv(), Err(oneshot::error::TryRecvError::Empty))
                 && matches!(rx2.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
             "破棄された response は response channel を完了しない必要があります"
+        );
+    }
+
+    #[test]
+    fn resolve_ws_disconnect_delay_start_returns_none_after_close_sent() {
+        let now = tokio::time::Instant::now();
+        // close 送信後 (ws_connected=false) は、開始時刻が設定済み (Some(過去)) でも
+        // None を返して待機を止める必要がある。
+        let start = now - tokio::time::Duration::from_secs(10);
+        assert_eq!(
+            resolve_ws_disconnect_delay_start(Some(start), false, true, now),
+            None,
+            "close 送信後は None を返す必要があります"
+        );
+    }
+
+    #[test]
+    fn resolve_ws_disconnect_delay_start_returns_none_when_switching_condition_broken() {
+        let now = tokio::time::Instant::now();
+        // 切替条件不成立 (switching_ready=false) は、state が Connected でも
+        // None を返して待機を止める必要がある。
+        let start = now - tokio::time::Duration::from_secs(10);
+        assert_eq!(
+            resolve_ws_disconnect_delay_start(Some(start), true, false, now),
+            None,
+            "切替条件不成立時は None を返す必要があります"
+        );
+    }
+
+    #[test]
+    fn resolve_ws_disconnect_delay_start_keeps_existing_start_while_waiting() {
+        let now = tokio::time::Instant::now();
+        // 待機中 (ws_connected=true かつ switching_ready=true) は None を返さない。
+        // 既存の開始時刻を維持し、now で置き換えて待機期限を延ばさない。
+        let start = now - tokio::time::Duration::from_secs(3);
+        assert_eq!(
+            resolve_ws_disconnect_delay_start(Some(start), true, true, now),
+            Some(start),
+            "待機中は既存の開始時刻を維持する必要があります"
+        );
+    }
+
+    #[test]
+    fn resolve_ws_disconnect_delay_start_sets_now_when_start_is_missing() {
+        let now = tokio::time::Instant::now();
+        // 待機中に開始時刻が未設定 (None) でも、now で初期化した開始時刻を返す。
+        assert_eq!(
+            resolve_ws_disconnect_delay_start(None, true, true, now),
+            Some(now),
+            "未設定なら now を開始時刻として設定する必要があります"
         );
     }
 }
