@@ -44,35 +44,28 @@ required input range と sample range の未検査演算は、issue 0138 のフ�
 
 - `(acc * 1_000_000) / timescale`（`u64` の乗算 overflow。累積 duration が `u64::MAX / 1_000_000` を超えると overflow する）
 
-本 issue は、この microseconds 変換の乗算 overflow を初期化時検証へ統合する。
+本 issue は、この乗算 overflow を、tick のまま累積を保持して変換を安全化する方式で解消する。
 
 ## 設計方針
 
-### duration 累積と microseconds 変換
+### duration 累積と再生時刻の保持
 
-`cumulative_us` の構築で行う `(acc * 1_000_000) / timescale` は checked arithmetic へ変更する。
-乗算が overflow した場合は、sample index を含む `DurationOverflow` error で reader 初期化を失敗させる。
-検証は reader 初期化時（`cumulative_us` 構築時）に行い、`get_sample` の hot path には未検査演算を残さない。
+`cumulative` にはタイムスケール単位 (tick) の累積 duration をそのまま保持し、マイクロ秒への事前変換は行わない。
+tick と timescale を保持する `Mp4Duration` を追加し、`std::time::Duration` への変換は商と剰余に分けて行うことで overflow しない。
+
+- 秒: `ticks / timescale` は `u64` に収まる
+- ナノ秒: `(ticks % timescale) * 1_000_000_000 / timescale` は 1_000_000_000 未満になる
 
 `acc += duration as u64` の加算は、`shiguredo_mp4` の invariant（Σ sample count <= `u32::MAX` なら総 duration < `u64::MAX`）により overflow せず、checked 化の対象としない。
 invariant による保証をコメントで明記する。
-
-### error
-
-`cumulative_us` 構築の乗算 overflow には、sample index を保持する `DurationOverflow` を追加する。
-sample index は 0 始まりのビデオサンプル連番で、overflow に達した時点で最後に加算したサンプルを示す。
-`Display` と `std::error::Error::source` を更新し、error message は日本語とする。
 
 ## test
 
 mock / stub、sleep、外部 command、ネットワークを使わず、実 `Mp4SampleReader` をテストする。
 
-- `cumulative_us` 構築の乗算が overflow する duration 入力を `DurationOverflow`（sample index 付き）で拒否し、閾値直前の 4294 サンプルでは受理されることを確認する
-  - 既存フィクスチャの byte patch では累積 duration が `u64::MAX / 1_000_000` に届かないため、テスト内で合成 MP4 を組み立てる
-  - 最小到達条件は duration を `u32::MAX` とした 4295 サンプル以上（`stts` 1 エントリ `{sample_count: 4295, sample_delta: 4294967295}`、`stsz` / `stsc` / `stco` を整合させる。`stsd` は SDK が受理する SampleEntry にし、`mdat` のペイロードはサンプルサイズの合計以上を確保する）
-  - 加算 overflow は `shiguredo_mp4` の invariant により到達不能であり、テスト対象にしない
+- `Mp4Duration::to_duration` が overflow せず正しい `Duration` を返すことを確認する（ticks=0、1 秒ちょうど、割り切れない剰余、`u64::MAX` の巨大値）
+- 既存の composition time offset が 0 の fixture (`testdata/red-320x320-h264.mp4` 等) について、sample payload、送信順序、`cumulative_duration` の全値が変わらないことを確認する
 - malformed MP4 は panic せずに具体的な error variant、sample index を検証する
-- 既存の composition time offset が 0 の fixture (`testdata/red-320x320-h264.mp4` 等) について、sample payload、送信順序、`cumulative_us` の全値が変わらないことを確認する
 
 fixture を byte patch する場合は、書き換え前の box type、box size、対象 field を `assert_eq!` で確認してから変更し、偶然別の byte 列を書き換えたテストを成功させない。
 
@@ -83,8 +76,7 @@ fixture を byte patch する場合は、書き換え前の box type、box size�
 
 ## 完了条件
 
-- SDK 内の microseconds 変換に未検査の `*` が残っていない（加算は invariant により overflow しないため対象外）
-- `cumulative_us` 構築の乗算が overflow する入力で、panic せず `DurationOverflow`（sample index 付き）を返す
+- タイムスケール単位の累積 duration を `Mp4Duration` で保持し、`std::time::Duration` への変換が overflow しない
 - 加算 overflow が `shiguredo_mp4` の invariant により到達不能である旨がコメントに明記されている
 - debug / release profile に依存せず、同じ不正入力が同じ error になる
 - `cargo test --workspace` が成功する
@@ -101,4 +93,3 @@ fixture を byte patch する場合は、書き換え前の box type、box size�
 - `issues/closed/0062-bug-fix-mp4-get-sample-oob-panic.md`
 - `shiguredo_mp4 2026.4.0` の `src/auxiliary.rs`
 - `shiguredo_mp4 2026.4.0` の `src/demux_mp4_file.rs`
-- Rust standard library `std::primitive::u64::checked_mul`
