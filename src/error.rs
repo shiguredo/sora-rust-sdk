@@ -67,6 +67,13 @@ pub enum Error {
     },
     /// プロキシ CONNECT 応答後に TLS 開始前の不正な余剰データを受信した。
     ProxyConnectUnexpectedTrailingData,
+    /// プロキシ CONNECT 応答の待ち受けがタイムアウトした。
+    ProxyConnectTimeout {
+        /// 接続を試みたプロキシホスト名。
+        host: String,
+        /// 接続を試みたプロキシポート番号。
+        port: u16,
+    },
     /// プロキシ認証情報の生成に失敗した。内部エラーとして [`AuthError`] を保持する。
     ProxyAuth(AuthError),
     /// DNS 解決に失敗した。
@@ -357,6 +364,12 @@ impl std::fmt::Display for Error {
             ),
             Error::ProxyConnectUnexpectedTrailingData => {
                 f.write_str("Proxy CONNECT 応答後に不正な余剰データを受信しました")
+            }
+            Error::ProxyConnectTimeout { host, port } => {
+                write!(
+                    f,
+                    "プロキシ CONNECT 応答待ちがタイムアウトしました: {host}:{port}"
+                )
             }
             Error::ProxyAuth(err) => write!(f, "Proxy 認証ヘッダーの生成に失敗しました: {err}"),
             Error::DnsResolve { host, source } => {
