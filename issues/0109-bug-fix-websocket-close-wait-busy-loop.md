@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-13
 - Model: deepseek-v4-flash
 - Branch: feature/fix-websocket-close-wait-busy-loop
 - Polished: 2026-08-13
@@ -42,3 +42,11 @@ EOF・read/feed_recv_buf エラー吸収・redirect・`close_emitted` 経路で�
 
 - `src/connection.rs` (実装と、`#[cfg(test)]` モジュール内のビジーループ検証テスト)
 - `CHANGES.md`
+
+## 解決方法
+
+`SoraConnection::run` のメインループ冒頭で `resolve_ws_disconnect_delay_start` を毎イテレーション呼び出し、切断待機の開始時刻を再計算するようにした。この関数は `ws.state()` が `Connected` でない (close 送信後) か切替条件が不成立のときに `None` を返す。開始時刻が `None` になると遅延分岐は pending になるため、期限切れの `sleep_until` で毎回即 Ready にならず、select! がビジーループしない。
+
+切替条件の判定は `is_switching_ready` に切り出し、メインループ冒頭の resolve 呼び出しと WebSocket 切断ブロックの両方で共有した。切断ブロックは開始時刻が設定済みで `WS_DISCONNECT_DELAY` を経過し、state が `Connected` の場合のみ `ws.close()` を送信する。待機中に切替条件が一時的に崩壊して復帰すると開始時刻は再初期化されるため、`WS_DISCONNECT_DELAY` のカウントは 0 からやり直しになる。
+
+ビジーループの有無を検証するテスト (`resolve_ws_disconnect_delay_start` / `is_switching_ready` の各テスト) を `src/connection.rs` の `#[cfg(test)]` モジュールに追加した。e2e テスト `ignore_disconnect_websocket` / `server_close_message` と `cargo test --workspace` で既存の切替・クローズ検知の挙動が変わらないことを確認した。
