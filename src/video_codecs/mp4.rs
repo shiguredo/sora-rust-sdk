@@ -1304,6 +1304,25 @@ mod tests {
             .to_duration(),
             std::time::Duration::new(u64::MAX, 0)
         );
+        // ナノ秒の乗算が最大になる境界 (timescale=u32::MAX、剰余=timescale-1) でも overflow しない。
+        let max_mul = (u32::MAX as u64 - 1) * 1_000_000_000 / u32::MAX as u64;
+        assert_eq!(
+            Mp4Duration {
+                ticks: u32::MAX as u64 - 1,
+                timescale: u32::MAX
+            }
+            .to_duration(),
+            std::time::Duration::from_nanos(max_mul)
+        );
+        // timescale ちょうど (剰余 0) は 1 秒。
+        assert_eq!(
+            Mp4Duration {
+                ticks: u32::MAX as u64,
+                timescale: u32::MAX
+            }
+            .to_duration(),
+            std::time::Duration::from_secs(1)
+        );
     }
 
     // リーダー構築後にファイルを 0 バイトへ縮小すると、
