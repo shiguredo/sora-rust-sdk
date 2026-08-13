@@ -1118,163 +1118,178 @@ impl SoraConnection {
                 }
             }
 
-            while let Some(event) = ws.poll_event() {
-                match event {
-                    ConnectionEvent::Connected { .. } => {
-                        rtc_log_info!("WebSocket connection established");
-                        let connect_message = OutgoingMessage::new_connect(
-                            &channel_id,
-                            role,
-                            client_id.clone(),
-                            bundle_id.clone(),
-                            redirect,
-                            sora_client.clone(),
-                            libwebrtc.clone(),
-                            environment.clone(),
-                            metadata.clone(),
-                            data_channel_signaling,
-                            ignore_disconnect_websocket,
-                            simulcast,
-                            simulcast_request_rid.clone(),
-                            spotlight,
-                            spotlight_focus_rid.clone(),
-                            spotlight_unfocus_rid.clone(),
-                            signaling_notify_metadata.clone(),
-                            data_channels.clone(),
-                            forwarding_filters.clone(),
-                            audio.clone(),
-                            video.clone(),
-                        );
-                        let connect_text = Json(connect_message).to_string();
-                        handler.on_signaling_message(
-                            SignalingType::WebSocket,
-                            SignalingDirection::Sent,
-                            &connect_text,
-                        );
-                        self.send_websocket_message(&mut ws, &connect_text)?;
-                    }
-                    ConnectionEvent::TextMessage(text) => {
-                        rtc_log_info!("[WebSocket] Received text message of {} bytes", text.len());
-                        let message = match IncomingMessage::parse(&text) {
-                            Ok(message) => message,
-                            Err(err) => {
-                                rtc_log_error!("Failed to parse JSON message: {}", err);
-                                continue;
-                            }
-                        };
-                        match message.data {
-                            IncomingMessageData::Offer {
-                                sdp,
-                                ice_servers,
-                                data_channels,
+            // websocket_closed=true は WebSocket のソケットが死んでいるか ws 層が
+            // failed 状態で、残留イベントの処理は無意味である。
+            // 特にプロトコルエラー吸収時は close_internal で state が Closing に
+            // 遷移済みのため、残留 Offer/ReOffer イベントを処理すると send_text の
+            // check_connected() が失敗して run() が Err を返してしまう。
+            // そのため websocket_closed=true の間は ws のイベント処理を丸ごとスキップする。
+            if !websocket_closed {
+                while let Some(event) = ws.poll_event() {
+                    match event {
+                        ConnectionEvent::Connected { .. } => {
+                            rtc_log_info!("WebSocket connection established");
+                            let connect_message = OutgoingMessage::new_connect(
+                                &channel_id,
+                                role,
+                                client_id.clone(),
+                                bundle_id.clone(),
+                                redirect,
+                                sora_client.clone(),
+                                libwebrtc.clone(),
+                                environment.clone(),
+                                metadata.clone(),
+                                data_channel_signaling,
+                                ignore_disconnect_websocket,
                                 simulcast,
-                                encodings,
-                            } => {
-                                handler.on_signaling_message(
-                                    SignalingType::WebSocket,
-                                    SignalingDirection::Received,
-                                    &text,
-                                );
-                                self.data_channel_configs = data_channels;
-                                self.offer_simulcast = simulcast;
-                                self.simulcast_encodings = encodings;
-                                let answer_sdp = self.handle_offer(&sdp, &ice_servers).await?;
-                                let answer_message = OutgoingMessage::new_answer(&answer_sdp);
-                                let answer_text = Json(answer_message).to_string();
-                                handler.on_signaling_message(
-                                    SignalingType::WebSocket,
-                                    SignalingDirection::Sent,
-                                    &answer_text,
-                                );
-                                self.send_websocket_message(&mut ws, &answer_text)?;
-                            }
-                            IncomingMessageData::ReOffer { sdp, ice_servers } => {
-                                handler.on_signaling_message(
-                                    SignalingType::WebSocket,
-                                    SignalingDirection::Received,
-                                    &text,
-                                );
-                                let answer_sdp = self.handle_offer(&sdp, &ice_servers).await?;
-                                let reanswer_message = OutgoingMessage::new_reanswer(&answer_sdp);
-                                let reanswer_text = Json(reanswer_message).to_string();
-                                handler.on_signaling_message(
-                                    SignalingType::WebSocket,
-                                    SignalingDirection::Sent,
-                                    &reanswer_text,
-                                );
-                                self.send_websocket_message(&mut ws, &reanswer_text)?;
-                            }
-                            IncomingMessageData::Ping { stats } => {
-                                if stats.unwrap_or(false) {
-                                    if self.request_stats_pong(&event_tx).is_err() {
-                                        // エラー時は通常の pong を送信する
+                                simulcast_request_rid.clone(),
+                                spotlight,
+                                spotlight_focus_rid.clone(),
+                                spotlight_unfocus_rid.clone(),
+                                signaling_notify_metadata.clone(),
+                                data_channels.clone(),
+                                forwarding_filters.clone(),
+                                audio.clone(),
+                                video.clone(),
+                            );
+                            let connect_text = Json(connect_message).to_string();
+                            handler.on_signaling_message(
+                                SignalingType::WebSocket,
+                                SignalingDirection::Sent,
+                                &connect_text,
+                            );
+                            self.send_websocket_message(&mut ws, &connect_text)?;
+                        }
+                        ConnectionEvent::TextMessage(text) => {
+                            rtc_log_info!(
+                                "[WebSocket] Received text message of {} bytes",
+                                text.len()
+                            );
+                            let message = match IncomingMessage::parse(&text) {
+                                Ok(message) => message,
+                                Err(err) => {
+                                    rtc_log_error!("Failed to parse JSON message: {}", err);
+                                    continue;
+                                }
+                            };
+                            match message.data {
+                                IncomingMessageData::Offer {
+                                    sdp,
+                                    ice_servers,
+                                    data_channels,
+                                    simulcast,
+                                    encodings,
+                                } => {
+                                    handler.on_signaling_message(
+                                        SignalingType::WebSocket,
+                                        SignalingDirection::Received,
+                                        &text,
+                                    );
+                                    self.data_channel_configs = data_channels;
+                                    self.offer_simulcast = simulcast;
+                                    self.simulcast_encodings = encodings;
+                                    let answer_sdp = self.handle_offer(&sdp, &ice_servers).await?;
+                                    let answer_message = OutgoingMessage::new_answer(&answer_sdp);
+                                    let answer_text = Json(answer_message).to_string();
+                                    handler.on_signaling_message(
+                                        SignalingType::WebSocket,
+                                        SignalingDirection::Sent,
+                                        &answer_text,
+                                    );
+                                    self.send_websocket_message(&mut ws, &answer_text)?;
+                                }
+                                IncomingMessageData::ReOffer { sdp, ice_servers } => {
+                                    handler.on_signaling_message(
+                                        SignalingType::WebSocket,
+                                        SignalingDirection::Received,
+                                        &text,
+                                    );
+                                    let answer_sdp = self.handle_offer(&sdp, &ice_servers).await?;
+                                    let reanswer_message =
+                                        OutgoingMessage::new_reanswer(&answer_sdp);
+                                    let reanswer_text = Json(reanswer_message).to_string();
+                                    handler.on_signaling_message(
+                                        SignalingType::WebSocket,
+                                        SignalingDirection::Sent,
+                                        &reanswer_text,
+                                    );
+                                    self.send_websocket_message(&mut ws, &reanswer_text)?;
+                                }
+                                IncomingMessageData::Ping { stats } => {
+                                    if stats.unwrap_or(false) {
+                                        if self.request_stats_pong(&event_tx).is_err() {
+                                            // エラー時は通常の pong を送信する
+                                            self.send_pong(&event_tx);
+                                        }
+                                    } else {
                                         self.send_pong(&event_tx);
                                     }
-                                } else {
-                                    self.send_pong(&event_tx);
                                 }
-                            }
-                            IncomingMessageData::ReqStats {} => {
-                                // 統計情報を含む stats メッセージを送信
-                                self.request_stats_response(&event_tx);
-                            }
-                            IncomingMessageData::Notify {} => {
-                                handler.on_notify(&message.message);
-                            }
-                            IncomingMessageData::Push {} => {
-                                handler.on_push(&message.message);
-                            }
-                            IncomingMessageData::Switched {
-                                ignore_disconnect_websocket: iws,
-                            } => {
-                                switched_received = true;
-                                switched_ignore_disconnect_websocket = iws;
-                                handler.on_switched();
-                                if !use_data_channel_signaling
-                                    && is_data_channel_signaling_ready(
-                                        switched_received,
-                                        &self.data_channel_configs,
-                                        &opened_data_channels,
-                                    )
-                                {
-                                    use_data_channel_signaling = true;
+                                IncomingMessageData::ReqStats {} => {
+                                    // 統計情報を含む stats メッセージを送信
+                                    self.request_stats_response(&event_tx);
                                 }
-                            }
-                            IncomingMessageData::Redirect { location } => {
-                                handler.on_signaling_message(
-                                    SignalingType::WebSocket,
-                                    SignalingDirection::Received,
-                                    &text,
-                                );
-                                rtc_log_info!("Received redirect message: {}", location);
-                                redirect_location = Some(location);
-                                break;
-                            }
-                            IncomingMessageData::Close { .. } => {
-                                rtc_log_info!("Disconnected from Sora server");
-                                break;
+                                IncomingMessageData::Notify {} => {
+                                    handler.on_notify(&message.message);
+                                }
+                                IncomingMessageData::Push {} => {
+                                    handler.on_push(&message.message);
+                                }
+                                IncomingMessageData::Switched {
+                                    ignore_disconnect_websocket: iws,
+                                } => {
+                                    switched_received = true;
+                                    switched_ignore_disconnect_websocket = iws;
+                                    handler.on_switched();
+                                    if !use_data_channel_signaling
+                                        && is_data_channel_signaling_ready(
+                                            switched_received,
+                                            &self.data_channel_configs,
+                                            &opened_data_channels,
+                                        )
+                                    {
+                                        use_data_channel_signaling = true;
+                                    }
+                                }
+                                IncomingMessageData::Redirect { location } => {
+                                    handler.on_signaling_message(
+                                        SignalingType::WebSocket,
+                                        SignalingDirection::Received,
+                                        &text,
+                                    );
+                                    rtc_log_info!("Received redirect message: {}", location);
+                                    redirect_location = Some(location);
+                                    break;
+                                }
+                                IncomingMessageData::Close { .. } => {
+                                    rtc_log_info!("Disconnected from Sora server");
+                                    break;
+                                }
                             }
                         }
-                    }
-                    ConnectionEvent::BinaryMessage(data) => {
-                        rtc_log_info!("[WebSocket] Received binary message: {} bytes", data.len());
-                    }
-                    ConnectionEvent::Ping(_) => {
-                        rtc_log_info!("[WebSocket] Received Ping");
-                    }
-                    ConnectionEvent::Pong(_) => {
-                        rtc_log_info!("[WebSocket] Received Pong");
-                    }
-                    ConnectionEvent::Close { code, reason } => {
-                        rtc_log_info!("[WebSocket] Received Close: {:?} {}", code, reason);
-                        handler.on_websocket_close(code.map(|c| c.0), &reason);
-                        break;
-                    }
-                    ConnectionEvent::StateChanged(state) => {
-                        rtc_log_info!("[WebSocket] State: {:?}", state);
-                    }
-                    ConnectionEvent::Error(err) => {
-                        rtc_log_error!("[WebSocket] Error: {}", err);
+                        ConnectionEvent::BinaryMessage(data) => {
+                            rtc_log_info!(
+                                "[WebSocket] Received binary message: {} bytes",
+                                data.len()
+                            );
+                        }
+                        ConnectionEvent::Ping(_) => {
+                            rtc_log_info!("[WebSocket] Received Ping");
+                        }
+                        ConnectionEvent::Pong(_) => {
+                            rtc_log_info!("[WebSocket] Received Pong");
+                        }
+                        ConnectionEvent::Close { code, reason } => {
+                            rtc_log_info!("[WebSocket] Received Close: {:?} {}", code, reason);
+                            handler.on_websocket_close(code.map(|c| c.0), &reason);
+                            break;
+                        }
+                        ConnectionEvent::StateChanged(state) => {
+                            rtc_log_info!("[WebSocket] State: {:?}", state);
+                        }
+                        ConnectionEvent::Error(err) => {
+                            rtc_log_error!("[WebSocket] Error: {}", err);
+                        }
                     }
                 }
             }
@@ -1448,7 +1463,11 @@ impl SoraConnection {
             }
         }
 
-        if ws.state() == ConnectionState::Connected {
+        // websocket_closed=true は WebSocket のソケットが死んでいるか ws 層が failed 状態で、
+        // 正常な close handshake が成立しない。この状態で close handshake を実行すると
+        // 死んだソケットへの I/O が失敗し、ユーザー主導の正常切断にもかかわらず
+        // run() が Err を返してしまうため、close handshake をスキップする。
+        if ws.state() == ConnectionState::Connected && !websocket_closed {
             // server Close はすでに terminal event として確定しているため、
             // この後始末で発生するエラーは warning として記録し、run の Ok(()) を覆さない。
             let close_result = tokio::time::timeout(websocket_close_timeout, async {
