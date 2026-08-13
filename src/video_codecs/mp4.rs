@@ -220,6 +220,31 @@ struct Mp4SampleMeta {
     duration: u32,
 }
 
+/// MP4 のタイムスケールで表した再生時刻。
+///
+/// マイクロ秒へ事前変換せず、タイムスケール単位 (tick) のまま保持する。
+/// 必要な時点で [`Mp4Timestamp::to_duration`] により [`std::time::Duration`] へ変換する。
+struct Mp4Timestamp {
+    /// タイムスケール単位の再生時刻。
+    ticks: u64,
+    /// 1 秒あたりのタイムスタンプ単位数。
+    timescale: u32,
+}
+
+impl Mp4Timestamp {
+    /// [`std::time::Duration`] に変換する。
+    ///
+    /// 商と剰余に分けて変換するため overflow しない:
+    /// - 秒: `ticks / timescale` は `u64` に収まる
+    /// - ナノ秒: `(ticks % timescale) * 1_000_000_000 / timescale` は
+    ///   分子が `timescale` 未満 * 1_000_000_000 のため 1_000_000_000 未満になる
+    fn to_duration(&self) -> std::time::Duration {
+        let secs = self.ticks / self.timescale as u64;
+        let nanos = (self.ticks % self.timescale as u64) * 1_000_000_000 / self.timescale as u64;
+        std::time::Duration::new(secs, nanos as u32)
+    }
+}
+
 /// MP4 ファイルからビデオサンプルを読み出すリーダー。
 ///
 /// コンストラクタでファイルを開き、全サンプルのメタデータを事前解析する。
@@ -231,11 +256,11 @@ pub struct Mp4SampleReader {
     track_info: Mp4VideoTrackInfo,
     /// 各サンプルのメタデータ。
     samples: Vec<Mp4SampleMeta>,
-    /// 各フレームの累積再生時刻 (マイクロ秒)。
-    /// cumulative_us[0] = 0, cumulative_us[i] = フレーム 0..i の合計再生時間。
+    /// 各フレームの累積再生時刻。
+    /// cumulative[0] = 0, cumulative[i] = フレーム 0..i の合計再生時間。
     /// 長さは samples.len() + 1 で、末尾が動画全体の長さ。
     /// フレームペーシングで絶対時刻ベースの待機に使用する。
-    cumulative_us: Vec<u64>,
+    cumulative: Vec<Mp4Timestamp>,
 }
 
 impl Mp4SampleReader {
@@ -353,20 +378,29 @@ impl Mp4SampleReader {
         // フレームペーシングで「次のフレームをいつ送るべきか」を O(1) で求めるため。
         // thread::sleep の相対待ちでは処理時間の累積ドリフトが発生するが、
         // このテーブルを使って Instant ベースの絶対時刻待ちを行うことで防止する。
-        let timescale = track_info.timescale as u64;
-        let mut cumulative_us = Vec::new();
+        // 時刻はマイクロ秒へ事前変換せず、タイムスケール単位 (tick) のまま保持する。
+        let timescale = track_info.timescale;
+        let mut cumulative = Vec::new();
         let mut acc: u64 = 0;
-        cumulative_us.push(0);
+        cumulative.push(Mp4Timestamp {
+            ticks: 0,
+            timescale,
+        });
         for sample in &samples {
+            // 加算は shiguredo_mp4 が検証する invariant
+            // (Σ sample count <= u32::MAX なら総 duration < u64::MAX) により overflow しない。
             acc += sample.duration as u64;
-            cumulative_us.push((acc * 1_000_000) / timescale);
+            cumulative.push(Mp4Timestamp {
+                ticks: acc,
+                timescale,
+            });
         }
 
         Ok(Self {
             file,
             track_info,
             samples,
-            cumulative_us,
+            cumulative,
         })
     }
 
@@ -554,10 +588,10 @@ impl Mp4SampleReader {
         })
     }
 
-    /// 先頭からフレーム index までの累積再生時間をマイクロ秒で返す。
+    /// 先頭からフレーム index までの累積再生時間を返す。
     /// index=0 なら 0、index=len() なら動画全体の長さ。
-    fn cumulative_duration_us(&self, index: usize) -> u64 {
-        self.cumulative_us[index]
+    fn cumulative_duration(&self, index: usize) -> std::time::Duration {
+        self.cumulative[index].to_duration()
     }
 }
 
@@ -902,12 +936,10 @@ impl Mp4VideoCapturer {
                     }
 
                     // 次のフレームの絶対送信時刻まで待機する。
-                    // cumulative_duration_us(i+1) は「フレーム 0 から i までの合計再生時間」を返す。
+                    // cumulative_duration(i+1) は「フレーム 0 から i までの合計再生時間」を返す。
                     // loop_start からのオフセットとして使うことで、累積ドリフトを防止する。
-                    let next_frame_time_us = reader.cumulative_duration_us(i + 1);
-                    let Some(target) = loop_start
-                        .checked_add(std::time::Duration::from_micros(next_frame_time_us))
-                    else {
+                    let next_frame_time = reader.cumulative_duration(i + 1);
+                    let Some(target) = loop_start.checked_add(next_frame_time) else {
                         // 累積再生時間が Instant の表現範囲を超えるのは、再生時間が極めて長い破損入力に限られる。
                         // 実用上は発生しないが、発生した場合はログを残してフィーダースレッドを終了する。
                         rtc_log_warning!("MP4: loop deadline overflow, stopping feeder thread");
@@ -1219,7 +1251,78 @@ mod tests {
             "サンプル NAL データがファイルから正しく読み込まれていません"
         );
 
+        // cumulative_duration の全値が従来どおり (i * 40000 µs) であることを確認する。
+        // フィクスチャは 25 サンプル、duration 512、timescale 12800 のため、
+        // 1 サンプルあたり 512 * 1_000_000 / 12800 = 40000 マイクロ秒になる。
+        for i in 0..=reader.len() {
+            assert_eq!(
+                reader.cumulative_duration(i),
+                std::time::Duration::from_micros(i as u64 * 40000),
+                "cumulative_duration[{i}] が期待値と異なります"
+            );
+        }
+
         let _ = std::fs::remove_file(&tmp_path);
+    }
+
+    // Mp4Timestamp::to_duration が overflow せず正しい Duration を返すことを確認する。
+    #[test]
+    fn mp4_timestamp_converts_to_duration() {
+        // ticks=0 は 0 秒。
+        assert_eq!(
+            Mp4Timestamp {
+                ticks: 0,
+                timescale: 12800
+            }
+            .to_duration(),
+            std::time::Duration::ZERO
+        );
+        // ticks == timescale はちょうど 1 秒。
+        assert_eq!(
+            Mp4Timestamp {
+                ticks: 12800,
+                timescale: 12800
+            }
+            .to_duration(),
+            std::time::Duration::from_secs(1)
+        );
+        // 割り切れない剰余: 1 tick = 1/12800 秒 = 78125 ナノ秒。
+        assert_eq!(
+            Mp4Timestamp {
+                ticks: 1,
+                timescale: 12800
+            }
+            .to_duration(),
+            std::time::Duration::from_nanos(78125)
+        );
+        // 巨大な ticks でも overflow しない (timescale=1 なら tick がそのまま秒になる)。
+        assert_eq!(
+            Mp4Timestamp {
+                ticks: u64::MAX,
+                timescale: 1
+            }
+            .to_duration(),
+            std::time::Duration::new(u64::MAX, 0)
+        );
+        // ナノ秒の乗算が最大になる境界 (timescale=u32::MAX、剰余=timescale-1) でも overflow しない。
+        let max_mul = (u32::MAX as u64 - 1) * 1_000_000_000 / u32::MAX as u64;
+        assert_eq!(
+            Mp4Timestamp {
+                ticks: u32::MAX as u64 - 1,
+                timescale: u32::MAX
+            }
+            .to_duration(),
+            std::time::Duration::from_nanos(max_mul)
+        );
+        // timescale ちょうど (剰余 0) は 1 秒。
+        assert_eq!(
+            Mp4Timestamp {
+                ticks: u32::MAX as u64,
+                timescale: u32::MAX
+            }
+            .to_duration(),
+            std::time::Duration::from_secs(1)
+        );
     }
 
     // リーダー構築後にファイルを 0 バイトへ縮小すると、
