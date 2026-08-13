@@ -4,7 +4,7 @@
 - Created: 2026-07-29
 - Completed: {YYYY-MM-DD}
 - Model: GPT-5
-- Branch: feature/fix-mp4-arithmetic
+- Branch: feature/fix-mp4-duration-overflow
 - Polished: 2026-08-13
 - Updated: 2026-08-12
 
