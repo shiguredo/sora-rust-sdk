@@ -223,15 +223,15 @@ struct Mp4SampleMeta {
 /// MP4 のタイムスケールで表した再生時刻。
 ///
 /// マイクロ秒へ事前変換せず、タイムスケール単位 (tick) のまま保持する。
-/// 必要な時点で [`Mp4Duration::to_duration`] により [`std::time::Duration`] へ変換する。
-struct Mp4Duration {
-    /// タイムスケール単位の累積 duration。
+/// 必要な時点で [`Mp4Timestamp::to_duration`] により [`std::time::Duration`] へ変換する。
+struct Mp4Timestamp {
+    /// タイムスケール単位の再生時刻。
     ticks: u64,
     /// 1 秒あたりのタイムスタンプ単位数。
     timescale: u32,
 }
 
-impl Mp4Duration {
+impl Mp4Timestamp {
     /// [`std::time::Duration`] に変換する。
     ///
     /// 商と剰余に分けて変換するため overflow しない:
@@ -260,7 +260,7 @@ pub struct Mp4SampleReader {
     /// cumulative[0] = 0, cumulative[i] = フレーム 0..i の合計再生時間。
     /// 長さは samples.len() + 1 で、末尾が動画全体の長さ。
     /// フレームペーシングで絶対時刻ベースの待機に使用する。
-    cumulative: Vec<Mp4Duration>,
+    cumulative: Vec<Mp4Timestamp>,
 }
 
 impl Mp4SampleReader {
@@ -382,7 +382,7 @@ impl Mp4SampleReader {
         let timescale = track_info.timescale;
         let mut cumulative = Vec::new();
         let mut acc: u64 = 0;
-        cumulative.push(Mp4Duration {
+        cumulative.push(Mp4Timestamp {
             ticks: 0,
             timescale,
         });
@@ -390,7 +390,7 @@ impl Mp4SampleReader {
             // 加算は shiguredo_mp4 が検証する invariant
             // (Σ sample count <= u32::MAX なら総 duration < u64::MAX) により overflow しない。
             acc += sample.duration as u64;
-            cumulative.push(Mp4Duration {
+            cumulative.push(Mp4Timestamp {
                 ticks: acc,
                 timescale,
             });
@@ -1265,12 +1265,12 @@ mod tests {
         let _ = std::fs::remove_file(&tmp_path);
     }
 
-    // Mp4Duration::to_duration が overflow せず正しい Duration を返すことを確認する。
+    // Mp4Timestamp::to_duration が overflow せず正しい Duration を返すことを確認する。
     #[test]
-    fn mp4_duration_converts_to_duration() {
+    fn mp4_timestamp_converts_to_duration() {
         // ticks=0 は 0 秒。
         assert_eq!(
-            Mp4Duration {
+            Mp4Timestamp {
                 ticks: 0,
                 timescale: 12800
             }
@@ -1279,7 +1279,7 @@ mod tests {
         );
         // ticks == timescale はちょうど 1 秒。
         assert_eq!(
-            Mp4Duration {
+            Mp4Timestamp {
                 ticks: 12800,
                 timescale: 12800
             }
@@ -1288,7 +1288,7 @@ mod tests {
         );
         // 割り切れない剰余: 1 tick = 1/12800 秒 = 78125 ナノ秒。
         assert_eq!(
-            Mp4Duration {
+            Mp4Timestamp {
                 ticks: 1,
                 timescale: 12800
             }
@@ -1297,7 +1297,7 @@ mod tests {
         );
         // 巨大な ticks でも overflow しない (timescale=1 なら tick がそのまま秒になる)。
         assert_eq!(
-            Mp4Duration {
+            Mp4Timestamp {
                 ticks: u64::MAX,
                 timescale: 1
             }
@@ -1307,7 +1307,7 @@ mod tests {
         // ナノ秒の乗算が最大になる境界 (timescale=u32::MAX、剰余=timescale-1) でも overflow しない。
         let max_mul = (u32::MAX as u64 - 1) * 1_000_000_000 / u32::MAX as u64;
         assert_eq!(
-            Mp4Duration {
+            Mp4Timestamp {
                 ticks: u32::MAX as u64 - 1,
                 timescale: u32::MAX
             }
@@ -1316,7 +1316,7 @@ mod tests {
         );
         // timescale ちょうど (剰余 0) は 1 秒。
         assert_eq!(
-            Mp4Duration {
+            Mp4Timestamp {
                 ticks: u32::MAX as u64,
                 timescale: u32::MAX
             }
