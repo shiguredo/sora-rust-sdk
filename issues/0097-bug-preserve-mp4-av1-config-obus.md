@@ -122,11 +122,11 @@ AV1 ISOBMFF では Sequence Header より前の Metadata OBU も許容される�
 AV1 RTP Payload Format Section 7.2 では、`profile`、`level-idx`、`tier` の省略値はそれぞれ 0、5、0 である。
 現行の bare `AV1` capability はこの既定値を広告するため、AV1CodecConfigurationRecord の値が既定値を超える bitstream をそのまま送ると、受信側が宣言した能力を超える可能性がある。
 
-issue 0096 で導入する reader 固有の required `SdpVideoFormat` と stream identity を AV1 にも適用する。
+issue 0140 で導入する reader 固有の required `SdpVideoFormat` と bitstream identity を AV1 にも適用する。
 AV1 required format には AV1CodecConfigurationRecord の `seq_profile`、`seq_level_idx_0`、`seq_tier_0` を 10 進文字列の `profile`、`level-idx`、`tier` parameter として必ず設定し、省略値へ fallback しない。
 
 `Mp4PassthroughVideoCodecCapability` は AV1 reader について required format だけを encoder format として返す。
-preference の codec type 利用可否は issue 0096 の `is_supported` 経路で判定し、bare `AV1` を実 negotiated format の代用にしない。
+preference の codec type 利用可否は issue 0140 の `is_supported` 経路で判定し、bare `AV1` を実 negotiated format の代用にしない。
 
 `resolve_sdp_format(Encoder, incoming)` は AV1 RTP Payload Format Section 7.2.3 に従い、次を検証する。
 
@@ -143,7 +143,7 @@ level と tier の上限は libwebrtc の profile matching に委ねず、SDK �
 
 ### sample description の一貫性
 
-issue 0096 で導入する全 `sample.sample_entry` の一貫性検証を利用し、AV1 では次を最初の configuration と比較する。
+issue 0140 で導入する全 `sample.sample_entry` の一貫性検証を利用し、AV1 では次を最初の configuration と比較する。
 
 - codec type、width、height
 - AV1CodecConfigurationRecord の全 field
@@ -151,7 +151,7 @@ issue 0096 で導入する全 `sample.sample_entry` の一貫性検証を利用�
 
 後続 sample entry が byte-for-byte 同一なら受理する。
 いずれかが変わる場合は、古い `configOBUs` を新しい sample に付与せず、sample index と相違 field を含む unsupported sample description error で reader 初期化を失敗させる。
-issue 0096 の実装より先に本 issue を実装する場合は、同等の全 sample entry 検証を本 issue に含める。
+issue 0140 の実装より先に本 issue を実装する場合は、同等の全 sample entry 検証を本 issue に含める。
 
 ### Sequence Header の field 検証
 
