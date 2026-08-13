@@ -897,6 +897,9 @@ impl SoraConnection {
         let mut switched_received = false;
         let mut switched_ignore_disconnect_websocket = false;
         let mut opened_data_channels = HashSet::<String>::new();
+        // 切替成立後の WebSocket 切断待機 (WS_DISCONNECT_DELAY) の開始時刻を保持する。
+        // WebSocket を破棄した時点で None にリセットする。リセットしないと期限切れの
+        // sleep_until が select! で即座に解決し続けスピンするため。
         let mut ws_disconnect_delay_start: Option<tokio::time::Instant> = None;
         const WS_DISCONNECT_DELAY: Duration = Duration::from_secs(10);
         let mut buf = vec![0u8; 8192];
@@ -917,15 +920,12 @@ impl SoraConnection {
                         Ok(n) => n,
                         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => 0,
                         Err(e) => {
-                            // switched 後の WebSocket 読み取りエラー (ECONNRESET 等) は、
-                            // DataChannel シグナリングが健全な限り吸収して接続を継続する。
                             if switched_ignore_disconnect_websocket && use_data_channel_signaling {
                                 rtc_log_warning!(
                                     "WebSocket read failed; continuing DataChannel signaling: {}",
                                     e
                                 );
                                 websocket_closed = true;
-                                // 期限切れ sleep_until で select! がスピンしないようリセットする
                                 ws_disconnect_delay_start = None;
                                 continue;
                             }
@@ -936,7 +936,6 @@ impl SoraConnection {
                         if switched_ignore_disconnect_websocket && use_data_channel_signaling {
                             rtc_log_info!("WebSocket closed; continuing DataChannel signaling");
                             websocket_closed = true;
-                            // 期限切れ sleep_until で select! がスピンしないようリセットする
                             ws_disconnect_delay_start = None;
                             continue;
                         } else {
@@ -945,15 +944,12 @@ impl SoraConnection {
                         }
                     } else {
                         if let Err(e) = ws.feed_recv_buf(&buf[..n], now()?) {
-                            // switched 後の WebSocket プロトコルエラー (不正なフレーム等) は、
-                            // DataChannel シグナリングが健全な限り吸収して接続を継続する。
                             if switched_ignore_disconnect_websocket && use_data_channel_signaling {
                                 rtc_log_warning!(
                                     "WebSocket frame processing failed; continuing DataChannel signaling: {}",
                                     e
                                 );
                                 websocket_closed = true;
-                                // 期限切れ sleep_until で select! がスピンしないようリセットする
                                 ws_disconnect_delay_start = None;
                                 continue;
                             }
@@ -1416,7 +1412,6 @@ impl SoraConnection {
                     if switched_ignore_disconnect_websocket && use_data_channel_signaling {
                         rtc_log_info!("WebSocket closed; continuing DataChannel signaling");
                         websocket_closed = true;
-                        // 期限切れ sleep_until で select! がスピンしないようリセットする
                         ws_disconnect_delay_start = None;
                         continue;
                     } else {
