@@ -1466,8 +1466,12 @@ impl SoraConnection {
         // 死んだソケットへの I/O が失敗し、ユーザー主導の正常切断にもかかわらず
         // run() が Err を返してしまうため、close handshake をスキップする。
         if ws.state() == ConnectionState::Connected && !websocket_closed {
-            // server Close はすでに terminal event として確定しているため、
-            // この後始末で発生するエラーは warning として記録し、run の Ok(()) を覆さない。
+            // server Close、または switched 後の ignore 構成での切断は ws の終了処理が
+            // 確定的に進むため、この後始末で発生するエラーは warning として記録し、
+            // run の Ok(()) を覆さない。
+            // ignore 構成では切断と RST が同時に起きた場合に websocket_closed が
+            // 立つ前に close handshake へ入り、死んだソケットへの I/O が失敗して
+            // ユーザー主導の切断が Err になることがあるため、同様に warning に落とす。
             let close_result = tokio::time::timeout(websocket_close_timeout, async {
                 ws.close(CloseCode::NORMAL, "shutdown")?;
                 loop {
@@ -1503,7 +1507,9 @@ impl SoraConnection {
             match close_result {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => {
-                    if server_close_received {
+                    if server_close_received
+                        || (switched_ignore_disconnect_websocket && use_data_channel_signaling)
+                    {
                         rtc_log_warning!("WebSocket close handshake failed: {}", e);
                     } else {
                         return Err(e);
