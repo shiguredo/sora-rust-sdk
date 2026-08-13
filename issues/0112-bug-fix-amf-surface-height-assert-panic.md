@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-13
 - Model: deepseek-v4-flash
 - Branch: feature/fix-amf-surface-height-assert-panic
 - Polished: {YYYY-MM-DD}
@@ -39,3 +39,12 @@ assert_eq!(surface_height as u32, frame_height);
 
 - `src/video_codecs/amf.rs`
 - `CHANGES.md`
+
+## 解決方法
+
+`src/video_codecs/amf.rs` の `AmfEncoder::encode` 内の `assert_eq!(surface_height as u32, frame_height)` を修正する本 issue は、既に closed 済みの以下 2 issue と同一の問題である。
+
+- `closed/0024-bug-amf-encoder-hot-path-panic.md`: AMF SDK の仕様調査の結果、`AMFPlane::GetHeight()` は crop region の論理高さを返し、アライメントによるパディングは `GetVPitch()` が吸収するため、`surface_height` と `frame_height` は常に一致すると判断して closed にした。
+- `closed/0057-bug-fix-amf-assert-eq-hot-path-panic.md`: 上記 0024 の判断を AMF SDK ソースで裏取りした結果に基づき、`assert_eq!` を除去して `VideoCodecStatus::Error` を返す方式では異常が握りつぶされるため、panic で即座に検知できる現状のままが安全と判断して closed にした。
+
+本 issue にはこれら 2 回の調査結論を覆す新たな根拠がないため、修正せず closed にする。
