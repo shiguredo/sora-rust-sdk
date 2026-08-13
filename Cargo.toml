@@ -1,6 +1,6 @@
 [package]
 name = "sora_sdk"
-version = "2026.1.0-canary.19"
+version = "2026.1.0-canary.20"
 edition = "2024"
 rust-version = "1.93"
 description = "Sora Rust SDK"
