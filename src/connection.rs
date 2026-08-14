@@ -17,7 +17,7 @@ use shiguredo_webrtc::{
     CxxString, DataChannel, DataChannelObserver, DataChannelObserverHandler, DataChannelState,
     IceCandidateRef, IceServer, MediaStreamTrack, PeerConnection, PeerConnectionDependencies,
     PeerConnectionObserver, PeerConnectionObserverHandler, PeerConnectionOfferAnswerOptions,
-    PeerConnectionRtcConfiguration, PeerConnectionState, Resolution, RtcError,
+    PeerConnectionRtcConfiguration, PeerConnectionState, RTCStatsReport, Resolution, RtcError,
     RtpEncodingParameters, RtpEncodingParametersVector, RtpReceiver, RtpSender, RtpTransceiver,
     SSLCertChainRef, SSLCertificateVerifier, SSLCertificateVerifierHandler, SdpType,
     SessionDescription, SetLocalDescriptionObserver, SetLocalDescriptionObserverHandler,
@@ -454,6 +454,7 @@ impl SoraConnectionHandle {
     pub async fn selected_signaling_url(&self) -> Result<Option<String>> {
         self.send_command(
             "selected_signaling_url",
+            None,
             SoraConnectionCommand::GetSelectedSignalingUrl,
         )
         .await
@@ -467,6 +468,7 @@ impl SoraConnectionHandle {
     pub async fn connected_signaling_url(&self) -> Result<Option<String>> {
         self.send_command(
             "connected_signaling_url",
+            None,
             SoraConnectionCommand::GetConnectedSignalingUrl,
         )
         .await
@@ -476,7 +478,7 @@ impl SoraConnectionHandle {
     ///
     /// `run()` が切断要求を受け付けたことを確認してから戻る。
     pub async fn disconnect(&self) -> Result<()> {
-        self.send_command("disconnect", SoraConnectionCommand::Disconnect)
+        self.send_command("disconnect", None, SoraConnectionCommand::Disconnect)
             .await
     }
 
@@ -499,7 +501,7 @@ impl SoraConnectionHandle {
         params: Option<JsonString>,
         options: RpcRequestOptions,
     ) -> Result<Option<RpcResponse>> {
-        self.send_command("send_rpc_request", |tx| {
+        self.send_command("send_rpc_request", None, |tx| {
             SoraConnectionCommand::SendRpcRequest {
                 method: method.to_string(),
                 params,
@@ -517,10 +519,12 @@ impl SoraConnectionHandle {
     /// `#` プレフィックスのないラベルを渡すと `Error::InvalidDataChannelLabel` を返す。
     /// また、Offer 応答の `data_channels` に含まれていないラベルも同様に返す。
     pub async fn send_message(&self, label: &str, data: &[u8]) -> Result<()> {
-        self.send_command("send_message", |tx| SoraConnectionCommand::SendMessage {
-            label: label.to_string(),
-            data: data.to_vec(),
-            response_tx: tx,
+        self.send_command("send_message", None, |tx| {
+            SoraConnectionCommand::SendMessage {
+                label: label.to_string(),
+                data: data.to_vec(),
+                response_tx: tx,
+            }
         })
         .await?
     }
@@ -528,14 +532,20 @@ impl SoraConnectionHandle {
     /// 統計情報を取得する。
     ///
     /// PeerConnection の統計情報を JSON 形式で取得する。
+    /// 統計コールバックが 5 秒以内に発火しない場合は `Error::CommandTimeout` を返す。
     pub async fn get_stats(&self) -> Result<JsonString> {
-        self.send_command("get_stats", SoraConnectionCommand::GetStats)
-            .await?
+        self.send_command(
+            "get_stats",
+            Some(Duration::from_secs(5)),
+            SoraConnectionCommand::GetStats,
+        )
+        .await?
     }
 
     async fn send_command<R>(
         &self,
         command: &'static str,
+        timeout: Option<Duration>,
         build: impl FnOnce(oneshot::Sender<R>) -> SoraConnectionCommand,
     ) -> Result<R> {
         let (tx, rx) = oneshot::channel();
@@ -545,8 +555,17 @@ impl SoraConnectionHandle {
                 reason: e.to_string(),
                 command,
             })?;
-        rx.await
-            .map_err(|source| Error::CommandResponseMissing { source, command })
+        let result = match timeout {
+            Some(duration) => match tokio::time::timeout(duration, rx).await {
+                Ok(result) => result,
+                Err(_) => {
+                    rtc_log_warning!("Timed out waiting for {} result", command);
+                    return Err(Error::CommandTimeout { command });
+                }
+            },
+            None => rx.await,
+        };
+        result.map_err(|source| Error::CommandResponseMissing { source, command })
     }
 }
 
@@ -597,6 +616,8 @@ enum SoraEvent {
     DataChannelMessage { label: String, data: Vec<u8> },
     DataChannelRegister(DataChannel),
     DataChannelStateChange(String),
+    SendWebSocketMessage(String),
+    SendDataChannelMessage { label: String, message: String },
     RpcTimeout { id: u64 },
 }
 
@@ -657,6 +678,16 @@ impl SSLCertificateVerifierHandler for TurnTlsCaCertVerifier {
         )
         .is_ok()
     }
+}
+
+/// `RTCStatsReport` を `JsonString` に変換する。
+///
+/// `to_json()` で得た文字列を、JSON として妥当であることを検証した `JsonString` にパースする。
+fn report_to_json_string(report: &RTCStatsReport) -> Result<JsonString> {
+    report
+        .to_json()
+        .map_err(Error::from)
+        .and_then(|s| s.parse())
 }
 
 impl SoraConnection {
@@ -1032,6 +1063,20 @@ impl SoraConnection {
                         SoraEvent::DataChannelStateChange(label) => {
                             self.handle_data_channel_state(&mut *handler, &label, &mut opened_data_channels, &mut use_data_channel_signaling, switched_received);
                         }
+                        // このイベントを受信したら WebSocket メッセージを送信する
+                        // 送信時のエラーはログだけ出して無視する
+                        SoraEvent::SendWebSocketMessage(message) => {
+                            if let Err(e) = self.send_websocket_message(&mut ws, &message) {
+                                rtc_log_warning!("Failed to send WebSocket message: error={}", e);
+                            }
+                        }
+                        // このイベントを受信したら DataChannel メッセージを送信する
+                        // 送信時のエラーはログだけ出して無視する
+                        SoraEvent::SendDataChannelMessage { label, message } => {
+                            if let Err(e) = self.send_data_channel_message(&label, message.as_bytes()) {
+                                rtc_log_warning!("Failed to send DataChannel message: label='{}' error={}", label, e);
+                            }
+                        }
                     }
                 }
                 // ハンドル経由での切断要求
@@ -1069,8 +1114,13 @@ impl SoraConnection {
                             break;
                         }
                         SoraConnectionCommand::GetStats(stats_response_tx) => {
-                            let stats = self.get_stats().await;
-                            let _ = stats_response_tx.send(stats);
+                            // get_stats のコールバック内で直接応答を送信するため、
+                            // run ループはブロックされない。
+                            let pc = &self.pc;
+                            pc.get_stats(move |report| {
+                                let result = report_to_json_string(&report);
+                                let _ = stats_response_tx.send(result);
+                            });
                         }
                         SoraConnectionCommand::GetSelectedSignalingUrl(response_tx) => {
                             let _ = response_tx.send(self.selected_signaling_url.clone());
@@ -1226,10 +1276,7 @@ impl SoraConnection {
                                 }
                                 IncomingMessageData::Ping { stats } => {
                                     if stats.unwrap_or(false) {
-                                        if self.request_stats_pong(&event_tx).is_err() {
-                                            // エラー時は通常の pong を送信する
-                                            self.send_pong(&event_tx);
-                                        }
+                                        self.request_stats_pong(&event_tx);
                                     } else {
                                         self.send_pong(&event_tx);
                                     }
@@ -1644,50 +1691,30 @@ impl SoraConnection {
 
     fn send_pong(&self, event_tx: &mpsc::UnboundedSender<SoraEvent>) {
         let message = OutgoingMessage::new_pong(None);
-        let _ = event_tx.send(SoraEvent::SignalingMessage(Json(message).to_string()));
+        // pong はシグナリングメッセージとして返信するが、on_signaling_message は発生させない
+        let _ = event_tx.send(SoraEvent::SendWebSocketMessage(Json(message).to_string()));
     }
 
-    fn request_stats_pong(&self, event_tx: &mpsc::UnboundedSender<SoraEvent>) -> Result<()> {
+    fn request_stats_pong(&self, event_tx: &mpsc::UnboundedSender<SoraEvent>) {
         let pc = &self.pc;
         let event_tx = event_tx.clone();
         pc.get_stats(move |report| {
-            let message = OutgoingMessage::new_pong(
-                report
-                    .to_json()
-                    .map_err(Error::from)
-                    .and_then(|s| s.parse())
-                    .ok(),
-            );
-            let _ = event_tx.send(SoraEvent::SignalingMessage(Json(message).to_string()));
+            let message = OutgoingMessage::new_pong(report_to_json_string(&report).ok());
+            // pong はシグナリングメッセージとして返信するが、on_signaling_message は発生させない
+            let _ = event_tx.send(SoraEvent::SendWebSocketMessage(Json(message).to_string()));
         });
-        Ok(())
     }
 
     fn request_stats_response(&self, event_tx: &mpsc::UnboundedSender<SoraEvent>) {
         let pc = &self.pc;
         let event_tx = event_tx.clone();
         pc.get_stats(move |report| {
-            if let Ok(reports) = report.to_json()
-                && let Ok(reports) = reports.parse()
-            {
+            if let Ok(reports) = report_to_json_string(&report) {
                 let message = OutgoingMessage::new_stats(reports);
-                let _ = event_tx.send(SoraEvent::SignalingMessage(Json(message).to_string()));
+                // req-stats はシグナリングメッセージとして返信するが、on_signaling_message は発生させない
+                let _ = event_tx.send(SoraEvent::SendWebSocketMessage(Json(message).to_string()));
             }
         });
-    }
-
-    async fn get_stats(&mut self) -> Result<JsonString> {
-        let pc = &self.pc;
-        let (tx, rx) = oneshot::channel();
-        pc.get_stats(move |report| {
-            let r = report.to_json();
-            let _ = tx.send(r);
-        });
-        let json = rx.await.map_err(|e| Error::CommandResponseMissing {
-            source: e,
-            command: "get_stats",
-        })??;
-        json.parse()
     }
 
     async fn handle_offer(&mut self, sdp: &str, ice_servers: &[IceServerConfig]) -> Result<String> {
@@ -2047,30 +2074,39 @@ impl SoraConnection {
                         self.send_data_channel_message("signaling", reanswer_text.as_bytes())?;
                     }
                     IncomingMessageData::Ping { stats } => {
-                        let pong = if stats.unwrap_or(false) {
-                            let reports = self.get_stats().await.ok();
-                            OutgoingMessage::new_pong(reports)
+                        if stats.unwrap_or(false) {
+                            // pc.get_stats() のコールバックから、event_tx 経由での DataChannel 送信で結果を返す
+                            let pc = &self.pc;
+                            let event_tx = self.event_tx.clone();
+                            pc.get_stats(move |report| {
+                                let message =
+                                    OutgoingMessage::new_pong(report_to_json_string(&report).ok());
+                                let text = Json(message).to_string();
+                                let _ = event_tx.send(SoraEvent::SendDataChannelMessage {
+                                    label: "signaling".to_string(),
+                                    message: text,
+                                });
+                            });
                         } else {
-                            OutgoingMessage::new_pong(None)
-                        };
-                        let pong_text = Json(pong).to_string();
-                        handler.on_signaling_message(
-                            SignalingType::DataChannel,
-                            SignalingDirection::Sent,
-                            &pong_text,
-                        );
-                        self.send_data_channel_message("signaling", pong_text.as_bytes())?;
+                            let pong = OutgoingMessage::new_pong(None);
+                            let pong_text = Json(pong).to_string();
+                            self.send_data_channel_message("signaling", pong_text.as_bytes())?;
+                        }
                     }
                     IncomingMessageData::ReqStats {} => {
-                        // 統計情報を含む stats メッセージを送信（stats チャンネル経由）
-                        let reports = self.get_stats().await;
-                        if let Ok(reports) = reports {
-                            let stats = OutgoingMessage::new_stats(reports);
-                            self.send_data_channel_message(
-                                "stats",
-                                Json(stats).to_string().as_bytes(),
-                            )?;
-                        }
+                        // pc.get_stats() のコールバックから、event_tx 経由での DataChannel 送信で結果を返す
+                        let pc = &self.pc;
+                        let event_tx = self.event_tx.clone();
+                        pc.get_stats(move |report| {
+                            if let Ok(reports) = report_to_json_string(&report) {
+                                let message = OutgoingMessage::new_stats(reports);
+                                let text = Json(message).to_string();
+                                let _ = event_tx.send(SoraEvent::SendDataChannelMessage {
+                                    label: "stats".to_string(),
+                                    message: text,
+                                });
+                            }
+                        });
                     }
                     IncomingMessageData::Notify {} => {
                         handler.on_notify(&text);
@@ -3984,6 +4020,102 @@ mod tests {
                 Err(Error::DataChannelMissing { label }) if label == "signaling"
             ),
             "signaling DataChannel 未登録の ping は DataChannelMissing になる必要があります"
+        );
+    }
+
+    /// `SoraConnectionCommand::GetStats` を受信して応答を送らず、
+    /// 受信した oneshot の Sender をテスト側へ渡すサーバーを生成する。
+    ///
+    /// 戻り値は `SoraConnectionHandle` と、サーバーが受信した Sender を受け取るための channel。
+    /// コールバックの発火タイミングはテスト側が制御する。
+    fn spawn_get_stats_server() -> (
+        SoraConnectionHandle,
+        mpsc::UnboundedReceiver<oneshot::Sender<Result<JsonString>>>,
+    ) {
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
+        let handle = SoraConnectionHandle { command_tx };
+        let (sender_tx, sender_rx) =
+            mpsc::unbounded_channel::<oneshot::Sender<Result<JsonString>>>();
+        tokio::spawn(async move {
+            while let Some(command) = command_rx.recv().await {
+                if let SoraConnectionCommand::GetStats(tx) = command {
+                    let _ = sender_tx.send(tx);
+                }
+            }
+        });
+        (handle, sender_rx)
+    }
+
+    /// get_stats の応答待機が、コールバック不発時にタイムアウトして
+    /// `Error::CommandTimeout` を返すことを確認する。
+    ///
+    /// あわせて、タイムアウト後に遅延して届くコールバック送信が無視されることを
+    /// 確認する。タイムアウトで受信側がドロップ済みのため、送信は失敗する。
+    #[tokio::test]
+    async fn get_stats_times_out_and_ignores_late_callback() {
+        let (handle, mut sender_rx) = spawn_get_stats_server();
+
+        // コールバックが発火しないままタイムアウトする。
+        let result = handle
+            .send_command(
+                "get_stats",
+                Some(Duration::from_millis(50)),
+                SoraConnectionCommand::GetStats,
+            )
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(Error::CommandTimeout { command }) if command == "get_stats"
+            ),
+            "コールバック不発時は Error::CommandTimeout になる必要があります"
+        );
+
+        // タイムアウト後に遅延してコールバックが発火しても、受信側は
+        // ドロップ済みのため送信は失敗し、無視される。
+        let tx = sender_rx
+            .recv()
+            .await
+            .expect("GetStats コマンドがサーバーに到達していません");
+        let json = "{}"
+            .parse::<JsonString>()
+            .expect("JSON のパースに失敗しました");
+        let send_result = tx.send(Ok(json));
+        assert!(
+            send_result.is_err(),
+            "タイムアウト後のコールバック送信は失敗 (無視) される必要があります"
+        );
+    }
+
+    /// get_stats の応答待機が、コールバック発火時に結果を返すことを確認する。
+    #[tokio::test]
+    async fn get_stats_returns_result_when_callback_fires() {
+        let (handle, mut sender_rx) = spawn_get_stats_server();
+        let json = "{}"
+            .parse::<JsonString>()
+            .expect("JSON のパースに失敗しました");
+        let expected = json.clone();
+
+        // get_stats の呼び出しと並行して、サーバー経由でコールバック相当の応答を送る。
+        let send_task = tokio::spawn(async move {
+            let tx = sender_rx
+                .recv()
+                .await
+                .expect("GetStats コマンドがサーバーに到達していません");
+            let _ = tx.send(Ok(expected));
+        });
+        let result = handle.get_stats().await;
+        send_task
+            .await
+            .expect("コールバック相当の送信タスクが失敗しました");
+
+        assert_eq!(
+            result
+                .as_ref()
+                .expect("コールバック発火時は Ok を返す必要があります")
+                .to_string(),
+            json.to_string(),
+            "get_stats の結果はコールバックが送信した値と一致する必要があります"
         );
     }
 
