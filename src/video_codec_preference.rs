@@ -1,7 +1,7 @@
 //! ビデオコーデックの優先順位設定。
 use std::collections::HashSet;
 
-use shiguredo_webrtc::{SdpVideoFormat, VideoCodecType};
+use shiguredo_webrtc::VideoCodecType;
 
 use nojson::{DisplayJson, Json, JsonFormatter, JsonParseError, RawJsonValue};
 
@@ -273,6 +273,13 @@ fn validate_codec(
             ),
         });
     };
+    // preference の妥当性は `is_supported` の結果を source of truth として判定する。
+    // かつては bare `SdpVideoFormat` を `resolve_sdp_format` に渡す追加検証も行っていたが、
+    // codec 固有 parameter を required とする capability では bare 生成が fuzzy match で
+    // 拒否され、`is_supported` を override して true を返しても validation で落ちる矛盾があった。
+    // 実 encoder factory の format 解決は別途 `SoraVideoEncoderFactory::create` が実
+    // negotiated format で行うため、preference 判定側では codec type / direction の可否だけを
+    // 見れば足りる。
     let encoder_supported = capability.is_supported(CodecDirection::Encoder, codec.codec_type());
     let decoder_supported = capability.is_supported(CodecDirection::Decoder, codec.codec_type());
     let (direction_supported, opposite_supported) = match codec.direction() {
@@ -290,25 +297,6 @@ fn validate_codec(
         return Err(Error::InvalidVideoCodecPreference {
             reason: format!(
                 "{direction} not supported: codec_preference={}, codec_capability={}",
-                Json(codec),
-                codec_capability_summary(capability, codec.codec_type())
-            ),
-        });
-    }
-
-    let requested = SdpVideoFormat::new(
-        codec
-            .codec_type()
-            .as_str()
-            .expect("known codec type must be converted to codec name"),
-    );
-    if capability
-        .resolve_sdp_format(codec.direction(), requested.as_ref())
-        .is_none()
-    {
-        return Err(Error::InvalidVideoCodecPreference {
-            reason: format!(
-                "codec format not found: codec_preference={}, codec_capability={}",
                 Json(codec),
                 codec_capability_summary(capability, codec.codec_type())
             ),

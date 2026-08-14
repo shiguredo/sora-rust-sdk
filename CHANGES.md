@@ -43,3 +43,11 @@
   - 今まではタイムスケール単位の累積再生時間をマイクロ秒へ事前変換しており、累積再生時間が極めて大きい入力ファイルを処理した場合に、パニックまたはラップアラウンドする可能性があった
   - 正常な MP4 ファイルでは、このような再生時間を含むことはまずないが、壊れた MP4 ファイルが渡された場合に備えての防御的な対応を追加した
   - @sile
+
+### misc
+
+- [UPDATE] `validate_video_codec_preference` から bare `SdpVideoFormat` を `resolve_sdp_format` に投入する重複検証を削除し、`is_supported` を preference validation の source of truth にする
+  - 既存の全 capability は default `is_supported` を使っているため既存挙動は変わらない
+  - 後続の MP4 passthrough / codec 固有 `is_supported` override で preference validation が拒否されない土台になる
+  - `SoraVideoEncoderFactory::create` / `SoraVideoDecoderFactory::create` の `resolve_sdp_format` pass-through を production コメントと回帰テストで固定する
+  - @sile
