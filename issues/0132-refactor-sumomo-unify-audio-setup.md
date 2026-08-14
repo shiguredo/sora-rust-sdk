@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-15
 - Model: deepseek-v4-flash
 - Branch: feature/refactor-sumomo-unify-audio-setup
 - Polished: {YYYY-MM-DD}
@@ -32,3 +32,9 @@
 ## 変更対象
 
 - `examples/sumomo/src/main.rs`
+
+## 解決方法
+
+- 実装対象の重複が存在しなくなったため、対応せずに closed にする
+- 0132 の前提である `main` と `run_with_raw_player` の 2 経路は、0101 で `run_with_raw_player` を廃止して `main()` に統合したことで解消された
+- 現在は `examples/sumomo/src/main.rs` の `build_and_run_connection` の 1 箇所で音声セットアップ (`SumomoAdm` の生成・`AdmConfig` の決定・`AudioDeviceCapturer` の生成・起動) を完結している
