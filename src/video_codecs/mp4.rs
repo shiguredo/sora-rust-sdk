@@ -82,7 +82,7 @@ pub enum Mp4Error {
     ///
     /// codec type、解像度、NAL 長サイズ、parameter sets のいずれかが変わる
     /// sample description は本 SDK では受理しない。
-    /// byte-for-byte 完全一致の再掲は `shiguredo_mp4` 側で `None` に normalize されるため受理する。
+    /// 前のサンプルと構造的に等値な再掲は `shiguredo_mp4` 側で `None` に正規化されるため受理する。
     InconsistentSampleDescription {
         /// 相違が検出されたビデオサンプルの 0 始まりインデックス。
         index: usize,
@@ -335,8 +335,8 @@ impl Mp4SampleReader {
         // 最初のサンプルの sample_entry からコーデック情報 (解像度、parameter sets 等) を取得し、
         // 以後の Some(sample_entry) も extract_track_info に通して、
         // codec_type / width / height / nal_length_size / parameter_sets の
-        // byte-for-byte 一致を検証する。sample description が途中で切り替わる MP4 を
-        // silently 最初の configuration のまま送出しないためのゲート。
+        // 値等値を検証する。sample description が途中で切り替わる MP4 を
+        // 気付かれないまま最初の configuration のまま送出しないためのゲート。
         let mut track_info: Option<Mp4VideoTrackInfo> = None;
         let mut samples = Vec::new();
 
@@ -347,6 +347,12 @@ impl Mp4SampleReader {
             }
 
             // sample_entry が付与されたサンプルではコーデック情報を確定または一貫性検証する。
+            //
+            // shiguredo_mp4 が前のサンプルと構造的に等値なサンプルエントリーを `None` に
+            // 正規化するため、後発の `Some(sample_entry)` は必ず何らかの相違を持つ。
+            // 本 SDK が抽出する 5 field の一致で `mismatched` が空になる場合、その相違は
+            // 本 SDK の抽出範囲外（`avcC` header や補助 box）にある。codec 固有 field の
+            // 検証は、将来 `Mp4VideoTrackInfo` を拡張する形で加える。
             if let Some(entry) = sample.sample_entry {
                 let info = Self::extract_track_info(entry, timescale)?;
                 if let Some(ref first) = track_info {
