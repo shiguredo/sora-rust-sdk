@@ -855,7 +855,7 @@ impl SoraConnection {
             .config
             .event_handler
             .take()
-            .expect("event_handler は new() で設定されている");
+            .expect("event_handler must be set in new()");
         let proxy = self.proxy.clone();
 
         if signaling_urls.is_empty() {
@@ -901,7 +901,7 @@ impl SoraConnection {
         let display_host = format_bracketed_host(&target.host);
         let scheme = if target.tls { "wss" } else { "ws" };
         rtc_log_info!(
-            "接続先: {}://{}:{}{}",
+            "Connection target: {}://{}:{}{}",
             scheme,
             display_host,
             target.port,
@@ -1057,7 +1057,7 @@ impl SoraConnection {
                         }
                         SoraEvent::RpcTimeout { id } => {
                             if let Some(mut pending) = self.pending_rpc_responses.remove(&id) {
-                                let _ = pending.response_tx.take().expect("response_tx は必ず存在する").send(Err(Error::RpcTimeout));
+                                let _ = pending.response_tx.take().expect("response_tx must exist").send(Err(Error::RpcTimeout));
                             }
                         }
                         SoraEvent::DataChannelStateChange(label) => {
@@ -1136,7 +1136,7 @@ impl SoraConnection {
                                     if notification {
                                         let _ = response_tx.send(Ok(None));
                                     } else {
-                                        let id = rpc_id.expect("notification でない場合は id が存在する");
+                                        let id = rpc_id.expect("id must exist when notification is false");
                                         let event_tx = event_tx.clone();
                                         let timeout_handle = tokio::spawn(async move {
                                             tokio::time::sleep(timeout).await;
@@ -1391,7 +1391,7 @@ impl SoraConnection {
                 let display_host = format_bracketed_host(&new_target.host);
                 let scheme = if new_target.tls { "wss" } else { "ws" };
                 rtc_log_info!(
-                    "リダイレクト先: {}://{}:{}{}",
+                    "Redirect target: {}://{}:{}{}",
                     scheme,
                     display_host,
                     new_target.port,
@@ -2008,7 +2008,7 @@ impl SoraConnection {
         };
 
         rtc_log_info!(
-            "DataChannel '{}' からメッセージを受信: {} bytes",
+            "Received message from DataChannel '{}': {} bytes",
             label,
             message_bytes.len()
         );
@@ -2120,7 +2120,7 @@ impl SoraConnection {
                             let _ = pending
                                 .response_tx
                                 .take()
-                                .expect("response_tx は必ず存在する")
+                                .expect("response_tx must exist")
                                 .send(Ok(Some(response)));
                         } else {
                             // 未知 / timeout 済み / 重複の id の正常 response は破棄する。
@@ -2151,7 +2151,7 @@ impl SoraConnection {
                             let _ = pending
                                 .response_tx
                                 .take()
-                                .expect("response_tx は必ず存在する")
+                                .expect("response_tx must exist")
                                 .send(Err(err));
                         } else {
                             // JSON syntax error と相関できない protocol violation は破棄する。
@@ -2910,7 +2910,7 @@ async fn connect_websocket(
     let deadline = tokio::time::Instant::now() + timeout;
     if let Some(proxy) = proxy {
         rtc_log_info!(
-            "HTTP Proxy 経由で接続します: {}:{}",
+            "Connecting via HTTP proxy: {}:{}",
             format_bracketed_host(proxy.host()),
             proxy.port
         );
@@ -2920,7 +2920,7 @@ async fn connect_websocket(
         if target.tls {
             let (tcp_stream, pending) = stream
                 .into_plain_parts()
-                .expect("BUG: proxy 接続後は plain stream のはずです");
+                .expect("BUG: stream must be plain after proxy connection");
             // TLS 接続では ClientHello をクライアントが先に送るため、
             // CONNECT 200 応答直後にサーバーからバイトが届くことはありえない。
             // 余剰バイトはプロキシの応答注入であるため接続を拒否する。
@@ -3074,7 +3074,7 @@ async fn connect_signaling_urls(
                 let display_host = format_bracketed_host(&target.host);
                 let scheme = if target.tls { "wss" } else { "ws" };
                 rtc_log_info!(
-                    "接続試行: {}://{}:{}{}",
+                    "Connection attempt: {}://{}:{}{}",
                     scheme,
                     display_host,
                     target.port,
@@ -3096,7 +3096,7 @@ async fn connect_signaling_urls(
                 let display_host = format_bracketed_host(&target.host);
                 let scheme = if target.tls { "wss" } else { "ws" };
                 rtc_log_info!(
-                    "接続成功: {}://{}:{}{}",
+                    "Connection established: {}://{}:{}{}",
                     scheme,
                     display_host,
                     target.port,
