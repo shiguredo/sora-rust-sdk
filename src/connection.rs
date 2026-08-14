@@ -17,7 +17,7 @@ use shiguredo_webrtc::{
     CxxString, DataChannel, DataChannelObserver, DataChannelObserverHandler, DataChannelState,
     IceCandidateRef, IceServer, MediaStreamTrack, PeerConnection, PeerConnectionDependencies,
     PeerConnectionObserver, PeerConnectionObserverHandler, PeerConnectionOfferAnswerOptions,
-    PeerConnectionRtcConfiguration, PeerConnectionState, Resolution, RtcError,
+    PeerConnectionRtcConfiguration, PeerConnectionState, RTCStatsReport, Resolution, RtcError,
     RtpEncodingParameters, RtpEncodingParametersVector, RtpReceiver, RtpSender, RtpTransceiver,
     SSLCertChainRef, SSLCertificateVerifier, SSLCertificateVerifierHandler, SdpType,
     SessionDescription, SetLocalDescriptionObserver, SetLocalDescriptionObserverHandler,
@@ -555,7 +555,6 @@ impl SoraConnectionHandle {
                 reason: e.to_string(),
                 command,
             })?;
-        // タイムアウト付きの場合は tokio::time::timeout を付けて .await する呼び出す
         let result = match timeout {
             Some(duration) => match tokio::time::timeout(duration, rx).await {
                 Ok(result) => result,
@@ -617,7 +616,7 @@ enum SoraEvent {
     DataChannelMessage { label: String, data: Vec<u8> },
     DataChannelRegister(DataChannel),
     DataChannelStateChange(String),
-    SendWebsocketMessage(String),
+    SendWebSocketMessage(String),
     SendDataChannelMessage { label: String, message: String },
     RpcTimeout { id: u64 },
 }
@@ -679,6 +678,16 @@ impl SSLCertificateVerifierHandler for TurnTlsCaCertVerifier {
         )
         .is_ok()
     }
+}
+
+/// `RTCStatsReport` を `JsonString` に変換する。
+///
+/// `to_json()` で得た文字列を、JSON として妥当であることを検証した `JsonString` にパースする。
+fn report_to_json_string(report: &RTCStatsReport) -> Result<JsonString> {
+    report
+        .to_json()
+        .map_err(Error::from)
+        .and_then(|s| s.parse())
 }
 
 impl SoraConnection {
@@ -1054,11 +1063,11 @@ impl SoraConnection {
                         SoraEvent::DataChannelStateChange(label) => {
                             self.handle_data_channel_state(&mut *handler, &label, &mut opened_data_channels, &mut use_data_channel_signaling, switched_received);
                         }
-                        // このイベントを受信したら Websocket メッセージを送信する
+                        // このイベントを受信したら WebSocket メッセージを送信する
                         // 送信時のエラーはログだけ出して無視する
-                        SoraEvent::SendWebsocketMessage(message) => {
+                        SoraEvent::SendWebSocketMessage(message) => {
                             if let Err(e) = self.send_websocket_message(&mut ws, &message) {
-                                rtc_log_warning!("Failed to send Websocket message: error={}", e);
+                                rtc_log_warning!("Failed to send WebSocket message: error={}", e);
                             }
                         }
                         // このイベントを受信したら DataChannel メッセージを送信する
@@ -1109,10 +1118,7 @@ impl SoraConnection {
                             // run ループはブロックされない。
                             let pc = &self.pc;
                             pc.get_stats(move |report| {
-                                let result = report
-                                    .to_json()
-                                    .map_err(Error::from)
-                                    .and_then(|s| s.parse());
+                                let result = report_to_json_string(&report);
                                 let _ = stats_response_tx.send(result);
                             });
                         }
@@ -1270,10 +1276,7 @@ impl SoraConnection {
                                 }
                                 IncomingMessageData::Ping { stats } => {
                                     if stats.unwrap_or(false) {
-                                        if self.request_stats_pong(&event_tx).is_err() {
-                                            // エラー時は通常の pong を送信する
-                                            self.send_pong(&event_tx);
-                                        }
+                                        self.request_stats_pong(&event_tx);
                                     } else {
                                         self.send_pong(&event_tx);
                                     }
@@ -1689,36 +1692,27 @@ impl SoraConnection {
     fn send_pong(&self, event_tx: &mpsc::UnboundedSender<SoraEvent>) {
         let message = OutgoingMessage::new_pong(None);
         // pong はシグナリングメッセージとして返信するが、on_signaling_message は発生させない
-        let _ = event_tx.send(SoraEvent::SendWebsocketMessage(Json(message).to_string()));
+        let _ = event_tx.send(SoraEvent::SendWebSocketMessage(Json(message).to_string()));
     }
 
-    fn request_stats_pong(&self, event_tx: &mpsc::UnboundedSender<SoraEvent>) -> Result<()> {
+    fn request_stats_pong(&self, event_tx: &mpsc::UnboundedSender<SoraEvent>) {
         let pc = &self.pc;
         let event_tx = event_tx.clone();
         pc.get_stats(move |report| {
-            let message = OutgoingMessage::new_pong(
-                report
-                    .to_json()
-                    .map_err(Error::from)
-                    .and_then(|s| s.parse())
-                    .ok(),
-            );
+            let message = OutgoingMessage::new_pong(report_to_json_string(&report).ok());
             // pong はシグナリングメッセージとして返信するが、on_signaling_message は発生させない
-            let _ = event_tx.send(SoraEvent::SendWebsocketMessage(Json(message).to_string()));
+            let _ = event_tx.send(SoraEvent::SendWebSocketMessage(Json(message).to_string()));
         });
-        Ok(())
     }
 
     fn request_stats_response(&self, event_tx: &mpsc::UnboundedSender<SoraEvent>) {
         let pc = &self.pc;
         let event_tx = event_tx.clone();
         pc.get_stats(move |report| {
-            if let Ok(reports) = report.to_json()
-                && let Ok(reports) = reports.parse()
-            {
+            if let Ok(reports) = report_to_json_string(&report) {
                 let message = OutgoingMessage::new_stats(reports);
                 // req-stats はシグナリングメッセージとして返信するが、on_signaling_message は発生させない
-                let _ = event_tx.send(SoraEvent::SendWebsocketMessage(Json(message).to_string()));
+                let _ = event_tx.send(SoraEvent::SendWebSocketMessage(Json(message).to_string()));
             }
         });
     }
@@ -2085,13 +2079,8 @@ impl SoraConnection {
                             let pc = &self.pc;
                             let event_tx = self.event_tx.clone();
                             pc.get_stats(move |report| {
-                                let message = OutgoingMessage::new_pong(
-                                    report
-                                        .to_json()
-                                        .map_err(Error::from)
-                                        .and_then(|s| s.parse())
-                                        .ok(),
-                                );
+                                let message =
+                                    OutgoingMessage::new_pong(report_to_json_string(&report).ok());
                                 let text = Json(message).to_string();
                                 let _ = event_tx.send(SoraEvent::SendDataChannelMessage {
                                     label: "signaling".to_string(),
@@ -2109,9 +2098,7 @@ impl SoraConnection {
                         let pc = &self.pc;
                         let event_tx = self.event_tx.clone();
                         pc.get_stats(move |report| {
-                            if let Ok(reports) = report.to_json()
-                                && let Ok(reports) = reports.parse()
-                            {
+                            if let Ok(reports) = report_to_json_string(&report) {
                                 let message = OutgoingMessage::new_stats(reports);
                                 let text = Json(message).to_string();
                                 let _ = event_tx.send(SoraEvent::SendDataChannelMessage {
