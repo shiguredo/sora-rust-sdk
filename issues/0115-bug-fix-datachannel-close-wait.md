@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-15
 - Model: deepseek-v4-flash
 - Branch: feature/fix-datachannel-close-wait
 - Polished: 2026-08-13
@@ -63,3 +63,14 @@
 - `src/connection.rs` (待機ループの修正、remove 判定の純粋関数化、終了フェーズの `command_rx` クローズ)
 - `src/connection.rs` 内の `#[cfg(test)]` モジュール (待機ループ・終了フェーズの単体テスト)、`e2e-tests/tests/server_close_message.rs` (close 通知契約の検証拡張)
 - `CHANGES.md`
+
+## 解決方法
+
+`feature/fix-datachannel-close-wait` ブランチで実装し、PR #71 (commit 936f1fd) として develop にマージした。
+
+- remove 判定を `is_data_channel_closed` と `opened_data_channels` の確認を集約した `should_notify_close` にし、待機ループと `handle_data_channel_state` の両方から使うようにした。Closing などの Closed 以外の状態では remove しない
+- 待機ループ開始前に `close_command_channel_and_ack_pending_disconnects` で `command_rx` を閉じ、以後の送信は `Error::CommandSendFailed` にする。クローズ前に積まれた `Disconnect` のみ ack を返し、`Disconnect` 以外のコマンドは破棄する。ドレインは `recv()` を `None` まで回す非同期方式とした
+- 待機ループを `wait_data_channels_close` に切り出し、終了要因を `DataChannelCloseWaitResult` (AllChannelsClosed / TimedOut / EventChannelClosed) で区別して返すようにした。event_rx クローズ時とタイムアウト時は英語の警告ログを出し分ける
+- `src/connection.rs` の `#[cfg(test)]` に `should_notify_close`・待機ループ・終了フェーズのコマンド拒否の単体テストを追加した
+- `e2e-tests/tests/server_close_message.rs` の close 通知契約の検証を `assert_data_channel_close_notified_exactly_once` に改名し、重複・欠落なく 1 回 (`== 1`) に拡張した
+- CHANGES.md への [FIX] 追記はしない (対応完了後の確認で不要と判断した)
