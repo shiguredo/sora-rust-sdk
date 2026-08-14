@@ -196,6 +196,11 @@ pub enum Error {
         /// 失敗したコマンド名。
         command: &'static str,
     },
+    /// コマンドの応答待機がタイムアウトした。
+    CommandTimeout {
+        /// タイムアウトしたコマンド名。
+        command: &'static str,
+    },
     /// ビデオコーデックの capability 指定が不正。
     InvalidVideoCodecCapability {
         /// 失敗理由。
@@ -438,6 +443,9 @@ impl std::fmt::Display for Error {
                     f,
                     "コマンドの応答を受信できませんでした: {command}: {source}"
                 )
+            }
+            Error::CommandTimeout { command } => {
+                write!(f, "コマンドの応答待機がタイムアウトしました: {command}")
             }
             Error::InvalidVideoCodecCapability { reason } => {
                 write!(f, "VideoCodecCapability が不正です: {reason}")
