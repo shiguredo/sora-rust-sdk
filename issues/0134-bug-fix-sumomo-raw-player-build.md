@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-15
 - Model: deepseek-v4-flash
 - Branch: feature/fix-sumomo-raw-player-build
 - Polished: {YYYY-MM-DD}
@@ -28,3 +28,9 @@
 ## 変更対象
 
 - `examples/sumomo/src/main.rs`
+
+## 解決方法
+
+- 2026-08-10 のコミット `43ec626` (PR #52) で、`examples/sumomo/src/main.rs` の `run_with_raw_player` を廃止し、raw-player 描画を `examples/sumomo/src/raw_player_renderer.rs` の `RawPlayerRenderer` に移した
+- `raw_player::quit()` は `SdlCleanupGuard` の `Drop` 内で呼ぶように変更し、unsafe ブロックで包んで `quit()` を呼び出す条件を Safety コメントで明記した
+- これにより `examples/sumomo/src/main.rs` の `run_with_raw_player` 内で unsafe なしに `raw_player::quit()` を呼ぶ経路が消滅し、`cargo build -p sumomo --features raw-player` が成功するようになった
