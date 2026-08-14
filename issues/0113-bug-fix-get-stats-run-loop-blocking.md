@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-15
 - Model: deepseek-v4-flash
 - Branch: feature/fix-get-stats-run-loop-blocking
 - Polished: 2026-08-13
@@ -67,3 +67,13 @@
 - `src/connection.rs` (private な `SoraConnection::get_stats` の削除、`SoraConnectionCommand::GetStats` コマンド処理、`handle_data_channel_message`、`send_pong` / `request_stats_pong` / `request_stats_response`、`SoraConnectionHandle::get_stats` と `send_command` の `timeout: Option<Duration>` 追加、新規 `SoraEvent` バリアント (`SendWebsocketMessage` / `SendDataChannelMessage`) と run ループの match arm、テスト)
 - `src/error.rs` (`Error::CommandTimeout { command }` を追加)
 - `CHANGES.md`
+
+## 解決方法
+
+- `SoraConnectionCommand::GetStats` コマンド処理で `pc.get_stats` のコールバックから oneshot の `stats_response_tx` へ直接応答を送信するようにし、run ループがコールバックを `await` しないようにした
+- DataChannel 経由の `ping` (stats 付き) / `req-stats` への応答もコールバック内でメッセージを生成し、新規 `SoraEvent::SendDataChannelMessage` を `event_tx` に送信して run ループの match arm から送信するようにした
+- WebSocket 経由の `ping` / `req-stats` への応答は新規 `SoraEvent::SendWebSocketMessage` を送信するようにし、pong / stats 応答で `on_signaling_message` が発生しないようにした
+- `send_command` に `timeout: Option<Duration>` を追加し、`SoraConnectionHandle::get_stats` は 5 秒のタイムアウトで `Error::CommandTimeout` を返すようにした
+- タイムアウト後にコールバックが遅れて発火しても、oneshot の Receiver がドロップ済みのため送信が失敗し無視される (panic しない) ことを確認した
+- 未使用になった private な `async fn get_stats` を削除し、`RTCStatsReport` の JSON 変換を `report_to_json_string` ヘルパーに共通化した
+- タイムアウトと正常系の挙動を確認する単体テストを追加した
