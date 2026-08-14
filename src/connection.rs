@@ -1428,6 +1428,9 @@ impl SoraConnection {
             }
         }
 
+        // run ループを抜けた時点で終了フェーズに入るため、以後のコマンド送信を拒否する。
+        close_command_channel_and_ack_pending_disconnects(&mut self.command_rx);
+
         // DataChannel シグナリングを利用している場合は、
         // disconnect_wait_timeout を上限にクローズ完了を待機する。
         if use_data_channel_signaling && !opened_data_channels.is_empty() {
@@ -1439,7 +1442,6 @@ impl SoraConnection {
             let data_channels = self.data_channels;
             wait_data_channels_close(
                 &mut self.event_rx,
-                &mut self.command_rx,
                 &mut *handler,
                 &mut opened_data_channels,
                 data_channels,
@@ -2291,18 +2293,13 @@ enum DataChannelCloseWaitResult {
 
 /// DataChannel のクローズを `deadline` まで待機する。
 ///
-/// `event_rx` の状態遷移イベントと `command_rx` のコマンドを処理しながら、
-/// `opened_data_channels` が空になるまで待つ。
+/// `event_rx` の状態遷移イベントを処理しながら、`opened_data_channels` が空になるまで待つ。
 ///
 /// - DataChannelStateChange で閉じた DataChannel があった場合、on_data_channel_close を通知する
-/// - 待機中に受信した `Disconnect` コマンドには ack を返して待機を継続する
-/// - `Disconnect` 以外のコマンドは応答せず破棄する (呼び出し側は
-///   `Error::CommandResponseMissing` になる)
 /// - `deadline` が経過した場合と `event_rx` がクローズされた場合は、
 ///   残りチャネルへ on_data_channel_close を通知して待機を終了する
 async fn wait_data_channels_close(
     event_rx: &mut mpsc::UnboundedReceiver<SoraEvent>,
-    command_rx: &mut mpsc::UnboundedReceiver<SoraConnectionCommand>,
     handler: &mut dyn SoraConnectionEventHandler,
     opened_data_channels: &mut HashSet<String>,
     data_channels: HashMap<String, ManagedDataChannel>,
@@ -2332,19 +2329,6 @@ async fn wait_data_channels_close(
                     }
                 }
             }
-            // command_rx は Some(command) で受ける。
-            // クローズ済みチャネルに対する recv() は即 None を返すため、
-            // None を受け続ける実装にすると他のイベントの無い間は select!
-            // がビジーループしてしまう。
-            Some(command) = command_rx.recv() => {
-                // 待機中に受信した Disconnect コマンドには ack を返して待機を継続する。
-                // サーバーへの disconnect メッセージは送信しない (初回の切断要求で送信を試行済み、
-                // またはサーバー主導の切断のため不要)。
-                if let SoraConnectionCommand::Disconnect(ack_tx) = command {
-                    let _ = ack_tx.send(());
-                }
-                // Disconnect 以外のコマンドは応答せず破棄する。
-            }
             _ = tokio::time::sleep_until(deadline) => {
                 // タイムアウトした場合も event_rx と同様、残りチャネルへの close 通知を
                 // 行ってから待機を終了する。
@@ -2360,6 +2344,26 @@ async fn wait_data_channels_close(
         if opened_data_channels.is_empty() {
             return DataChannelCloseWaitResult::AllChannelsClosed;
         }
+    }
+}
+
+/// `command_rx` を閉じ、残っているコマンドを処理する。
+///
+/// クローズ前にキューに積まれていたコマンドは次のように処理する。
+/// `Disconnect` には ack を返す (呼び出し側は成功する)。
+/// `Disconnect` 以外のコマンドは応答せず破棄する (その呼び出し側は
+/// `Error::CommandResponseMissing` になる)。
+fn close_command_channel_and_ack_pending_disconnects(
+    command_rx: &mut mpsc::UnboundedReceiver<SoraConnectionCommand>,
+) {
+    command_rx.close();
+    // close() 前にキューに積まれていたコマンドを処理する。
+    // 待機中に送信された 2 回目の Disconnect などが対象になる。
+    while let Ok(command) = command_rx.try_recv() {
+        if let SoraConnectionCommand::Disconnect(ack_tx) = command {
+            let _ = ack_tx.send(());
+        }
+        // Disconnect 以外のコマンドは応答せず破棄する。
     }
 }
 
@@ -3757,7 +3761,6 @@ mod tests {
         let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
         register_compressed_data_channel(&mut connection, "signaling");
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SoraEvent>();
-        let (_command_tx, mut command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
         let mut handler = RecordingHandler::default();
         let mut opened = opened_labels(&["signaling"]);
 
@@ -3771,7 +3774,6 @@ mod tests {
 
         let result = wait_data_channels_close(
             &mut event_rx,
-            &mut command_rx,
             &mut handler,
             &mut opened,
             data_channels,
@@ -3808,7 +3810,6 @@ mod tests {
         register_compressed_data_channel(&mut connection, "signaling");
         register_compressed_data_channel(&mut connection, "#chat");
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SoraEvent>();
-        let (_command_tx, mut command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
         let mut handler = RecordingHandler::default();
         let mut opened = opened_labels(&["signaling", "#chat"]);
 
@@ -3828,7 +3829,6 @@ mod tests {
 
         let result = wait_data_channels_close(
             &mut event_rx,
-            &mut command_rx,
             &mut handler,
             &mut opened,
             data_channels,
@@ -3857,126 +3857,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wait_close_loop_acks_disconnect_and_continues() {
-        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
-        register_compressed_data_channel(&mut connection, "signaling");
+    async fn close_command_channel_acks_queued_disconnect() {
         let (command_tx, mut command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
-        let mut handler = RecordingHandler::default();
-        let mut opened = opened_labels(&["signaling"]);
-
-        // チャネルを close() して Closed 状態に遷移させておく。
-        connection.data_channels["signaling"].channel.close();
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let data_channels = connection.data_channels;
-        // close() による実際の StateChange イベントが届かないよう、
-        // event_rx は独立のチャネルを使う。
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SoraEvent>();
-        let task = tokio::spawn(async move {
-            let result = wait_data_channels_close(
-                &mut event_rx,
-                &mut command_rx,
-                &mut handler,
-                &mut opened,
-                data_channels,
-                tokio::time::Instant::now() + tokio::time::Duration::from_secs(60),
-            )
-            .await;
-            (result, handler, opened)
-        });
-
-        // 待機中に disconnect() を呼び、ack が返ることを確認する。
+        // 終了フェーズに入る直前に 2 回目の disconnect() が送信された状況を作る。
         let (ack_tx, ack_rx) = oneshot::channel();
         command_tx
             .send(SoraConnectionCommand::Disconnect(ack_tx))
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), ack_rx)
+
+        close_command_channel_and_ack_pending_disconnects(&mut command_rx);
+
+        // キューに積まれていた Disconnect には ack が返る必要がある。
+        ack_rx
             .await
-            .expect("disconnect() の ack が返る必要があります")
             .expect("disconnect の ack が送信される必要があります");
-
-        // ack 時点では close 通知・待機終了が発生していないことを確認する。
-        assert!(!task.is_finished(), "ack 時点で待機が終了してはいけません");
-
-        // その後の Closed イベントが通常どおり処理されることを確認する。
-        event_tx
-            .send(SoraEvent::DataChannelStateChange("signaling".to_string()))
-            .unwrap();
-        let (result, handler, opened) =
-            task.await.expect("wait タスクが正常終了する必要があります");
-        assert_eq!(
-            result,
-            DataChannelCloseWaitResult::AllChannelsClosed,
-            "ack 後の Closed イベントで待機が正常終了する必要があります"
-        );
+        // close() 後の送信は失敗する (CommandSendFailed になる)。
+        let (ack_tx2, _ack_rx2) = oneshot::channel();
         assert!(
-            opened.is_empty(),
-            "Closed イベント後に opened がクリアされる必要があります"
-        );
-        assert_eq!(
-            handler.data_channel_close_count, 1,
-            "close 通知は Closed イベントの 1 回だけである必要があります"
+            command_tx
+                .send(SoraConnectionCommand::Disconnect(ack_tx2))
+                .is_err(),
+            "close() 後の送信は失敗する必要があります"
         );
     }
 
     #[tokio::test]
-    async fn wait_close_loop_discards_non_disconnect_command() {
-        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
-        register_compressed_data_channel(&mut connection, "signaling");
+    async fn close_command_channel_discards_non_disconnect_command() {
         let (command_tx, mut command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
-        let mut handler = RecordingHandler::default();
-        let mut opened = opened_labels(&["signaling"]);
-
-        // チャネルを close() して Closed 状態に遷移させておく。
-        connection.data_channels["signaling"].channel.close();
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let data_channels = connection.data_channels;
-        // close() による実際の StateChange イベントが届かないよう、
-        // event_rx は独立のチャネルを使う。
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SoraEvent>();
-        let task = tokio::spawn(async move {
-            let result = wait_data_channels_close(
-                &mut event_rx,
-                &mut command_rx,
-                &mut handler,
-                &mut opened,
-                data_channels,
-                tokio::time::Instant::now() + tokio::time::Duration::from_secs(60),
-            )
-            .await;
-            (result, handler, opened)
-        });
-
-        // 待機中に GetStats コマンドを送信しても応答されないことを確認する。
+        // 終了フェーズに入る直前に GetStats が送信された状況を作る。
         let (stats_tx, stats_rx) = oneshot::channel();
         command_tx
             .send(SoraConnectionCommand::GetStats(stats_tx))
             .unwrap();
 
-        // 待機を正常終了させるための Closed イベントを送信する。
-        event_tx
-            .send(SoraEvent::DataChannelStateChange("signaling".to_string()))
-            .unwrap();
-        let (result, handler, opened) =
-            task.await.expect("wait タスクが正常終了する必要があります");
-        assert_eq!(
-            result,
-            DataChannelCloseWaitResult::AllChannelsClosed,
-            "Closed イベントで待機が正常終了する必要があります"
-        );
-        assert!(
-            opened.is_empty(),
-            "Closed イベント後に opened がクリアされる必要があります"
-        );
+        close_command_channel_and_ack_pending_disconnects(&mut command_rx);
 
         // GetStats には応答が返らず、呼び出し側は CommandResponseMissing になる
         // (response_tx が send されずに drop されるため RecvError になる)。
         assert!(
             stats_rx.await.is_err(),
             "Disconnect 以外のコマンドには応答してはいけません"
-        );
-        assert_eq!(
-            handler.data_channel_close_count, 1,
-            "close 通知は Closed イベントの 1 回だけである必要があります"
         );
     }
 
@@ -3985,7 +3905,6 @@ mod tests {
         let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
         register_compressed_data_channel(&mut connection, "signaling");
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SoraEvent>();
-        let (_command_tx, mut command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
         let mut handler = RecordingHandler::default();
         let mut opened = opened_labels(&["signaling"]);
 
@@ -3995,7 +3914,6 @@ mod tests {
 
         let result = wait_data_channels_close(
             &mut event_rx,
-            &mut command_rx,
             &mut handler,
             &mut opened,
             data_channels,
@@ -4026,7 +3944,6 @@ mod tests {
         register_compressed_data_channel(&mut connection, "signaling");
         register_compressed_data_channel(&mut connection, "#chat");
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SoraEvent>();
-        let (_command_tx, mut command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
         let mut handler = RecordingHandler::default();
         let mut opened = opened_labels(&["signaling", "#chat"]);
 
@@ -4038,7 +3955,6 @@ mod tests {
 
         let result = wait_data_channels_close(
             &mut event_rx,
-            &mut command_rx,
             &mut handler,
             &mut opened,
             data_channels,
