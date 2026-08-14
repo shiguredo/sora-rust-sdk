@@ -235,11 +235,12 @@ async fn server_close_message_terminates_run_after_websocket_closed() {
         .expect("switched 通知の受信がタイムアウトしました");
 
     // SDK が WebSocket を自分から閉じるまで待つ。
-    // 全 DataChannel オープン + 10 秒 + 余裕を見て 60 秒。
+    // 全 DataChannel オープンから WS_DISCONNECT_DELAY (10 秒) 後に決定的に閉じるため、
+    // 余裕を見て 20 秒で待つ。
     connection
         .wait_for_event(
             |event| matches!(event, SoraTestEvent::WebsocketClose { .. }),
-            Duration::from_secs(60),
+            Duration::from_secs(20),
         )
         .await
         .expect("WebSocket Close コールバックが届きませんでした");

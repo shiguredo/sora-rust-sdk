@@ -1869,9 +1869,7 @@ impl SoraConnection {
                 *use_data_channel_signaling = true;
             }
         } else if should_notify_close(&self.data_channels, opened_data_channels, label) {
-            rtc_log_info!("DataChannel '{}' closed", label);
-            opened_data_channels.remove(label);
-            handler.on_data_channel_close(label);
+            notify_data_channel_closed(handler, opened_data_channels, label);
         }
     }
 
@@ -2273,11 +2271,23 @@ fn notify_close_for_remaining(
     handler: &mut dyn SoraConnectionEventHandler,
     opened_data_channels: &mut HashSet<String>,
 ) {
-    for label in opened_data_channels.iter() {
-        rtc_log_info!("DataChannel '{}' closed", label);
-        handler.on_data_channel_close(label);
+    // イテレート中の opened_data_channels の変更を避けるため、ラベルを先に取り出す。
+    let labels: Vec<String> = opened_data_channels.iter().cloned().collect();
+    for label in &labels {
+        notify_data_channel_closed(handler, opened_data_channels, label);
     }
-    opened_data_channels.clear();
+}
+
+/// DataChannel の close をログ出力し、opened_data_channels から remove してから
+/// コールバックを通知する。
+fn notify_data_channel_closed(
+    handler: &mut dyn SoraConnectionEventHandler,
+    opened_data_channels: &mut HashSet<String>,
+    label: &str,
+) {
+    rtc_log_info!("DataChannel '{}' closed", label);
+    opened_data_channels.remove(label);
+    handler.on_data_channel_close(label);
 }
 
 /// DataChannel クローズ待機ループの終了要因。
@@ -2311,9 +2321,7 @@ async fn wait_data_channels_close(
                 match event {
                     Some(SoraEvent::DataChannelStateChange(label)) => {
                         if should_notify_close(&data_channels, opened_data_channels, &label) {
-                            rtc_log_info!("DataChannel '{}' closed", label);
-                            opened_data_channels.remove(&label);
-                            handler.on_data_channel_close(&label);
+                            notify_data_channel_closed(handler, opened_data_channels, &label);
                         }
                     }
                     Some(_) => {}
@@ -3723,6 +3731,25 @@ mod tests {
         );
     }
 
+    /// DataChannel が Closed 状態に遷移するまで待つ。
+    ///
+    /// libwebrtc の close() は非同期遷移のため、固定 sleep ではなく
+    /// state() が Closed になるまでポーリングして決定的に待つ。
+    async fn wait_data_channel_closed(connection: &mut SoraConnection, label: &str) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if connection.data_channels[label].channel.state() == DataChannelState::Closed {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "DataChannel '{}' が Closed 状態に遷移しませんでした",
+                label
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     #[tokio::test]
     async fn should_notify_close_ignores_non_closed_state() {
         let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
@@ -3743,7 +3770,7 @@ mod tests {
         register_compressed_data_channel(&mut connection, "signaling");
         // close() を呼ぶと Closed 状態に遷移する (テスト環境でも観測できる)。
         connection.data_channels["signaling"].channel.close();
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        wait_data_channel_closed(&mut connection, "signaling").await;
         let opened = opened_labels(&["signaling"]);
         assert!(
             should_notify_close(&connection.data_channels, &opened, "signaling"),
@@ -3758,7 +3785,7 @@ mod tests {
         // #chat が Closed でも opened に含まれなければ remove されないことを確認する。
         register_compressed_data_channel(&mut connection, "#chat");
         connection.data_channels["#chat"].channel.close();
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        wait_data_channel_closed(&mut connection, "#chat").await;
         let opened = opened_labels(&["signaling"]);
         assert!(
             !should_notify_close(&connection.data_channels, &opened, "#chat"),
@@ -3828,7 +3855,8 @@ mod tests {
         // 全チャネルを close() して Closed 状態に遷移させる。
         connection.data_channels["signaling"].channel.close();
         connection.data_channels["#chat"].channel.close();
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        wait_data_channel_closed(&mut connection, "signaling").await;
+        wait_data_channel_closed(&mut connection, "#chat").await;
 
         // 全チャネルの Closed イベントを送信する。
         event_tx
