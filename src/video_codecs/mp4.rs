@@ -356,7 +356,7 @@ impl Mp4SampleReader {
             if let Some(entry) = sample.sample_entry {
                 let info = Self::extract_track_info(entry, timescale)?;
                 if let Some(ref first) = track_info {
-                    let mismatched = collect_mismatched_track_info_fields(first, &info);
+                    let mismatched = Self::collect_mismatched_track_info_fields(first, &info);
                     if !mismatched.is_empty() {
                         return Err(Mp4Error::InconsistentSampleDescription {
                             index: samples.len(),
@@ -569,6 +569,61 @@ impl Mp4SampleReader {
         }
     }
 
+    /// 2 個の `Mp4VideoTrackInfo` を field 単位で比較し、相違する field 名を返す。
+    ///
+    /// 検証対象は `codec_type` / `width` / `height` / `nal_length_size` /
+    /// `parameter_sets` の 5 field。
+    /// `timescale` は `mdhd` の track 単位属性で `SampleEntry` からは抽出されず、
+    /// `extract_track_info` にはループ外の同一 scalar が毎回渡されるため、
+    /// サンプルエントリー間で変わり得ない値として比較対象に含めない。
+    ///
+    /// codec 固有 field（H.264 の profile-level-id、AV1 の av1C / configOBUs など）
+    /// の bit-identical 検証は、各 codec 固有の別対応で `Mp4VideoTrackInfo` を
+    /// 拡張する形で加える。
+    ///
+    /// `Mp4VideoTrackInfo` に新しい field を追加した際にヘルパー未更新を
+    /// compile error として検出するため、両側を exhaustive に destructure して
+    /// 明示的に列挙する。比較対象外の field は `_` に束縛する。
+    fn collect_mismatched_track_info_fields(
+        first: &Mp4VideoTrackInfo,
+        current: &Mp4VideoTrackInfo,
+    ) -> Vec<&'static str> {
+        let Mp4VideoTrackInfo {
+            codec_type: first_codec_type,
+            width: first_width,
+            height: first_height,
+            timescale: _,
+            parameter_sets: first_parameter_sets,
+            nal_length_size: first_nal_length_size,
+        } = first;
+        let Mp4VideoTrackInfo {
+            codec_type: current_codec_type,
+            width: current_width,
+            height: current_height,
+            timescale: _,
+            parameter_sets: current_parameter_sets,
+            nal_length_size: current_nal_length_size,
+        } = current;
+
+        let mut mismatched = Vec::new();
+        if first_codec_type != current_codec_type {
+            mismatched.push("codec_type");
+        }
+        if first_width != current_width {
+            mismatched.push("width");
+        }
+        if first_height != current_height {
+            mismatched.push("height");
+        }
+        if first_nal_length_size != current_nal_length_size {
+            mismatched.push("nal_length_size");
+        }
+        if first_parameter_sets != current_parameter_sets {
+            mismatched.push("parameter_sets");
+        }
+        mismatched
+    }
+
     /// サンプル数を返す。
     pub fn len(&self) -> usize {
         self.samples.len()
@@ -646,40 +701,6 @@ fn read_bytes_at(
     file.seek(std::io::SeekFrom::Start(position))?;
     file.read_exact(&mut data)?;
     Ok(data)
-}
-
-/// 2 個の `Mp4VideoTrackInfo` を field 単位で比較し、相違する field 名を返す。
-///
-/// 検証対象は `codec_type` / `width` / `height` / `nal_length_size` /
-/// `parameter_sets` の 5 field。
-/// `timescale` は `mdhd` の track 単位属性で `SampleEntry` からは抽出されず、
-/// `extract_track_info` にはループ外の同一 scalar が毎回渡されるため、
-/// サンプルエントリー間で変わり得ない値として比較対象に含めない。
-///
-/// codec 固有 field（H.264 の profile-level-id、AV1 の av1C / configOBUs など）
-/// の bit-identical 検証は、各 codec 固有の別対応で `Mp4VideoTrackInfo` を
-/// 拡張する形で加える。
-fn collect_mismatched_track_info_fields(
-    first: &Mp4VideoTrackInfo,
-    current: &Mp4VideoTrackInfo,
-) -> Vec<&'static str> {
-    let mut mismatched = Vec::new();
-    if first.codec_type != current.codec_type {
-        mismatched.push("codec_type");
-    }
-    if first.width != current.width {
-        mismatched.push("width");
-    }
-    if first.height != current.height {
-        mismatched.push("height");
-    }
-    if first.nal_length_size != current.nal_length_size {
-        mismatched.push("nal_length_size");
-    }
-    if first.parameter_sets != current.parameter_sets {
-        mismatched.push("parameter_sets");
-    }
-    mismatched
 }
 
 /// 長さプレフィックス付き NAL ユニットを Annex B 形式に変換する。
@@ -1121,7 +1142,7 @@ mod tests {
 
         // 完全一致は相違なし。
         assert!(
-            collect_mismatched_track_info_fields(&base, &base).is_empty(),
+            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &base).is_empty(),
             "完全一致では相違が報告されないはずです"
         );
 
@@ -1135,7 +1156,7 @@ mod tests {
             nal_length_size: base.nal_length_size,
         };
         assert_eq!(
-            collect_mismatched_track_info_fields(&base, &modified),
+            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
             vec!["codec_type"],
             "codec_type だけの相違は codec_type のみを返すはずです"
         );
@@ -1150,7 +1171,7 @@ mod tests {
             nal_length_size: base.nal_length_size,
         };
         assert_eq!(
-            collect_mismatched_track_info_fields(&base, &modified),
+            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
             vec!["width"],
             "width だけの相違は width のみを返すはずです"
         );
@@ -1165,7 +1186,7 @@ mod tests {
             nal_length_size: base.nal_length_size,
         };
         assert_eq!(
-            collect_mismatched_track_info_fields(&base, &modified),
+            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
             vec!["height"],
             "height だけの相違は height のみを返すはずです"
         );
@@ -1180,7 +1201,7 @@ mod tests {
             nal_length_size: 2,
         };
         assert_eq!(
-            collect_mismatched_track_info_fields(&base, &modified),
+            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
             vec!["nal_length_size"],
             "nal_length_size だけの相違は nal_length_size のみを返すはずです"
         );
@@ -1195,7 +1216,7 @@ mod tests {
             nal_length_size: base.nal_length_size,
         };
         assert_eq!(
-            collect_mismatched_track_info_fields(&base, &modified),
+            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
             vec!["parameter_sets"],
             "parameter_sets の byte 列の相違は parameter_sets のみを返すはずです"
         );
@@ -1210,7 +1231,7 @@ mod tests {
             nal_length_size: base.nal_length_size,
         };
         assert_eq!(
-            collect_mismatched_track_info_fields(&base, &modified),
+            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
             vec!["parameter_sets"],
             "parameter_sets の Some から None への遷移は parameter_sets のみを返すはずです"
         );
@@ -1233,7 +1254,10 @@ mod tests {
             nal_length_size: base.nal_length_size,
         };
         assert_eq!(
-            collect_mismatched_track_info_fields(&base_without_params, &modified_with_params),
+            Mp4SampleReader::collect_mismatched_track_info_fields(
+                &base_without_params,
+                &modified_with_params
+            ),
             vec!["parameter_sets"],
             "parameter_sets の None から Some への遷移は parameter_sets のみを返すはずです"
         );
@@ -1249,7 +1273,7 @@ mod tests {
             nal_length_size: 2,
         };
         assert_eq!(
-            collect_mismatched_track_info_fields(&base, &modified),
+            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
             vec!["codec_type", "height", "nal_length_size", "parameter_sets"],
             "複数 field の相違は codec_type -> width -> height -> nal_length_size -> parameter_sets の順で並ぶはずです"
         );
@@ -1264,7 +1288,7 @@ mod tests {
             nal_length_size: base.nal_length_size,
         };
         assert!(
-            collect_mismatched_track_info_fields(&base, &modified).is_empty(),
+            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified).is_empty(),
             "timescale は比較対象外なので相違として報告されないはずです"
         );
     }
