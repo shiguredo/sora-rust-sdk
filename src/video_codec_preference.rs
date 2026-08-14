@@ -365,6 +365,9 @@ mod tests {
         implementation: VideoCodecImplementation,
         encoder_supported: Vec<VideoCodecType>,
         decoder_supported: Vec<VideoCodecType>,
+        // false のときは `is_supported` が true でも `resolve_sdp_format` は None を返す。
+        // codec 固有 parameter を必須とし、bare format を拒否する capability を表す。
+        resolves_sdp_format: bool,
     }
 
     impl TestVideoCodecCapability {
@@ -377,7 +380,13 @@ mod tests {
                 implementation,
                 encoder_supported,
                 decoder_supported,
+                resolves_sdp_format: true,
             }
+        }
+
+        fn without_sdp_format_resolution(mut self) -> Self {
+            self.resolves_sdp_format = false;
+            self
         }
     }
 
@@ -409,6 +418,9 @@ mod tests {
             direction: CodecDirection,
             format: SdpVideoFormatRef<'_>,
         ) -> Option<shiguredo_webrtc::SdpVideoFormat> {
+            if !self.resolves_sdp_format {
+                return None;
+            }
             let codec_type = format
                 .name()
                 .ok()
@@ -589,6 +601,29 @@ mod tests {
         let preference = sample_preference();
         let capabilities = sample_capabilities();
         assert!(validate_video_codec_preference(&preference, &capabilities).is_ok());
+    }
+
+    // preference 検証は `is_supported` だけを見る。
+    // `resolve_sdp_format` が bare format を拒否しても、指定方向が supported なら通る。
+    #[test]
+    fn validate_succeeds_when_supported_even_if_resolve_sdp_format_is_none() {
+        let preference = VideoCodecPreference::new(vec![default_preference_codec(
+            CodecDirection::Encoder,
+            VideoCodecType::H264,
+            VideoCodecImplementation::new("nvcodec", "NVIDIA NVENC/NVDEC"),
+        )]);
+        let capabilities: Vec<Box<dyn VideoCodecCapability>> = vec![Box::new(
+            TestVideoCodecCapability::new(
+                VideoCodecImplementation::new("nvcodec", "NVIDIA NVENC/NVDEC"),
+                vec![VideoCodecType::H264],
+                Vec::new(),
+            )
+            .without_sdp_format_resolution(),
+        )];
+        assert!(
+            validate_video_codec_preference(&preference, &capabilities).is_ok(),
+            "is_supported が true なら resolve が None でも検証は成功するはずです"
+        );
     }
 
     #[test]
