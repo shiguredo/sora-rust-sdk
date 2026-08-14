@@ -46,8 +46,9 @@
 
 ### misc
 
-- [UPDATE] `validate_video_codec_preference` から bare `SdpVideoFormat` を `resolve_sdp_format` に投入する重複検証を削除し、`is_supported` を preference validation の source of truth にする
+- [UPDATE] `validate_video_codec_preference` から bare `SdpVideoFormat` を `resolve_sdp_format` に投入する重複検証を削除し、`is_supported` を preference 検証の判定基準にする
   - 既存の全 capability は default `is_supported` を使っているため既存挙動は変わらない
-  - 後続の MP4 passthrough / codec 固有 `is_supported` override で preference validation が拒否されない土台になる
-  - `SoraVideoEncoderFactory::create` / `SoraVideoDecoderFactory::create` の `resolve_sdp_format` pass-through を production コメントと回帰テストで固定する
+  - 後続の MP4 passthrough / codec 固有 `is_supported` override で preference 検証が拒否されない土台になる
+  - `SoraVideoEncoderFactory::create` の `resolve_sdp_format` 経由の受け渡しを実装コメントと回帰テストで固定する
+  - `SoraVideoDecoderFactory::create` にも同じ受け渡しの実装コメントを追加する
   - @sile

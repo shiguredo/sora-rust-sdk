@@ -273,13 +273,11 @@ fn validate_codec(
             ),
         });
     };
-    // preference の妥当性は `is_supported` の結果を source of truth として判定する。
-    // かつては bare `SdpVideoFormat` を `resolve_sdp_format` に渡す追加検証も行っていたが、
-    // codec 固有 parameter を required とする capability では bare 生成が fuzzy match で
-    // 拒否され、`is_supported` を override して true を返しても validation で落ちる矛盾があった。
-    // 実 encoder factory の format 解決は別途 `SoraVideoEncoderFactory::create` が実
-    // negotiated format で行うため、preference 判定側では codec type / direction の可否だけを
-    // 見れば足りる。
+    // preference の可否は `is_supported` だけで判定する。
+    // codec 固有 parameter を必須とする capability では、bare な `SdpVideoFormat` を
+    // `resolve_sdp_format` に渡すと拒否され、`is_supported` が true でも検証が落ちる。
+    // 実 format の解決は `SoraVideoEncoderFactory::create` /
+    // `SoraVideoDecoderFactory::create` が行う。
     let encoder_supported = capability.is_supported(CodecDirection::Encoder, codec.codec_type());
     let decoder_supported = capability.is_supported(CodecDirection::Decoder, codec.codec_type());
     let (direction_supported, opposite_supported) = match codec.direction() {
