@@ -3767,7 +3767,7 @@ mod tests {
         // Closing 状態 (Closed でない) の StateChange イベントを送信する。
         event_tx
             .send(SoraEvent::DataChannelStateChange("signaling".to_string()))
-            .unwrap();
+            .expect("Closing 状態のイベントの送信に失敗しました");
         // イベントを処理させた後、event_rx をクローズして待機を終了させる。
         drop(event_tx);
         let data_channels = connection.data_channels;
@@ -3821,10 +3821,10 @@ mod tests {
         // 全チャネルの Closed イベントを送信する。
         event_tx
             .send(SoraEvent::DataChannelStateChange("signaling".to_string()))
-            .unwrap();
+            .expect("signaling の Closed イベントの送信に失敗しました");
         event_tx
             .send(SoraEvent::DataChannelStateChange("#chat".to_string()))
-            .unwrap();
+            .expect("#chat の Closed イベントの送信に失敗しました");
         let data_channels = connection.data_channels;
 
         let result = wait_data_channels_close(
@@ -3863,7 +3863,7 @@ mod tests {
         let (ack_tx, ack_rx) = oneshot::channel();
         command_tx
             .send(SoraConnectionCommand::Disconnect(ack_tx))
-            .unwrap();
+            .expect("Disconnect コマンドの送信に失敗しました");
 
         close_command_channel_and_ack_pending_disconnects(&mut command_rx);
 
@@ -3888,7 +3888,7 @@ mod tests {
         let (stats_tx, stats_rx) = oneshot::channel();
         command_tx
             .send(SoraConnectionCommand::GetStats(stats_tx))
-            .unwrap();
+            .expect("GetStats コマンドの送信に失敗しました");
 
         close_command_channel_and_ack_pending_disconnects(&mut command_rx);
 
