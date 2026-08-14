@@ -1429,7 +1429,7 @@ impl SoraConnection {
         }
 
         // run ループを抜けた時点で終了フェーズに入るため、以後のコマンド送信を拒否する。
-        close_command_channel_and_ack_pending_disconnects(&mut self.command_rx);
+        close_command_channel_and_ack_pending_disconnects(&mut self.command_rx).await;
 
         // DataChannel シグナリングを利用している場合は、
         // disconnect_wait_timeout を上限にクローズ完了を待機する。
@@ -2349,17 +2349,19 @@ async fn wait_data_channels_close(
 
 /// `command_rx` を閉じ、残っているコマンドを処理する。
 ///
-/// クローズ前にキューに積まれていたコマンドは次のように処理する。
+/// クローズ前に送信されたコマンドは次のように処理する。
 /// `Disconnect` には ack を返す (呼び出し側は成功する)。
 /// `Disconnect` 以外のコマンドは応答せず破棄する (その呼び出し側は
 /// `Error::CommandResponseMissing` になる)。
-fn close_command_channel_and_ack_pending_disconnects(
+///
+/// ドレインは `recv()` を `None` まで回して行う。UnboundedReceiver の close() のドキュメントには、
+/// メッセージを落とさないためには close() 後に recv() を None まで呼ぶことと記述されている。
+/// ref: https://docs.rs/tokio/latest/tokio/sync/mpsc/struct.UnboundedReceiver.html#method.close
+async fn close_command_channel_and_ack_pending_disconnects(
     command_rx: &mut mpsc::UnboundedReceiver<SoraConnectionCommand>,
 ) {
     command_rx.close();
-    // close() 前にキューに積まれていたコマンドを処理する。
-    // 待機中に送信された 2 回目の Disconnect などが対象になる。
-    while let Ok(command) = command_rx.try_recv() {
+    while let Some(command) = command_rx.recv().await {
         if let SoraConnectionCommand::Disconnect(ack_tx) = command {
             let _ = ack_tx.send(());
         }
@@ -3875,9 +3877,9 @@ mod tests {
             .send(SoraConnectionCommand::Disconnect(ack_tx))
             .expect("Disconnect コマンドの送信に失敗しました");
 
-        close_command_channel_and_ack_pending_disconnects(&mut command_rx);
+        close_command_channel_and_ack_pending_disconnects(&mut command_rx).await;
 
-        // キューに積まれていた Disconnect には ack が返る必要がある。
+        // クローズ前に送信された Disconnect には ack が返る必要がある。
         ack_rx
             .await
             .expect("disconnect の ack が送信される必要があります");
@@ -3900,7 +3902,7 @@ mod tests {
             .send(SoraConnectionCommand::GetStats(stats_tx))
             .expect("GetStats コマンドの送信に失敗しました");
 
-        close_command_channel_and_ack_pending_disconnects(&mut command_rx);
+        close_command_channel_and_ack_pending_disconnects(&mut command_rx).await;
 
         // GetStats には応答が返らず、呼び出し側は CommandResponseMissing になる
         // (response_tx が send されずに drop されるため RecvError になる)。
