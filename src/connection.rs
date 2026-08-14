@@ -3749,12 +3749,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn should_notify_close_ignores_unopened_label() {
+    #[tokio::test]
+    async fn should_notify_close_ignores_unopened_label() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        // opened_data_channels に含まれない #chat を Closed 状態にする。
+        // #chat が Closed でも opened に含まれなければ remove されないことを確認する。
+        register_compressed_data_channel(&mut connection, "#chat");
+        connection.data_channels["#chat"].channel.close();
+        tokio::time::sleep(Duration::from_millis(100)).await;
         let opened = opened_labels(&["signaling"]);
-        let data_channels = HashMap::new();
         assert!(
-            !should_notify_close(&data_channels, &opened, "#chat"),
+            !should_notify_close(&connection.data_channels, &opened, "#chat"),
             "opened_data_channels に含まれない label は remove してはなりません"
         );
     }
