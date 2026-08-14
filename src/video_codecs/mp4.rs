@@ -78,10 +78,10 @@ pub enum Mp4Error {
         /// ビデオコーデック種別。
         codec_type: VideoCodecType,
     },
-    /// 2 個目以降の sample entry が最初の configuration と一致しない。
+    /// 2 個目以降のサンプルエントリーが最初の設定と一致しない。
     ///
     /// codec type、解像度、NAL 長サイズ、parameter sets のいずれかが変わる
-    /// sample description は本 SDK では受理しない。
+    /// サンプルエントリーは本 SDK では受理しない。
     /// 前のサンプルと構造的に等値な再掲は `shiguredo_mp4` 側で `None` に正規化されるため受理する。
     InconsistentSampleDescription {
         /// 相違が検出されたビデオサンプルの 0 始まりインデックス。
@@ -335,8 +335,8 @@ impl Mp4SampleReader {
         // 最初のサンプルの sample_entry からコーデック情報 (解像度、parameter sets 等) を取得し、
         // 以後の Some(sample_entry) も extract_track_info に通して、
         // codec_type / width / height / nal_length_size / parameter_sets の
-        // 値等値を検証する。sample description が途中で切り替わる MP4 を
-        // 気付かれないまま最初の configuration のまま送出しないためのゲート。
+        // 値等値を検証する。サンプルエントリーが途中で切り替わる MP4 を
+        // 気付かれないまま最初の設定のまま送出しないためのゲート。
         let mut track_info: Option<Mp4VideoTrackInfo> = None;
         let mut samples = Vec::new();
 
@@ -654,7 +654,7 @@ fn read_bytes_at(
 /// `parameter_sets` の 5 field。
 /// `timescale` は `mdhd` の track 単位属性で `SampleEntry` からは抽出されず、
 /// `extract_track_info` にはループ外の同一 scalar が毎回渡されるため、
-/// sample entry 間で変わり得ない値として比較対象に含めない。
+/// サンプルエントリー間で変わり得ない値として比較対象に含めない。
 ///
 /// codec 固有 field（H.264 の profile-level-id、AV1 の av1C / configOBUs など）
 /// の bit-identical 検証は、各 codec 固有の別対応で `Mp4VideoTrackInfo` を

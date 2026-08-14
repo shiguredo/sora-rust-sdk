@@ -26,8 +26,8 @@
 - [FIX] 非ゼロの composition time offset (B フレーム) を含む MP4 を `Mp4SampleReader` の初期化時に拒否する
   - 今までは composition time offset を無視してデコード順のまま送信していた
   - @sile
-- [FIX] MP4 の途中で sample description が切り替わる入力を `Mp4SampleReader` の初期化時に拒否する
-  - 今までは最初の sample description だけを採用し、以後の切り替わりを無視して気付かれないまま壊れた映像を送信していた
+- [FIX] MP4 の途中でサンプルエントリーが切り替わる入力を `Mp4SampleReader` の初期化時に拒否する
+  - 今までは最初のサンプルエントリーだけを採用し、以後の切り替わりを無視して気付かれないまま壊れた映像を送信していた
   - `Mp4Error::InconsistentSampleDescription` で相違した field と sample index を返す
   - @sile
 - [FIX] sumomo の `--audio false` 指定時に音声トラックが SDP に含まれないようにする
