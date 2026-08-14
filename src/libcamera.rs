@@ -1102,7 +1102,7 @@ fn requeue_request(
 }
 
 // パース済みコントロール値
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 enum ControlValue {
     Bool(bool),
     I32(i32),
@@ -1291,6 +1291,14 @@ fn resolve_enum_value(control_name: &str, value_str: &str) -> Option<i32> {
             "MultiExposure" => Some(core::hdr_mode::MULTI_EXPOSURE),
             "SingleExposure" => Some(core::hdr_mode::SINGLE_EXPOSURE),
             "Night" => Some(core::hdr_mode::NIGHT),
+            _ => None,
+        },
+        "WdrMode" => match value_str {
+            "Off" => Some(core::wdr_mode::OFF),
+            "Linear" => Some(core::wdr_mode::LINEAR),
+            "Power" => Some(core::wdr_mode::POWER),
+            "Exponential" => Some(core::wdr_mode::EXPONENTIAL),
+            "HistogramEqualization" => Some(core::wdr_mode::HISTOGRAM_EQUALIZATION),
             _ => None,
         },
         "NoiseReductionMode" => match value_str {
@@ -1655,5 +1663,79 @@ mod tests {
             CapturedFrameBuffers::Native(_) => None,
         };
         assert!(mapped_view.is_none());
+    }
+
+    #[test]
+    fn parse_control_value_resolves_wdr_mode_off_to_i32() {
+        // --libcamera-control WdrMode=Off の文字列指定が I32(0) へ解決されることを検証する
+        let value = parse_control_value(&core::WDR_MODE, "Off")
+            .expect("WdrMode=Off のパースに失敗しました");
+        assert!(
+            matches!(&value, ControlValue::I32(0)),
+            "WdrMode=Off が I32(0) へ解決されませんでした: {value:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_enum_value_resolves_all_wdr_mode_enum_values() {
+        // WdrMode の全 enum 値が対応する定数値へ解決されることを検証する
+        let cases = [
+            ("Off", core::wdr_mode::OFF),
+            ("Linear", core::wdr_mode::LINEAR),
+            ("Power", core::wdr_mode::POWER),
+            ("Exponential", core::wdr_mode::EXPONENTIAL),
+            (
+                "HistogramEqualization",
+                core::wdr_mode::HISTOGRAM_EQUALIZATION,
+            ),
+        ];
+        for (value_str, expected) in cases {
+            assert_eq!(
+                resolve_enum_value("WdrMode", value_str),
+                Some(expected),
+                "WdrMode={value_str} の解決に失敗しました"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_enum_value_rejects_invalid_wdr_mode_strings() {
+        // 無効文字列と小文字は厳密一致のため解決されないことを検証する
+        for value_str in ["Foo", "off", "OFF", "LinearX"] {
+            assert_eq!(
+                resolve_enum_value("WdrMode", value_str),
+                None,
+                "WdrMode={value_str} は解決されるべきではありません"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_control_value_resolves_wdr_mode_numeric_value() {
+        // WdrMode=1 は数値指定として I32(1) へ解決されることを検証する
+        let value =
+            parse_control_value(&core::WDR_MODE, "1").expect("WdrMode=1 のパースに失敗しました");
+        assert!(
+            matches!(&value, ControlValue::I32(1)),
+            "WdrMode=1 が I32(1) へ解決されませんでした: {value:?}"
+        );
+    }
+
+    #[test]
+    fn parse_control_value_rejects_invalid_wdr_mode_string() {
+        // WdrMode=Foo は enum 解決にも数値解決にも失敗して None になることを検証する
+        assert!(
+            parse_control_value(&core::WDR_MODE, "Foo").is_none(),
+            "WdrMode=Foo はパースされるべきではありません"
+        );
+    }
+
+    #[test]
+    fn parse_control_value_rejects_lowercase_wdr_mode_string() {
+        // WdrMode=off は小文字のため enum 解決に失敗して None になることを検証する
+        assert!(
+            parse_control_value(&core::WDR_MODE, "off").is_none(),
+            "WdrMode=off はパースされるべきではありません"
+        );
     }
 }
