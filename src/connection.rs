@@ -1432,40 +1432,20 @@ impl SoraConnection {
         // disconnect_wait_timeout を上限にクローズ完了を待機する。
         if use_data_channel_signaling && !opened_data_channels.is_empty() {
             let deadline = tokio::time::Instant::now() + disconnect_wait_timeout;
-            while !opened_data_channels.is_empty() {
-                let timeout_result = tokio::time::timeout_at(deadline, async {
-                    while let Some(event) = self.event_rx.recv().await {
-                        if let SoraEvent::DataChannelStateChange(label) = event {
-                            return label;
-                        }
-                    }
-                    String::new()
-                })
-                .await;
-                match timeout_result {
-                    Ok(label) if !label.is_empty() => {
-                        if opened_data_channels.remove(&label) {
-                            rtc_log_info!("DataChannel '{}' closed", label);
-                            handler.on_data_channel_close(&label);
-                        }
-                    }
-                    _ => {
-                        rtc_log_warning!(
-                            "切断待機がタイムアウトしました (残り {} チャネル)",
-                            opened_data_channels.len()
-                        );
-                        // タイムアウトした残りチャネルにも close コールバックを通知する。
-                        // サーバーが DataChannel を閉じないまま切断された場合でも、
-                        // ユーザーへの close 通知が漏れないようにする。
-                        for label in &opened_data_channels {
-                            rtc_log_info!("DataChannel '{}' closed", label);
-                            handler.on_data_channel_close(label);
-                        }
-                        opened_data_channels.clear();
-                        break;
-                    }
-                }
-            }
+            // .await を超える値を渡す場合は Send である必要があるが、&data_channels は
+            // Send でないためエラーになるので、self.data_channels で所有権ごと渡す。
+            // これ以降 self.data_channels は利用できないので、
+            // 問題になるようならインターフェースを &mut data_channels に変更すること。
+            let data_channels = self.data_channels;
+            wait_data_channels_close(
+                &mut self.event_rx,
+                &mut self.command_rx,
+                &mut *handler,
+                &mut opened_data_channels,
+                data_channels,
+                deadline,
+            )
+            .await;
         }
 
         // websocket_closed=true は WebSocket のソケットが死んでいるか ws 層が failed 状態で、
@@ -1864,18 +1844,6 @@ impl SoraConnection {
         }
     }
 
-    fn is_data_channel_open(&self, label: &str) -> bool {
-        self.data_channels
-            .get(label)
-            .is_some_and(|m| m.channel.state() == DataChannelState::Open)
-    }
-
-    fn is_data_channel_closed(&self, label: &str) -> bool {
-        self.data_channels
-            .get(label)
-            .is_some_and(|m| m.channel.state() == DataChannelState::Closed)
-    }
-
     fn handle_data_channel_state(
         &self,
         handler: &mut dyn SoraConnectionEventHandler,
@@ -1884,7 +1852,8 @@ impl SoraConnection {
         use_data_channel_signaling: &mut bool,
         switched_received: bool,
     ) {
-        if self.is_data_channel_open(label) && !opened_data_channels.contains(label) {
+        if is_data_channel_open(&self.data_channels, label) && !opened_data_channels.contains(label)
+        {
             rtc_log_info!("DataChannel '{}' opened", label);
             opened_data_channels.insert(label.to_string());
             handler.on_data_channel_open(label);
@@ -1897,7 +1866,7 @@ impl SoraConnection {
             {
                 *use_data_channel_signaling = true;
             }
-        } else if self.is_data_channel_closed(label) && opened_data_channels.contains(label) {
+        } else if should_notify_close(&self.data_channels, opened_data_channels, label) {
             rtc_log_info!("DataChannel '{}' closed", label);
             opened_data_channels.remove(label);
             handler.on_data_channel_close(label);
@@ -2260,6 +2229,138 @@ fn resolve_ws_disconnect_delay_start(
 /// 既存どおり unsupported message として扱う。
 fn is_server_close_label(label: &str) -> bool {
     label == "signaling"
+}
+
+/// 指定したラベルの DataChannel が Open 状態かどうかを返す。
+fn is_data_channel_open(data_channels: &HashMap<String, ManagedDataChannel>, label: &str) -> bool {
+    data_channels
+        .get(label)
+        .is_some_and(|m| m.channel.state() == DataChannelState::Open)
+}
+
+/// 指定したラベルの DataChannel が Closed 状態かどうかを返す。
+fn is_data_channel_closed(
+    data_channels: &HashMap<String, ManagedDataChannel>,
+    label: &str,
+) -> bool {
+    data_channels
+        .get(label)
+        .is_some_and(|m| m.channel.state() == DataChannelState::Closed)
+}
+
+/// DataChannel の状態遷移イベントを受信したときに、close コールバックを通知して
+/// opened_data_channels から remove すべきかを判定する純粋関数。
+///
+/// チャネルが実際に Closed 状態で、かつ opened_data_channels にラベルが含まれる
+/// 場合のみ true を返す。Closing などの途中状態ではまだ閉じていないため false を
+/// 返し、誤った close 通知を防ぐ。
+fn should_notify_close(
+    data_channels: &HashMap<String, ManagedDataChannel>,
+    opened_data_channels: &HashSet<String>,
+    label: &str,
+) -> bool {
+    is_data_channel_closed(data_channels, label) && opened_data_channels.contains(label)
+}
+
+/// 残りチャネルへ close コールバックを通知し、opened_data_channels をクリアする。
+///
+/// タイムアウトやイベントチャネルクローズで待機を終了するときに使う。
+/// サーバーが DataChannel を閉じないまま切断された場合でも、
+/// ユーザーへの close 通知が漏れないようにする。
+fn notify_close_for_remaining(
+    handler: &mut dyn SoraConnectionEventHandler,
+    opened_data_channels: &mut HashSet<String>,
+) {
+    for label in opened_data_channels.iter() {
+        rtc_log_info!("DataChannel '{}' closed", label);
+        handler.on_data_channel_close(label);
+    }
+    opened_data_channels.clear();
+}
+
+/// DataChannel クローズ待機ループの終了要因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DataChannelCloseWaitResult {
+    /// 全チャネルの Closed 遷移を確認して待機を完了した。
+    AllChannelsClosed,
+    /// 待機時間が経過した。
+    TimedOut,
+    /// イベントチャネルがクローズされた。
+    EventChannelClosed,
+}
+
+/// DataChannel のクローズを `deadline` まで待機する。
+///
+/// `event_rx` の状態遷移イベントと `command_rx` のコマンドを処理しながら、
+/// `opened_data_channels` が空になるまで待つ。
+///
+/// - DataChannelStateChange で閉じた DataChannel があった場合、on_data_channel_close を通知する
+/// - 待機中に受信した `Disconnect` コマンドには ack を返して待機を継続する
+/// - `Disconnect` 以外のコマンドは応答せず破棄する (呼び出し側は
+///   `Error::CommandResponseMissing` になる)
+/// - `deadline` が経過した場合と `event_rx` がクローズされた場合は、
+///   残りチャネルへ on_data_channel_close を通知して待機を終了する
+async fn wait_data_channels_close(
+    event_rx: &mut mpsc::UnboundedReceiver<SoraEvent>,
+    command_rx: &mut mpsc::UnboundedReceiver<SoraConnectionCommand>,
+    handler: &mut dyn SoraConnectionEventHandler,
+    opened_data_channels: &mut HashSet<String>,
+    data_channels: HashMap<String, ManagedDataChannel>,
+    deadline: tokio::time::Instant,
+) -> DataChannelCloseWaitResult {
+    loop {
+        tokio::select! {
+            event = event_rx.recv() => {
+                match event {
+                    Some(SoraEvent::DataChannelStateChange(label)) => {
+                        if should_notify_close(&data_channels, opened_data_channels, &label) {
+                            rtc_log_info!("DataChannel '{}' closed", label);
+                            opened_data_channels.remove(&label);
+                            handler.on_data_channel_close(&label);
+                        }
+                    }
+                    Some(_) => {}
+                    None => {
+                        // event_rx がクローズされた場合は、残りチャネルへの close 通知を
+                        // 行ってから待機を終了する。
+                        rtc_log_warning!(
+                            "DataChannel close wait aborted because the event channel was closed ({} channels remain)",
+                            opened_data_channels.len()
+                        );
+                        notify_close_for_remaining(handler, opened_data_channels);
+                        return DataChannelCloseWaitResult::EventChannelClosed;
+                    }
+                }
+            }
+            // command_rx は Some(command) で受ける。
+            // クローズ済みチャネルに対する recv() は即 None を返すため、
+            // None を受け続ける実装にすると他のイベントの無い間は select!
+            // がビジーループしてしまう。
+            Some(command) = command_rx.recv() => {
+                // 待機中に受信した Disconnect コマンドには ack を返して待機を継続する。
+                // サーバーへの disconnect メッセージは送信しない (初回の切断要求で送信を試行済み、
+                // またはサーバー主導の切断のため不要)。
+                if let SoraConnectionCommand::Disconnect(ack_tx) = command {
+                    let _ = ack_tx.send(());
+                }
+                // Disconnect 以外のコマンドは応答せず破棄する。
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                // タイムアウトした場合も event_rx と同様、残りチャネルへの close 通知を
+                // 行ってから待機を終了する。
+                rtc_log_warning!(
+                    "DataChannel close wait timed out ({} channels remain)",
+                    opened_data_channels.len()
+                );
+                notify_close_for_remaining(handler, opened_data_channels);
+                return DataChannelCloseWaitResult::TimedOut;
+            }
+        }
+
+        if opened_data_channels.is_empty() {
+            return DataChannelCloseWaitResult::AllChannelsClosed;
+        }
+    }
 }
 
 struct ManagedDataChannel {
@@ -3616,6 +3717,352 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn should_notify_close_ignores_closing_state() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_compressed_data_channel(&mut connection, "signaling");
+        let opened = opened_labels(&["signaling"]);
+        assert!(
+            !should_notify_close(&connection.data_channels, &opened, "signaling"),
+            "Closing 状態では remove してはなりません"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_notify_close_accepts_closed_state() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_compressed_data_channel(&mut connection, "signaling");
+        // close() を呼ぶと Closed 状態に遷移する。
+        connection.data_channels["signaling"].channel.close();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let opened = opened_labels(&["signaling"]);
+        assert!(
+            should_notify_close(&connection.data_channels, &opened, "signaling"),
+            "Closed 状態では remove する必要があります"
+        );
+    }
+
+    #[test]
+    fn should_notify_close_ignores_unopened_label() {
+        let opened = opened_labels(&["signaling"]);
+        let data_channels = HashMap::new();
+        assert!(
+            !should_notify_close(&data_channels, &opened, "#chat"),
+            "opened_data_channels に含まれない label は remove してはなりません"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_close_loop_keeps_waiting_on_closing_state_event() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_compressed_data_channel(&mut connection, "signaling");
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SoraEvent>();
+        let (_command_tx, mut command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
+        let mut handler = RecordingHandler::default();
+        let mut opened = opened_labels(&["signaling"]);
+
+        // Closing 状態 (Closed でない) の StateChange イベントを送信する。
+        event_tx
+            .send(SoraEvent::DataChannelStateChange("signaling".to_string()))
+            .unwrap();
+        // イベントを処理させた後、event_rx をクローズして待機を終了させる。
+        drop(event_tx);
+        let data_channels = connection.data_channels;
+
+        let result = wait_data_channels_close(
+            &mut event_rx,
+            &mut command_rx,
+            &mut handler,
+            &mut opened,
+            data_channels,
+            tokio::time::Instant::now() + tokio::time::Duration::from_secs(60),
+        )
+        .await;
+
+        // Closing 状態のイベントでは remove されないため、待機は AllChannelsClosed
+        // ではなく event_rx クローズで終了する必要がある。
+        assert_eq!(
+            result,
+            DataChannelCloseWaitResult::EventChannelClosed,
+            "Closing 状態のイベントで AllChannelsClosed として終了してはいけません"
+        );
+        // close 通知は event_rx クローズ時の残りチャネル通知のみ (1 回)。
+        assert_eq!(
+            handler.data_channel_close_count, 1,
+            "close 通知は残りチャネルへの通知 1 回だけである必要があります"
+        );
+        assert_eq!(
+            handler.data_channel_close_labels,
+            vec!["signaling".to_string()],
+            "close 通知の label が一致する必要があります"
+        );
+        assert!(
+            opened.is_empty(),
+            "event_rx クローズ時の残りチャネル通知で opened がクリアされる必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_close_loop_notifies_close_when_all_channels_closed() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_compressed_data_channel(&mut connection, "signaling");
+        register_compressed_data_channel(&mut connection, "#chat");
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SoraEvent>();
+        let (_command_tx, mut command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
+        let mut handler = RecordingHandler::default();
+        let mut opened = opened_labels(&["signaling", "#chat"]);
+
+        // 全チャネルを close() して Closed 状態に遷移させる。
+        connection.data_channels["signaling"].channel.close();
+        connection.data_channels["#chat"].channel.close();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // 全チャネルの Closed イベントを送信する。
+        event_tx
+            .send(SoraEvent::DataChannelStateChange("signaling".to_string()))
+            .unwrap();
+        event_tx
+            .send(SoraEvent::DataChannelStateChange("#chat".to_string()))
+            .unwrap();
+        let data_channels = connection.data_channels;
+
+        let result = wait_data_channels_close(
+            &mut event_rx,
+            &mut command_rx,
+            &mut handler,
+            &mut opened,
+            data_channels,
+            tokio::time::Instant::now() + tokio::time::Duration::from_secs(60),
+        )
+        .await;
+
+        assert_eq!(
+            result,
+            DataChannelCloseWaitResult::AllChannelsClosed,
+            "全チャネル Closed なら待機が正常終了する必要があります"
+        );
+        assert!(
+            opened.is_empty(),
+            "全チャネル Closed 後に opened がクリアされる必要があります"
+        );
+        assert_eq!(
+            handler.data_channel_close_count, 2,
+            "各チャネルへ close 通知が 1 回ずつ呼ばれる必要があります"
+        );
+        assert_eq!(
+            handler.data_channel_close_labels,
+            vec!["signaling".to_string(), "#chat".to_string()],
+            "close 通知の label が受信順と一致する必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_close_loop_acks_disconnect_and_continues() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_compressed_data_channel(&mut connection, "signaling");
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
+        let mut handler = RecordingHandler::default();
+        let mut opened = opened_labels(&["signaling"]);
+
+        // チャネルを close() して Closed 状態に遷移させておく。
+        connection.data_channels["signaling"].channel.close();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let data_channels = connection.data_channels;
+        // close() による実際の StateChange イベントが届かないよう、
+        // event_rx は独立のチャネルを使う。
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SoraEvent>();
+        let task = tokio::spawn(async move {
+            let result = wait_data_channels_close(
+                &mut event_rx,
+                &mut command_rx,
+                &mut handler,
+                &mut opened,
+                data_channels,
+                tokio::time::Instant::now() + tokio::time::Duration::from_secs(60),
+            )
+            .await;
+            (result, handler, opened)
+        });
+
+        // 待機中に disconnect() を呼び、ack が返ることを確認する。
+        let (ack_tx, ack_rx) = oneshot::channel();
+        command_tx
+            .send(SoraConnectionCommand::Disconnect(ack_tx))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), ack_rx)
+            .await
+            .expect("disconnect() の ack が返る必要があります")
+            .expect("disconnect の ack が送信される必要があります");
+
+        // ack 時点では close 通知・待機終了が発生していないことを確認する。
+        assert!(!task.is_finished(), "ack 時点で待機が終了してはいけません");
+
+        // その後の Closed イベントが通常どおり処理されることを確認する。
+        event_tx
+            .send(SoraEvent::DataChannelStateChange("signaling".to_string()))
+            .unwrap();
+        let (result, handler, opened) =
+            task.await.expect("wait タスクが正常終了する必要があります");
+        assert_eq!(
+            result,
+            DataChannelCloseWaitResult::AllChannelsClosed,
+            "ack 後の Closed イベントで待機が正常終了する必要があります"
+        );
+        assert!(
+            opened.is_empty(),
+            "Closed イベント後に opened がクリアされる必要があります"
+        );
+        assert_eq!(
+            handler.data_channel_close_count, 1,
+            "close 通知は Closed イベントの 1 回だけである必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_close_loop_discards_non_disconnect_command() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_compressed_data_channel(&mut connection, "signaling");
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
+        let mut handler = RecordingHandler::default();
+        let mut opened = opened_labels(&["signaling"]);
+
+        // チャネルを close() して Closed 状態に遷移させておく。
+        connection.data_channels["signaling"].channel.close();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let data_channels = connection.data_channels;
+        // close() による実際の StateChange イベントが届かないよう、
+        // event_rx は独立のチャネルを使う。
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SoraEvent>();
+        let task = tokio::spawn(async move {
+            let result = wait_data_channels_close(
+                &mut event_rx,
+                &mut command_rx,
+                &mut handler,
+                &mut opened,
+                data_channels,
+                tokio::time::Instant::now() + tokio::time::Duration::from_secs(60),
+            )
+            .await;
+            (result, handler, opened)
+        });
+
+        // 待機中に GetStats コマンドを送信しても応答されないことを確認する。
+        let (stats_tx, stats_rx) = oneshot::channel();
+        command_tx
+            .send(SoraConnectionCommand::GetStats(stats_tx))
+            .unwrap();
+
+        // 待機を正常終了させるための Closed イベントを送信する。
+        event_tx
+            .send(SoraEvent::DataChannelStateChange("signaling".to_string()))
+            .unwrap();
+        let (result, handler, opened) =
+            task.await.expect("wait タスクが正常終了する必要があります");
+        assert_eq!(
+            result,
+            DataChannelCloseWaitResult::AllChannelsClosed,
+            "Closed イベントで待機が正常終了する必要があります"
+        );
+        assert!(
+            opened.is_empty(),
+            "Closed イベント後に opened がクリアされる必要があります"
+        );
+
+        // GetStats には応答が返らず、呼び出し側は CommandResponseMissing になる
+        // (response_tx が send されずに drop されるため RecvError になる)。
+        assert!(
+            stats_rx.await.is_err(),
+            "Disconnect 以外のコマンドには応答してはいけません"
+        );
+        assert_eq!(
+            handler.data_channel_close_count, 1,
+            "close 通知は Closed イベントの 1 回だけである必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_close_loop_distinguishes_event_channel_closed() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_compressed_data_channel(&mut connection, "signaling");
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SoraEvent>();
+        let (_command_tx, mut command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
+        let mut handler = RecordingHandler::default();
+        let mut opened = opened_labels(&["signaling"]);
+
+        // event_rx をクローズして待機を終了させる。
+        drop(event_tx);
+        let data_channels = connection.data_channels;
+
+        let result = wait_data_channels_close(
+            &mut event_rx,
+            &mut command_rx,
+            &mut handler,
+            &mut opened,
+            data_channels,
+            tokio::time::Instant::now() + tokio::time::Duration::from_secs(60),
+        )
+        .await;
+
+        // event_rx クローズはタイムアウトとは区別された終了要因で返る。
+        assert_eq!(
+            result,
+            DataChannelCloseWaitResult::EventChannelClosed,
+            "event_rx クローズは EventChannelClosed として終了する必要があります"
+        );
+        // クローズ時もタイムアウト時と同じく残りチャネルへ close 通知される。
+        assert_eq!(
+            handler.data_channel_close_count, 1,
+            "event_rx クローズ時に残りチャネルへ close 通知される必要があります"
+        );
+        assert!(
+            opened.is_empty(),
+            "event_rx クローズ時の残りチャネル通知で opened がクリアされる必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_close_loop_distinguishes_timeout_and_notifies_remaining() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_compressed_data_channel(&mut connection, "signaling");
+        register_compressed_data_channel(&mut connection, "#chat");
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SoraEvent>();
+        let (_command_tx, mut command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
+        let mut handler = RecordingHandler::default();
+        let mut opened = opened_labels(&["signaling", "#chat"]);
+
+        // 期限切れを即座に発生させるため、過去の時刻を deadline にする。
+        let deadline = tokio::time::Instant::now() - tokio::time::Duration::from_secs(1);
+        // event_rx を開いたままにして、クローズ終了と区別する。
+        let _event_tx = event_tx;
+        let data_channels = connection.data_channels;
+
+        let result = wait_data_channels_close(
+            &mut event_rx,
+            &mut command_rx,
+            &mut handler,
+            &mut opened,
+            data_channels,
+            deadline,
+        )
+        .await;
+
+        // タイムアウトは event_rx クローズとは区別された終了要因で返る。
+        assert_eq!(
+            result,
+            DataChannelCloseWaitResult::TimedOut,
+            "期限切れは TimedOut として終了する必要があります"
+        );
+        // タイムアウト時に残りチャネルへ close 通知される現状維持の挙動。
+        assert_eq!(
+            handler.data_channel_close_count, 2,
+            "タイムアウト時に残りチャネルへ close 通知される必要があります"
+        );
+        assert!(
+            opened.is_empty(),
+            "タイムアウト時に opened がクリアされる必要があります"
+        );
+    }
+
     use shiguredo_webrtc::DataChannelInit;
 
     /// 実際の `SoraConnectionContext` と `SoraConnection` を構築するテスト用ヘルパー。
@@ -3639,6 +4086,8 @@ mod tests {
     #[derive(Default)]
     struct RecordingHandler {
         data_channel_message_count: usize,
+        data_channel_close_count: usize,
+        data_channel_close_labels: Vec<String>,
         signaling_received_count: usize,
         notify_count: usize,
         push_count: usize,
@@ -3675,6 +4124,11 @@ mod tests {
 
         fn on_data_channel_message(&mut self, _label: &str, _data: &[u8]) {
             self.data_channel_message_count += 1;
+        }
+
+        fn on_data_channel_close(&mut self, label: &str) {
+            self.data_channel_close_count += 1;
+            self.data_channel_close_labels.push(label.to_string());
         }
     }
 

@@ -112,8 +112,9 @@ async fn assert_websocket_close_not_duplicated(connection: &mut SoraTestConnecti
     );
 }
 
-/// Close 受信前に open を観測した各 DataChannel label について、on_data_channel_close が重複しないことを確認する。
-async fn assert_data_channel_close_not_duplicated(connection: &mut SoraTestConnection) {
+/// Close 受信前に open を観測した各 DataChannel label について、
+/// on_data_channel_close が重複・欠落なく 1 回だけ呼ばれることを確認する。
+async fn assert_data_channel_close_notified_exactly_once(connection: &mut SoraTestConnection) {
     let events = connection.events().await;
     let opened_labels: HashSet<String> = events
         .into_iter()
@@ -130,9 +131,9 @@ async fn assert_data_channel_close_not_duplicated(connection: &mut SoraTestConne
         let close_count = connection
             .count_data_channel_close(|actual| actual == label)
             .await;
-        assert!(
-            close_count <= 1,
-            "on_data_channel_close が label='{label}' で重複して呼ばれました: {close_count} 回"
+        assert_eq!(
+            close_count, 1,
+            "on_data_channel_close が label='{label}' で重複・欠落なく 1 回呼ばれる必要があります: {close_count} 回"
         );
     }
 }
@@ -204,7 +205,7 @@ async fn server_close_message_terminates_run_while_websocket_connected() {
     // その時点で 1 回通知される。server Close メッセージの処理で追加通知されない。
     assert_websocket_close_not_duplicated(&mut connection).await;
 
-    assert_data_channel_close_not_duplicated(&mut connection).await;
+    assert_data_channel_close_notified_exactly_once(&mut connection).await;
 }
 
 /// WebSocket 切断後に DisconnectChannel API で Sora 側から切断し、
@@ -265,5 +266,5 @@ async fn server_close_message_terminates_run_after_websocket_closed() {
     // server Close メッセージの処理で追加通知されない。
     assert_websocket_close_not_duplicated(&mut connection).await;
 
-    assert_data_channel_close_not_duplicated(&mut connection).await;
+    assert_data_channel_close_notified_exactly_once(&mut connection).await;
 }
