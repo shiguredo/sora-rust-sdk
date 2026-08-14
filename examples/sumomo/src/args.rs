@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::io;
 
-use shiguredo_webrtc::{VideoCodecType, rtc_log_info};
+use shiguredo_webrtc::VideoCodecType;
 use sora_sdk::Role;
 
 use crate::error::Result;
@@ -147,7 +147,7 @@ pub(crate) fn parse_args(mut args: noargs::RawArgs) -> Result<Args> {
     args.metadata_mut().app_description = "Sora WebSocket シグナリングの最小サンプル";
 
     if noargs::VERSION_FLAG.take(&mut args).is_present() {
-        rtc_log_info!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+        println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
         std::process::exit(0);
     }
 
