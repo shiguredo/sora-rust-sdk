@@ -631,6 +631,17 @@ impl Mp4SampleReader {
 /// ファイルベースの読み込みで seek + read_exact の組み合わせが必要な箇所は
 /// すべてこの関数に集約する。read_exact は要求サイズの読み込みを保証するため、
 /// ファイルが途中で縮小されている場合は I/O エラーを返す。
+fn read_bytes_at(
+    file: &mut BufReader<std::fs::File>,
+    position: u64,
+    size: usize,
+) -> Result<Vec<u8>> {
+    let mut data = vec![0; size];
+    file.seek(std::io::SeekFrom::Start(position))?;
+    file.read_exact(&mut data)?;
+    Ok(data)
+}
+
 /// 2 個の `Mp4VideoTrackInfo` を field 単位で比較し、相違する field 名を返す。
 ///
 /// 検証対象は `codec_type` / `width` / `height` / `nal_length_size` /
@@ -663,17 +674,6 @@ fn collect_mismatched_track_info_fields(
         mismatched.push("parameter_sets");
     }
     mismatched
-}
-
-fn read_bytes_at(
-    file: &mut BufReader<std::fs::File>,
-    position: u64,
-    size: usize,
-) -> Result<Vec<u8>> {
-    let mut data = vec![0; size];
-    file.seek(std::io::SeekFrom::Start(position))?;
-    file.read_exact(&mut data)?;
-    Ok(data)
 }
 
 /// 長さプレフィックス付き NAL ユニットを Annex B 形式に変換する。
