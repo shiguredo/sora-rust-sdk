@@ -2251,7 +2251,7 @@ fn is_data_channel_closed(
 }
 
 /// DataChannel の状態遷移イベントを受信したときに、close コールバックを通知して
-/// opened_data_channels から remove すべきかを判定する純粋関数。
+/// opened_data_channels から remove すべきかを判定する関数。
 ///
 /// チャネルが実際に Closed 状態で、かつ opened_data_channels にラベルが含まれる
 /// 場合のみ true を返す。Closing などの途中状態ではまだ閉じていないため false を
@@ -3722,13 +3722,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_notify_close_ignores_closing_state() {
+    async fn should_notify_close_ignores_non_closed_state() {
         let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
         register_compressed_data_channel(&mut connection, "signaling");
         let opened = opened_labels(&["signaling"]);
+        // register 直後のチャネルは Closed 以外の状態 (テスト環境では Connecting) であり、
+        // 閉じたとは判定されない。Closing を含む Closed 以外の状態で remove しないことを
+        // 検証する (テスト環境では Closing 状態を作れないため)。
         assert!(
             !should_notify_close(&connection.data_channels, &opened, "signaling"),
-            "Closing 状態では remove してはなりません"
+            "Closed 以外の状態では remove してはなりません"
         );
     }
 
@@ -3736,7 +3739,7 @@ mod tests {
     async fn should_notify_close_accepts_closed_state() {
         let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
         register_compressed_data_channel(&mut connection, "signaling");
-        // close() を呼ぶと Closed 状態に遷移する。
+        // close() を呼ぶと Closed 状態に遷移する (テスト環境でも観測できる)。
         connection.data_channels["signaling"].channel.close();
         tokio::time::sleep(Duration::from_millis(100)).await;
         let opened = opened_labels(&["signaling"]);
@@ -3757,17 +3760,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wait_close_loop_keeps_waiting_on_closing_state_event() {
+    async fn wait_close_loop_keeps_waiting_on_non_closed_state_event() {
         let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
         register_compressed_data_channel(&mut connection, "signaling");
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SoraEvent>();
         let mut handler = RecordingHandler::default();
         let mut opened = opened_labels(&["signaling"]);
 
-        // Closing 状態 (Closed でない) の StateChange イベントを送信する。
+        // Closed 以外の状態 (register 直後は Connecting) の StateChange イベントを送信する。
+        // テスト環境では Closing 状態を作れないため、Closed 以外を代表する Connecting で
+        // 「Closed でない状態のイベントでは remove されない」ことを検証する。
         event_tx
             .send(SoraEvent::DataChannelStateChange("signaling".to_string()))
-            .expect("Closing 状態のイベントの送信に失敗しました");
+            .expect("Closed 以外の状態のイベントの送信に失敗しました");
         // イベントを処理させた後、event_rx をクローズして待機を終了させる。
         drop(event_tx);
         let data_channels = connection.data_channels;
@@ -3781,12 +3786,12 @@ mod tests {
         )
         .await;
 
-        // Closing 状態のイベントでは remove されないため、待機は AllChannelsClosed
+        // Closed 以外の状態のイベントでは remove されないため、待機は AllChannelsClosed
         // ではなく event_rx クローズで終了する必要がある。
         assert_eq!(
             result,
             DataChannelCloseWaitResult::EventChannelClosed,
-            "Closing 状態のイベントで AllChannelsClosed として終了してはいけません"
+            "Closed 以外の状態のイベントで AllChannelsClosed として終了してはいけません"
         );
         // close 通知は event_rx クローズ時の残りチャネル通知のみ (1 回)。
         assert_eq!(

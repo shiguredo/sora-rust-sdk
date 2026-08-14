@@ -23,7 +23,7 @@
 
 ## 設計方針
 
-- 待機ループの remove 判定を `handle_data_channel_state` と同じくチャネル状態の確認付きにする (`is_data_channel_closed` を確認してから remove する)。判定は純粋関数 (チャネルの `is_closed` 判定を引数で受け取る関数) に切り出し、待機ループと `handle_data_channel_state` の両方から使って 1 箇所に集約する
+- 待機ループの remove 判定を `handle_data_channel_state` と同じくチャネル状態の確認付きにする (`is_data_channel_closed` を確認してから remove する)。判定は `is_data_channel_closed` と `opened_data_channels` の確認を `should_notify_close` に集約し、待機ループと `handle_data_channel_state` の両方から使って 1 箇所で行う
 - 待機ループの開始前に `command_rx` を閉じ、以後のコマンド送信を拒否する。終了フェーズに入った時点 (run のメインループを抜けた直後) に `command_rx.close()` を呼び、以後の送信は即座に `Error::CommandSendFailed` にする
   - `close()` により、待機中や close handshake 中に送信されたコマンドはキューに積まれることなく即座に失敗するため、「待機中に送信された `Disconnect` が ack されずに `Error::CommandResponseMissing` になる」レースを構造的に排除する (待機ループの select! が複数 ready 分岐からランダムに選ぶことに起因するレースも含めて完全に消える)
   - クローズ前にキューに積まれていたコマンドはドレインして処理する。`Disconnect` には ack を返す (呼び出し側は成功する)。`Disconnect` 以外のコマンド (`GetStats` / `GetSelectedSignalingUrl` / `GetConnectedSignalingUrl` / `SendRpcRequest` / `SendMessage`) は破棄する (その呼び出し側は従来どおり `Error::CommandResponseMissing` になる)
@@ -41,9 +41,9 @@
 - 終了フェーズに入った後は `command_rx` が閉じられ、以後の `disconnect()` は ack の代わりに `Error::CommandSendFailed` を返す。クローズ前にキューに積まれた `Disconnect` には ack が返る。いずれの場合も `Error::CommandResponseMissing` にはならない
 - `event_rx` クローズ時とタイムアウト時でログが区別される
 - 待機ループの修正を検証するテストがある
-  - remove 判定ロジックを純粋関数 (チャネルの `is_closed` 判定を引数で受け取る関数) に切り出し、`src/connection.rs` 内の `#[cfg(test)]` モジュールで「Closing 状態では remove されない」「Closed 状態では remove される」ことを検証する。「Closing / Closed 状態」は注入する `is_closed` 述語の真偽で表現する (実 DataChannel の状態判定そのものの検証は実装と e2e に委ねる)
+  - remove 判定を `should_notify_close` に集約し、`src/connection.rs` 内の `#[cfg(test)]` モジュールで「Closed 以外の状態では remove されない」「Closed 状態では remove される」ことを検証する。「Closed / Closed 以外」は実チャネルの状態遷移で表現する (テスト環境で作れる状態は register 直後の Connecting と close() 後の Closed のみで、Closing は作れない)。「Closed 以外」の代表として Connecting を使う (実 DataChannel の Closing での誤通知の検証は実装と e2e に委ねる)
   - 待機ループのイベント処理を実際の mpsc チャネルを引数で受け取る単体テスト可能な形に切り出し、`src/connection.rs` 内の `#[cfg(test)]` モジュールで次を検証する (実サーバー e2e では待機窓が短く決定的に再現できないため)
-    - 待機ループが remove 判定を純粋関数経由で行うこと (Closing 状態の `DataChannelStateChange` イベントを受信しても close 通知・remove が発生しない)
+    - 待機ループが remove 判定を `should_notify_close` 経由で行うこと (Closed 以外の状態の `DataChannelStateChange` イベントを受信しても close 通知・remove が発生しない)
     - 全チャネルの Closed イベントを受信すると close 通知が行われ、待機が正常終了すること
     - `event_rx` クローズ時とタイムアウト時の待機終了要因の区別 (ログ出力そのものではなく、待機終了要因を表す戻り値で検証する)
     - タイムアウト時に残りチャネルへ close 通知される現状維持の挙動
