@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-08-13
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-14
 - Branch: feature/fix-mp4-sample-entry-consistency
 - Polished: {YYYY-MM-DD}
 
@@ -96,3 +96,22 @@ field 単位比較の順序は本 issue の「設計方針 → sample entry の�
 - `cargo clippy --workspace --all-targets -- -D warnings` が成功する
 - `CHANGES.md` の develop セクションに `[FIX]` を追記する
 - production log は英語、コメントとテストの assertion message は日本語にする
+
+## 解決方法
+
+### 実装
+
+- `Mp4Error::InconsistentSampleDescription { index: usize, fields: Vec<&'static str> }` variant を追加する
+- `Mp4SampleReader::new_inner` の while ループを、最初の `Some(sample_entry)` だけでなく、以後の `Some(sample_entry)` も `extract_track_info` に通して一貫性検証する形に変更する
+- `Mp4SampleReader::collect_mismatched_track_info_fields` private method を追加し、`codec_type` / `width` / `height` / `nal_length_size` / `parameter_sets` の 5 フィールドを比較する。相違があれば `Mp4Error::InconsistentSampleDescription` を返す
+- `Mp4VideoTrackInfo` の両側を exhaustive に destructure して、新フィールド追加時にヘルパー未更新が compile error として検出されるようにする（`timescale` は `mdhd` の track 単位属性で `SampleEntry` からは抽出されないため比較対象外とし、`_` に束縛する）
+- `Mp4Error::InconsistentSampleDescription` の `Display` は `sample=<index> fields=<fields>` 形式で相違した フィールド名 を含めて出力する
+
+### テスト
+
+- `sample_description_consistency_check_reports_field_mismatches`: 5 フィールドそれぞれの単独相違、`parameter_sets` の Some/None 単独遷移、複数フィールド同時変更時の順序、`timescale` が比較対象外であることを検証する
+- `inconsistent_sample_description_display_and_source`: `Display` 実装が sample index と全ての相違フィールド名を含むこと、`Error::source()` が None を返すことを検証する
+
+### CHANGES.md
+
+- `[FIX] MP4 の途中でサンプルエントリーが切り替わる入力を Mp4SampleReader の初期化時に拒否する` を追加する
