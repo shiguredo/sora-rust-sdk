@@ -80,13 +80,11 @@ pub enum Mp4Error {
     },
     /// 2 個目以降のサンプルエントリーが最初の設定と一致しない。
     ///
-    /// codec type、解像度、NAL 長サイズ、parameter sets のいずれかが変わる
-    /// サンプルエントリーは本 SDK では受理しない。
-    /// 前のサンプルと構造的に等値な再掲は `shiguredo_mp4` 側で `None` に正規化されるため受理する。
+    /// コーデックや解像度などが途中で変わるサンプルエントリーは本 SDK では受理しない。
     InconsistentSampleDescription {
         /// 相違が検出されたビデオサンプルの 0 始まりインデックス。
         index: usize,
-        /// 相違した Mp4VideoTrackInfo の field 名。
+        /// 相違したフィールド名。
         fields: Vec<&'static str>,
     },
 }
@@ -350,8 +348,8 @@ impl Mp4SampleReader {
             //
             // shiguredo_mp4 が前のサンプルと構造的に等値なサンプルエントリーを `None` に
             // 正規化するため、後発の `Some(sample_entry)` は必ず何らかの相違を持つ。
-            // 本 SDK が抽出する 5 field の一致で `mismatched` が空になる場合、その相違は
-            // 本 SDK の抽出範囲外（`avcC` header や補助 box）にある。codec 固有 field の
+            // 本 SDK が抽出する 5 フィールドの一致で `mismatched` が空になる場合、その相違は
+            // 本 SDK の抽出範囲外（`avcC` header や補助 box）にある。codec 固有フィールドの
             // 検証は、将来 `Mp4VideoTrackInfo` を拡張する形で加える。
             if let Some(entry) = sample.sample_entry {
                 let info = Self::extract_track_info(entry, timescale)?;
@@ -569,21 +567,21 @@ impl Mp4SampleReader {
         }
     }
 
-    /// 2 個の `Mp4VideoTrackInfo` を field 単位で比較し、相違する field 名を返す。
+    /// 2 個の `Mp4VideoTrackInfo` をフィールド単位で比較し、相違するフィールド名を返す。
     ///
     /// 検証対象は `codec_type` / `width` / `height` / `nal_length_size` /
-    /// `parameter_sets` の 5 field。
+    /// `parameter_sets` の 5 フィールド。
     /// `timescale` は `mdhd` の track 単位属性で `SampleEntry` からは抽出されず、
     /// `extract_track_info` にはループ外の同一 scalar が毎回渡されるため、
     /// サンプルエントリー間で変わり得ない値として比較対象に含めない。
     ///
-    /// codec 固有 field（H.264 の profile-level-id、AV1 の av1C / configOBUs など）
+    /// codec 固有フィールド（H.264 の profile-level-id、AV1 の av1C / configOBUs など）
     /// の bit-identical 検証は、各 codec 固有の別対応で `Mp4VideoTrackInfo` を
     /// 拡張する形で加える。
     ///
-    /// `Mp4VideoTrackInfo` に新しい field を追加した際にヘルパー未更新を
+    /// `Mp4VideoTrackInfo` に新しいフィールドを追加した際にヘルパー未更新を
     /// compile error として検出するため、両側を exhaustive に destructure して
-    /// 明示的に列挙する。比較対象外の field は `_` に束縛する。
+    /// 明示的に列挙する。比較対象外のフィールドは `_` に束縛する。
     fn collect_mismatched_track_info_fields(
         first: &Mp4VideoTrackInfo,
         current: &Mp4VideoTrackInfo,
@@ -1263,7 +1261,7 @@ mod tests {
         );
 
         // codec_type / height / nal_length_size / parameter_sets を同時に変えると
-        // 相違リストに全 field が設計方針の記載順で並ぶ。
+        // 相違リストに全フィールドが設計方針の記載順で並ぶ。
         modified = Mp4VideoTrackInfo {
             codec_type: VideoCodecType::H265,
             width: base.width,
@@ -1275,7 +1273,7 @@ mod tests {
         assert_eq!(
             Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
             vec!["codec_type", "height", "nal_length_size", "parameter_sets"],
-            "複数 field の相違は codec_type -> width -> height -> nal_length_size -> parameter_sets の順で並ぶはずです"
+            "複数フィールドの相違は codec_type -> width -> height -> nal_length_size -> parameter_sets の順で並ぶはずです"
         );
 
         // timescale だけを変えても比較対象外なので相違なし。
@@ -1295,8 +1293,8 @@ mod tests {
 
     #[test]
     fn inconsistent_sample_description_display_and_source() {
-        // Display 出力に sample index と全ての相違 field 名が含まれることを確認する。
-        // issue 側の完了条件で「Display 実装が sample index と相違 field 名を含む」と
+        // Display 出力に sample index と全ての相違フィールド名が含まれることを確認する。
+        // issue 側の完了条件で「Display 実装が sample index と相違フィールド名を含む」と
         // 明示されているため、helper unit test とは別に error variant 側を直接検証する。
         let err = Mp4Error::InconsistentSampleDescription {
             index: 3,
@@ -1310,7 +1308,7 @@ mod tests {
         for expected_field in ["codec_type", "width", "parameter_sets"] {
             assert!(
                 message.contains(expected_field),
-                "相違した field 名 {expected_field} が Display 出力に含まれるはずです: {message}"
+                "相違したフィールド名 {expected_field} が Display 出力に含まれるはずです: {message}"
             );
         }
 
