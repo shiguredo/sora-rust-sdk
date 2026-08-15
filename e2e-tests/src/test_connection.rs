@@ -299,7 +299,7 @@ impl SoraTestConnectionBuilder {
             event_rx: self.event_rx,
             event_log: Vec::new(),
             run_task,
-            run_task_result_read: false,
+            run_task_joined: false,
             run_task_error_message: None,
         })
     }
@@ -318,8 +318,8 @@ pub struct SoraTestConnection {
     event_rx: UnboundedReceiver<SoraTestEvent>,
     event_log: Vec<SoraTestEvent>,
     run_task: JoinHandle<Result<()>>,
-    /// `run_task` の結果を読み出し済みかどうか。
-    run_task_result_read: bool,
+    /// `run_task` の `JoinHandle` を await 済みかどうか。
+    run_task_joined: bool,
     /// `run_task` が `Err` または panic で終了した場合のエラーメッセージ。
     run_task_error_message: Option<String>,
 }
@@ -376,12 +376,13 @@ impl SoraTestConnection {
         match self.disconnect().await {
             Ok(()) => self.wait_for_run_finished(timeout).await,
             Err(error) => {
-                // disconnect が失敗するのは `run_task` が終了済みの場合が多い。
-                // `run_task` が真のエラーを保持している場合はそちらを優先して表示する。
-                if let Some(message) = self.read_run_task_error_message().await {
-                    return Err(io::Error::other(message).into());
+                // disconnect() の失敗は run task の終了のみを意味するため、
+                // 直接結果を読み出して真のエラーを優先表示する。
+                self.store_run_task_error_message().await;
+                match self.run_task_error_message.as_deref() {
+                    Some(message) => Err(io::Error::other(message).into()),
+                    None => Err(error),
                 }
-                Err(error)
             }
         }
     }
@@ -391,7 +392,7 @@ impl SoraTestConnection {
     /// `disconnect()` 後の後始末をテスト側で明示的に完了させるために使う。
     pub async fn wait_for_run_finished(&mut self, timeout: Duration) -> Result<()> {
         // タイムアウト内に `run_task` の終了を待機して結果を保持する。
-        tokio::time::timeout(timeout, self.store_run_task_result())
+        tokio::time::timeout(timeout, self.store_run_task_error_message())
             .await
             .map_err(|_| {
                 io::Error::other("connection task がタイムアウト内に終了しませんでした")
@@ -450,6 +451,8 @@ impl SoraTestConnection {
                 .flatten();
 
             let Some(event) = maybe_event else {
+                // チャネルクローズは run task の終了を意味するため、結果を直接読み出す。
+                self.store_run_task_error_message().await;
                 return self.timeout_or_run_task_error().await;
             };
 
@@ -695,13 +698,13 @@ impl SoraTestConnection {
         Err(io::Error::new(io::ErrorKind::TimedOut, "タイムアウトしました").into())
     }
 
-    /// `run_task` の結果を読み出して `self` に保持する。
+    /// `run_task` の結果を読み出して、エラーメッセージを `self` に保持する。
     ///
-    /// 初回読み出し時だけ実際に `run_task` の実行を待って結果を保持し、2 回目以降は
-    /// 何もしない。`run_task` が `Err` または panic で終了した場合は、
-    /// そのエラーメッセージを `run_task_error_message` に保持する。
-    async fn store_run_task_result(&mut self) {
-        if self.run_task_result_read {
+    /// 初回読み出し時だけ実際に `run_task` の終了を待って結果を保持し、2 回目以降は
+    /// 何もしない。`Err` または panic で終了した場合は、そのエラーメッセージを
+    /// `run_task_error_message` に保持する。
+    async fn store_run_task_error_message(&mut self) {
+        if self.run_task_joined {
             return;
         }
         match (&mut self.run_task).await {
@@ -714,7 +717,7 @@ impl SoraTestConnection {
                     Some(format!("connection task が panic しました: {join_error}"));
             }
         }
-        self.run_task_result_read = true;
+        self.run_task_joined = true;
     }
 
     /// `run_task` が終了済みの場合に、エラーメッセージを読み出して返す。
@@ -723,7 +726,7 @@ impl SoraTestConnection {
     /// 未終了なら `None` を返す。終了済みでも `Ok(())` の場合は `None` を返す。
     async fn read_run_task_error_message(&mut self) -> Option<String> {
         if self.run_task.is_finished() {
-            self.store_run_task_result().await;
+            self.store_run_task_error_message().await;
         }
         self.run_task_error_message.clone()
     }
