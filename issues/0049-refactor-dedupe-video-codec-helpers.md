@@ -2,7 +2,7 @@
 
 - Priority: Low
 - Created: 2026-07-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-16
 - Model: Composer
 - Branch: feature/refactor-dedupe-video-codec-helpers
 - Polished: 2026-07-29
@@ -93,4 +93,12 @@ Low。
    - `--features vpl`
    - `--features amf`
    - `--features nvcodec`
-   - `--features openh264`
+    - `--features openh264`
+
+## 解決方法
+
+本 issue は `#0146`（リリース前の非破壊掃除を一括で行う）に統合した。
+
+旧 `#0049`・旧 `#0054`・旧 `#0130` はいずれも「重複の解消と SemVer 非影響の掃除」を目的とする同一カテゴリの issue であり、生成元が別々だったために 3 本に分裂していた。重複したカテゴリの issue が独立に残ると、実装時に対象ファイル・完了条件の検証が分断されるため、3 つを 1 つの `#0146` に統合して一括対応する。
+
+本 issue の内容（video codec ヘルパーの共通化）は `#0146` の「現状 1. video codec ヘルパーの重複」および「設計方針」「完了条件」「変更対象」「解決方法」に引き継がれている。
