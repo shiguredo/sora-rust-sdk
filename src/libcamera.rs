@@ -1855,8 +1855,7 @@ mod tests {
             .expect("invalid value のコントロールはエラーになるべきではありません");
         assert!(
             parsed.is_empty(),
-            "invalid value のコントロールはスキップされるべきです: {:?}",
-            parsed
+            "invalid value のコントロールはスキップされるべきです"
         );
     }
 
@@ -1869,8 +1868,7 @@ mod tests {
             .expect("read-only コントロールはエラーになるべきではありません");
         assert!(
             parsed.is_empty(),
-            "read-only コントロールはスキップされるべきです: {:?}",
-            parsed
+            "read-only コントロールはスキップされるべきです"
         );
     }
 }
