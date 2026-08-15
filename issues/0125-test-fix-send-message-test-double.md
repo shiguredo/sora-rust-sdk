@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-16
 - Model: deepseek-v4-flash
 - Branch: feature/fix-send-message-test-double
 - Polished: 2026-08-15
@@ -44,3 +44,11 @@
 ## 変更対象
 
 - `src/connection.rs` (テストモジュールと、SendMessage コマンドハンドラのテスト可能なメソッドへの切り出し)
+
+## 解決方法
+
+`src/connection.rs` の `SoraConnectionCommand::SendMessage` コマンドハンドラの処理 (ラベル検証と `send_data_channel_message` 呼び出し) を `handle_send_message_command` メソッドへ切り出し、挙動を変えずに `run()` のコマンドループから呼び出すようにした。
+
+フェイク実装の `spawn_message_server` は削除し、テストは `build_test_connection` と `register_data_channel_config` で実 `SoraConnection` を構築して `handle_send_message_command` を直接呼ぶようにした。未登録ラベル・`#` プレフィックスなし・SDK 内部用ラベル・空ラベルが `Error::InvalidDataChannelLabel` になること、`data_channel_configs` にのみ登録し実チャネル未登録で `Error::DataChannelMissing` になることを検証する。プロダクションに存在しない `Ok(())` 成功経路の検証 (`send_message_accepts_registered_label`) は削除し、実チャネルが Open になる成功経路は e2e テスト (`e2e-tests/tests/messaging.rs` の `test_messaging_sendrecv`) が担保する。
+
+テストは同期 body のため `#[test]` に揃え、`handle_send_message_command` の引数は呼び出し側・テスト側の余計な変換を避けるため `&str` / `&[u8]` で受け取るようにした。`cargo test --workspace`、`cargo fmt --check --all`、`cargo clippy --workspace -- -D warnings` が通ることを確認した。
