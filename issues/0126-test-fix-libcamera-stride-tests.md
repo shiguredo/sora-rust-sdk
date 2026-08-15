@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-16
 - Model: deepseek-v4-flash
 - Branch: feature/fix-libcamera-stride-tests
 - Polished: 2026-08-15
@@ -34,3 +34,9 @@ libcamera は `stream_config.stride()` を width と独立に提供する (src/l
 ## 変更対象
 
 - `src/libcamera.rs` (テストモジュール)
+
+## 解決方法
+
+- `src/libcamera.rs` のテストモジュールに `copy_i420_planes_to_buffer_skips_stride_padding` と `copy_nv12_planes_to_buffer_skips_stride_padding` を追加した
+- 幅 4・高さ 2 で Y plane 長 16 (stride 8)・U/V (UV) plane 長 8 の stride > width な入力を使い、行ごとにデータの直後に配置した padding (0xFF) がスキップされてデータバイトのみがコピーされることを検証する
+- 既存テストの挙動は変更していない
