@@ -118,6 +118,10 @@ tokio = {
 }
 tokio-rustls.workspace = true
 
+[dev-dependencies]
+# テストでソケットの SO_LINGER を設定して RST を送るために利用
+socket2 = "0.6"
+
 [features]
 default = ["openh264"]
 amf = ["dep:shiguredo_amf"]
