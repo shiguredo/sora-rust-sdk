@@ -570,7 +570,7 @@ fn run_libcamera_loop_inner(
         let _ = tx.send((completed.cookie(), Some(timestamp_us)));
     });
 
-    let parsed_controls = parse_controls(&controls);
+    let parsed_controls = parse_controls(&controls)?;
 
     let stride_i32 = i32::try_from(stride).map_err(|_| Error::LibcameraMessage {
         message: format!("stride is too large: {}", stride),
@@ -1391,13 +1391,12 @@ fn parse_control_value(id: &ControlId, value: &str) -> Option<ControlValue> {
     }
 }
 
-fn parse_controls(controls: &[(String, String)]) -> Vec<ParsedControl> {
+fn parse_controls(controls: &[(String, String)]) -> Result<Vec<ParsedControl>> {
     let mut parsed = Vec::with_capacity(controls.len());
 
     for (key, raw_value) in controls {
         let Some(id) = find_control_id(key) else {
-            rtc_log_warning!("unknown libcamera control: {}", key);
-            continue;
+            return Err(Error::UnknownLibcameraControl { name: key.clone() });
         };
 
         if id.direction() == Direction::Out {
@@ -1422,7 +1421,7 @@ fn parse_controls(controls: &[(String, String)]) -> Vec<ParsedControl> {
         parsed.push(ParsedControl { id, value });
     }
 
-    parsed
+    Ok(parsed)
 }
 
 fn apply_controls(request: &shiguredo_libcamera::Request, controls: &[ParsedControl]) {
@@ -1810,6 +1809,68 @@ mod tests {
         assert!(
             parse_control_value(&core::WDR_MODE, "off").is_none(),
             "WdrMode=off はパースされるべきではありません"
+        );
+    }
+
+    #[test]
+    fn parse_controls_rejects_unknown_control() {
+        // --libcamera-control に find_control_id が解決できないコントロール名を
+        // 指定するとエラーを返し、コントロール名がエラーに含まれることを検証する
+        let controls = vec![("UnknownControl".to_string(), "1".to_string())];
+        let err = match parse_controls(&controls) {
+            Ok(_) => panic!("unknown コントロールはエラーになるべきです"),
+            Err(err) => err,
+        };
+        assert!(
+            format!("{err}").contains("unknown libcamera control: UnknownControl"),
+            "エラーメッセージにコントロール名が含まれていません: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_controls_parses_normal_control() {
+        // Brightness は InOut の Float コントロールであり、通常どおりパースされることを検証する
+        let controls = vec![("Brightness".to_string(), "0.5".to_string())];
+        let parsed =
+            parse_controls(&controls).expect("正常なコントロールのパースは成功するはずです");
+        assert_eq!(parsed.len(), 1, "パース結果の件数が期待と異なります");
+        assert_eq!(
+            parsed[0].id.name(),
+            "Brightness",
+            "パースされたコントロール名が期待と異なります"
+        );
+        assert!(
+            matches!(&parsed[0].value, ControlValue::F32(0.5)),
+            "Brightness=0.5 が F32(0.5) へ解決されませんでした: {:?}",
+            parsed[0].value
+        );
+    }
+
+    #[test]
+    fn parse_controls_skips_invalid_value_control() {
+        // Brightness は Float コントロールなので abc は値のパースに失敗する。
+        // invalid value は従来どおり警告のみでスキップされ、エラーにならないことを検証する
+        let controls = vec![("Brightness".to_string(), "abc".to_string())];
+        let parsed = parse_controls(&controls)
+            .expect("invalid value のコントロールはエラーになるべきではありません");
+        assert!(
+            parsed.is_empty(),
+            "invalid value のコントロールはスキップされるべきです: {:?}",
+            parsed
+        );
+    }
+
+    #[test]
+    fn parse_controls_skips_read_only_control() {
+        // AeState は Direction::Out (read-only) のコントロールである。
+        // read-only コントロールは従来どおり警告のみでスキップされ、エラーにならないことを検証する
+        let controls = vec![("AeState".to_string(), "1".to_string())];
+        let parsed = parse_controls(&controls)
+            .expect("read-only コントロールはエラーになるべきではありません");
+        assert!(
+            parsed.is_empty(),
+            "read-only コントロールはスキップされるべきです: {:?}",
+            parsed
         );
     }
 }
