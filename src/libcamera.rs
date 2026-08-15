@@ -1479,6 +1479,80 @@ mod tests {
     }
 
     #[test]
+    fn copy_i420_planes_to_buffer_skips_stride_padding() {
+        // 幅 4・高さ 2 で Y plane 長 16 (stride 8)・U/V plane 長 8 の stride > width な入力
+        // padding バイトには 0xFF を入れ、行ごとにデータの直後に配置する
+        let planes = vec![
+            vec![
+                0_u8, 1, 2, 3, 0xFF, 0xFF, 0xFF, 0xFF, // 行 0
+                4, 5, 6, 7, 0xFF, 0xFF, 0xFF, 0xFF, // 行 1
+            ],
+            vec![10_u8, 11, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+            vec![20_u8, 21, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+        ];
+
+        let buffer = copy_i420_planes_to_buffer(&planes, 4, 2)
+            .expect("copy_i420_planes_to_buffer は成功するはずです");
+
+        // Y 平面は各行の先頭 4 バイトだけがコピーされ、padding (0xFF) はスキップされる
+        let dst_stride_y = buffer.stride_y() as usize;
+        for row in 0..2 {
+            let expected = &[0_u8, 1, 2, 3, 4, 5, 6, 7][row * 4..(row + 1) * 4];
+            let actual = &buffer.y_data()[row * dst_stride_y..row * dst_stride_y + 4];
+            assert_eq!(
+                actual, expected,
+                "Y 平面の行 {row} のデータが正しくコピーされていません"
+            );
+        }
+
+        // U/V 平面は chroma_width 2 バイトだけがコピーされ、padding (0xFF) はスキップされる
+        assert_eq!(
+            &buffer.u_data()[..2],
+            &[10_u8, 11],
+            "U 平面のデータが正しくコピーされていません"
+        );
+        assert_eq!(
+            &buffer.v_data()[..2],
+            &[20_u8, 21],
+            "V 平面のデータが正しくコピーされていません"
+        );
+    }
+
+    #[test]
+    fn copy_nv12_planes_to_buffer_skips_stride_padding() {
+        // 幅 4・高さ 2 で Y plane 長 16 (stride 8)・UV plane 長 8 の stride > width な入力
+        // padding バイトには 0xFF を入れ、行ごとにデータの直後に配置する
+        let planes = vec![
+            vec![
+                0_u8, 1, 2, 3, 0xFF, 0xFF, 0xFF, 0xFF, // 行 0
+                4, 5, 6, 7, 0xFF, 0xFF, 0xFF, 0xFF, // 行 1
+            ],
+            vec![10_u8, 11, 12, 13, 0xFF, 0xFF, 0xFF, 0xFF],
+        ];
+
+        let buffer = copy_nv12_planes_to_buffer(&planes, 4, 2)
+            .expect("copy_nv12_planes_to_buffer は成功するはずです");
+
+        // Y 平面は各行の先頭 4 バイトだけがコピーされ、padding (0xFF) はスキップされる
+        let dst_stride_y = buffer.stride_y() as usize;
+        for row in 0..2 {
+            let expected = &[0_u8, 1, 2, 3, 4, 5, 6, 7][row * 4..(row + 1) * 4];
+            let actual = &buffer.y_data()[row * dst_stride_y..row * dst_stride_y + 4];
+            assert_eq!(
+                actual, expected,
+                "Y 平面の行 {row} のデータが正しくコピーされていません"
+            );
+        }
+
+        // UV 平面は chroma_width * 2 バイトだけがコピーされ、padding (0xFF) はスキップされる
+        assert_eq!(
+            &buffer.uv_data()[..4],
+            &[10_u8, 11, 12, 13],
+            "UV 平面のデータが正しくコピーされていません"
+        );
+    }
+
+    #[test]
     fn copy_i420_planes_to_buffer_rejects_insufficient_planes() {
         let planes = vec![vec![0_u8; 8], vec![0_u8; 2]];
         let err = match copy_i420_planes_to_buffer(&planes, 4, 2) {
