@@ -1154,13 +1154,7 @@ impl SoraConnection {
                             }
                         }
                         SoraConnectionCommand::SendMessage { label, data, response_tx } => {
-                            let result = if label.starts_with('#')
-                                && self.data_channel_configs.iter().any(|c| c.label == label)
-                            {
-                                self.send_data_channel_message(&label, &data)
-                            } else {
-                                Err(Error::InvalidDataChannelLabel { label })
-                            };
+                            let result = self.handle_send_message_command(&label, &data);
                             let _ = response_tx.send(result);
                         }
                     }
@@ -1974,6 +1968,22 @@ impl SoraConnection {
             return Err(Error::DataChannelSendFailed);
         }
         Ok(())
+    }
+
+    /// SendMessage コマンドのラベル検証と DataChannel への送信を実行する。
+    ///
+    /// `#` プレフィックス付きで `data_channel_configs` に登録済みのラベルのみ送信を試みる。
+    /// それ以外のラベルは `Error::InvalidDataChannelLabel` を返す。
+    /// ラベルが登録済みでも実チャネル (`data_channels`) が無い場合は
+    /// `Error::DataChannelMissing` を返す。
+    fn handle_send_message_command(&mut self, label: &str, data: &[u8]) -> Result<()> {
+        if label.starts_with('#') && self.data_channel_configs.iter().any(|c| c.label == label) {
+            self.send_data_channel_message(label, data)
+        } else {
+            Err(Error::InvalidDataChannelLabel {
+                label: label.to_string(),
+            })
+        }
     }
 
     async fn handle_data_channel_message(
@@ -3544,114 +3554,102 @@ mod tests {
         assert!(result.is_ok(), "now() は Ok を返す必要があります");
     }
 
-    fn spawn_message_server(
-        valid_labels: Vec<String>,
-    ) -> (SoraConnectionHandle, tokio::task::JoinHandle<()>) {
-        let (command_tx, mut command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
-        let handle = SoraConnectionHandle { command_tx };
-        let server = tokio::spawn(async move {
-            while let Some(command) = command_rx.recv().await {
-                if let SoraConnectionCommand::SendMessage {
-                    label,
-                    data: _,
-                    response_tx,
-                } = command
-                {
-                    let result = if valid_labels.contains(&label) && label.starts_with('#') {
-                        Ok(())
-                    } else {
-                        Err(Error::InvalidDataChannelLabel { label })
-                    };
-                    let _ = response_tx.send(result);
-                }
-            }
-        });
-        (handle, server)
-    }
-
-    #[tokio::test]
-    async fn send_message_rejects_unknown_label() {
-        let (handle, _server) = spawn_message_server(vec!["#chat".to_string()]);
-        let err = handle
-            .send_message("#unknown", b"data")
-            .await
-            .expect_err("未指定ラベルは InvalidDataChannelLabel になるべき");
-        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label == "#unknown"));
-    }
-
-    #[tokio::test]
-    async fn send_message_rejects_signaling_label() {
-        let (handle, _server) = spawn_message_server(vec!["#chat".to_string()]);
-        let err = handle
-            .send_message("signaling", b"data")
-            .await
-            .expect_err("signaling ラベルは InvalidDataChannelLabel になるべき");
-        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label == "signaling"));
-    }
-
-    #[tokio::test]
-    async fn send_message_rejects_stats_label() {
-        let (handle, _server) = spawn_message_server(vec!["#chat".to_string()]);
-        let err = handle
-            .send_message("stats", b"data")
-            .await
-            .expect_err("stats ラベルは InvalidDataChannelLabel になるべき");
-        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label == "stats"));
-    }
-
-    #[tokio::test]
-    async fn send_message_rejects_push_label() {
-        let (handle, _server) = spawn_message_server(vec!["#chat".to_string()]);
-        let err = handle
-            .send_message("push", b"data")
-            .await
-            .expect_err("push ラベルは InvalidDataChannelLabel になるべき");
-        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label == "push"));
-    }
-
-    #[tokio::test]
-    async fn send_message_rejects_notify_label() {
-        let (handle, _server) = spawn_message_server(vec!["#chat".to_string()]);
-        let err = handle
-            .send_message("notify", b"data")
-            .await
-            .expect_err("notify ラベルは InvalidDataChannelLabel になるべき");
-        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label == "notify"));
-    }
-
-    #[tokio::test]
-    async fn send_message_rejects_rpc_label() {
-        let (handle, _server) = spawn_message_server(vec!["#chat".to_string()]);
-        let err = handle
-            .send_message("rpc", b"data")
-            .await
-            .expect_err("rpc ラベルは InvalidDataChannelLabel になるべき");
-        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label == "rpc"));
-    }
-
-    #[tokio::test]
-    async fn send_message_rejects_empty_label() {
-        let (handle, _server) = spawn_message_server(vec!["#chat".to_string()]);
-        let err = handle
-            .send_message("", b"data")
-            .await
-            .expect_err("空ラベルは InvalidDataChannelLabel になるべき");
-        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label.is_empty()));
-    }
-
-    #[tokio::test]
-    async fn send_message_rejects_all_labels_when_no_data_channels_configured() {
-        let (handle, _server) = spawn_message_server(Vec::new());
-        let err = handle.send_message("#chat", b"data").await.expect_err(
-            "data_channels 未設定時は通常の # ラベルでも InvalidDataChannelLabel になるべき",
+    #[test]
+    fn send_message_rejects_unknown_label() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_data_channel_config(&mut connection, "#chat");
+        let result = connection.handle_send_message_command("#unknown", b"data");
+        assert!(
+            matches!(result, Err(Error::InvalidDataChannelLabel { label }) if label == "#unknown"),
+            "未登録ラベルは InvalidDataChannelLabel になるべき"
         );
-        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label == "#chat"));
     }
 
-    #[tokio::test]
-    async fn send_message_accepts_registered_label() {
-        let (handle, _server) = spawn_message_server(vec!["#chat".to_string()]);
-        assert!(handle.send_message("#chat", b"data").await.is_ok());
+    #[test]
+    fn send_message_rejects_signaling_label() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_data_channel_config(&mut connection, "#chat");
+        let result = connection.handle_send_message_command("signaling", b"data");
+        assert!(
+            matches!(result, Err(Error::InvalidDataChannelLabel { label }) if label == "signaling"),
+            "signaling ラベルは InvalidDataChannelLabel になるべき"
+        );
+    }
+
+    #[test]
+    fn send_message_rejects_stats_label() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_data_channel_config(&mut connection, "#chat");
+        let result = connection.handle_send_message_command("stats", b"data");
+        assert!(
+            matches!(result, Err(Error::InvalidDataChannelLabel { label }) if label == "stats"),
+            "stats ラベルは InvalidDataChannelLabel になるべき"
+        );
+    }
+
+    #[test]
+    fn send_message_rejects_push_label() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_data_channel_config(&mut connection, "#chat");
+        let result = connection.handle_send_message_command("push", b"data");
+        assert!(
+            matches!(result, Err(Error::InvalidDataChannelLabel { label }) if label == "push"),
+            "push ラベルは InvalidDataChannelLabel になるべき"
+        );
+    }
+
+    #[test]
+    fn send_message_rejects_notify_label() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_data_channel_config(&mut connection, "#chat");
+        let result = connection.handle_send_message_command("notify", b"data");
+        assert!(
+            matches!(result, Err(Error::InvalidDataChannelLabel { label }) if label == "notify"),
+            "notify ラベルは InvalidDataChannelLabel になるべき"
+        );
+    }
+
+    #[test]
+    fn send_message_rejects_rpc_label() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_data_channel_config(&mut connection, "#chat");
+        let result = connection.handle_send_message_command("rpc", b"data");
+        assert!(
+            matches!(result, Err(Error::InvalidDataChannelLabel { label }) if label == "rpc"),
+            "rpc ラベルは InvalidDataChannelLabel になるべき"
+        );
+    }
+
+    #[test]
+    fn send_message_rejects_empty_label() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_data_channel_config(&mut connection, "#chat");
+        let result = connection.handle_send_message_command("", b"data");
+        assert!(
+            matches!(result, Err(Error::InvalidDataChannelLabel { label }) if label.is_empty()),
+            "空ラベルは InvalidDataChannelLabel になるべき"
+        );
+    }
+
+    #[test]
+    fn send_message_rejects_all_labels_when_no_data_channels_configured() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let result = connection.handle_send_message_command("#chat", b"data");
+        assert!(
+            matches!(result, Err(Error::InvalidDataChannelLabel { label }) if label == "#chat"),
+            "data_channels 未設定時は通常の # ラベルでも InvalidDataChannelLabel になるべき"
+        );
+    }
+
+    #[test]
+    fn send_message_returns_data_channel_missing_when_channel_not_registered() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_data_channel_config(&mut connection, "#chat");
+        let result = connection.handle_send_message_command("#chat", b"data");
+        assert!(
+            matches!(result, Err(Error::DataChannelMissing { label }) if label == "#chat"),
+            "config に登録済みでも実チャネル未登録なら DataChannelMissing になるべき"
+        );
     }
 
     #[test]
@@ -4196,13 +4194,19 @@ mod tests {
         }
     }
 
-    /// compress 有効の DataChannel を実 PeerConnection 経由で登録するテスト用ヘルパー。
-    fn register_compressed_data_channel(connection: &mut SoraConnection, label: &str) {
+    /// DataChannel の設定 (`data_channel_configs`) だけを登録するテスト用ヘルパー。
+    /// 実チャネルは作成しないため、`DataChannelMissing` エラーパスの再現に使う。
+    fn register_data_channel_config(connection: &mut SoraConnection, label: &str) {
         connection.data_channel_configs.push(DataChannelConfig {
             label: label.to_string(),
             compress: true,
             direction: "sendrecv".to_string(),
         });
+    }
+
+    /// compress 有効の DataChannel を実 PeerConnection 経由で登録するテスト用ヘルパー。
+    fn register_compressed_data_channel(connection: &mut SoraConnection, label: &str) {
+        register_data_channel_config(connection, label);
         let mut init = DataChannelInit::new();
         let channel = connection
             .pc
