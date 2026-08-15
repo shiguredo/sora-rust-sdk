@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-16
 - Model: deepseek-v4-flash
 - Branch: feature/fix-e2e-run-task-error-visibility
 - Polished: 2026-08-15
@@ -42,3 +42,14 @@ e2e テストで接続が早期に失敗した場合、run task が保持する�
 ## 変更対象
 
 - `e2e-tests/src/test_connection.rs`
+
+## 解決方法
+
+`e2e-tests/src/test_connection.rs` の `SoraTestConnection` に、run task の結果を 1 回だけ読み出して保持する仕組みを追加した。
+
+- `run_task_joined` フラグと `run_task_error_message` フィールドを追加し、`store_run_task_error_message()` で `JoinHandle` の結果を初回読み出し時のみ読み出して保持する
+- `wait_for_event` 系は、タイムアウト時に run task が `Err` で終了していれば「タイムアウトしました (run_task のエラー: …)」を返す
+- `wait_for_event` がチャネルクローズを検知した場合と、`disconnect_and_wait` の `disconnect()` が失敗した場合は、`is_finished()` の成立を待たずに直接 `store_run_task_error_message().await` して真のエラーを優先表示する
+- `wait_for_run_finished` は保持済みの結果を返すため、2 回目以降も panic しない
+
+設計方針の「機密情報 (シグナリング URL・接続先 host・credential) を除去してからメッセージに含める」は実装しない。SDK のエラー表示は URL 原値を含むが、シグナリング URL は機密情報ではなく、テストインフラ側で秘匿するのは過剰なため。
