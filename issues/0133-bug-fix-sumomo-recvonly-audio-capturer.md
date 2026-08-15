@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-16
 - Model: deepseek-v4-flash
 - Branch: feature/fix-sumomo-recvonly-audio-capturer
 - Polished: 2026-08-16
@@ -41,3 +41,14 @@
 - `CHANGES.md`（`[FIX]` エントリを追加）
 
 注: open issue 0128 も `examples/sumomo/src/main.rs` の外部 ADM 生成条件を変更予定のため、実装順によっては併合が必要になる。
+
+## 解決方法
+
+`examples/sumomo/src/main.rs` の `build_and_run_connection` で、外部 ADM (`SumomoAdm`) と音声キャプチャー (`AudioDeviceCapturer`) の生成条件の両方に `args.role.wants_send()` を追加した。
+
+- 外部 ADM は `args.role.wants_send() && args.audio_enabled() && args.audio_input_device.is_some()` で生成する
+- 音声キャプチャーは `args.role.wants_send() && args.audio_enabled()` で生成する
+- 両方を同時にゲートすることで、recvonly では音声キャプチャーも外部 ADM も生成されず、`external_adm.as_ref().expect(...)` の panic も発生しない
+- `validate_args` は変更せず、recvonly と `--audio-input-device` の併用はエラーにしない（指定は静かに無視される）
+
+CHANGES.md への `[FIX]` エントリ追加は本対応では行わない。
