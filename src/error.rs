@@ -227,6 +227,12 @@ pub enum Error {
     /// libcamera のエラー（`feature = "libcamera"` 時のみ有効）。内部エラーとして [`shiguredo_libcamera::Error`] を保持する。
     #[cfg(feature = "libcamera")]
     Libcamera(shiguredo_libcamera::Error),
+    /// unknown な libcamera コントロールが指定された（`feature = "libcamera"` 時のみ有効）。
+    #[cfg(feature = "libcamera")]
+    UnknownLibcameraControl {
+        /// 指定されたコントロール名。
+        name: String,
+    },
     /// OpenH264 のエラー（`feature = "openh264"` 時のみ有効）。内部エラーとして [`shiguredo_openh264::Error`] を保持する。
     #[cfg(feature = "openh264")]
     Openh264(shiguredo_openh264::Error),
@@ -470,6 +476,10 @@ impl std::fmt::Display for Error {
             Error::LibcameraMessage { message } => write!(f, "libcamera error: {message}"),
             #[cfg(feature = "libcamera")]
             Error::Libcamera(err) => write!(f, "libcamera error: {err}"),
+            #[cfg(feature = "libcamera")]
+            Error::UnknownLibcameraControl { name } => {
+                write!(f, "unknown libcamera control: {name}")
+            }
             #[cfg(feature = "openh264")]
             Error::Openh264(err) => write!(f, "OpenH264 error: {err}"),
             #[cfg(feature = "amf")]
