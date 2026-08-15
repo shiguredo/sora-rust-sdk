@@ -536,13 +536,14 @@ fn build_and_run_connection(
     SoraConnectionHandle,
     tokio::task::JoinHandle<sora_sdk::Result<()>>,
 )> {
-    // 音声が有効で、--audio-input-device が指定された場合は SumomoAdm を使用する
+    // 送信ロールかつ音声が有効で、--audio-input-device が指定された場合は SumomoAdm を使用する。
     #[cfg(feature = "media-device")]
-    let external_adm = if args.audio_enabled() && args.audio_input_device.is_some() {
-        Some(SumomoAdm::new())
-    } else {
-        None
-    };
+    let external_adm =
+        if args.role.wants_send() && args.audio_enabled() && args.audio_input_device.is_some() {
+            Some(SumomoAdm::new())
+        } else {
+            None
+        };
 
     // --input-mp4 が指定されている場合は MP4 を読み込んでパススルーの準備をする
     let mp4_state = prepare_mp4_state(args)?;
@@ -565,9 +566,9 @@ fn build_and_run_connection(
     )?;
     let context = SoraConnectionContext::new_with_config(context_config)?;
 
-    // 音声が有効で、--audio-input-device が指定された場合は AudioDeviceCapturer を使用する
+    // 送信ロールかつ音声が有効で、--audio-input-device が指定された場合は AudioDeviceCapturer を使用する。
     #[cfg(feature = "media-device")]
-    let audio_capturer = if args.audio_enabled() {
+    let audio_capturer = if args.role.wants_send() && args.audio_enabled() {
         if let Some(ref device_id) = args.audio_input_device {
             let state = external_adm
                 .as_ref()
