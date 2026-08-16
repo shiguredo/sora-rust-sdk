@@ -89,40 +89,44 @@ impl IncomingMessage {
         })
     }
 
+    /// `config.iceServers` をパースする。
+    ///
+    /// `config` / `iceServers` が存在しない場合は空リストを返す。
     pub fn parse_ice_servers(value: RawJsonValue) -> Result<Vec<IceServerConfig>> {
-        value
-            .to_member("config")?
-            .required()?
-            .to_member("iceServers")?
-            .required()?
-            .to_array()?
-            .map(|v| v.try_into())
-            .collect()
-    }
-
-    pub fn parse_ice_servers_optional(value: RawJsonValue) -> Result<Vec<IceServerConfig>> {
-        let Some(config) = value.to_member("config")?.optional() else {
-            return Ok(vec![]);
-        };
-        let Some(ice_servers) = config.to_member("iceServers")?.optional() else {
-            return Ok(vec![]);
-        };
-        ice_servers.to_array()?.map(|v| v.try_into()).collect()
+        Self::parse_optional(value, "config", |config| {
+            Self::parse_optional(config, "iceServers", |ice_servers| {
+                ice_servers.to_array()?.map(|v| v.try_into()).collect()
+            })
+        })
     }
 
     pub fn parse_data_channels(value: RawJsonValue) -> Result<Vec<DataChannelConfig>> {
-        value
-            .to_member("data_channels")?
-            .optional()
-            .map(|v| v.to_array()?.map(|v| v.try_into()).collect())
-            .unwrap_or(Ok(vec![]))
+        Self::parse_optional(value, "data_channels", |v| {
+            v.to_array()?.map(|v| v.try_into()).collect()
+        })
     }
 
     pub fn parse_simulcast_encodings(value: RawJsonValue) -> Result<Vec<SimulcastEncodingConfig>> {
+        Self::parse_optional(value, "encodings", |v| {
+            v.to_array()?.map(|v| v.try_into()).collect()
+        })
+    }
+
+    /// オプショナルなメンバーを取得して `parse` でパースする。
+    ///
+    /// `member` が存在しない場合は空リストを返す。
+    fn parse_optional<'text, 'raw, T, F>(
+        value: RawJsonValue<'text, 'raw>,
+        member: &str,
+        parse: F,
+    ) -> Result<Vec<T>>
+    where
+        F: FnOnce(RawJsonValue<'text, 'raw>) -> Result<Vec<T>>,
+    {
         value
-            .to_member("encodings")?
+            .to_member(member)?
             .optional()
-            .map(|v| v.to_array()?.map(|v| v.try_into()).collect())
+            .map(parse)
             .unwrap_or(Ok(vec![]))
     }
 }
@@ -156,7 +160,7 @@ impl<'text, 'raw> TryFrom<RawJsonValue<'text, 'raw>> for IncomingMessageData {
             "re-offer" => {
                 let sdp = value.to_member("sdp")?.required()?.try_into()?;
                 // re-offer では config がオプショナル
-                let ice_servers = IncomingMessage::parse_ice_servers_optional(value)?;
+                let ice_servers = IncomingMessage::parse_ice_servers(value)?;
                 Ok(Self::ReOffer { sdp, ice_servers })
             }
             "ping" => {

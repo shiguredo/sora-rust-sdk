@@ -24,6 +24,7 @@ use crate::video_codec::{SimulcastCapabilityHelper, codec_type_from_format};
 use crate::video_codec_capability::{
     CodecDirection, VideoCodecCapability, VideoCodecImplementation,
 };
+use crate::video_codecs::helpers;
 
 fn openh264_supported_formats() -> Vec<SdpVideoFormat> {
     vec![SdpVideoFormat::new_with_parameters(
@@ -174,7 +175,7 @@ impl VideoEncoderHandler for Openh264VideoEncoder {
         if frame_width == 0 || frame_height == 0 {
             return VideoCodecStatus::ErrParameter;
         }
-        let requested_frame_type = requested_frame_type(frame_types);
+        let requested_frame_type = helpers::requested_frame_type(frame_types);
         if matches!(requested_frame_type, Some(VideoFrameType::Empty)) {
             return VideoCodecStatus::NoOutput;
         }
@@ -554,17 +555,12 @@ impl VideoCodecCapability for Openh264VideoCodecCapability {
     }
 }
 
+// OpenH264 固有の `FrameType` を `VideoFrameType` に変換する。
 fn frame_type_from_openh264(frame_type: FrameType) -> VideoFrameType {
     match frame_type {
         FrameType::Idr => VideoFrameType::Key,
         FrameType::I | FrameType::P => VideoFrameType::Delta,
     }
-}
-
-fn requested_frame_type(
-    frame_types: Option<VideoFrameTypeVectorRef<'_>>,
-) -> Option<VideoFrameType> {
-    frame_types.and_then(|frame_types| frame_types.get(0))
 }
 
 fn update_pause_state(
@@ -605,8 +601,7 @@ fn has_annexb_start_code(data: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shiguredo_webrtc::Environment;
-    use shiguredo_webrtc::{VideoFrameType, VideoFrameTypeVector};
+    use shiguredo_webrtc::{Environment, VideoFrameType};
 
     fn openh264_path() -> Option<String> {
         std::env::var("OPENH264_PATH").ok()
@@ -696,19 +691,6 @@ mod tests {
         assert_eq!(
             frame_type_from_openh264(FrameType::P),
             VideoFrameType::Delta
-        );
-    }
-
-    #[test]
-    fn openh264_requested_frame_type_uses_first_entry() {
-        assert_eq!(requested_frame_type(None), None);
-
-        let mut frame_types = VideoFrameTypeVector::new(2);
-        frame_types.push(VideoFrameType::Empty);
-        frame_types.push(VideoFrameType::Key);
-        assert_eq!(
-            requested_frame_type(Some(frame_types.as_ref())),
-            Some(VideoFrameType::Empty)
         );
     }
 

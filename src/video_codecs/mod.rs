@@ -4,6 +4,14 @@
 //! [VideoCodecCapability] 実装を提供する。
 #[cfg(feature = "amf")]
 pub mod amf;
+#[cfg(any(
+    feature = "v4l2",
+    feature = "vpl",
+    feature = "amf",
+    feature = "nvcodec",
+    feature = "openh264"
+))]
+pub mod helpers;
 pub mod internal;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub mod internal_apple;

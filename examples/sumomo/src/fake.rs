@@ -104,7 +104,6 @@ impl FakeVideoCapturer {
                         width,
                         height,
                         start_time_ms,
-                        fps,
                     );
                     let sleep_ms = (1000 / fps).saturating_sub(2).max(1);
                     shiguredo_webrtc::Thread::sleep_ms(sleep_ms);
@@ -135,7 +134,6 @@ fn tick_once(
     width: i32,
     height: i32,
     start_time_ms: i64,
-    _fps: i32,
 ) {
     let elapsed_ms = shiguredo_webrtc::time_millis() - start_time_ms;
     let radius = (width.min(height)) / 4;

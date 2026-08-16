@@ -53,7 +53,7 @@ use shiguredo_webrtc::{rtc_log_error, rtc_log_info, rtc_log_verbose, rtc_log_war
 ///
 /// TURN-TLS の TLS 設定は `SoraConnectionBuilder::turn_tls_insecure()` / `turn_tls_ca_cert()` で行う。
 #[derive(Clone, Default)]
-pub struct TlsConfig {
+pub(crate) struct TlsConfig {
     /// サーバー証明書の検証をスキップする。
     pub(crate) insecure: bool,
     /// クライアント証明書 (PEM 形式)。
@@ -690,6 +690,39 @@ fn report_to_json_string(report: &RTCStatsReport) -> Result<JsonString> {
         .and_then(|s| s.parse())
 }
 
+/// SDP 処理 (set remote/local description / create answer) のタイムアウト。
+const SDP_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// SetRemoteDescription / SetLocalDescription の完了通知を受け取る Observer。
+///
+/// どちらの操作も「エラー文字列の `Option` をチャネルで返す」点で同じ形をしているため、
+/// 1 つの構造体で 2 つのトレイトを実装して共有する。
+struct SetDescriptionObserverHandler {
+    tx: mpsc::UnboundedSender<Option<String>>,
+}
+
+impl SetRemoteDescriptionObserverHandler for SetDescriptionObserverHandler {
+    fn on_set_remote_description_complete(&mut self, error: RtcError) {
+        send_set_description_result(&self.tx, error);
+    }
+}
+
+impl SetLocalDescriptionObserverHandler for SetDescriptionObserverHandler {
+    fn on_set_local_description_complete(&mut self, error: RtcError) {
+        send_set_description_result(&self.tx, error);
+    }
+}
+
+/// SDP 適用の完了結果をエラー文字列の `Option` に変換して送信する。
+fn send_set_description_result(tx: &mpsc::UnboundedSender<Option<String>>, error: RtcError) {
+    let msg = if error.ok() {
+        None
+    } else {
+        Some(error.message().unwrap_or_else(|_| "unknown".to_string()))
+    };
+    let _ = tx.send(msg);
+}
+
 impl SoraConnection {
     /// [SoraConnectionBuilder] を生成する。
     ///
@@ -803,7 +836,7 @@ impl SoraConnection {
         let mut rtc_config = PeerConnectionRtcConfiguration::new();
         let pc = PeerConnection::create(pc_factory, &mut rtc_config, &mut deps)?;
 
-        let client = Self {
+        let connection = Self {
             data_channels: HashMap::new(),
             data_channel_configs: Vec::new(),
             offer_simulcast: false,
@@ -821,7 +854,7 @@ impl SoraConnection {
             pc_observer: observer,
             config,
         };
-        Ok((client, handle))
+        Ok((connection, handle))
     }
 
     /// メインループを開始する。
@@ -1674,27 +1707,12 @@ impl SoraConnection {
         {
             let pc = &self.pc;
             let offer = SessionDescription::new(SdpType::Offer, sdp)?;
-            struct RemObsHandler {
-                tx: mpsc::UnboundedSender<Option<String>>,
-            }
-
-            impl SetRemoteDescriptionObserverHandler for RemObsHandler {
-                fn on_set_remote_description_complete(&mut self, error: RtcError) {
-                    let msg = if error.ok() {
-                        None
-                    } else {
-                        Some(error.message().unwrap_or_else(|_| "unknown".to_string()))
-                    };
-                    let _ = self.tx.send(msg);
-                }
-            }
-
-            let rem_obs = SetRemoteDescriptionObserver::new_with_handler(Box::new(RemObsHandler {
-                tx: rem_tx,
-            }));
+            let rem_obs = SetRemoteDescriptionObserver::new_with_handler(Box::new(
+                SetDescriptionObserverHandler { tx: rem_tx },
+            ));
             pc.set_remote_description(offer, &rem_obs);
         }
-        let rem_res = tokio::time::timeout(Duration::from_secs(5), rem_rx.recv())
+        let rem_res = tokio::time::timeout(SDP_OPERATION_TIMEOUT, rem_rx.recv())
             .await
             .map_err(|_| Error::SetRemoteDescriptionTimeout)?
             .ok_or_else(|| Error::SetRemoteDescriptionResponseMissing)?;
@@ -1738,35 +1756,21 @@ impl SoraConnection {
             let mut opts = PeerConnectionOfferAnswerOptions::new();
             pc.create_answer(&mut ans_obs, &mut opts);
         }
-        let answer_sdp = tokio::time::timeout(Duration::from_secs(5), ans_rx.recv())
+        let answer_sdp = tokio::time::timeout(SDP_OPERATION_TIMEOUT, ans_rx.recv())
             .await
             .map_err(|_| Error::AnswerTimeout)?
             .ok_or_else(|| Error::AnswerResponseMissing)??;
 
         let answer = SessionDescription::new(SdpType::Answer, &answer_sdp)?;
         let (loc_tx, mut loc_rx) = mpsc::unbounded_channel::<Option<String>>();
-        struct LocObsHandler {
-            tx: mpsc::UnboundedSender<Option<String>>,
-        }
-
-        impl SetLocalDescriptionObserverHandler for LocObsHandler {
-            fn on_set_local_description_complete(&mut self, error: RtcError) {
-                let msg = if error.ok() {
-                    None
-                } else {
-                    Some(error.message().unwrap_or_else(|_| "unknown".to_string()))
-                };
-                let _ = self.tx.send(msg);
-            }
-        }
-
-        let loc_obs =
-            SetLocalDescriptionObserver::new_with_handler(Box::new(LocObsHandler { tx: loc_tx }));
+        let loc_obs = SetLocalDescriptionObserver::new_with_handler(Box::new(
+            SetDescriptionObserverHandler { tx: loc_tx },
+        ));
         {
             let pc = &self.pc;
             pc.set_local_description(answer, &loc_obs);
         }
-        let loc_res = tokio::time::timeout(Duration::from_secs(5), loc_rx.recv())
+        let loc_res = tokio::time::timeout(SDP_OPERATION_TIMEOUT, loc_rx.recv())
             .await
             .map_err(|_| Error::SetLocalDescriptionTimeout)?
             .ok_or_else(|| Error::SetLocalDescriptionResponseMissing)?;
@@ -1932,7 +1936,7 @@ impl SoraConnection {
             data.to_vec()
         };
 
-        rtc_log_info!(
+        rtc_log_verbose!(
             "Sent message to DataChannel '{}': {} bytes",
             label,
             send_data.len()
@@ -1991,7 +1995,7 @@ impl SoraConnection {
             data.to_vec()
         };
 
-        rtc_log_info!(
+        rtc_log_verbose!(
             "Received message from DataChannel '{}': {} bytes",
             label,
             message_bytes.len()
@@ -2730,6 +2734,9 @@ impl TimerManager {
     }
 
     fn set_timer(&mut self, id: TimerId, duration: u64) {
+        // 同じ id の実行中タイマーが残ったまま上書きすると、古いタイマーの
+        // 発火で誤ったタイマーイベントが届くため、上書き前に abort する。
+        self.clear_timer(id);
         let sender = self.sender.clone();
         let handle = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(duration)).await;
@@ -3570,6 +3577,31 @@ mod tests {
         timers.set_timer(TimerId::CloseTimeout, 0);
         tokio::task::yield_now().await;
         drop(timers);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn timer_manager_set_timer_same_id_aborts_previous() {
+        let (timer_tx, mut timer_rx) = mpsc::channel::<TimerId>(16);
+        let mut timers = TimerManager::new(timer_tx);
+        // 同じ id を 2 回設定すると最初のタイマーは abort される。
+        timers.set_timer(TimerId::Ping, 50);
+        timers.set_timer(TimerId::Ping, 100);
+        // 最初のタイマーの発火時刻 (50ms) を過ぎても 1 件目は届かない。
+        tokio::time::sleep(Duration::from_millis(70)).await;
+        assert!(
+            matches!(timer_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "上書き前のタイマーが abort されていません"
+        );
+        // 2 件目のタイマーの発火時刻を過ぎると 1 件だけ届く。
+        let received = tokio::time::timeout(Duration::from_millis(200), timer_rx.recv())
+            .await
+            .expect("タイマーイベントが届きませんでした")
+            .expect("タイマーイベントの受信に失敗しました");
+        assert_eq!(received, TimerId::Ping, "受信した TimerId が一致しません");
+        assert!(
+            matches!(timer_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "同じ id のタイマーイベントが 2 件届いています"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

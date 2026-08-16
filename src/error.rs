@@ -130,8 +130,6 @@ pub enum Error {
     JsonParse(JsonParseError),
     /// WebRTC のエラー。内部エラーとして [`shiguredo_webrtc::Error`] を保持する。
     Webrtc(shiguredo_webrtc::Error),
-    /// [`PeerConnection`](shiguredo_webrtc::PeerConnection) が存在しない。
-    PeerConnectionMissing,
     /// SetRemoteDescription がタイムアウトした。
     SetRemoteDescriptionTimeout,
     /// SetRemoteDescription の応答を受信できなかった。
@@ -329,7 +327,7 @@ impl std::fmt::Display for Error {
         match self {
             Error::InvalidRole { value } => write!(
                 f,
-                "--role は sendonly, recvonly, sendrecv のみ対応です: {value}"
+                "role は sendonly, recvonly, sendrecv のみ対応です: {value}"
             ),
             Error::HostEmpty => f.write_str("ホストが空です"),
             Error::HostInvalidFormat => f.write_str("ホストの指定が不正です"),
@@ -411,7 +409,6 @@ impl std::fmt::Display for Error {
             Error::Io(err) => write!(f, "IO エラー: {err}"),
             Error::JsonParse(err) => write!(f, "JSON エラー: {err}"),
             Error::Webrtc(err) => write!(f, "WebRTC エラー: {err}"),
-            Error::PeerConnectionMissing => f.write_str("PeerConnection がありません"),
             Error::SetRemoteDescriptionTimeout => {
                 f.write_str("SetRemoteDescription がタイムアウトしました")
             }
@@ -473,23 +470,23 @@ impl std::fmt::Display for Error {
                 write!(f, "VideoCodecPreference が不正です: {reason}")
             }
             #[cfg(feature = "libcamera")]
-            Error::LibcameraMessage { message } => write!(f, "libcamera error: {message}"),
+            Error::LibcameraMessage { message } => write!(f, "libcamera エラー: {message}"),
             #[cfg(feature = "libcamera")]
-            Error::Libcamera(err) => write!(f, "libcamera error: {err}"),
+            Error::Libcamera(err) => write!(f, "libcamera エラー: {err}"),
             #[cfg(feature = "libcamera")]
             Error::UnknownLibcameraControl { name } => {
-                write!(f, "unknown libcamera control: {name}")
+                write!(f, "不明な libcamera コントロールです: {name}")
             }
             #[cfg(feature = "openh264")]
-            Error::Openh264(err) => write!(f, "OpenH264 error: {err}"),
+            Error::Openh264(err) => write!(f, "OpenH264 エラー: {err}"),
             #[cfg(feature = "amf")]
-            Error::Amf { source } => write!(f, "AMF error: {source}"),
+            Error::Amf { source } => write!(f, "AMF エラー: {source}"),
             #[cfg(feature = "amf")]
-            Error::AmfMessage { reason } => write!(f, "AMF error: {reason}"),
+            Error::AmfMessage { reason } => write!(f, "AMF エラー: {reason}"),
             #[cfg(feature = "vpl")]
-            Error::Vpl { source } => write!(f, "VPL error: {source}"),
+            Error::Vpl { source } => write!(f, "VPL エラー: {source}"),
             #[cfg(feature = "vpl")]
-            Error::VplMessage { reason } => write!(f, "VPL error: {reason}"),
+            Error::VplMessage { reason } => write!(f, "VPL エラー: {reason}"),
             Error::RpcTimeout => f.write_str("RPC レスポンスがタイムアウトしました"),
             Error::RpcProtocolViolation { id } => match id {
                 Some(id) => {
@@ -518,13 +515,13 @@ impl std::fmt::Display for Error {
                 f.write_str("client_cert と client_key は両方を指定する必要があります")
             }
             #[cfg(feature = "nvcodec")]
-            Error::NvCodec { source } => write!(f, "NVCodec error: {source}"),
+            Error::NvCodec { source } => write!(f, "NVCodec エラー: {source}"),
             #[cfg(feature = "nvcodec")]
-            Error::NvCodecMessage { reason } => write!(f, "NVCodec error: {reason}"),
+            Error::NvCodecMessage { reason } => write!(f, "NVCodec エラー: {reason}"),
             #[cfg(feature = "v4l2")]
-            Error::V4l2 { source } => write!(f, "V4L2 error: {source}"),
+            Error::V4l2 { source } => write!(f, "V4L2 エラー: {source}"),
             #[cfg(feature = "v4l2")]
-            Error::V4l2Message { reason } => write!(f, "V4L2 error: {reason}"),
+            Error::V4l2Message { reason } => write!(f, "V4L2 エラー: {reason}"),
             Error::InvalidSystemTime { source } => {
                 write!(
                     f,

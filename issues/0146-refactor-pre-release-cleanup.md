@@ -15,7 +15,7 @@
 
 ## 目的
 
-コードベース全体のデッドコード・重複定義・過剰なログ・装飾コメント・可読性の問題を一括して解消し、保守コストを下げる。リリース前の掃除のため、後方互換のない変更（`Error::PeerConnectionMissing` の削除、`TlsConfig` の非公開化）と実行時動作を変える設計改善（`TimerManager::set_timer` の同一 id 上書き修正、VP9 の profile-id 統一）も対象に含める。
+コードベース全体のデッドコード・重複定義・過剰なログのレベル調整・可読性の問題を一括して解消し、保守コストを下げる。リリース前の掃除のため、後方互換のない変更（`Error::PeerConnectionMissing` の削除、`TlsConfig` の非公開化）と実行時動作を変える設計改善（`TimerManager::set_timer` の同一 id 上書き修正、VP9 の profile-id 統一）も対象に含める。
 
 ## 現状
 
@@ -38,16 +38,16 @@
 - `e2e-tests/src/lib.rs` の `wait_task_finished`: 定義のみで呼び出し 0
 - `src/error.rs` の `Error::PeerConnectionMissing` バリアント: 構築箇所が存在しない（Display の実装のみ。`source()` には明示的な arm がなく `_ => None` に落ちる）
 
-### 3. 装飾コメント・命名のずれ・未使用引数
+### 3. 命名のずれ
 
 - `src/connection.rs` の `let client = Self { ... }` と `Ok((client, handle))`: リネーム取りこぼし。両方を `connection` にリネーム
-- `// -------------------------` 系の装飾コメント: `src/connection.rs` / `src/types.rs` / `src/signaling_types.rs` のみ。全削除
-- `#[expect(unused_variables)]`: `src/video_codec_capability.rs` は未使用の `env` / `format`。`src/video_codecs/openh264.rs` は `settings` と `env` / `format`。`src/video_codecs/{amf,nvcodec,v4l2,vpl}.rs` の `init_encode` は `settings`。未使用引数を `_env` / `_format` / `_settings` にし属性を外す
 
 ### 4. 過剰なログ
 
-- `src/video_codecs/mp4.rs` の `Mp4PassthroughEncoder::encode` 内のフレーム単位 `rtc_log_info!`（ホットパスで毎フレーム出力）
-- `src/connection.rs` の DataChannel メッセージ送受信の 1 メッセージごとの `rtc_log_info!`（`send_data_channel_message` の送信 1 箇所 + `handle_data_channel_message` の受信 1 箇所）
+ホットパスで毎メッセージ・毎フレーム出力される `rtc_log_info!` は、通常運用では不要なノイズになるため、削除せず `rtc_log_verbose!` にレベルを落とす。
+
+- `src/video_codecs/mp4.rs` の `Mp4PassthroughEncoder::encode` 内のフレーム単位 `rtc_log_info!`（ホットパスで毎フレーム出力）→ `rtc_log_verbose!` に変更
+- `src/connection.rs` の DataChannel メッセージ送受信の 1 メッセージごとの `rtc_log_info!`（`send_data_channel_message` の送信 1 箇所 + `handle_data_channel_message` の受信 1 箇所）→ `rtc_log_verbose!` に変更
 
 ### 5. 重複ロジック・重複定義
 
@@ -82,7 +82,7 @@
 
 - 原則 SemVer 非影響の変更に限定する
 - 例外として、後方互換のない変更を 2 件だけ含める（`Error::PeerConnectionMissing` の削除、`TlsConfig` の非公開化。いずれも構築・参照手段がなく、リリース前の掃除として実施する）
-- `CHANGES.md` に変更概要を追記する。後方互換のない変更 2 件（`Error::PeerConnectionMissing` の削除、`TlsConfig` の非公開化）は `[CHANGE]` に記載する。実行時動作を変える設計改善（`TimerManager::set_timer` の abort 追加、VP9 の profile-id 統一）は後方互換がある変更として `[UPDATE]` に記載する。それ以外のリファクタリング・掃除は `### misc` サブセクションに記載する（shiguredo-changelog スキルに従う）
+- `CHANGES.md` は変更しない
 - バグ修正や機能追加は混ぜない（例外: `TimerManager::set_timer` の abort 追加は、実行時動作の正確性を高める設計改善として本 issue に含める）
 - 各変更はモックやスタブを使わないテストで確認する
 - video codec ヘルパーの共通化方針:
@@ -90,21 +90,21 @@
   - `supported_formats_for_codec` と `target_kbps_from_bps` は共通化するか判断する
     - `supported_formats_for_codec`: 全 codec をカバーする単一の関数に統合し、呼び出し側で使わない arm はデッドコード最適化に任せる。または codec_type ごとの SdpVideoFormat 生成だけを共通関数として切り出す。VP9 の profile-id 差異は `profile-id=0` を付与する方向で統一する（SDP で明示的に profile を指定する方が安全なため。vpl 側は現状どおり、nvcodec 側に profile-id を追加する動作変更を含む）
     - `target_kbps_from_bps`: 戻り型を `u32` に統一する。AMF 側は `u32` を要求するためそのまま使える。VPL 側の受け口（`config.target_kbps` / `ReconfigureParams::target_kbps`）は `u16` のままなので、呼び出し元で `u16::try_from` して渡す。`u16` に統一すると AMF 側で `u32::from` するだけなので実害はないが、共通関数は呼び出し元の API 要求型から独立させ、変換は呼び出し元に置くのが責務の分離として適切。`u16::try_from` が失敗する（65,535 kbps 超）場合の挙動は、現行の `unwrap_or(u16::MAX)` によるクリップを維持する（サイレントに壊れるリスクは VPL の API 上限自体に由来するため）
-  - 共通化しないもの（`encoder_codec_config` / `decoder_codec` / `frame_type_from_*`）は各バックエンドにそのまま残し、なぜ共通化しないかのコメントを付ける（各クレート固有の型 `shiguredo_vpl::CodecConfig` / `shiguredo_amf::CodecConfig` / `shiguredo_nvcodec::CodecConfig` 等に依存し、トレイト・マクロの新規作成は shiguredo-rust スキルで禁止されているため）
+  - 共通化しないもの（`encoder_codec_config` / `decoder_codec` / `frame_type_from_*`）は各バックエンドにそのまま残す（各クレート固有の型 `shiguredo_vpl::CodecConfig` / `shiguredo_amf::CodecConfig` / `shiguredo_nvcodec::CodecConfig` 等に依存し、トレイト・マクロの新規作成は shiguredo-rust スキルで禁止されているため）
 - feature ごとのコンパイルが壊れないように共通モジュールの依存を整理する。`shiguredo_webrtc` への依存（`VideoFrameType` / `VideoFrameTypeVectorRef` 等）は `lib.rs` で re-export せず、各ファイルで直接 import する（shiguredo-rust スキルの re-export 禁止に従う）
 
 ## 完了条件
 
-- 上記のデッドコード・到達不能コード・装飾コメント・未使用引数属性・過剰ログ・重複定義が削除・整理されている
+- 上記のデッドコード・到達不能コード・重複定義が削除・整理されている
+- 過剰ログは削除せず `rtc_log_verbose!` にレベル変更されている
 - 現状 6（軽微な可読性・設計）の各項目（`tick_once` の `_fps`、`TlsConfig`、`TimerManager::set_timer`、`handle_offer`、`error.rs` の Display、`lib.rs` のサンプル）が対応済みである
 - `requested_frame_type` が単一実装になり、全バックエンドがそれを利用している
 - `supported_formats_for_codec` と `target_kbps_from_bps` について共通化の要否を判断し、共通化する場合は単一実装にしている
-- 共通化しないもの（`encoder_codec_config` / `decoder_codec` / `frame_type_from_*`）は各バックエンドにそのまま残し、なぜ共通化しないかのコメントを付けている
+- 共通化しないもの（`encoder_codec_config` / `decoder_codec` / `frame_type_from_*`）は各バックエンドにそのまま残している
 - `TlsConfig` が公開 API から除外されている（`lib.rs` の `pub use` から削除し、`pub(crate)` にしている）
 - `skills/sora-rust-sdk/SKILL.md` の公開型一覧（接続ビルダーの表）から `TlsConfig` が除去されている
 - `Error::PeerConnectionMissing` が `Error` enum から削除されている
 - `skills/sora-rust-sdk/SKILL.md` のエラー型テーブルから `PeerConnectionMissing` が除去されている
-- `CHANGES.md` に変更概要が追記されている（`[CHANGE]` 2 件、`[UPDATE]` 2 件、その他は `### misc`）
 - 対象外表の項目を実施していない
 - 検証:
   - `cargo fmt --all --check`
@@ -124,7 +124,6 @@
   - `cargo test -p sora_sdk`
   - `cargo test -p sumomo`
   - `cargo test --workspace`
-  - `rg '// -{5,}' src/connection.rs src/types.rs src/signaling_types.rs` がヒットしない
 - production log は英語、コメントとテストの assertion message は日本語にする
 
 ## 変更対象
@@ -141,7 +140,7 @@
 - `src/video_codec_capability.rs`
 - `src/video_codec_preference.rs`
 - `src/connection.rs`
-- `src/types.rs`（装飾コメント削除）
+- `src/types.rs`
 - `src/signaling_types.rs`
 - `src/error.rs`
 - `src/lib.rs`
@@ -150,21 +149,19 @@
 - `examples/sumomo/src/fake.rs`
 - `skills/sora-rust-sdk/SKILL.md`（公開型一覧の `TlsConfig` 行の削除、エラー型テーブルの `PeerConnectionMissing` 除去）
 - `Makefile`（`fuzzing` / `fuzzing-list` ターゲットの削除。`#0081` は pending（Low）で、`fuzz/` ディレクトリが存在せず実質的に実行不能なため）
-- `CHANGES.md`（`[CHANGE]` 2 件、`[UPDATE]` 2 件、その他は `### misc` への追記）
 
 ## 解決方法
 
 1. `requested_frame_type` を共通モジュール `src/video_codecs/helpers.rs` に移し、各ファイル（`v4l2.rs` / `vpl.rs` / `amf.rs` / `nvcodec.rs` / `openh264.rs`）の定義を削除して import に差し替える。各ファイルの `#[cfg(test)]` にあるテストも `helpers.rs` の `#[cfg(test)]` に移す
 2. `supported_formats_for_codec` と `target_kbps_from_bps` の差分を評価し、共通化の要否を判断する。共通化する場合は `helpers.rs` に追加する。共通化しない場合は理由をコメントで残す
-3. `encoder_codec_config` / `decoder_codec` / `frame_type_from_*` は共通化不可能であるため、各ファイルにそのまま残し、なぜ共通化しないかのコメントを付ける
+3. `encoder_codec_config` / `decoder_codec` / `frame_type_from_*` は共通化不可能であるため、各ファイルにそのまま残す
 4. `src/video_codecs/mod.rs` に `pub mod helpers;` を追加する。helpers モジュールの cfg 条件は `any(feature = "v4l2", feature = "vpl", feature = "amf", feature = "nvcodec", feature = "openh264")` とする
 5. `e2e-tests/src/lib.rs` から `wait_task_finished` を削除する
-6. `src/connection.rs` の `client` を `connection` にリネームし、装飾コメントを 3 ファイルから削除する
-7. 未使用引数を `_` 接頭辞化し、`#[expect(unused_variables)]` を外す
-8. 過剰なログを削減する
-9. 重複ロジック・重複定義を整理する
-10. 軽微な可読性・設計の問題を修正する（`TlsConfig` の非公開化を除く。`TlsConfig` は step 11 で扱う）
-11. `TlsConfig` を `lib.rs` の `pub use` から外し、`pub(crate)` に変更し、`skills/sora-rust-sdk/SKILL.md` の公開型一覧から `TlsConfig` を除去する
-12. `Error::PeerConnectionMissing` を `src/error.rs` の `Error` enum から削除し、`skills/sora-rust-sdk/SKILL.md` のエラー型テーブルを更新する
-13. 各 feature パターンで `cargo check` と `cargo clippy` を確認する
-14. 完了条件のコマンドを実行し、`CHANGES.md` に変更概要を追記する（`[CHANGE]` 2 件、`[UPDATE]` 2 件、その他は `### misc`）
+6. `src/connection.rs` の `client` を `connection` にリネームする
+7. 過剰なログを削除せず `rtc_log_verbose!` に変更する
+8. 重複ロジック・重複定義を整理する
+9. 軽微な可読性・設計の問題を修正する（`TlsConfig` の非公開化を除く。`TlsConfig` は step 10 で扱う）
+10. `TlsConfig` を `lib.rs` の `pub use` から外し、`pub(crate)` に変更し、`skills/sora-rust-sdk/SKILL.md` の公開型一覧から `TlsConfig` を除去する
+11. `Error::PeerConnectionMissing` を `src/error.rs` の `Error` enum から削除し、`skills/sora-rust-sdk/SKILL.md` のエラー型テーブルを更新する
+12. 各 feature パターンで `cargo check` と `cargo clippy` を確認する
+13. 完了条件のコマンドを実行して確認する
