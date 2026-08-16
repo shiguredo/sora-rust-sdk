@@ -1477,7 +1477,11 @@ impl SoraConnection {
         }
 
         // run ループを抜けた時点で終了フェーズに入るため、以後のコマンド送信を拒否する。
-        close_command_channel_and_ack_pending_disconnects(&mut self.command_rx).await;
+        close_command_channel_and_ack_pending_disconnects(
+            &mut self.command_rx,
+            &mut user_initiated_disconnect,
+        )
+        .await;
 
         // DataChannel シグナリングを利用している場合は、
         // disconnect_wait_timeout を上限にクローズ完了を待機する。
@@ -2383,10 +2387,14 @@ async fn wait_data_channels_close(
 /// ref: https://docs.rs/tokio/latest/tokio/sync/mpsc/struct.UnboundedReceiver.html#method.close
 async fn close_command_channel_and_ack_pending_disconnects(
     command_rx: &mut mpsc::UnboundedReceiver<SoraConnectionCommand>,
+    user_initiated_disconnect: &mut bool,
 ) {
     command_rx.close();
     while let Some(command) = command_rx.recv().await {
         if let SoraConnectionCommand::Disconnect(ack_tx) = command {
+            // ユーザー主導の切断として記録し、close handshake 中の
+            // I/O エラーを warning に落とす対象に加える。
+            *user_initiated_disconnect = true;
             let _ = ack_tx.send(());
         }
         // Disconnect 以外のコマンドは応答せず破棄する。
@@ -4202,13 +4210,23 @@ mod tests {
         command_tx
             .send(SoraConnectionCommand::Disconnect(ack_tx))
             .expect("Disconnect コマンドの送信に失敗しました");
+        let mut user_initiated_disconnect = false;
 
-        close_command_channel_and_ack_pending_disconnects(&mut command_rx).await;
+        close_command_channel_and_ack_pending_disconnects(
+            &mut command_rx,
+            &mut user_initiated_disconnect,
+        )
+        .await;
 
         // クローズ前に送信された Disconnect には ack が返る必要がある。
         ack_rx
             .await
             .expect("disconnect の ack が送信される必要があります");
+        // キュー済み Disconnect を ack した場合はユーザー主導の切断として扱う。
+        assert!(
+            user_initiated_disconnect,
+            "キュー済み Disconnect の ack 時は user_initiated_disconnect が立つ必要があります"
+        );
         // close() 後の送信は失敗する (CommandSendFailed になる)。
         let (ack_tx2, _ack_rx2) = oneshot::channel();
         assert!(
@@ -4227,14 +4245,24 @@ mod tests {
         command_tx
             .send(SoraConnectionCommand::GetStats(stats_tx))
             .expect("GetStats コマンドの送信に失敗しました");
+        let mut user_initiated_disconnect = false;
 
-        close_command_channel_and_ack_pending_disconnects(&mut command_rx).await;
+        close_command_channel_and_ack_pending_disconnects(
+            &mut command_rx,
+            &mut user_initiated_disconnect,
+        )
+        .await;
 
         // GetStats には応答が返らず、呼び出し側は CommandResponseMissing になる
         // (response_tx が send されずに drop されるため RecvError になる)。
         assert!(
             stats_rx.await.is_err(),
             "Disconnect 以外のコマンドには応答してはいけません"
+        );
+        // Disconnect 以外のコマンドのみの場合はユーザー主導の切断として扱わない。
+        assert!(
+            !user_initiated_disconnect,
+            "Disconnect 以外のコマンドでは user_initiated_disconnect が立たない必要があります"
         );
     }
 
