@@ -940,6 +940,10 @@ impl SoraConnection {
         // また、終了処理の close handshake で Sora の WebSocket Close フレームを受信した
         // 場合に on_websocket_close を通知するかどうかの判定にも使う。
         let mut server_close_received = false;
+        // ユーザー主導の切断 (SoraConnectionCommand::Disconnect) による終了かどうか。
+        // ユーザーが切断を要求している以上、終了処理の WebSocket close handshake で
+        // 発生する I/O エラーは warning に落として run の Ok(()) を覆さないために使う。
+        let mut user_initiated_disconnect = false;
 
         'run_loop: loop {
             // 期限切れの値を sleep_until で持つと即 Ready になりビジーループしてしまうため、
@@ -1084,6 +1088,9 @@ impl SoraConnection {
                     match command {
                         SoraConnectionCommand::Disconnect(ack_tx) => {
                             rtc_log_info!("Received disconnect request");
+                            // ユーザー主導の切断として記録し、close handshake 中の
+                            // I/O エラーを warning に落とす対象に加える。
+                            user_initiated_disconnect = true;
                             // サーバーに切断を通知するため、disconnect メッセージを送信する。
                             // 送信失敗しても切断処理を中断せず、ログに残すだけにする。
                             let disconnect_message =
@@ -1470,7 +1477,11 @@ impl SoraConnection {
         }
 
         // run ループを抜けた時点で終了フェーズに入るため、以後のコマンド送信を拒否する。
-        close_command_channel_and_ack_pending_disconnects(&mut self.command_rx).await;
+        close_command_channel_and_ack_pending_disconnects(
+            &mut self.command_rx,
+            &mut user_initiated_disconnect,
+        )
+        .await;
 
         // DataChannel シグナリングを利用している場合は、
         // disconnect_wait_timeout を上限にクローズ完了を待機する。
@@ -1495,60 +1506,23 @@ impl SoraConnection {
         // 正常な close handshake が成立しない。この状態で close handshake を実行すると
         // 死んだソケットへの I/O が失敗し、ユーザー主導の正常切断にもかかわらず
         // run() が Err を返してしまうため、close handshake をスキップする。
-        if ws.state() == ConnectionState::Connected && !websocket_closed {
-            // server Close、または switched 後の ignore 構成での切断は ws の終了処理が
-            // 確定的に進むため、この後始末で発生するエラーは warning として記録し、
-            // run の Ok(()) を覆さない。
-            // ignore 構成では切断と RST が同時に起きた場合に websocket_closed が
-            // 立つ前に close handshake へ入り、死んだソケットへの I/O が失敗して
-            // ユーザー主導の切断が Err になることがあるため、同様に warning に落とす。
-            let close_result = tokio::time::timeout(websocket_close_timeout, async {
-                ws.close(CloseCode::NORMAL, "shutdown")?;
-                loop {
-                    if flush_ws_output(&mut ws, &mut stream, &mut timers).await? {
-                        return Ok::<_, Error>(());
-                    }
-                    let mut buf = vec![0u8; 8192];
-                    let n = stream.read(&mut buf).await?;
-                    if n == 0 {
-                        return Ok(());
-                    }
-                    ws.feed_recv_buf(&buf[..n], now()?)?;
-                    // server Close の終了処理では、Sora が送信した WebSocket Close
-                    // フレームを検出して on_websocket_close を通知する。
-                    // server Close メッセージと WebSocket Close フレームは別経路で
-                    // 届くため、処理順のレースで Close フレームが未処理のまま残る
-                    // 場合がある。ここで読み取ることで、on_websocket_close を
-                    // 決定的に 1 回だけ通知する。
-                    // server Close 以外の終了経路では従来どおりイベントを破棄する。
-                    while let Some(event) = ws.poll_event() {
-                        if server_close_received
-                            && let ConnectionEvent::Close { code, reason } = event
-                        {
-                            handler.on_websocket_close(code.map(|c| c.0), &reason);
-                        }
-                    }
-                    if ws.state() == ConnectionState::Closed {
-                        return Ok(());
-                    }
-                }
-            })
-            .await;
-            match close_result {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    if server_close_received
-                        || (switched_ignore_disconnect_websocket && use_data_channel_signaling)
-                    {
-                        rtc_log_warning!("WebSocket close handshake failed: {}", e);
-                    } else {
-                        return Err(e);
-                    }
-                }
-                Err(_) => {
-                    rtc_log_warning!("WebSocket close timed out");
-                }
-            }
+        if !websocket_closed {
+            // close handshake 中の I/O エラーを吸収すべき終了経路を合成して渡す。
+            // ignore 構成とユーザー主導の切断は「接続を終了する意思が確定している」
+            // 点で共通するため、まとめて 1 つの吸収条件にする。server_close_received
+            // も吸収条件に含まれるが、close handshake 中に受信した WebSocket Close
+            // フレームで on_websocket_close を通知する判定にも使うため別引数のままにする。
+            close_websocket_handshake(
+                &mut ws,
+                &mut stream,
+                &mut timers,
+                &mut *handler,
+                server_close_received,
+                (switched_ignore_disconnect_websocket && use_data_channel_signaling)
+                    || user_initiated_disconnect,
+                websocket_close_timeout,
+            )
+            .await?;
         }
 
         rtc_log_info!("Shutting down");
@@ -2413,10 +2387,14 @@ async fn wait_data_channels_close(
 /// ref: https://docs.rs/tokio/latest/tokio/sync/mpsc/struct.UnboundedReceiver.html#method.close
 async fn close_command_channel_and_ack_pending_disconnects(
     command_rx: &mut mpsc::UnboundedReceiver<SoraConnectionCommand>,
+    user_initiated_disconnect: &mut bool,
 ) {
     command_rx.close();
     while let Some(command) = command_rx.recv().await {
         if let SoraConnectionCommand::Disconnect(ack_tx) = command {
+            // ユーザー主導の切断として記録し、close handshake 中の
+            // I/O エラーを warning に落とす対象に加える。
+            *user_initiated_disconnect = true;
             let _ = ack_tx.send(());
         }
         // Disconnect 以外のコマンドは応答せず破棄する。
@@ -3158,6 +3136,94 @@ async fn flush_ws_output<R: RandomSource>(
     Ok(false)
 }
 
+/// WebSocket 接続の close handshake を実行する。
+///
+/// WebSocket が `Connected` の場合のみ Close フレーム (NORMAL, "shutdown") を送信し、
+/// 相手からの Close フレームまたは TCP の EOF を待って接続を終了する。Close フレーム
+/// の送受信が完了するか相手が EOF を返すと `Ok(())` を返す。
+///
+/// WebSocket が `Connected` 以外の場合は何もせず `Ok(())` を返す。
+///
+/// close handshake 全体は `websocket_close_timeout` を上限とする。タイムアウトした
+/// 場合は警告を出力して `Ok(())` を返す。
+///
+/// close handshake 中に I/O エラーが発生した場合は、`server_close_received` または
+/// `absorb_close_handshake_errors` が `true` なら警告を出力して `Ok(())` を返し、
+/// どちらも `false` なら `Err` を返す。
+///
+/// 引数:
+/// - `server_close_received`: DataChannel 経由の server Close による終了かどうか。
+///   相手からの Close フレームを `handler.on_websocket_close` で通知するかの判定と、
+///   I/O エラーを警告に落とすかの判定に使う。
+/// - `absorb_close_handshake_errors`: close handshake 中の I/O エラーを警告に落として
+///   `Ok(())` を返すべきかどうか。呼び出し元が
+///   `(switched_ignore_disconnect_websocket && use_data_channel_signaling) ||
+///   user_initiated_disconnect` の結果を渡す。
+async fn close_websocket_handshake<R: RandomSource>(
+    ws: &mut WebSocketClientConnection<R>,
+    stream: &mut ClientStream,
+    timers: &mut TimerManager,
+    handler: &mut dyn SoraConnectionEventHandler,
+    server_close_received: bool,
+    absorb_close_handshake_errors: bool,
+    websocket_close_timeout: Duration,
+) -> Result<()> {
+    if ws.state() == ConnectionState::Connected {
+        // server Close は server_close_received で終了経路が確定しているため、
+        // この後始末で発生するエラーは無視してよい。
+        // ignore 構成とユーザー主導の切断は、切断とサーバー側の RST が同時に
+        // 起きた場合に websocket_closed が立つ前に close handshake へ入り、
+        // 死んだソケットへの書き込みが失敗することがある。
+        // いずれも接続を終了する意思が確定しているため、close handshake の失敗は
+        // warning に落として run の Ok(()) を覆さない。
+        let close_result = tokio::time::timeout(websocket_close_timeout, async {
+            ws.close(CloseCode::NORMAL, "shutdown")?;
+            loop {
+                if flush_ws_output(ws, stream, timers).await? {
+                    return Ok::<_, Error>(());
+                }
+                let mut buf = vec![0u8; 8192];
+                let n = stream.read(&mut buf).await?;
+                if n == 0 {
+                    return Ok(());
+                }
+                ws.feed_recv_buf(&buf[..n], now()?)?;
+                // server Close の終了処理では、Sora が送信した WebSocket Close
+                // フレームを検出して on_websocket_close を通知する。
+                // server Close メッセージと WebSocket Close フレームは別経路で
+                // 届くため、処理順のレースで Close フレームが未処理のまま残る
+                // 場合がある。ここで読み取ることで、on_websocket_close を
+                // 決定的に 1 回だけ通知する。
+                // server Close 以外の終了経路では従来どおりイベントを破棄する。
+                while let Some(event) = ws.poll_event() {
+                    if server_close_received && let ConnectionEvent::Close { code, reason } = event
+                    {
+                        handler.on_websocket_close(code.map(|c| c.0), &reason);
+                    }
+                }
+                if ws.state() == ConnectionState::Closed {
+                    return Ok(());
+                }
+            }
+        })
+        .await;
+        match close_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                if server_close_received || absorb_close_handshake_errors {
+                    rtc_log_warning!("WebSocket close handshake failed: {}", e);
+                } else {
+                    return Err(e);
+                }
+            }
+            Err(_) => {
+                rtc_log_warning!("WebSocket close timed out");
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3552,6 +3618,140 @@ mod tests {
     fn now_returns_ok_timestamp() {
         let result = super::now();
         assert!(result.is_ok(), "now() は Ok を返す必要があります");
+    }
+
+    /// ユーザー主導の切断の close handshake が、サーバー側から RST で切断された
+    /// dead socket への書き込みで I/O エラーになっても `Ok(())` を返すべきことを
+    /// 検証する。
+    ///
+    /// e2e-tests/tests/messaging.rs の `test_messaging_sendrecv` で macOS self-hosted の
+    /// CI に一度だけ観測された「クライアント 2 の disconnect が
+    /// `Io(Os { code: 32, kind: BrokenPipe, message: "Broken pipe" })` で失敗する」
+    /// 現象の再現を意図する。
+    ///
+    /// クライアント 1 の切断を契機にサーバーがクライアント 2 の WebSocket を
+    /// RST で切断すると、クライアント 2 の run ループはそれを検知する前に
+    /// disconnect コマンドで抜けて close handshake に入る。このとき
+    /// `server_close_received` も ignore 構成でもないため、従来は close handshake の
+    /// 書き込みエラーがそのまま `run()` の `Err` になり、ユーザーが切断を要求した
+    /// にもかかわらず disconnect が失敗してしまう。
+    ///
+    /// 本テストは実 WebSocket コネクションをローカルの TCP 上で確立し、
+    /// サーバー側ソケットを RST で切断してから `close_websocket_handshake` を
+    /// 実行することで、この経路を決定的に再現する。ユーザー主導の切断は
+    /// `server_close_received=false` かつ吸収条件の合成 bool を `true` (ユーザー主導の
+    /// 切断を表す) にして表す。モックやスタブは使わない。
+    #[tokio::test]
+    async fn close_websocket_handshake_does_not_fail_user_disconnect_on_dead_socket() {
+        use shiguredo_websocket::{
+            ConnectionOutput, ServerConnectionOptions, WebSocketServerConnection,
+        };
+
+        // 実 TCP ペアを用意する。
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("TCP リスナーの起動に失敗しました");
+        let addr = listener
+            .local_addr()
+            .expect("リスナーアドレスの取得に失敗しました");
+        let client_tcp = TcpStream::connect(addr)
+            .await
+            .expect("クライアント側 TCP の接続に失敗しました");
+        let (mut server_tcp, _) = listener
+            .accept()
+            .await
+            .expect("サーバー側 TCP の受付に失敗しました");
+
+        // クライアント側の WebSocket を Connected まで駆動する。
+        let (timer_tx, _timer_rx) = mpsc::channel::<TimerId>(16);
+        let mut timers = TimerManager::new(timer_tx);
+        let mut client_stream = ClientStream::new_plain(client_tcp);
+        let options = ClientConnectionOptions::new("127.0.0.1", "/signaling");
+        let mut client_ws = WebSocketClientConnection::new(options, SecureRandom::new());
+        client_ws
+            .connect()
+            .expect("WebSocket クライアントの接続開始に失敗しました");
+        // ハンドシェイクリクエストを送信する。
+        flush_ws_output(&mut client_ws, &mut client_stream, &mut timers)
+            .await
+            .expect("ハンドシェイクリクエストの送信に失敗しました");
+
+        // サーバー側でリクエストを読み、自動受理して 101 応答を返す。
+        let mut server_ws = WebSocketServerConnection::new(ServerConnectionOptions::new());
+        let mut buf = vec![0u8; 8192];
+        loop {
+            let n = server_tcp
+                .read(&mut buf)
+                .await
+                .expect("サーバー側の読み込みに失敗しました");
+            assert!(n > 0, "ハンドシェイクリクエストが届きませんでした");
+            server_ws
+                .feed_recv_buf(&buf[..n])
+                .expect("ハンドシェイクリクエストの処理に失敗しました");
+            if server_ws.handshake_request().is_some() {
+                break;
+            }
+        }
+        server_ws
+            .accept_handshake_auto()
+            .expect("ハンドシェイクの自動受理に失敗しました");
+        while let Some(output) = server_ws.poll_output() {
+            if let ConnectionOutput::SendData(data) = output {
+                server_tcp
+                    .write_all(&data)
+                    .await
+                    .expect("101 応答の送信に失敗しました");
+            }
+        }
+
+        // クライアント側で 101 応答を読み、Connected になることを確認する。
+        let n = client_stream
+            .read(&mut buf)
+            .await
+            .expect("クライアント側の読み込みに失敗しました");
+        assert!(n > 0, "101 応答が届きませんでした");
+        client_ws
+            .feed_recv_buf(&buf[..n], now().expect("現在時刻の取得に失敗しました"))
+            .expect("101 応答の処理に失敗しました");
+        assert_eq!(
+            client_ws.state(),
+            ConnectionState::Connected,
+            "WebSocket クライアントが Connected になっていません"
+        );
+
+        // サーバー側ソケットを SO_LINGER=0 付きでクローズし、RST で切断する。
+        let std_server = server_tcp
+            .into_std()
+            .expect("サーバー側 TCP の std 変換に失敗しました");
+        let server_socket = socket2::Socket::from(std_server);
+        server_socket
+            .set_linger(Some(Duration::ZERO))
+            .expect("SO_LINGER の設定に失敗しました");
+        drop(server_socket);
+        drop(server_ws);
+        // RST がクライアント側に届くのを待つ。
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // ユーザー主導の切断 (server_close_received=false、吸収条件の合成 bool=true) の
+        // 条件で close handshake を実行する。これは messaging テストのクライアント 2
+        // と同じ条件である。ユーザーが切断を要求している以上、close handshake の
+        // 失敗は warning に落として Ok(()) を返すべきである。
+        let mut handler = RecordingHandler::default();
+        let result = close_websocket_handshake(
+            &mut client_ws,
+            &mut client_stream,
+            &mut timers,
+            &mut handler,
+            false,
+            true,
+            Duration::from_secs(3),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "ユーザー主導の切断の close handshake は Ok を返すべきですが Err になりました: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -4010,13 +4210,23 @@ mod tests {
         command_tx
             .send(SoraConnectionCommand::Disconnect(ack_tx))
             .expect("Disconnect コマンドの送信に失敗しました");
+        let mut user_initiated_disconnect = false;
 
-        close_command_channel_and_ack_pending_disconnects(&mut command_rx).await;
+        close_command_channel_and_ack_pending_disconnects(
+            &mut command_rx,
+            &mut user_initiated_disconnect,
+        )
+        .await;
 
         // クローズ前に送信された Disconnect には ack が返る必要がある。
         ack_rx
             .await
             .expect("disconnect の ack が送信される必要があります");
+        // キュー済み Disconnect を ack した場合はユーザー主導の切断として扱う。
+        assert!(
+            user_initiated_disconnect,
+            "キュー済み Disconnect の ack 時は user_initiated_disconnect が立つ必要があります"
+        );
         // close() 後の送信は失敗する (CommandSendFailed になる)。
         let (ack_tx2, _ack_rx2) = oneshot::channel();
         assert!(
@@ -4035,14 +4245,24 @@ mod tests {
         command_tx
             .send(SoraConnectionCommand::GetStats(stats_tx))
             .expect("GetStats コマンドの送信に失敗しました");
+        let mut user_initiated_disconnect = false;
 
-        close_command_channel_and_ack_pending_disconnects(&mut command_rx).await;
+        close_command_channel_and_ack_pending_disconnects(
+            &mut command_rx,
+            &mut user_initiated_disconnect,
+        )
+        .await;
 
         // GetStats には応答が返らず、呼び出し側は CommandResponseMissing になる
         // (response_tx が send されずに drop されるため RecvError になる)。
         assert!(
             stats_rx.await.is_err(),
             "Disconnect 以外のコマンドには応答してはいけません"
+        );
+        // Disconnect 以外のコマンドのみの場合はユーザー主導の切断として扱わない。
+        assert!(
+            !user_initiated_disconnect,
+            "Disconnect 以外のコマンドでは user_initiated_disconnect が立たない必要があります"
         );
     }
 

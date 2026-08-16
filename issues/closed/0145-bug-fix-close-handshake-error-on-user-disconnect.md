@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-08-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-16
 - Branch: feature/fix-close-handshake-error-on-user-disconnect
 - Polished: 2026-08-16
 
@@ -83,3 +83,12 @@ thread 'test_messaging_sendrecv' panicked at e2e-tests/tests/messaging.rs:143:10
 - `cargo test --workspace` が成功する
 - `cargo clippy --workspace --features openh264 -- -D warnings` が成功する
 - production log は英語、コメントとテストの assertion message は日本語にする
+
+## 解決方法
+
+- `SoraConnection::run` 内のインライン close handshake 処理を `close_websocket_handshake` 関数に抽出した (挙動不変)
+- `SoraConnection::run` に `user_initiated_disconnect` フラグを追加した。Disconnect コマンドの処理時と、終了フェーズでキュー済み Disconnect を ack した時の両方で立てる
+  - 後者は、run ループが Disconnect コマンド処理以外の終端経路 (read の EOF など) で抜けた直後にキュー済み Disconnect を `close_command_channel_and_ack_pending_disconnects` が ack する場合に対応し、`disconnect()` が `Ok` を返すのに `run()` が `Err` になる不整合も解消する
+- `close_websocket_handshake` の I/O エラー吸収条件にユーザー主導の切断を追加した。吸収条件の合成は呼び出し側の `run()` で行い、ignore 構成の bool と `user_initiated_disconnect` を合成して渡す。`server_close_received` は `on_websocket_close` の通知判定にも使うため別引数のまま残す
+- 実 TCP ペア + 実 WebSocket ハンドシェイク + OS の RST で決定的に再現するテスト `close_websocket_handshake_does_not_fail_user_disconnect_on_dead_socket` を追加した。SO_LINGER 設定のため `socket2` を dev-dependency に追加した
+- 検証: `cargo test --lib` (190 件) と `cargo clippy --workspace --features openh264 -- -D warnings` が成功する
