@@ -3,7 +3,7 @@
 - Priority: High
 - Created: 2026-08-13
 - Completed: {YYYY-MM-DD}
-- Branch: feature/refactor-mp4-reader-driven-capability
+- Branch: feature/refactor-mp4-reader-driven-capability-v2
 - Polished: 2026-08-13
 - Updated: 2026-08-17
 
@@ -63,10 +63,22 @@ codec 固有 parameter を capability 側で advertise できるようにする�
 - 非ゼロ composition time offset の拒否（現行の `Mp4Error::UnsupportedCompositionTimeOffset`）を本 issue で変更しない
 - MP4 audio track は本 issue の対象外とする
 
-### reader が公開する required SDP format
+### bitstream metadata の切り出し
 
-`Mp4SampleReader` に `required_sdp_format() -> SdpVideoFormat` を追加する。
-以下の値を reader 構築時に確定させ、以後は immutable に返す。
+`Mp4SampleReader` から capability に渡す情報を `Mp4BitstreamMetadata` としてスナップショット化する。
+`Mp4BitstreamMetadata` はファイル I/O を持たず、reader 構築時に確定した cheap clone 可能な値の束として capability の唯一の入力になる。
+
+- `Mp4SampleReader::bitstream_metadata(&self) -> Mp4BitstreamMetadata` を pub に追加する
+- `pub struct Mp4BitstreamMetadata` を pub に追加し、内部フィールドは private とする。既存の `PreferenceCodec` / `VideoCodecImplementation` と同じ「private フィールド + getter」流儀で以下を保持する
+  - `VideoCodecType`（対応 getter: `codec_type()`）
+  - required `SdpVideoFormat`（対応 getter: `required_sdp_format()` — clone を返す）
+  - bitstream identity `Arc`（getter を露出せず、内部でのみ capability 構築時に消費する）
+- 生成経路は `Mp4SampleReader::bitstream_metadata` のみとする。外部からのフィールドリテラル構築は private フィールドで塞ぐ
+- `Clone` を実装する（`Arc::clone` と `SdpVideoFormat` の clone だけの軽量コピー）
+- `Mp4SampleReader::required_sdp_format` は `pub(crate)` に降格し、外部からは `Mp4BitstreamMetadata` 経由で取得する
+- `Mp4SampleReader::codec_type` は既存の `pub` を維持する（`Mp4VideoCapturer` 選択などで既に使われている）
+
+required `SdpVideoFormat` は以下の値を reader 構築時に確定させ、以後は immutable に返す。
 
 - H.264: `H264`、`packetization-mode=1`
 - H.265: `H265`
@@ -77,24 +89,26 @@ codec 固有 parameter を capability 側で advertise できるようにする�
 いずれも現行の `Mp4PassthroughVideoCodecCapability::get_supported_formats(Encoder)` が返す format と同じ内容とする。
 codec 固有 parameter の追加は issue 0141 / 0097 で行い、本 issue では追加しない。
 
-### reader から capability を構築する
+### metadata から capability を構築する
 
-`Mp4PassthroughVideoCodecCapability::new(codec_type: VideoCodecType)` を廃止し、`Mp4PassthroughVideoCodecCapability::new(reader: &Mp4SampleReader) -> Self` に置き換える。
+`Mp4PassthroughVideoCodecCapability::new(codec_type: VideoCodecType)` を廃止し、`Mp4PassthroughVideoCodecCapability::new(metadata: Mp4BitstreamMetadata) -> Self` に置き換える。
 capability は内部に以下を保持する。
 
-- reader の `VideoCodecType`
-- reader から複製した required `SdpVideoFormat`
-- reader と共有する bitstream identity（次節）
+- metadata の `VideoCodecType`
+- metadata が握る required `SdpVideoFormat`
+- metadata と共有する bitstream identity（次節）
 
 `get_supported_formats(Encoder)` は required `SdpVideoFormat` だけを返す。
 `Decoder` は現行どおり空を返す。
 
+`&Mp4SampleReader` ではなく `Mp4BitstreamMetadata` を受け取ることで、signature から「呼び出しでファイル I/O が起きない」ことを明示する。
+
 ### bitstream identity
 
-`Mp4SampleReader` は private の zero-sized token 型を `Arc` で 1 度だけ構築し、capability・各 `Mp4EncodedSample`・encoder handler に `Arc::clone` で配布する。
+`Mp4SampleReader` は private の zero-sized token 型を `Arc` で 1 度だけ構築し、`Mp4BitstreamMetadata`・capability・各 `Mp4EncodedSample`・encoder handler に `Arc::clone` で配布する。
 external に露出せず、`Arc::ptr_eq` による同一 reader 判定にだけ使う。
 
-`Arc::ptr_eq` の安全性は identity Arc の全 clone（reader・capability・各 `Mp4EncodedSample`・encoder handler が保持）が生存中に手放されないことで担保する。
+`Arc::ptr_eq` の安全性は identity Arc の全 clone（reader・metadata・capability・各 `Mp4EncodedSample`・encoder handler が保持）が生存中に手放されないことで担保する。
 allocator の address 再利用は wrap 型では防げないため、この生存管理を前提とする。
 加えて、crate 内で他の `Arc<()>` と型で区別し、外部から同型 Arc を偶然構築されるのを防ぐため、`struct Mp4BitstreamIdentity;` のような固有型で wrap する（address 再割り当ての回避が目的ではない）。
 
@@ -104,7 +118,7 @@ allocator の address 再利用は wrap 型では防げないため、この生�
 - 不一致なら callback を呼ばず、`VideoCodecStatus::Error` を返す
 - codec configuration が偶然一致する別 reader の sample も、reader / capability の対応関係が食い違う input として拒否する
 
-reader / capability / capturer は 1 対 1 対 1 で使い、複数 capability を 1 reader から派生させる helper は本 issue で追加しない。
+`Mp4BitstreamMetadata` は `Clone` を持つため技術的には 1 reader から複数 capability を派生できるが、reader / capability / capturer は 1 対 1 対 1 で使い、複数 capability を 1 reader から派生させる helper は本 issue で追加しない。
 
 ### `is_supported` の override
 
@@ -131,15 +145,13 @@ handler は前節の `Arc::ptr_eq` 判定を行う。
 ### `examples/sumomo`
 
 現状の `build_context_config` は `mp4_codec_type: Option<VideoCodecType>` を受け取り、その中で `Mp4PassthroughVideoCodecCapability::new(codec_type)` を組み立てている。
-本 issue では capability 構築が `&Mp4SampleReader` を必要とするため、次のいずれかで書き替える。
+本 issue では capability 構築が `Mp4BitstreamMetadata` を必要とするため、`build_context_config` の signature を `mp4_metadata: Option<Mp4BitstreamMetadata>` に変更する。
 
-- `build_context_config` のシグネチャを `mp4_reader: Option<&Mp4SampleReader>` へ変更し、呼び出し側で reader を先に構築する
-- または、MP4 capability 追加ロジックを別関数（例: `add_mp4_passthrough_capability(&mut context_config, &reader)`）へ切り出し、`build_context_config` は MP4 非依存の設定だけを担当する
-
-いずれの場合も、reader を先に構築 → capability を借用で作成 → capability を `context_config` へ登録 → その後 reader を capturer へ move、という順序を守る。
+呼び出し側は「reader を先に構築 → `reader.bitstream_metadata()` で metadata を取り出し → metadata を `build_context_config` に値渡し → 返ってきた `context_config` を context に登録 → その後 reader を capturer へ move」の順序で使う。
+metadata は値で渡すため build_context_config の呼び出し後に借用が残らず、reader の move との調整も不要になる。
 本 issue では sumomo の他の設定は変更しない。
 
-`examples/sumomo/src/tests.rs` の `build_context_config_mp4_encoder_preference_uses_only_passthrough` と `build_context_config_mp4_manual_internal_encoder_is_passthrough` は現状 `Some(VideoCodecType::H264)` を直接渡しているため、`testdata/` 配下の実 H.264 MP4 fixture から `Mp4SampleReader` を構築して渡す形に書き替える（AGENTS.md により mock / stub は使わない）。
+`examples/sumomo/src/tests.rs` の `build_context_config_mp4_encoder_preference_uses_only_passthrough` と `build_context_config_mp4_manual_internal_encoder_is_passthrough` は現状 `Some(VideoCodecType::H264)` を直接渡しているため、`testdata/` 配下の実 H.264 MP4 fixture から `Mp4SampleReader` を構築し、`bitstream_metadata()` で取り出した値を渡す形に書き替える（AGENTS.md により mock / stub は使わない）。
 
 ## 変更対象
 
@@ -150,19 +162,23 @@ handler は前節の `Arc::ptr_eq` 判定を行う。
 
 ## 完了条件
 
-- `Mp4SampleReader` に `required_sdp_format() -> SdpVideoFormat` があり、H.264 は `packetization-mode=1`、H.265 / VP8 / VP9 / AV1 は bare codec name だけを返す
-- `Mp4PassthroughVideoCodecCapability::new` の signature が `&Mp4SampleReader` を受け取る形に変わる
-- `Mp4PassthroughVideoCodecCapability::get_supported_formats(Encoder)` の返り値が reader の `required_sdp_format()` と一致する
-- `Mp4PassthroughVideoCodecCapability::is_supported` が override され、`Encoder` かつ reader の codec type と一致する場合のみ true を返す test がある
-- reader が private の bitstream identity を生成し、capability・各 `Mp4EncodedSample`・encoder handler で `Arc::clone` を共有する
+- `Mp4SampleReader` に `bitstream_metadata(&self) -> Mp4BitstreamMetadata` があり、reader 構築時に確定した値の cheap clone を返す（呼び出しごとに同じ内容）
+- `Mp4SampleReader` の内部で確定させる required `SdpVideoFormat` は、H.264 は `packetization-mode=1`、H.265 / VP8 / VP9 / AV1 は bare codec name だけを含む
+- `pub struct Mp4BitstreamMetadata` が pub で公開され、フィールドは全て private、getter として `codec_type()` と `required_sdp_format()` を持つ。identity は getter を露出しない
+- `Mp4BitstreamMetadata` は `Clone` を実装し、内部は `Arc::clone` と `SdpVideoFormat` clone のみで cheap にコピーできる
+- `Mp4SampleReader::required_sdp_format` は `pub(crate)` に降格され、外部の唯一の取得経路が `Mp4BitstreamMetadata::required_sdp_format` になる
+- `Mp4PassthroughVideoCodecCapability::new` の signature が `Mp4BitstreamMetadata` を値で受け取る形に変わる
+- `Mp4PassthroughVideoCodecCapability::get_supported_formats(Encoder)` の返り値が metadata の `required_sdp_format()` と一致する
+- `Mp4PassthroughVideoCodecCapability::is_supported` が override され、`Encoder` かつ metadata の codec type と一致する場合のみ true を返す test がある
+- reader が private の bitstream identity を生成し、metadata・capability・各 `Mp4EncodedSample`・encoder handler で `Arc::clone` を共有する
 - `Mp4PassthroughEncoder` は入力 `VideoFrame` の sample identity を `Arc::ptr_eq` で照合し、不一致なら callback を呼ばず `VideoCodecStatus::Error` を返す test がある
 - codec configuration と codec_type が一致しても異なる reader / capability から生成した sample を渡すと `VideoCodecStatus::Error` になり、callback が呼ばれない test がある
-- `VideoCodecPreference::new_from_capability` を通す test で、`Mp4PassthroughVideoCodecCapability` から生成した preference が Encoder かつ reader の codec type と一致するエントリを持つことを確認する
-- `examples/sumomo` の `build_context_config`（またはそこから切り出した MP4 capability 登録関数）が reader を先に構築してから `Mp4PassthroughVideoCodecCapability::new(&reader)` で capability を作り、その後に reader を capturer へ move する順序で動く
-- `examples/sumomo/src/tests.rs` の `build_context_config_mp4_encoder_preference_uses_only_passthrough` と `build_context_config_mp4_manual_internal_encoder_is_passthrough` が `testdata/` 配下の実 H.264 MP4 fixture から `Mp4SampleReader` を構築する形に書き替えられ、mock / stub を使わず合格する
+- `VideoCodecPreference::new_from_capability` を通す test で、`Mp4PassthroughVideoCodecCapability` から生成した preference が Encoder かつ metadata の codec type と一致するエントリを持つことを確認する
+- `examples/sumomo` の `build_context_config` が `mp4_metadata: Option<Mp4BitstreamMetadata>` を値で受け取り、reader 構築 → `bitstream_metadata` → 呼び出し → context 登録 → reader を capturer へ move の順序で動く
+- `examples/sumomo/src/tests.rs` の `build_context_config_mp4_encoder_preference_uses_only_passthrough` と `build_context_config_mp4_manual_internal_encoder_is_passthrough` が `testdata/` 配下の実 H.264 MP4 fixture から `Mp4SampleReader` を構築し、`bitstream_metadata()` で取り出した値を渡す形に書き替えられ、mock / stub を使わず合格する
 - 既存の合成 fixture / real fixture の reader test が引き続き成功する
 - reader / capability / encoder handler の unit test は mock / stub、sleep、`#[ignore]`、外部 command、ネットワークを使用しない
 - `cargo test --workspace` が成功する
 - `cargo clippy --workspace --all-targets -- -D warnings` が成功する
-- `CHANGES.md` の develop セクションに `[CHANGE]` を追記する（`Mp4PassthroughVideoCodecCapability::new` の signature 変更が破壊的変更のため）
+- `CHANGES.md` の develop セクションに `[CHANGE]` を追記する（`Mp4PassthroughVideoCodecCapability::new` の signature 変更と `Mp4BitstreamMetadata` の新設が破壊的変更のため）
 - production log は英語、コメントとテストの assertion message は日本語にする
