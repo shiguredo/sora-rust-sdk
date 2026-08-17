@@ -14,6 +14,7 @@
 //!
 //! 対応コーデック: H.264, H.265, VP8, VP9, AV1
 use std::io::{self, BufReader, Read, Seek};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -351,11 +352,11 @@ pub struct Mp4SampleReader {
 
 impl Mp4SampleReader {
     /// MP4 ファイルを読み込み、ビデオトラックの全サンプルを事前解析する。
-    pub fn new(path: &str) -> crate::error::Result<Self> {
-        Self::new_inner(path).map_err(crate::error::Error::from)
+    pub fn new<P: AsRef<Path>>(path: P) -> crate::error::Result<Self> {
+        Self::new_inner(path.as_ref()).map_err(crate::error::Error::from)
     }
 
-    fn new_inner(path: &str) -> Result<Self> {
+    fn new_inner(path: &Path) -> Result<Self> {
         use shiguredo_mp4::demux::{Input, Mp4FileDemuxer};
 
         let mut file = BufReader::new(std::fs::File::open(path)?);
@@ -1286,11 +1287,7 @@ mod tests {
         );
         let path = std::env::temp_dir().join(tmp_name);
         std::fs::write(&path, fixture).expect("一時 fixture の書き込みに失敗しました");
-        let reader = Mp4SampleReader::new(
-            path.to_str()
-                .expect("パスは有効な UTF-8 である必要があります"),
-        )
-        .expect("fixture MP4 のパースに失敗しました");
+        let reader = Mp4SampleReader::new(&path).expect("fixture MP4 のパースに失敗しました");
         (reader, FixtureFile { path })
     }
 

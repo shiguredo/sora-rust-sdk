@@ -20,11 +20,7 @@ fn h264_metadata_from_fixture(tag: &str) -> Mp4BitstreamMetadata {
     );
     let path = std::env::temp_dir().join(tmp_name);
     std::fs::write(&path, fixture).expect("一時 fixture の書き込みに失敗しました");
-    let reader = Mp4SampleReader::new(
-        path.to_str()
-            .expect("パスは有効な UTF-8 である必要があります"),
-    )
-    .expect("fixture MP4 のパースに失敗しました");
+    let reader = Mp4SampleReader::new(&path).expect("fixture MP4 のパースに失敗しました");
     let metadata = reader.bitstream_metadata();
     let _ = std::fs::remove_file(&path);
     metadata
