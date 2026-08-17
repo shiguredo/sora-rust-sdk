@@ -5,6 +5,7 @@
 - Completed: {YYYY-MM-DD}
 - Branch: feature/refactor-mp4-reader-driven-capability
 - Polished: 2026-08-13
+- Updated: 2026-08-17
 
 ## 目的
 
@@ -12,7 +13,7 @@
 この基盤に H.264 の profile-level-id 対応（issue 0141）と AV1 の configOBUs 対応（issue 0097）を積む。
 B frame timeline 対応（pending 中の issue 0096）もこの基盤を前提とする。
 
-sample entry の一貫性検証（issue 0142）と preference validation の bare 検証削除・factory pass-through の明文化（issue 0143）は、本 issue と独立に切り出して先行 merge する構成にした。
+sample entry の一貫性検証（issue 0142）と preference validation の bare 検証削除・factory pass-through の明文化（issue 0143）は、本 issue と独立に切り出して先行 merge を完了している。
 
 ## 優先度根拠
 
@@ -39,13 +40,12 @@ codec 固有 parameter を capability 側で advertise できるようにする�
 
 ## 前提
 
-以下 2 issue を先行して merge する構成とする。
+以下 2 issue は本 issue の前提として既に develop へ merge 済み。
 
 - **issue 0142（sample_entry 一貫性の明示エラー化）**: `Mp4SampleReader::new_inner` が全 `Some(sample_entry)` を `extract_track_info` に通し、`codec_type` / `width` / `height` / `nal_length_size` / `parameter_sets` の byte-for-byte 一致を検証する。相違があれば `Mp4Error::InconsistentSampleDescription` で失敗
 - **issue 0143（preference validation の bare 検証削除 + factory pass-through 明文化）**: `validate_video_codec_preference` から bare `SdpVideoFormat` を `resolve_sdp_format` に投入する重複検証を削除し、`is_supported` を preference validation の source of truth にする。`SoraVideoEncoderFactory::create` の pass-through を production コメント + 回帰テストで固定
 
-上記が merge されていれば、本 issue は「reader-driven capability + Arc identity + `required_sdp_format` API + `is_supported` override + sumomo 更新」に絞れる。
-0143 が未 merge のまま本 issue を先行 merge しても現行の Mp4 H.264 required format（`packetization-mode=1`）は default `resolve_sdp_format` の fuzzy match を通過するため、実害はない（ただし後発の 0141 / 0097 が preference validation で拒否される）。
+これらが merge 済みのため、本 issue は「reader-driven capability + Arc identity + `required_sdp_format` API + `is_supported` override + sumomo 更新」に絞れる。
 
 ## 設計方針
 
@@ -57,8 +57,8 @@ codec 固有 parameter を capability 側で advertise できるようにする�
   - AV1 profile / level / tier 抽出と negotiation は issue 0097 で追加する
   - 本 issue の H.264 required format は現行と同じ `packetization-mode=1` のみ、H.265 / VP8 / VP9 / AV1 は現行と同じ bare format
 - `resolve_sdp_format` の codec 固有 negotiation は本 issue で追加せず、既存の fuzzy match 挙動を維持する
-- `validate_video_codec_preference` の bare `SdpVideoFormat` 検証削除と `SoraVideoEncoderFactory::create` の pass-through 固定は issue 0143 で扱う
-- sample entry の一貫性検証は issue 0142 で扱う
+- `validate_video_codec_preference` の bare `SdpVideoFormat` 検証削除と `SoraVideoEncoderFactory::create` の pass-through 固定は issue 0143 で対応済み
+- sample entry の一貫性検証は issue 0142 で対応済み
 - B frame の presentation timestamp 対応（composition time offset の保持、sample timeline、loop epoch など）は issue 0096 に残す
 - 非ゼロ composition time offset の拒否（現行の `Mp4Error::UnsupportedCompositionTimeOffset`）を本 issue で変更しない
 - MP4 audio track は本 issue の対象外とする
@@ -117,15 +117,14 @@ reader / capability / capturer は 1 対 1 対 1 で使い、複数 capability �
 required parameter を持つ format を advertise しても、bare 生成による preference 判定の false 化を回避する。
 
 `VideoCodecPreference::new_from_capability` はすでに `capability.is_supported` を経由するため、override された `is_supported` の結果がそのまま preference 生成に使われる。
-issue 0143 で `validate_video_codec_preference` から bare `SdpVideoFormat` の重複検証が削除されているため、override された `is_supported` の結果が preference validation の source of truth になる。
-0143 が未 merge の状態でも、Mp4 の H.264 required format（`packetization-mode=1`）は default `resolve_sdp_format` の fuzzy match を通るため本 issue の Mp4 経路自体は動く（ただし後発の 0141 / 0097 が preference validation で拒否される）。
+issue 0143 で `validate_video_codec_preference` から bare `SdpVideoFormat` の重複検証が削除済みのため、override された `is_supported` の結果が preference validation の source of truth になる。
 
 ### `resolve_sdp_format` と factory 経路
 
 本 issue では `resolve_sdp_format` の実装を変更せず、既存の `get_supported_formats` との fuzzy match 挙動を維持する。
 H.264 profile-level-id negotiation は issue 0141 で、AV1 profile / level / tier negotiation は issue 0097 で本 issue の基盤の上に追加する。
 
-`SoraVideoEncoderFactory::create` の pass-through 挙動（`capability.resolve_sdp_format` の返り値を `create_video_encoder` に渡す）は issue 0143 で production コメントと回帰テストにより固定される。
+`SoraVideoEncoderFactory::create` の pass-through 挙動（`capability.resolve_sdp_format` の返り値を `create_video_encoder` に渡す）は issue 0143 で production コメントと回帰テストにより固定済み。
 本 issue の `Mp4PassthroughVideoCodecCapability::create_video_encoder` は現行の codec type 一致判定に加え、capability が保持する bitstream identity を handler の constructor 引数として渡す。
 handler は前節の `Arc::ptr_eq` 判定を行う。
 
