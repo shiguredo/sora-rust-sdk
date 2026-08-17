@@ -172,6 +172,23 @@ impl From<shiguredo_mp4::demux::DemuxError> for Mp4Error {
 
 type Result<T> = std::result::Result<T, Mp4Error>;
 
+/// MP4 パススルー経路の bitstream 出処を識別するトークン。
+///
+/// zero-sized struct。`Mp4SampleReader` が構築時に `Arc` で 1 度だけ生成し、
+/// `Mp4PassthroughVideoCodecCapability`・各 `Mp4EncodedSample`・
+/// `Mp4PassthroughEncoder` に `Arc::clone` で配布する。
+/// `Arc::ptr_eq` により「同じ reader から派生した sample か」を判定する
+/// 用途にだけ使い、外部には露出しない。
+///
+/// アドレス比較の安全性は、identity Arc のすべての clone
+/// （reader・capability・各 sample・encoder handler が保持）が
+/// 生存中に手放されないことで担保する。
+/// allocator によるアドレス再利用は zero-sized wrap 型では防げないため、
+/// この生存管理を前提とする。
+/// 加えて、crate 内の他の `Arc<()>` と型で区別し、外部から偶然同型 `Arc`
+/// を渡されないよう固有型で wrap する。
+pub(crate) struct Mp4BitstreamIdentity;
+
 /// MP4 から抽出したエンコード済みビデオサンプル。
 ///
 /// `Mp4SampleReader` が生成し、native `VideoFrameBuffer` に保持されて
@@ -189,6 +206,10 @@ pub(crate) struct Mp4EncodedSample {
     pub height: u32,
     /// ビデオコーデック種別。
     pub codec_type: VideoCodecType,
+    /// この sample を生成した `Mp4SampleReader` の identity。
+    /// `Mp4PassthroughEncoder` の `encode` で `Arc::ptr_eq` により
+    /// 「capability が期待する reader と同一の reader 由来か」を照合する。
+    pub identity: Arc<Mp4BitstreamIdentity>,
 }
 
 impl VideoFrameBufferHandler for Mp4EncodedSample {
@@ -277,6 +298,10 @@ pub struct Mp4SampleReader {
     /// 長さは samples.len() + 1 で、末尾が動画全体の長さ。
     /// フレームペーシングで絶対時刻ベースの待機に使用する。
     cumulative: Vec<Mp4Timestamp>,
+    /// この reader 由来の sample を識別するトークン。
+    /// `Mp4PassthroughVideoCodecCapability`・各 `Mp4EncodedSample`・
+    /// `Mp4PassthroughEncoder` に `Arc::clone` で共有する。
+    identity: Arc<Mp4BitstreamIdentity>,
 }
 
 impl Mp4SampleReader {
@@ -436,6 +461,7 @@ impl Mp4SampleReader {
             track_info,
             samples,
             cumulative,
+            identity: Arc::new(Mp4BitstreamIdentity),
         })
     }
 
@@ -637,6 +663,45 @@ impl Mp4SampleReader {
         self.track_info.codec_type
     }
 
+    /// この reader が保持する bitstream identity の clone を返す。
+    ///
+    /// `Mp4PassthroughVideoCodecCapability` が capability 構築時に取得し、
+    /// 生成した `Mp4EncodedSample` と共通の identity を握らせるために使う。
+    pub(crate) fn identity(&self) -> Arc<Mp4BitstreamIdentity> {
+        self.identity.clone()
+    }
+
+    /// この MP4 の bitstream 実態から、パススルー送信に必要な `SdpVideoFormat` を返す。
+    ///
+    /// reader 構築時に確定するため、呼び出しごとに同じ内容を返す。
+    /// 現在は各 codec について以下を返す:
+    /// - H.264: `H264`, `packetization-mode=1`
+    /// - H.265: `H265`
+    /// - VP8: `VP8`
+    /// - VP9: `VP9`
+    /// - AV1: `AV1`
+    ///
+    /// codec 固有 parameter（H.264 の profile-level-id、AV1 の
+    /// profile / level / tier など）は、各 codec の別対応で拡張する。
+    pub fn required_sdp_format(&self) -> SdpVideoFormat {
+        match self.track_info.codec_type {
+            VideoCodecType::H264 => {
+                let mut format = SdpVideoFormat::new("H264");
+                format.parameters_mut().set("packetization-mode", "1");
+                format
+            }
+            VideoCodecType::H265 => SdpVideoFormat::new("H265"),
+            VideoCodecType::Vp8 => SdpVideoFormat::new("VP8"),
+            VideoCodecType::Vp9 => SdpVideoFormat::new("VP9"),
+            VideoCodecType::Av1 => SdpVideoFormat::new("AV1"),
+            // 未対応 codec は `new_inner` の `extract_track_info` が
+            // `Mp4Error::UnsupportedVideoCodec` で拒否するためここには来ない。
+            VideoCodecType::Generic | VideoCodecType::Unknown(_) => {
+                unreachable!("unsupported codec is rejected in Mp4SampleReader::new_inner")
+            }
+        }
+    }
+
     /// 指定インデックスのサンプルデータを取得する。
     ///
     /// サンプルデータはファイルから読み込むため、I/O エラーを返し得る。
@@ -675,6 +740,7 @@ impl Mp4SampleReader {
             width: self.track_info.width as u32,
             height: self.track_info.height as u32,
             codec_type: self.track_info.codec_type,
+            identity: self.identity.clone(),
         })
     }
 
@@ -749,12 +815,38 @@ fn length_prefixed_nalu_to_annex_b(data: &[u8], nal_length_size: u8) -> Vec<u8> 
 /// 実際のエンコード処理は行わず、`VideoFrame` の native `VideoFrameBuffer` から
 /// 事前エンコード済みのサンプルを取り出して `EncodedImage` として WebRTC に渡す。
 ///
+/// `Mp4PassthroughVideoCodecCapability::create_video_encoder` が生成し、
+/// 生成元 capability と同じ `Mp4BitstreamIdentity` を握る。`encode` で
+/// 受信 sample の identity と `Arc::ptr_eq` で照合し、別の reader 由来の sample
+/// を差し込まれた場合は callback を呼ばず `VideoCodecStatus::Error` を返す。
+///
 /// `has_trusted_rate_controller=true` を設定することで、
 /// WebRTC のビットレート制御がこのエンコーダーに対して介入しないようにする。
 /// パススルーなのでビットレートの調整は不可能であり、
 /// 代わりに `--video-bit-rate` で十分な帯域を確保する必要がある。
 struct Mp4PassthroughEncoder {
     callback: Option<VideoEncoderEncodedImageCallbackPtr>,
+    /// この encoder を生成した capability が保持する identity。
+    /// `encode` で受信 sample の identity と `Arc::ptr_eq` で照合する。
+    expected_identity: Arc<Mp4BitstreamIdentity>,
+}
+
+impl Mp4PassthroughEncoder {
+    fn new(expected_identity: Arc<Mp4BitstreamIdentity>) -> Self {
+        Self {
+            callback: None,
+            expected_identity,
+        }
+    }
+
+    /// 受信 sample の identity が、この encoder が期待する identity と同一かを判定する。
+    ///
+    /// `Arc::ptr_eq` によるアドレス比較で、同じ `Mp4SampleReader` から派生した
+    /// sample かを判定する。codec configuration が偶然一致する別 reader の sample も
+    /// ここで拒否する。
+    fn identity_matches(&self, sample: &Mp4EncodedSample) -> bool {
+        Arc::ptr_eq(&sample.identity, &self.expected_identity)
+    }
 }
 
 impl VideoEncoderHandler for Mp4PassthroughEncoder {
@@ -794,6 +886,14 @@ impl VideoEncoderHandler for Mp4PassthroughEncoder {
                 return VideoCodecStatus::Error;
             }
         };
+
+        // 別 reader 由来の sample を差し込まれた場合の防御。
+        if !self.identity_matches(sample) {
+            rtc_log_warning!(
+                "MP4Passthrough: rejected sample from a different reader (bitstream identity mismatch)"
+            );
+            return VideoCodecStatus::Error;
+        }
 
         rtc_log_verbose!(
             "MP4Passthrough: encode() keyframe={} size={} bytes",
@@ -876,15 +976,39 @@ impl VideoEncoderHandler for Mp4PassthroughEncoder {
 ///
 /// WebRTC のコーデックパイプラインにパススルーエンコーダーを登録するためのアダプター。
 /// MP4 から検出されたコーデック種別のみをサポートし、デコーダーは提供しない (送信専用)。
+///
+/// `Mp4SampleReader` の借用から構築し、reader が確定した required `SdpVideoFormat`
+/// と bitstream identity を capability・生成される encoder handler で共有する。
+/// これにより、この capability が生成する encoder が受け取る `VideoFrame` が
+/// 「同じ reader 由来の sample」であることを実行時に保証できる。
 pub struct Mp4PassthroughVideoCodecCapability {
     /// MP4 から検出されたコーデック種別。
     codec_type: VideoCodecType,
+    /// reader 由来の required `SdpVideoFormat`。`get_supported_formats(Encoder)` が返す。
+    required_format: SdpVideoFormat,
+    /// reader から複製した bitstream identity。
+    /// 生成する `Mp4PassthroughEncoder` に `Arc::clone` で渡し、encoder は
+    /// 受信 sample の identity と `Arc::ptr_eq` で照合する。
+    identity: Arc<Mp4BitstreamIdentity>,
 }
 
 impl Mp4PassthroughVideoCodecCapability {
-    /// 指定された [VideoCodecType] で `Mp4PassthroughVideoCodecCapability` を生成する。
-    pub fn new(codec_type: VideoCodecType) -> Self {
-        Self { codec_type }
+    /// `Mp4SampleReader` の借用から `Mp4PassthroughVideoCodecCapability` を生成する。
+    ///
+    /// reader / capability / capturer は 1 対 1 対 1 で使う。呼び出し側は
+    /// 1. reader を構築する
+    /// 2. reader の借用でこの capability を作る
+    /// 3. capability を context に登録する
+    /// 4. 同じ reader を [`Mp4VideoCapturer::new`] へ move する
+    ///
+    /// の順序を守ること。この順序により、encoder が受け取る sample の identity が
+    /// capability の identity と一致することが保証される。
+    pub fn new(reader: &Mp4SampleReader) -> Self {
+        Self {
+            codec_type: reader.codec_type(),
+            required_format: reader.required_sdp_format(),
+            identity: reader.identity(),
+        }
     }
 }
 
@@ -897,18 +1021,21 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
         if direction != CodecDirection::Encoder {
             return Vec::new();
         }
-        match self.codec_type {
-            VideoCodecType::H264 => {
-                let mut format = SdpVideoFormat::new("H264");
-                format.parameters_mut().set("packetization-mode", "1");
-                vec![format]
-            }
-            VideoCodecType::H265 => vec![SdpVideoFormat::new("H265")],
-            VideoCodecType::Vp8 => vec![SdpVideoFormat::new("VP8")],
-            VideoCodecType::Vp9 => vec![SdpVideoFormat::new("VP9")],
-            VideoCodecType::Av1 => vec![SdpVideoFormat::new("AV1")],
-            _ => Vec::new(),
-        }
+        // reader 由来の required format だけを広告する。codec 固有の
+        // required parameter（例: H.264 の profile-level-id）を持つ format も
+        // ここから返せる。
+        vec![self.required_format.clone()]
+    }
+
+    /// この capability が preference に載るかを判定する。
+    ///
+    /// デフォルト実装は bare `SdpVideoFormat` を組み立てて `resolve_sdp_format`
+    /// に通す形だが、reader 由来 required format が codec 固有 parameter を
+    /// 要求する場合に bare 入力が拒否され、false になってしまう。それを避けるため
+    /// override し、Encoder かつ reader の codec type と一致する場合のみ true を返す。
+    /// preference の可否判定はこの結果を source of truth として扱われる。
+    fn is_supported(&self, direction: CodecDirection, codec_type: VideoCodecType) -> bool {
+        direction == CodecDirection::Encoder && codec_type == self.codec_type
     }
 
     fn create_video_encoder(
@@ -925,8 +1052,9 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
         if format_codec_type != self.codec_type {
             return None;
         }
+        // encoder handler にも identity を共有し、受信 sample との照合を可能にする。
         Some(VideoEncoder::new_with_handler(Box::new(
-            Mp4PassthroughEncoder { callback: None },
+            Mp4PassthroughEncoder::new(self.identity.clone()),
         )))
     }
 }
@@ -1071,50 +1199,201 @@ impl Drop for Mp4VideoCapturer {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
+    use crate::video_codec_preference::VideoCodecPreference;
+
+    /// テスト実行中だけ存在する一時 fixture ファイル。Drop で自動的に削除する。
+    ///
+    /// 各テストが個別に tmp ファイルを作ることで、テスト実行順序に依存しない。
+    struct FixtureFile {
+        path: PathBuf,
+    }
+
+    impl Drop for FixtureFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    /// H.264 の fixture MP4 を一時ファイルに書き出して `Mp4SampleReader` を生成する。
+    /// 返される `FixtureFile` が drop されるまでファイルは残る。
+    fn h264_reader_from_fixture(tag: &str) -> (Mp4SampleReader, FixtureFile) {
+        let fixture = include_bytes!("../../testdata/red-320x320-h264.mp4");
+        let tmp_name = format!(
+            "sora-sdk-mp4-passthrough-{}-{}-{}.mp4",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("システム時刻は UNIX_EPOCH より後である必要があります")
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(tmp_name);
+        std::fs::write(&path, fixture).expect("一時 fixture の書き込みに失敗しました");
+        let reader = Mp4SampleReader::new(
+            path.to_str()
+                .expect("パスは有効な UTF-8 である必要があります"),
+        )
+        .expect("fixture MP4 のパースに失敗しました");
+        (reader, FixtureFile { path })
+    }
 
     #[test]
-    fn passthrough_capability_supports_only_selected_encoder_codec() {
-        let capability = Mp4PassthroughVideoCodecCapability::new(VideoCodecType::H264);
+    fn passthrough_capability_advertises_only_reader_required_format() {
+        let (reader, _fixture) = h264_reader_from_fixture("required-format");
+        let capability = Mp4PassthroughVideoCodecCapability::new(&reader);
+
         assert_eq!(capability.get_implementation().name(), "mp4-passthrough");
-        assert!(capability.is_supported(CodecDirection::Encoder, VideoCodecType::H264));
-        assert!(!capability.is_supported(CodecDirection::Encoder, VideoCodecType::Vp9));
-        assert!(!capability.is_supported(CodecDirection::Decoder, VideoCodecType::H264));
 
-        assert!(
-            capability
-                .create_video_encoder(
-                    shiguredo_webrtc::Environment::new().as_ref(),
-                    SdpVideoFormat::new("H264").as_ref(),
-                )
-                .is_some()
+        // Encoder 側の広告フォーマットは reader の required_sdp_format() と同じ 1 件だけ。
+        let encoder_formats = capability.get_supported_formats(CodecDirection::Encoder);
+        assert_eq!(
+            encoder_formats.len(),
+            1,
+            "Encoder 側は required_sdp_format() の 1 件だけを広告するはずです"
         );
-        assert!(
-            capability
-                .create_video_encoder(
-                    shiguredo_webrtc::Environment::new().as_ref(),
-                    SdpVideoFormat::new("VP9").as_ref(),
-                )
-                .is_none()
+        let required = reader.required_sdp_format();
+        assert_eq!(
+            encoder_formats[0]
+                .name()
+                .expect("format 名を取得できるはず"),
+            required.name().expect("required の name を取得できるはず")
         );
-        assert!(
-            capability
-                .create_video_decoder(
-                    shiguredo_webrtc::Environment::new().as_ref(),
-                    SdpVideoFormat::new("H264").as_ref(),
-                )
-                .is_none()
+        let mut owned = encoder_formats[0].clone();
+        let params: std::collections::HashMap<String, String> =
+            owned.parameters_mut().iter().collect();
+        assert_eq!(
+            params.get("packetization-mode").map(String::as_str),
+            Some("1"),
+            "H.264 required format は packetization-mode=1 を保持するはずです"
         );
 
-        let resolved = capability.resolve_sdp_format(
-            CodecDirection::Encoder,
-            SdpVideoFormat::new("H264").as_ref(),
+        // Decoder 側はパススルー送信のみなので空。
+        assert!(
+            capability
+                .get_supported_formats(CodecDirection::Decoder)
+                .is_empty(),
+            "Decoder 方向は空を返すはずです"
         );
-        assert!(resolved.is_some());
+    }
 
-        let unresolved = capability
-            .resolve_sdp_format(CodecDirection::Encoder, SdpVideoFormat::new("VP8").as_ref());
-        assert!(unresolved.is_none());
+    #[test]
+    fn passthrough_capability_is_supported_only_for_encoder_and_reader_codec_type() {
+        let (reader, _fixture) = h264_reader_from_fixture("is-supported");
+        let capability = Mp4PassthroughVideoCodecCapability::new(&reader);
+
+        // Encoder かつ reader の codec type (H.264) と一致する場合だけ true。
+        assert!(
+            capability.is_supported(CodecDirection::Encoder, VideoCodecType::H264),
+            "Encoder かつ H.264 は true を返すはずです"
+        );
+        assert!(
+            !capability.is_supported(CodecDirection::Encoder, VideoCodecType::Vp9),
+            "Encoder でも別 codec type は false を返すはずです"
+        );
+        assert!(
+            !capability.is_supported(CodecDirection::Decoder, VideoCodecType::H264),
+            "Decoder 方向は同じ codec type でも false を返すはずです"
+        );
+    }
+
+    #[test]
+    fn passthrough_capability_creates_encoder_only_for_reader_codec_type() {
+        let (reader, _fixture) = h264_reader_from_fixture("create-encoder");
+        let capability = Mp4PassthroughVideoCodecCapability::new(&reader);
+        let env = shiguredo_webrtc::Environment::new();
+
+        // reader の codec type と一致する H.264 では encoder が生成される。
+        assert!(
+            capability
+                .create_video_encoder(env.as_ref(), SdpVideoFormat::new("H264").as_ref())
+                .is_some(),
+            "reader の codec type と一致する H.264 は encoder を生成できるはずです"
+        );
+        // 別の codec type ではエンコーダーは生成されない。
+        assert!(
+            capability
+                .create_video_encoder(env.as_ref(), SdpVideoFormat::new("VP9").as_ref())
+                .is_none(),
+            "別の codec type の format は encoder を生成しないはずです"
+        );
+        // Decoder は常に生成しない (send only)。
+        assert!(
+            capability
+                .create_video_decoder(env.as_ref(), SdpVideoFormat::new("H264").as_ref())
+                .is_none(),
+            "Decoder は生成しないはずです (send only)"
+        );
+    }
+
+    #[test]
+    fn passthrough_capability_preference_registers_encoder_entry() {
+        let (reader, _fixture) = h264_reader_from_fixture("preference");
+        let capability = Mp4PassthroughVideoCodecCapability::new(&reader);
+
+        // is_supported override の結果が VideoCodecPreference::new_from_capability に
+        // そのまま反映されることを確認する。
+        let preference = VideoCodecPreference::new_from_capability(&capability);
+        let codecs = preference.codecs();
+
+        // Encoder 方向で H.264 のエントリが 1 件だけあるべき。
+        let encoder_entries: Vec<_> = codecs
+            .iter()
+            .filter(|codec| {
+                codec.direction() == CodecDirection::Encoder
+                    && codec.codec_type() == VideoCodecType::H264
+            })
+            .collect();
+        assert_eq!(
+            encoder_entries.len(),
+            1,
+            "preference は Encoder かつ H.264 のエントリを 1 件持つはずです"
+        );
+        assert_eq!(
+            encoder_entries[0].implementation(),
+            &capability.get_implementation(),
+            "エントリの implementation は passthrough capability のものと一致するはずです"
+        );
+
+        // Decoder 方向のエントリは無いはず (is_supported が false)。
+        assert!(
+            codecs
+                .iter()
+                .all(|codec| codec.direction() != CodecDirection::Decoder),
+            "Decoder 方向のエントリは持たないはずです"
+        );
+    }
+
+    #[test]
+    fn passthrough_encoder_identity_matches_only_same_reader_sample() {
+        // Arc::ptr_eq による identity 照合が、同じ reader 由来の sample だけを受理し、
+        // codec configuration が一致する別 reader の sample は拒否することを確認する。
+        let (mut reader_a, _fixture_a) = h264_reader_from_fixture("identity-a");
+        let (mut reader_b, _fixture_b) = h264_reader_from_fixture("identity-b");
+
+        // 両 reader は同じ fixture 由来なので codec_type / 解像度 / avcC は等値になる。
+        assert_eq!(reader_a.codec_type(), reader_b.codec_type());
+
+        let capability_a = Mp4PassthroughVideoCodecCapability::new(&reader_a);
+        let encoder = Mp4PassthroughEncoder::new(capability_a.identity.clone());
+
+        let sample_a = reader_a
+            .get_sample(0)
+            .expect("reader_a のサンプル取得に失敗しました");
+        let sample_b = reader_b
+            .get_sample(0)
+            .expect("reader_b のサンプル取得に失敗しました");
+
+        assert!(
+            encoder.identity_matches(&sample_a),
+            "同じ reader 由来の sample は identity が一致するはずです"
+        );
+        assert!(
+            !encoder.identity_matches(&sample_b),
+            "別 reader 由来の sample は codec configuration が等しくても identity が不一致のはずです"
+        );
     }
 
     /// テスト用の基準 `Mp4VideoTrackInfo` を返す。

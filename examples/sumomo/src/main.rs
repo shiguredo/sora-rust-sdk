@@ -90,7 +90,7 @@ fn add_video_codec_capability(
 
 fn build_context_config(
     adm_config: sora_sdk::AdmConfig,
-    mp4_codec_type: Option<VideoCodecType>,
+    mp4_reader: Option<&Mp4SampleReader>,
     openh264_path: Option<&str>,
     video_codec_implementation: VideoCodecImplementationSelections,
 ) -> Result<SoraConnectionContextConfig> {
@@ -218,9 +218,13 @@ fn build_context_config(
     // implementation を上書きする) のため、この順序が「MP4 の実 codec の Encoder が
     // passthrough になる」ことの不変条件になっている。順序が変わると下のフィルタで
     // Encoder エントリが 0 件になり、MP4 送信が静かに成立しなくなる。
-    if let Some(codec_type) = mp4_codec_type {
+    //
+    // reader は借用で受け取り、この関数が返った後も呼び出し側で move できるようにする。
+    // 呼び出し側は「reader 構築 → capability を借用で作成 → context_config 登録 →
+    // reader を capturer へ move」の順を守ること。
+    if let Some(reader) = mp4_reader {
         let passthrough_capability: Box<dyn VideoCodecCapability> =
-            Box::new(Mp4PassthroughVideoCodecCapability::new(codec_type));
+            Box::new(Mp4PassthroughVideoCodecCapability::new(reader));
         let passthrough_implementation = passthrough_capability.get_implementation();
         add_video_codec_capability(&mut context_config, passthrough_capability);
 
@@ -558,9 +562,13 @@ fn build_and_run_connection(
     #[cfg(not(feature = "media-device"))]
     let adm_config = sora_sdk::AdmConfig::NoAudioDevice;
 
+    // build_context_config には reader の借用だけ渡し、この関数呼び出しが返ったら
+    // 借用が終了する。後段の attach_sender_tracks に対しては mp4_state を move
+    // できる（context 構築で identity Arc がすでに複製されているため、reader を
+    // capturer に move しても capability 側で照合できる）。
     let context_config = build_context_config(
         adm_config,
-        mp4_codec_type,
+        mp4_state.as_ref().map(|(reader, _)| reader),
         args.openh264_path.as_deref(),
         args.video_codec_implementation.clone(),
     )?;
