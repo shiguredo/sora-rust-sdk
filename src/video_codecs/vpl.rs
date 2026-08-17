@@ -121,7 +121,7 @@ fn frame_type_from_vpl(picture_type: PictureType) -> VideoFrameType {
 // `u16` のため、共通ヘルパーの戻り値 (`u32`) を変換する。65,535 kbps 超は
 // 現行どおり `u16::MAX` でクリップする（サイレントに壊れるリスクは
 // VPL の API 上限自体に由来するため）。
-fn target_kbps_from_bps(target_bitrate_bps: u32) -> u16 {
+fn target_kbps_u16(target_bitrate_bps: u32) -> u16 {
     u16::try_from(helpers::target_kbps_from_bps(target_bitrate_bps)).unwrap_or(u16::MAX)
 }
 
@@ -286,7 +286,7 @@ impl VplVideoEncoder {
             1,
             vpl_rate_control_mode(self.codec_type),
         );
-        config.target_kbps = Some(target_kbps_from_bps(self.target_bitrate_bps));
+        config.target_kbps = Some(target_kbps_u16(self.target_bitrate_bps));
 
         let callback_state_for_callback = self.callback_state.clone();
         let callback_codec_type = self.codec_type;
@@ -314,7 +314,7 @@ impl VplVideoEncoder {
             });
         };
         let params = ReconfigureParams {
-            target_kbps: Some(target_kbps_from_bps(self.target_bitrate_bps)),
+            target_kbps: Some(target_kbps_u16(self.target_bitrate_bps)),
             framerate_num: Some(self.framerate.max(1)),
             framerate_den: Some(1),
             ..ReconfigureParams::default()

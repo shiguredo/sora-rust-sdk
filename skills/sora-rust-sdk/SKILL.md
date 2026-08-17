@@ -543,5 +543,5 @@ if let Some(url) = handle.selected_signaling_url().await? {
 - **`VideoTrackSource` は本クレートでは作らない**: `shiguredo_webrtc` 側の capturer / source、もしくは本クレートの `Mp4VideoCapturer` / `LibcameraVideoCapturer` から生成する。
 - **`send_message` のラベル制約**: SDK 内部用ラベル（`signaling`、`stats`、`push`、`notify`、`rpc`）および `#` プレフィックスのないラベル、Offer 応答の `data_channels` に含まれていないラベルを渡すと `Error::InvalidDataChannelLabel` を返す。`on_message` は `#` プレフィックスのユーザー定義 DataChannel 専用。
 - **JSON-RPC の id は SDK が管理する**: 利用側が `id` を組み立てる必要はない。`params` の中身だけ渡す。
-- **ロギングは `shiguredo_webrtc` の `rtc_log_*` マクロ**: SDK 内のログは libwebrtc 側 (`rtc_log_info!` / `rtc_log_warning!` / `rtc_log_error!`) に流れる。`log` / `tracing` クレートには依存していない。
+- **ロギングは `shiguredo_webrtc` の `rtc_log_*` マクロ**: SDK 内のログは libwebrtc 側 (`rtc_log_verbose!` / `rtc_log_info!` / `rtc_log_warning!` / `rtc_log_error!`) に流れる。`log` / `tracing` クレートには依存していない。
 - **デフォルトの ADM は Dummy**: マイク入力が必要な場合は `AdmConfig::UseBuiltIn` か `UseExternal` を明示する。

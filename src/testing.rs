@@ -130,17 +130,22 @@ mod tests {
         );
         // 公開フォーマットのリストが is_supported / resolve_sdp_format /
         // create_video_encoder にも効くことを確認する。
-        assert!(capability.is_supported(CodecDirection::Encoder, VideoCodecType::Vp9));
+        assert!(
+            capability.is_supported(CodecDirection::Encoder, VideoCodecType::Vp9),
+            "公開フォーマットに含まれる VP9 は is_supported で true になるべきです"
+        );
         let vp9 = SdpVideoFormat::new("VP9");
         assert!(
             capability
                 .resolve_sdp_format(CodecDirection::Encoder, vp9.as_ref())
-                .is_some()
+                .is_some(),
+            "公開フォーマットに含まれる VP9 は resolve_sdp_format で解決できるべきです"
         );
         assert!(
             capability
                 .create_video_encoder(shiguredo_webrtc::Environment::new().as_ref(), vp9.as_ref())
-                .is_some()
+                .is_some(),
+            "公開フォーマットに含まれる VP9 はエンコーダーを生成できるべきです"
         );
     }
 }

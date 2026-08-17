@@ -460,7 +460,6 @@ pub(crate) fn parse_args(mut args: noargs::RawArgs) -> Result<Args> {
         video_bit_rate,
         input_mp4,
         openh264_path,
-        video_codec_list: false,
         data_channel_signaling,
         ignore_disconnect_websocket,
         simulcast,
@@ -481,8 +480,7 @@ pub(crate) fn parse_args(mut args: noargs::RawArgs) -> Result<Args> {
         video_input_device,
         #[cfg(feature = "media-device")]
         audio_input_device,
-        #[cfg(feature = "media-device")]
-        list_devices: false,
+        ..Args::default()
     })
 }
 

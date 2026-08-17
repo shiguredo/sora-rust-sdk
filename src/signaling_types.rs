@@ -91,7 +91,7 @@ impl IncomingMessage {
     /// `config.iceServers` をパースする。
     ///
     /// `config` / `iceServers` が存在しない場合は空リストを返す。
-    pub fn parse_ice_servers(value: RawJsonValue) -> Result<Vec<IceServerConfig>> {
+    fn parse_ice_servers(value: RawJsonValue) -> Result<Vec<IceServerConfig>> {
         Self::parse_optional(value, "config", |config| {
             Self::parse_optional(config, "iceServers", |ice_servers| {
                 ice_servers.to_array()?.map(|v| v.try_into()).collect()
@@ -99,13 +99,13 @@ impl IncomingMessage {
         })
     }
 
-    pub fn parse_data_channels(value: RawJsonValue) -> Result<Vec<DataChannelConfig>> {
+    fn parse_data_channels(value: RawJsonValue) -> Result<Vec<DataChannelConfig>> {
         Self::parse_optional(value, "data_channels", |v| {
             v.to_array()?.map(|v| v.try_into()).collect()
         })
     }
 
-    pub fn parse_simulcast_encodings(value: RawJsonValue) -> Result<Vec<SimulcastEncodingConfig>> {
+    fn parse_simulcast_encodings(value: RawJsonValue) -> Result<Vec<SimulcastEncodingConfig>> {
         Self::parse_optional(value, "encodings", |v| {
             v.to_array()?.map(|v| v.try_into()).collect()
         })

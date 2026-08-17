@@ -3579,7 +3579,7 @@ mod tests {
         drop(timers);
     }
 
-    #[tokio::test(flavor = "current_thread")]
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn timer_manager_set_timer_same_id_aborts_previous() {
         let (timer_tx, mut timer_rx) = mpsc::channel::<TimerId>(16);
         let mut timers = TimerManager::new(timer_tx);
@@ -3587,6 +3587,8 @@ mod tests {
         timers.set_timer(TimerId::Ping, 50);
         timers.set_timer(TimerId::Ping, 100);
         // 最初のタイマーの発火時刻 (50ms) を過ぎても 1 件目は届かない。
+        // 仮想時刻 (start_paused) を使うため CI 負荷で sleep がオーバーシュートしても
+        // 決定論的に検証できる。
         tokio::time::sleep(Duration::from_millis(70)).await;
         assert!(
             matches!(timer_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),

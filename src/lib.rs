@@ -44,9 +44,10 @@
 //!
 //!     // 任意のタイミングで切断し、run() の完了を待つ。
 //!     handle.disconnect().await?;
-//!     run_task
+//!     let run_result = run_task
 //!         .await
-//!         .map_err(|_| std::io::Error::other("run task panicked"))??;
+//!         .map_err(|_| std::io::Error::other("run task panicked"))?;
+//!     run_result?;
 //!     Ok(())
 //! }
 //! ```
