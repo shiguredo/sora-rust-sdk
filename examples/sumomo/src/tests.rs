@@ -26,8 +26,6 @@ fn h264_metadata_from_fixture(tag: &str) -> Mp4BitstreamMetadata {
     )
     .expect("fixture MP4 のパースに失敗しました");
     let metadata = reader.bitstream_metadata();
-    // reader が持つファイルハンドルを閉じてから一時ファイルを削除する。
-    drop(reader);
     let _ = std::fs::remove_file(&path);
     metadata
 }
