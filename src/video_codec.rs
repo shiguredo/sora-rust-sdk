@@ -68,7 +68,7 @@ impl VideoEncoderFactoryHandler for SoraVideoEncoderFactory {
     // （解決済み format）を `capability.create_video_encoder` に渡す。
     // コーデック名だけの入力を直接 `create_video_encoder` に渡さない。
     // この経路はコーデック固有 parameter（H.264 profile-level-id、AV1 profile / level /
-    // tier など）を encoder まで届けるための前提であり、MP4 passthrough や将来の
+    // tier など）を encoder まで届けるための前提であり、MP4 パススルーや将来の
     // コーデック固有対応が依存する。
     fn create(
         &mut self,
