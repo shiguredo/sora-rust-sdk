@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-08-13
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-17
 - Branch: feature/refactor-preference-validation-and-factory-passthrough
 - Polished: {YYYY-MM-DD}
 
@@ -114,3 +114,22 @@ capability.create_video_encoder(env, resolved.as_ref())  // Decoder も同様
 - `cargo clippy --workspace --all-targets -- -D warnings` が成功する
 - `CHANGES.md` の develop セクションの `### misc` サブセクションに変更概要を追記する（機能に直接影響しないリファクタリングのため、`[CHANGE]` / `[ADD]` / `[UPDATE]` / `[FIX]` は使わない）
 - production log は英語、コメントとテストの assertion message は日本語にする
+
+## 解決方法
+
+### 実装
+
+- `src/video_codec_preference.rs` の `validate_codec` から「bare `SdpVideoFormat` を組み立てて `capability.resolve_sdp_format` に渡し、`None` なら reject」する分岐を削除し、`is_supported` を preference 検証の source of truth に一本化した
+- 削除により孤立した `use shiguredo_webrtc::SdpVideoFormat` の import と `codec_capability_summary` ヘルパーを撤去した
+- 削除方針とその根拠（`is_supported` を source of truth にすること、コーデック固有 `is_supported` override を capability 側で導入可能にすること）を日本語コメントとして `validate_codec` に残した
+- `src/video_codec.rs` の `SoraVideoEncoderFactory::create` / `SoraVideoDecoderFactory::create` の本体挙動は変更せず、`capability.resolve_sdp_format` の返り値を `create_video_encoder` / `create_video_decoder` にそのまま渡す pass-through 挙動と、後続の MP4 パススルー・コーデック固有 required parameter 対応がこの経路に依存する旨を日本語コメントで固定した
+
+### テスト
+
+- `validate_succeeds_when_supported_even_if_resolve_sdp_format_is_none`: `resolve_sdp_format` が常に `None` を返す capability でも、`is_supported` が `true` なら `validate_video_codec_preference` が成功することを確認する
+- `encoder_factory_passes_resolved_format_to_create_video_encoder`: `SoraVideoEncoderFactory::create` を bare な `SdpVideoFormat::new("H264")` で呼び、`resolve_sdp_format` が付けた `packetization-mode=1` が `create_video_encoder` の受信 format に届いていることを、テスト用の `RecordingCapability` に記録された parameter で確認する
+- `src/testing.rs` の共有 `TestVideoCodecCapability` に `without_sdp_format_resolution()` builder を追加し、`resolve_sdp_format` が常に `None` を返す capability を回帰テストから組み立てられるようにした（先行マージされた refactor で `TestVideoCodecCapability` が共有モジュールに移動していたため、後続 merge 時にこちらへ吸収した）
+
+### CHANGES.md
+
+- `### misc` サブセクションに `[UPDATE] ビデオコーデック preference の可否判定を is_supported に一本化する` を追加し、削除した検証の内容と MP4 パススルーのユースケースで具体的にどう詰まるかを順序付きリストで説明した
