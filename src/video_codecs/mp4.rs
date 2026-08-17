@@ -26,7 +26,7 @@ use shiguredo_webrtc::{
     VideoEncoderEncodedImageCallbackResultError, VideoEncoderEncoderInfo, VideoEncoderHandler,
     VideoEncoderRateControlParametersRef, VideoEncoderSettingsRef, VideoFrame, VideoFrameBuffer,
     VideoFrameBufferHandler, VideoFrameRef, VideoFrameType, VideoFrameTypeVectorRef,
-    VideoTrackSource, rtc_log_error, rtc_log_info, rtc_log_warning,
+    VideoTrackSource, rtc_log_error, rtc_log_info, rtc_log_verbose, rtc_log_warning,
 };
 
 use crate::video_codec_capability::{
@@ -795,7 +795,7 @@ impl VideoEncoderHandler for Mp4PassthroughEncoder {
             }
         };
 
-        rtc_log_info!(
+        rtc_log_verbose!(
             "MP4Passthrough: encode() keyframe={} size={} bytes",
             sample.is_keyframe,
             sample.data.len()

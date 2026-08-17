@@ -63,9 +63,8 @@ WebRTC SFU Sora のクライアントを Rust で実装するための SDK。シ
 |----|------|
 | `SoraConnection` | 接続本体。`run()` でシグナリングからメディア接続までを駆動する |
 | `SoraConnectionBuilder` | ビルダー。ムーブスタイルで連結し `.build()` で `(SoraConnection, SoraConnectionHandle)` を返す |
-| `TlsConfig` | WebSocket (シグナリング接続) の TLS 設定。`insecure` / `client_cert` / `client_key` / `ca_cert` を保持。Builder の `insecure` / `client_cert` / `ca_cert` メソッド経由で設定する |
 
-`SoraConnection::builder(context, signaling_urls, channel_id, role, event_handler) -> SoraConnectionBuilder` で開始。`signaling_urls` は `Vec<String>`、`channel_id` は `String`、`role` は `Role`、`event_handler` は `SoraConnectionEventHandler` トレイトを実装した任意の型のインスタンス（`impl SoraConnectionEventHandler + 'static`）。
+`SoraConnection::builder(context, signaling_urls, channel_id, role, event_handler) -> SoraConnectionBuilder` で開始。`signaling_urls` は `Vec<String>`、`channel_id` は `String`、`role` は `Role`、`event_handler` は `SoraConnectionEventHandler` トレイトを実装した任意の型のインスタンス（`impl SoraConnectionEventHandler + 'static`）。WebSocket TLS の設定（`insecure` / `ca_cert` / `client_cert`）は Builder の各メソッド経由で行う。
 
 #### イベントハンドラ (`SoraConnectionEventHandler` トレイト)
 
@@ -523,7 +522,7 @@ if let Some(url) = handle.selected_signaling_url().await? {
 | プロキシ | `ProxyUrlUnsupportedScheme`, `ProxyUrlUserinfoNotSupported`, `ProxyUrlFragmentNotAllowed`, `ProxyUrlMissingHost`, `ProxyUrlPathNotAllowed`, `ProxyUrlQueryNotAllowed`, `ProxyConnectDecode`, `ProxyConnectEncode`, `ProxyConnectResponseMissing`, `ProxyConnectStatusNotSuccessful`, `ProxyAuth` |
 | ネットワーク | `DnsResolve`, `NoResolvedAddress`, `TcpConnectTimeout`, `TcpConnect`, `TlsConfig`, `InvalidServerName`, `TlsConnectTimeout`, `TlsConnect`, `Websocket`, `Io`, `ProxyConnectUnexpectedTrailingData` |
 | シグナリング | `SignalingUrlsEmpty`, `AllSignalingUrlsFailed { errors }`, `UnsupportedMessageType`, `JsonParse` |
-| WebRTC | `Webrtc`, `PeerConnectionMissing`, `SetRemoteDescriptionTimeout`, `SetRemoteDescriptionResponseMissing`, `SetRemoteDescriptionFailed`, `AnswerTimeout`, `AnswerResponseMissing`, `AnswerFailed`, `SetLocalDescriptionTimeout`, `SetLocalDescriptionResponseMissing`, `SetLocalDescriptionFailed`, `SimulcastVideoSenderMissing`, `SimulcastSetParametersFailed`, `CandidateNotSupported` |
+| WebRTC | `Webrtc`, `SetRemoteDescriptionTimeout`, `SetRemoteDescriptionResponseMissing`, `SetRemoteDescriptionFailed`, `AnswerTimeout`, `AnswerResponseMissing`, `AnswerFailed`, `SetLocalDescriptionTimeout`, `SetLocalDescriptionResponseMissing`, `SetLocalDescriptionFailed`, `SimulcastVideoSenderMissing`, `SimulcastSetParametersFailed`, `CandidateNotSupported` |
 | DataChannel / RPC | `DataChannelMissing`, `DataChannelSendFailed`, `Utf8DecodeFailed`, `RpcTimeout`, `InvalidDataChannelLabel`, `Redirected` |
 | TLS 証明書 | `TurnTlsCaCert`, `ClientCertParse`, `ClientKeyParse`, `CaCertParse`, `ClientCertKeyIncomplete` |
 | コーデック | `InvalidVideoCodecCapability`, `InvalidVideoCodecPreference` |
@@ -544,5 +543,5 @@ if let Some(url) = handle.selected_signaling_url().await? {
 - **`VideoTrackSource` は本クレートでは作らない**: `shiguredo_webrtc` 側の capturer / source、もしくは本クレートの `Mp4VideoCapturer` / `LibcameraVideoCapturer` から生成する。
 - **`send_message` のラベル制約**: SDK 内部用ラベル（`signaling`、`stats`、`push`、`notify`、`rpc`）および `#` プレフィックスのないラベル、Offer 応答の `data_channels` に含まれていないラベルを渡すと `Error::InvalidDataChannelLabel` を返す。`on_message` は `#` プレフィックスのユーザー定義 DataChannel 専用。
 - **JSON-RPC の id は SDK が管理する**: 利用側が `id` を組み立てる必要はない。`params` の中身だけ渡す。
-- **ロギングは `shiguredo_webrtc` の `rtc_log_*` マクロ**: SDK 内のログは libwebrtc 側 (`rtc_log_info!` / `rtc_log_warning!` / `rtc_log_error!`) に流れる。`log` / `tracing` クレートには依存していない。
+- **ロギングは `shiguredo_webrtc` の `rtc_log_*` マクロ**: SDK 内のログは libwebrtc 側 (`rtc_log_verbose!` / `rtc_log_info!` / `rtc_log_warning!` / `rtc_log_error!`) に流れる。`log` / `tracing` クレートには依存していない。
 - **デフォルトの ADM は Dummy**: マイク入力が必要な場合は `AdmConfig::UseBuiltIn` か `UseExternal` を明示する。

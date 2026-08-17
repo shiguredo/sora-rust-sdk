@@ -42,6 +42,46 @@ pub(crate) struct Args {
     pub(crate) list_devices: bool,
 }
 
+impl Default for Args {
+    fn default() -> Self {
+        Self {
+            signaling_urls: Vec::new(),
+            channel_id: String::new(),
+            role: Role::RecvOnly,
+            audio: None,
+            video: None,
+            video_codec_type: None,
+            video_codec_implementation: VideoCodecImplementationSelections::default(),
+            video_bit_rate: None,
+            input_mp4: None,
+            openh264_path: None,
+            video_codec_list: false,
+            data_channel_signaling: None,
+            ignore_disconnect_websocket: None,
+            simulcast: None,
+            insecure: false,
+            client_cert: None,
+            client_key: None,
+            ca_cert: None,
+            duration: None,
+            metadata: None,
+            turn_tls_insecure: false,
+            turn_tls_ca_cert: None,
+            use_libcamera: false,
+            use_libcamera_native: false,
+            libcamera_controls: Vec::new(),
+            #[cfg(feature = "raw-player")]
+            use_raw_player: false,
+            #[cfg(feature = "media-device")]
+            video_input_device: None,
+            #[cfg(feature = "media-device")]
+            audio_input_device: None,
+            #[cfg(feature = "media-device")]
+            list_devices: false,
+        }
+    }
+}
+
 impl Args {
     /// 音声が有効かどうかを返す。
     ///
@@ -175,39 +215,10 @@ pub(crate) fn parse_args(mut args: noargs::RawArgs) -> Result<Args> {
 
         let _ = args.finish();
         return Ok(Args {
-            signaling_urls: Vec::new(),
-            channel_id: String::new(),
-            role: Role::RecvOnly,
-            audio: None,
-            video: None,
-            video_codec_type: None,
-            video_codec_implementation: video_codec_implementation.unwrap_or_default(),
-            video_bit_rate: None,
-            input_mp4: None,
-            openh264_path,
             video_codec_list: true,
-            data_channel_signaling: None,
-            ignore_disconnect_websocket: None,
-            simulcast: None,
-            insecure: false,
-            client_cert: None,
-            client_key: None,
-            ca_cert: None,
-            duration: None,
-            metadata: None,
-            turn_tls_insecure: false,
-            turn_tls_ca_cert: None,
-            use_libcamera: false,
-            use_libcamera_native: false,
-            libcamera_controls: Vec::new(),
-            #[cfg(feature = "raw-player")]
-            use_raw_player: false,
-            #[cfg(feature = "media-device")]
-            video_input_device: None,
-            #[cfg(feature = "media-device")]
-            audio_input_device: None,
-            #[cfg(feature = "media-device")]
-            list_devices: false,
+            video_codec_implementation: video_codec_implementation.unwrap_or_default(),
+            openh264_path,
+            ..Args::default()
         });
     }
 
@@ -223,36 +234,8 @@ pub(crate) fn parse_args(mut args: noargs::RawArgs) -> Result<Args> {
         // list-devices モードでは他のオプションは不要
         let _ = args.finish();
         return Ok(Args {
-            signaling_urls: Vec::new(),
-            channel_id: String::new(),
-            role: Role::RecvOnly,
-            audio: None,
-            video: None,
-            video_codec_type: None,
-            video_codec_implementation: VideoCodecImplementationSelections::Auto,
-            video_bit_rate: None,
-            data_channel_signaling: None,
-            ignore_disconnect_websocket: None,
-            simulcast: None,
-            insecure: false,
-            client_cert: None,
-            client_key: None,
-            ca_cert: None,
-            duration: None,
-            metadata: None,
-            turn_tls_insecure: false,
-            turn_tls_ca_cert: None,
-            input_mp4: None,
-            openh264_path: None,
-            video_codec_list: false,
-            use_libcamera: false,
-            use_libcamera_native: false,
-            libcamera_controls: Vec::new(),
-            #[cfg(feature = "raw-player")]
-            use_raw_player: false,
-            video_input_device: None,
-            audio_input_device: None,
             list_devices: true,
+            ..Args::default()
         });
     }
 
@@ -477,7 +460,6 @@ pub(crate) fn parse_args(mut args: noargs::RawArgs) -> Result<Args> {
         video_bit_rate,
         input_mp4,
         openh264_path,
-        video_codec_list: false,
         data_channel_signaling,
         ignore_disconnect_websocket,
         simulcast,
@@ -498,8 +480,7 @@ pub(crate) fn parse_args(mut args: noargs::RawArgs) -> Result<Args> {
         video_input_device,
         #[cfg(feature = "media-device")]
         audio_input_device,
-        #[cfg(feature = "media-device")]
-        list_devices: false,
+        ..Args::default()
     })
 }
 
