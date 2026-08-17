@@ -46,9 +46,9 @@
 
 ### misc
 
-- [UPDATE] `validate_video_codec_preference` から bare `SdpVideoFormat` を `resolve_sdp_format` に投入する重複検証を削除し、`is_supported` を preference 検証の判定基準にする
-  - 既存の全 capability は default `is_supported` を使っているため既存挙動は変わらない
-  - 後続の MP4 passthrough / codec 固有 `is_supported` override で preference 検証が拒否されない土台になる
-  - `SoraVideoEncoderFactory::create` の `resolve_sdp_format` 経由の受け渡しを実装コメントと回帰テストで固定する
-  - `SoraVideoDecoderFactory::create` にも同じ受け渡しの実装コメントを追加する
+- [UPDATE] preference の可否判定を `is_supported` に一本化する
+  - default `is_supported` の実体は「コーデック名だけの `SdpVideoFormat` を `resolve_sdp_format` に通せるか」なので、以前あった同名の冗長検証は既存 capability では結果が一致するだけだった
+  - ただし capability 側で `is_supported` を override して可否を上書きしても、その冗長検証が同じコーデック名だけの入力で拒否する構造だったため、override が事実上無効化されていた
+  - 一本化により、後続の MP4 passthrough やコーデック固有 required parameter を持つ capability が preference 検証で拒否されずに済む
+  - `SoraVideoEncoderFactory::create` / `SoraVideoDecoderFactory::create` の「解決済み format を create_video_encoder / create_video_decoder に渡す」既存配線を実装コメントと回帰テストで固定する（本体挙動は変えない）
   - @sile

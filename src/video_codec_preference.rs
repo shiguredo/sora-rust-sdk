@@ -273,9 +273,12 @@ fn validate_codec(
             ),
         });
     };
-    // preference の可否は `is_supported` だけで判定する。
-    // codec 固有 parameter を必須とする capability では、bare な `SdpVideoFormat` を
-    // `resolve_sdp_format` に渡すと拒否され、`is_supported` が true でも検証が落ちる。
+    // preference の可否判定は `is_supported` に一本化する。
+    // default `is_supported` の実体は「コーデック名だけの `SdpVideoFormat` を
+    // `resolve_sdp_format` に通せるか」なので、以前あった同名の冗長検証は既存 capability
+    // では結果が一致するだけだったが、capability 側で `is_supported` を override して
+    // 可否を変えたい場合（コーデック固有 parameter を必須とする MP4 passthrough 等）に、
+    // その検証が同じコーデック名だけの入力で拒否して override を無効化する構造だった。
     // 実 format の解決は `SoraVideoEncoderFactory::create` /
     // `SoraVideoDecoderFactory::create` が行う。
     let encoder_supported = capability.is_supported(CodecDirection::Encoder, codec.codec_type());
@@ -366,7 +369,7 @@ mod tests {
         encoder_supported: Vec<VideoCodecType>,
         decoder_supported: Vec<VideoCodecType>,
         // false のときは `is_supported` が true でも `resolve_sdp_format` は None を返す。
-        // codec 固有 parameter を必須とし、bare format を拒否する capability を表す。
+        // コーデック固有 parameter を必須とし、bare format を拒否する capability を表す。
         resolves_sdp_format: bool,
     }
 

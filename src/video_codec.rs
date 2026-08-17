@@ -64,11 +64,12 @@ impl VideoEncoderFactoryHandler for SoraVideoEncoderFactory {
         collect_supported_formats(&self.preference, &capabilities, CodecDirection::Encoder)
     }
 
-    // libwebrtc から要求された `format` は `capability.resolve_sdp_format` に渡し、
-    // その返り値（解決済み format）を `capability.create_video_encoder` に渡す。
-    // bare な入力を `create_video_encoder` に渡さない。
-    // codec 固有 parameter を encoder まで届ける経路として、MP4 passthrough や
-    // 将来の profile-level-id / AV1 profile 対応がこの配線を前提とする。
+    // 要求された `format` を `capability.resolve_sdp_format` に通し、その返り値
+    // （解決済み format）を `capability.create_video_encoder` に渡す。
+    // コーデック名だけの入力を直接 `create_video_encoder` に渡さない。
+    // この経路はコーデック固有 parameter（H.264 profile-level-id、AV1 profile / level /
+    // tier など）を encoder まで届けるための前提であり、MP4 passthrough や将来の
+    // コーデック固有対応が依存する。
     fn create(
         &mut self,
         env: EnvironmentRef<'_>,
@@ -96,8 +97,9 @@ impl VideoDecoderFactoryHandler for SoraVideoDecoderFactory {
         collect_supported_formats(&self.preference, &capabilities, CodecDirection::Decoder)
     }
 
-    // Encoder 側と同じ規則。要求 `format` を `resolve_sdp_format` に渡し、
-    // 返り値を `create_video_decoder` に渡す。bare な入力は `create_video_decoder` に渡さない。
+    // Encoder 側と同じ規則。要求された `format` を `capability.resolve_sdp_format` に
+    // 通し、返り値を `capability.create_video_decoder` に渡す。コーデック名だけの入力を
+    // 直接 `create_video_decoder` に渡さない。
     fn create(
         &mut self,
         env: EnvironmentRef<'_>,
