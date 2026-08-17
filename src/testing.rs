@@ -11,11 +11,11 @@ use crate::video_codec_capability::{
 };
 
 /// `VideoEncoderHandler` を最小限に実装したテスト専用の型。
-struct NoopVideoEncoder;
+pub(crate) struct NoopVideoEncoder;
 impl VideoEncoderHandler for NoopVideoEncoder {}
 
 /// `VideoDecoderHandler` を最小限に実装したテスト専用の型。
-struct NoopVideoDecoder;
+pub(crate) struct NoopVideoDecoder;
 impl VideoDecoderHandler for NoopVideoDecoder {}
 
 /// `VideoCodecCapability` を本物のコードで実装したテスト専用の型。
@@ -23,6 +23,9 @@ pub(crate) struct TestVideoCodecCapability {
     implementation: VideoCodecImplementation,
     encoder_formats: Vec<VideoCodecType>,
     decoder_formats: Vec<VideoCodecType>,
+    /// false のときは `is_supported` が true でも `resolve_sdp_format` は None を返す。
+    /// コーデック固有 parameter を必須とし、コーデック名だけの入力を拒否する capability を表す。
+    resolves_sdp_format: bool,
 }
 
 impl TestVideoCodecCapability {
@@ -36,7 +39,16 @@ impl TestVideoCodecCapability {
             implementation,
             encoder_formats,
             decoder_formats,
+            resolves_sdp_format: true,
         }
+    }
+
+    /// `resolve_sdp_format` が常に None を返す capability に変換する。
+    /// コーデック固有 parameter を必須としてコーデック名だけの入力を拒否する
+    /// capability の挙動をシミュレートする。
+    pub(crate) fn without_sdp_format_resolution(mut self) -> Self {
+        self.resolves_sdp_format = false;
+        self
     }
 
     /// 指定した方向のコーデック種別リストを返す。
@@ -69,6 +81,9 @@ impl VideoCodecCapability for TestVideoCodecCapability {
         direction: CodecDirection,
         format: SdpVideoFormatRef<'_>,
     ) -> Option<SdpVideoFormat> {
+        if !self.resolves_sdp_format {
+            return None;
+        }
         let codec_type = format
             .name()
             .ok()

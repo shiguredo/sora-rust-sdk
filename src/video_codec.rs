@@ -62,6 +62,12 @@ impl VideoEncoderFactoryHandler for SoraVideoEncoderFactory {
         collect_supported_formats(&self.preference, &capabilities, CodecDirection::Encoder)
     }
 
+    // 要求された `format` を `capability.resolve_sdp_format` に通し、その返り値
+    // （解決済み format）を `capability.create_video_encoder` に渡す。
+    // コーデック名だけの入力を直接 `create_video_encoder` に渡さない。
+    // この経路はコーデック固有 parameter（H.264 profile-level-id、AV1 profile / level /
+    // tier など）を encoder まで届けるための前提であり、MP4 パススルーや将来の
+    // コーデック固有対応が依存する。
     fn create(
         &mut self,
         env: EnvironmentRef<'_>,
@@ -89,6 +95,9 @@ impl VideoDecoderFactoryHandler for SoraVideoDecoderFactory {
         collect_supported_formats(&self.preference, &capabilities, CodecDirection::Decoder)
     }
 
+    // Encoder 側と同じ規則。要求された `format` を `capability.resolve_sdp_format` に
+    // 通し、返り値を `capability.create_video_decoder` に渡す。コーデック名だけの入力を
+    // 直接 `create_video_decoder` に渡さない。
     fn create(
         &mut self,
         env: EnvironmentRef<'_>,
@@ -452,8 +461,10 @@ pub fn codec_type_from_format(format: &SdpVideoFormatRef<'_>) -> Option<VideoCod
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
-    use crate::testing::TestVideoCodecCapability;
+    use crate::testing::{NoopVideoEncoder, TestVideoCodecCapability};
     use crate::video_codec_capability::VideoCodecImplementation;
     use crate::video_codec_preference::PreferenceCodec;
 
@@ -605,6 +616,105 @@ mod tests {
         let vp8 = SdpVideoFormat::new("VP8");
         assert!(
             VideoDecoderFactoryHandler::create(&mut factory, env.as_ref(), vp8.as_ref()).is_none()
+        );
+    }
+
+    // SoraVideoEncoderFactory::create が、bare 入力ではなく
+    // `resolve_sdp_format` の返り値を `create_video_encoder` に渡すことを確認する。
+    // resolve は入力を無視して parameter 付き format を返し、create_video_encoder
+    // はその parameter を記録する。bare がそのまま届いていれば packetization-mode は無い。
+    struct RecordingCapability {
+        implementation: VideoCodecImplementation,
+        last_format_parameters: Arc<Mutex<Option<HashMap<String, String>>>>,
+    }
+
+    impl VideoCodecCapability for RecordingCapability {
+        fn get_implementation(&self) -> VideoCodecImplementation {
+            self.implementation.clone()
+        }
+
+        fn get_supported_formats(&self, direction: CodecDirection) -> Vec<SdpVideoFormat> {
+            match direction {
+                CodecDirection::Encoder => vec![SdpVideoFormat::new_with_parameters(
+                    "H264",
+                    &HashMap::from([(String::from("packetization-mode"), String::from("1"))]),
+                    &[],
+                )],
+                CodecDirection::Decoder => Vec::new(),
+            }
+        }
+
+        fn is_supported(&self, direction: CodecDirection, codec_type: VideoCodecType) -> bool {
+            direction == CodecDirection::Encoder && codec_type == VideoCodecType::H264
+        }
+
+        fn resolve_sdp_format(
+            &self,
+            direction: CodecDirection,
+            _format: SdpVideoFormatRef<'_>,
+        ) -> Option<SdpVideoFormat> {
+            if direction != CodecDirection::Encoder {
+                return None;
+            }
+            Some(SdpVideoFormat::new_with_parameters(
+                "H264",
+                &HashMap::from([(String::from("packetization-mode"), String::from("1"))]),
+                &[],
+            ))
+        }
+
+        fn create_video_encoder(
+            &self,
+            _env: EnvironmentRef<'_>,
+            format: SdpVideoFormatRef<'_>,
+        ) -> Option<VideoEncoder> {
+            let params = format
+                .to_owned()
+                .parameters_mut()
+                .iter()
+                .collect::<HashMap<String, String>>();
+            *self
+                .last_format_parameters
+                .lock()
+                .expect("last_format_parameters は poison しないはず") = Some(params);
+            Some(VideoEncoder::new_with_handler(Box::new(NoopVideoEncoder)))
+        }
+    }
+
+    #[test]
+    fn encoder_factory_passes_resolved_format_to_create_video_encoder() {
+        let recorder = Arc::new(Mutex::new(None));
+        let capability = RecordingCapability {
+            implementation: VideoCodecImplementation::new("recording", "Recording"),
+            last_format_parameters: recorder.clone(),
+        };
+        let preference = VideoCodecPreference::new(vec![PreferenceCodec::new(
+            CodecDirection::Encoder,
+            VideoCodecType::H264,
+            VideoCodecImplementation::new("recording", "Recording"),
+        )]);
+        let capabilities: Vec<Box<dyn VideoCodecCapability>> = vec![Box::new(capability)];
+        let shared = Arc::new(Mutex::new(capabilities));
+        let mut factory = SoraVideoEncoderFactory::new(preference, shared);
+        let env = shiguredo_webrtc::Environment::new();
+
+        // factory への入力は bare `H264` （parameter なし）。
+        let input = SdpVideoFormat::new("H264");
+        assert!(
+            VideoEncoderFactoryHandler::create(&mut factory, env.as_ref(), input.as_ref())
+                .is_some(),
+            "factory create は encoder を返すはずです"
+        );
+
+        let recorded = recorder
+            .lock()
+            .expect("recorder は poison しないはず")
+            .clone()
+            .expect("create_video_encoder が呼ばれたはずです");
+        assert_eq!(
+            recorded.get("packetization-mode").map(String::as_str),
+            Some("1"),
+            "resolve_sdp_format が付けた packetization-mode=1 が create_video_encoder に届いていません"
         );
     }
 

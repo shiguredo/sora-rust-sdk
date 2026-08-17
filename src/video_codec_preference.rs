@@ -1,7 +1,7 @@
 //! ビデオコーデックの優先順位設定。
 use std::collections::HashSet;
 
-use shiguredo_webrtc::{SdpVideoFormat, VideoCodecType};
+use shiguredo_webrtc::VideoCodecType;
 
 use nojson::{DisplayJson, Json, JsonFormatter, JsonParseError, RawJsonValue};
 
@@ -273,6 +273,11 @@ fn validate_codec(
             ),
         });
     };
+    // preference の可否判定は `is_supported` の結果で完結させる。
+    // コーデック固有 parameter を必須とする capability も `is_supported` の
+    // override で可否を表明することでこの検証を通せる。
+    // 実 format の解決は `SoraVideoEncoderFactory::create` /
+    // `SoraVideoDecoderFactory::create` が行う。
     let encoder_supported = capability.is_supported(CodecDirection::Encoder, codec.codec_type());
     let decoder_supported = capability.is_supported(CodecDirection::Decoder, codec.codec_type());
     let (direction_supported, opposite_supported) = match codec.direction() {
@@ -290,25 +295,6 @@ fn validate_codec(
         return Err(Error::InvalidVideoCodecPreference {
             reason: format!(
                 "{direction} not supported: codec_preference={}, codec_capability={}",
-                Json(codec),
-                codec_capability_summary(capability, codec.codec_type())
-            ),
-        });
-    }
-
-    let requested = SdpVideoFormat::new(
-        codec
-            .codec_type()
-            .as_str()
-            .expect("known codec type must be converted to codec name"),
-    );
-    if capability
-        .resolve_sdp_format(codec.direction(), requested.as_ref())
-        .is_none()
-    {
-        return Err(Error::InvalidVideoCodecPreference {
-            reason: format!(
-                "codec format not found: codec_preference={}, codec_capability={}",
                 Json(codec),
                 codec_capability_summary(capability, codec.codec_type())
             ),
@@ -483,6 +469,29 @@ mod tests {
         let preference = sample_preference();
         let capabilities = sample_capabilities();
         assert!(validate_video_codec_preference(&preference, &capabilities).is_ok());
+    }
+
+    // preference 検証は `is_supported` だけを見る。
+    // `resolve_sdp_format` が bare format を拒否しても、指定方向が supported なら通る。
+    #[test]
+    fn validate_succeeds_when_supported_even_if_resolve_sdp_format_is_none() {
+        let preference = VideoCodecPreference::new(vec![default_preference_codec(
+            CodecDirection::Encoder,
+            VideoCodecType::H264,
+            VideoCodecImplementation::new("nvcodec", "NVIDIA NVENC/NVDEC"),
+        )]);
+        let capabilities: Vec<Box<dyn VideoCodecCapability>> = vec![Box::new(
+            TestVideoCodecCapability::new(
+                VideoCodecImplementation::new("nvcodec", "NVIDIA NVENC/NVDEC"),
+                vec![VideoCodecType::H264],
+                Vec::new(),
+            )
+            .without_sdp_format_resolution(),
+        )];
+        assert!(
+            validate_video_codec_preference(&preference, &capabilities).is_ok(),
+            "is_supported が true なら resolve が None でも検証は成功するはずです"
+        );
     }
 
     #[test]
