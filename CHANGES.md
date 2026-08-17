@@ -15,6 +15,12 @@
   - @voluntas
 - [CHANGE] Mp4Error の InputPositionOutOfRange と InconsistentSampleTable の file_size フィールドを usize から u64 に変更する
   - @sile
+- [CHANGE] `Mp4PassthroughVideoCodecCapability::new` の signature を `VideoCodecType` から `&Mp4SampleReader` へ変更する
+  - reader が確定した required `SdpVideoFormat` と、reader / capability / encoder が共有する bitstream identity を capability に持たせる
+  - `Mp4PassthroughEncoder` は encode 時に受信 sample の identity を `Arc::ptr_eq` で照合し、別 reader 由来の sample を差し込まれた場合は callback を呼ばず `VideoCodecStatus::Error` を返す
+  - `Mp4PassthroughVideoCodecCapability::is_supported` を override し、Encoder かつ reader の codec type と一致する場合のみ true を返す（コーデック固有 required parameter を持つ format を将来 advertise しても preference 検証が破綻しないようにする土台）
+  - sumomo の `build_context_config` は `mp4_reader: Option<&Mp4SampleReader>` を受け取る形に変更し、reader を先に構築 → capability を借用で生成 → context に登録 → その後 reader を capturer へ move する順序を守る
+  - @sile
 - [UPDATE] `shiguredo_webrtc` を 0.150.3 に上げ、Ubuntu 26.04 LTS に対応する
   - @voluntas
 - [UPDATE] `shiguredo_mp4` を 2026.4.0 に上げる
