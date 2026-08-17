@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-07-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-18
 - Model: Composer
 - Branch: feature/fix-v4l2-stride-buffer-size-mismatch
 - Polished: {YYYY-MM-DD}
@@ -48,6 +48,9 @@ Medium。
 
 ## 解決方法
 
-1. `yuv420_size()` 依存をやめ、`build_i420_frame` と同じ Y/U/V サイズ計算で `buf.len()` を検査する
-2. 必要ならサイズ計算を `v4l2.rs` 内の小さな関数に切り出す
-3. 端数ケースの単体テストを追加する
+SDK 側の `src/video_codecs/v4l2.rs` は変更せず、`shiguredo_v4l2` を `2026.2.0-canary.1` に更新して解決した。
+
+- `Resolution::yuv420_size()` が `stride * height * 3 / 2` から、`div_ceil` ベースの平面分割と一致する計算 (`y_size + 2 * uv_size`、`uv_size` は `div_ceil(stride, 2) * div_ceil(height, 2)`) に修正された
+- これにより `src/video_codecs/v4l2.rs` の encode fill クロージャの `buf.len() < yuv420_size()` による長さ検査と、その後の `split_at_mut` による平面分割が同じサイズ定義になる
+- 奇数 stride / height で `split_at_mut` がパニックする経路がなくなる
+- 奇数 stride / height の検証は shiguredo_v4l2 側の PBT で行われている
