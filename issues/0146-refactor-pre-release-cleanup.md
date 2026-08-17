@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-08-16
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-17
 - Model: deepseek-v4-flash
 - Branch: feature/refactor-pre-release-cleanup
 - Polished: {YYYY-MM-DD}
@@ -165,3 +165,5 @@
 11. `Error::PeerConnectionMissing` を `src/error.rs` の `Error` enum から削除し、`skills/sora-rust-sdk/SKILL.md` のエラー型テーブルを更新する
 12. 各 feature パターンで `cargo check` と `cargo clippy` を確認する
 13. 完了条件のコマンドを実行して確認する
+
+上記の全ステップを実施し、完了条件に記載したコマンド（`cargo fmt` / `cargo clippy` / 各 feature の `cargo check` / `cargo test --workspace` 等）がすべて通過したため closed にする。
