@@ -11,53 +11,40 @@ use crate::video_codec_capability::{
 };
 
 /// `VideoEncoderHandler` を最小限に実装したテスト専用の型。
-pub(crate) struct NoopVideoEncoder;
+struct NoopVideoEncoder;
 impl VideoEncoderHandler for NoopVideoEncoder {}
 
 /// `VideoDecoderHandler` を最小限に実装したテスト専用の型。
-pub(crate) struct NoopVideoDecoder;
+struct NoopVideoDecoder;
 impl VideoDecoderHandler for NoopVideoDecoder {}
 
 /// `VideoCodecCapability` を本物のコードで実装したテスト専用の型。
-///
-/// サポートするコーデック種別のリストと、`get_supported_formats()` に
-/// 反映するフォーマットのリストを保持する。フォーマットのリストが未設定の場合は
-/// サポートするコーデック種別からフォーマットを生成する。
 pub(crate) struct TestVideoCodecCapability {
     implementation: VideoCodecImplementation,
-    encoder_supported: Vec<VideoCodecType>,
-    decoder_supported: Vec<VideoCodecType>,
-    encoder_formats: Option<Vec<VideoCodecType>>,
-    decoder_formats: Option<Vec<VideoCodecType>>,
+    encoder_formats: Vec<VideoCodecType>,
+    decoder_formats: Vec<VideoCodecType>,
 }
 
 impl TestVideoCodecCapability {
-    /// サポートするコーデック種別を指定して生成する。
+    /// 方向ごとのコーデック種別リストを指定して生成する。
     pub(crate) fn new(
         implementation: VideoCodecImplementation,
-        encoder_supported: Vec<VideoCodecType>,
-        decoder_supported: Vec<VideoCodecType>,
+        encoder_formats: Vec<VideoCodecType>,
+        decoder_formats: Vec<VideoCodecType>,
     ) -> Self {
         Self {
             implementation,
-            encoder_supported,
-            decoder_supported,
-            encoder_formats: None,
-            decoder_formats: None,
+            encoder_formats,
+            decoder_formats,
         }
     }
 
-    /// 指定した方向の `get_supported_formats()` の結果を明示的に設定する。
-    pub(crate) fn with_supported_formats(
-        mut self,
-        direction: CodecDirection,
-        formats: Vec<VideoCodecType>,
-    ) -> Self {
+    /// 指定した方向のコーデック種別リストを返す。
+    fn formats(&self, direction: CodecDirection) -> &[VideoCodecType] {
         match direction {
-            CodecDirection::Encoder => self.encoder_formats = Some(formats),
-            CodecDirection::Decoder => self.decoder_formats = Some(formats),
+            CodecDirection::Encoder => &self.encoder_formats,
+            CodecDirection::Decoder => &self.decoder_formats,
         }
-        self
     }
 }
 
@@ -67,27 +54,14 @@ impl VideoCodecCapability for TestVideoCodecCapability {
     }
 
     fn get_supported_formats(&self, direction: CodecDirection) -> Vec<SdpVideoFormat> {
-        let codec_types = match direction {
-            CodecDirection::Encoder => self
-                .encoder_formats
-                .as_ref()
-                .unwrap_or(&self.encoder_supported),
-            CodecDirection::Decoder => self
-                .decoder_formats
-                .as_ref()
-                .unwrap_or(&self.decoder_supported),
-        };
-        codec_types
+        self.formats(direction)
             .iter()
             .filter_map(|codec_type| codec_type.as_str().map(SdpVideoFormat::new))
             .collect()
     }
 
     fn is_supported(&self, direction: CodecDirection, codec_type: VideoCodecType) -> bool {
-        match direction {
-            CodecDirection::Encoder => self.encoder_supported.contains(&codec_type),
-            CodecDirection::Decoder => self.decoder_supported.contains(&codec_type),
-        }
+        self.formats(direction).contains(&codec_type)
     }
 
     fn resolve_sdp_format(
@@ -140,5 +114,33 @@ impl VideoCodecCapability for TestVideoCodecCapability {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capability_methods_share_the_same_format_list() {
+        let capability = TestVideoCodecCapability::new(
+            VideoCodecImplementation::new("test", "Test Codec"),
+            vec![VideoCodecType::Vp9, VideoCodecType::H264],
+            Vec::new(),
+        );
+        // 公開フォーマットのリストが is_supported / resolve_sdp_format /
+        // create_video_encoder にも効くことを確認する。
+        assert!(capability.is_supported(CodecDirection::Encoder, VideoCodecType::Vp9));
+        let vp9 = SdpVideoFormat::new("VP9");
+        assert!(
+            capability
+                .resolve_sdp_format(CodecDirection::Encoder, vp9.as_ref())
+                .is_some()
+        );
+        assert!(
+            capability
+                .create_video_encoder(shiguredo_webrtc::Environment::new().as_ref(), vp9.as_ref())
+                .is_some()
+        );
     }
 }

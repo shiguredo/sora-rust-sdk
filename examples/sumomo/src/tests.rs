@@ -8,36 +8,9 @@ fn test_args(
         signaling_urls: vec!["wss://example.com/signaling".to_string()],
         channel_id: "test-channel".to_string(),
         role: Role::SendOnly,
-        audio: None,
-        video: None,
-        video_codec_type: None,
         video_codec_implementation,
-        video_bit_rate: None,
-        input_mp4: None,
         openh264_path: openh264_path.map(ToString::to_string),
-        video_codec_list: false,
-        data_channel_signaling: None,
-        ignore_disconnect_websocket: None,
-        simulcast: None,
-        insecure: false,
-        client_cert: None,
-        client_key: None,
-        ca_cert: None,
-        duration: None,
-        metadata: None,
-        turn_tls_insecure: false,
-        turn_tls_ca_cert: None,
-        use_libcamera: false,
-        use_libcamera_native: false,
-        libcamera_controls: Vec::new(),
-        #[cfg(feature = "raw-player")]
-        use_raw_player: false,
-        #[cfg(feature = "media-device")]
-        video_input_device: None,
-        #[cfg(feature = "media-device")]
-        audio_input_device: None,
-        #[cfg(feature = "media-device")]
-        list_devices: false,
+        ..Args::default()
     }
 }
 

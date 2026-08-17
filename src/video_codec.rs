@@ -452,13 +452,10 @@ pub fn codec_type_from_format(format: &SdpVideoFormatRef<'_>) -> Option<VideoCod
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use super::*;
     use crate::testing::TestVideoCodecCapability;
     use crate::video_codec_capability::VideoCodecImplementation;
     use crate::video_codec_preference::PreferenceCodec;
-    use shiguredo_webrtc::ScalabilityMode;
 
     // VideoEncoderHandler を最小限に実装し、implementation name を返すテスト専用の型。
     struct NoopVideoEncoderWithInfoName;
@@ -512,17 +509,12 @@ mod tests {
             VideoCodecType::H264,
             VideoCodecImplementation::new("impl-a", "Implementation A"),
         )]);
-        let capabilities: Vec<Box<dyn VideoCodecCapability>> = vec![Box::new(
-            TestVideoCodecCapability::new(
+        let capabilities: Vec<Box<dyn VideoCodecCapability>> =
+            vec![Box::new(TestVideoCodecCapability::new(
                 VideoCodecImplementation::new("impl-a", "Implementation A"),
-                vec![VideoCodecType::H264],
-                Vec::new(),
-            )
-            .with_supported_formats(
-                CodecDirection::Encoder,
                 vec![VideoCodecType::Vp9, VideoCodecType::H264],
-            ),
-        )];
+                Vec::new(),
+            ))];
 
         let shared = Arc::new(Mutex::new(capabilities));
         let mut factory = SoraVideoEncoderFactory::new(preference, shared);
@@ -546,25 +538,16 @@ mod tests {
             ),
         ]);
         let capabilities: Vec<Box<dyn VideoCodecCapability>> = vec![
-            Box::new(
-                TestVideoCodecCapability::new(
-                    VideoCodecImplementation::new("impl-a", "Implementation A"),
-                    vec![VideoCodecType::Vp8],
-                    Vec::new(),
-                )
-                .with_supported_formats(
-                    CodecDirection::Encoder,
-                    vec![VideoCodecType::Av1, VideoCodecType::Vp8],
-                ),
-            ),
-            Box::new(
-                TestVideoCodecCapability::new(
-                    VideoCodecImplementation::new("impl-b", "Implementation B"),
-                    vec![VideoCodecType::H264],
-                    Vec::new(),
-                )
-                .with_supported_formats(CodecDirection::Encoder, vec![VideoCodecType::H264]),
-            ),
+            Box::new(TestVideoCodecCapability::new(
+                VideoCodecImplementation::new("impl-a", "Implementation A"),
+                vec![VideoCodecType::Av1, VideoCodecType::Vp8],
+                Vec::new(),
+            )),
+            Box::new(TestVideoCodecCapability::new(
+                VideoCodecImplementation::new("impl-b", "Implementation B"),
+                vec![VideoCodecType::H264],
+                Vec::new(),
+            )),
         ];
 
         let shared = Arc::new(Mutex::new(capabilities));
@@ -582,14 +565,12 @@ mod tests {
             VideoCodecType::Vp8,
             VideoCodecImplementation::new("impl-a", "Implementation A"),
         )]);
-        let capabilities: Vec<Box<dyn VideoCodecCapability>> = vec![Box::new(
-            TestVideoCodecCapability::new(
+        let capabilities: Vec<Box<dyn VideoCodecCapability>> =
+            vec![Box::new(TestVideoCodecCapability::new(
                 VideoCodecImplementation::new("impl-a", "Implementation A"),
-                vec![VideoCodecType::Vp8],
+                vec![VideoCodecType::Av1],
                 Vec::new(),
-            )
-            .with_supported_formats(CodecDirection::Encoder, vec![VideoCodecType::Av1]),
-        )];
+            ))];
 
         let shared = Arc::new(Mutex::new(capabilities));
         let mut factory = SoraVideoEncoderFactory::new(preference, shared);
@@ -615,26 +596,10 @@ mod tests {
         let mut factory = SoraVideoDecoderFactory::new(preference, shared);
         let env = shiguredo_webrtc::Environment::new();
 
-        let mut unmatched = SdpVideoFormat::new_with_parameters(
-            "H264",
-            &HashMap::from([(String::from("packetization-mode"), String::from("0"))]),
-            &[ScalabilityMode::L1T1],
-        );
-        unmatched.parameters_mut().set("packetization-mode", "0");
+        // サポート済みの H264 は生成でき、未サポートの VP8 は生成できないことを検証する。
+        let h264 = SdpVideoFormat::new("H264");
         assert!(
-            VideoDecoderFactoryHandler::create(&mut factory, env.as_ref(), unmatched.as_ref())
-                .is_some()
-        );
-
-        let mut matched = SdpVideoFormat::new_with_parameters(
-            "H264",
-            &HashMap::from([(String::from("packetization-mode"), String::from("1"))]),
-            &[ScalabilityMode::L1T2],
-        );
-        matched.parameters_mut().set("packetization-mode", "1");
-        assert!(
-            VideoDecoderFactoryHandler::create(&mut factory, env.as_ref(), matched.as_ref())
-                .is_some()
+            VideoDecoderFactoryHandler::create(&mut factory, env.as_ref(), h264.as_ref()).is_some()
         );
 
         let vp8 = SdpVideoFormat::new("VP8");

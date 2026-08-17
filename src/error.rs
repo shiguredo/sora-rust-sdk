@@ -10,7 +10,7 @@ use crate::video_codecs::mp4::Mp4Error;
 /// SDK のエラー型。
 #[derive(Debug)]
 pub enum Error {
-    /// `--role` に不正な値が指定された。
+    /// role に不正な値が指定された。
     InvalidRole {
         /// 指定された role 文字列。
         value: String,

@@ -25,8 +25,8 @@ pub(crate) fn requested_frame_type(
 ///
 /// H.264 は level-asymmetry-allowed / packetization-mode を付与する。
 /// VP9 は SDP で明示的にプロファイルを指定する方が安全なため `profile-id=0` を付与する。
-/// 各バックエンドが対応していないコーデックは `collect_supported_formats` 側で
-/// ハードウェアの対応状況により呼び出されないため、ここに全コーデックを列挙する。
+/// 各バックエンドが対応していないコーデックは各バックエンドの `collect_supported_formats`
+/// 側でハードウェアの対応状況により呼び出されないため、ここに全コーデックを列挙する。
 ///
 /// H.264 専用の v4l2 / openh264 からは利用しないため、それらの feature のみの
 /// ビルドでは未使用にならないように feature 条件でコンパイルを制御する。
