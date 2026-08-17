@@ -1291,13 +1291,13 @@ impl SoraConnection {
                                     );
                                     self.send_websocket_message(&mut ws, &answer_text)?;
                                 }
-                                IncomingMessageData::ReOffer { sdp, ice_servers } => {
+                                IncomingMessageData::ReOffer { sdp } => {
                                     handler.on_signaling_message(
                                         SignalingType::WebSocket,
                                         SignalingDirection::Received,
                                         &text,
                                     );
-                                    let answer_sdp = self.handle_offer(&sdp, &ice_servers).await?;
+                                    let answer_sdp = self.handle_offer(&sdp, &[]).await?;
                                     let reanswer_message =
                                         OutgoingMessage::new_reanswer(&answer_sdp);
                                     let reanswer_text = Json(reanswer_message).to_string();
@@ -2019,8 +2019,8 @@ impl SoraConnection {
                 // メッセージをパースして処理
                 let incoming = IncomingMessage::parse(&text)?;
                 match incoming.data {
-                    IncomingMessageData::ReOffer { sdp, ice_servers } => {
-                        let answer_sdp = self.handle_offer(&sdp, &ice_servers).await?;
+                    IncomingMessageData::ReOffer { sdp } => {
+                        let answer_sdp = self.handle_offer(&sdp, &[]).await?;
                         let reanswer_message = OutgoingMessage::new_reanswer(&answer_sdp);
                         let reanswer_text = Json(reanswer_message).to_string();
                         handler.on_signaling_message(

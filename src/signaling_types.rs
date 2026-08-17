@@ -53,7 +53,6 @@ pub(crate) enum IncomingMessageData {
     },
     ReOffer {
         sdp: String,
-        ice_servers: Vec<IceServerConfig>,
     },
     Ping {
         stats: Option<bool>,
@@ -159,9 +158,7 @@ impl<'text, 'raw> TryFrom<RawJsonValue<'text, 'raw>> for IncomingMessageData {
             }
             "re-offer" => {
                 let sdp = value.to_member("sdp")?.required()?.try_into()?;
-                // re-offer では config がオプショナル
-                let ice_servers = IncomingMessage::parse_ice_servers(value)?;
-                Ok(Self::ReOffer { sdp, ice_servers })
+                Ok(Self::ReOffer { sdp })
             }
             "ping" => {
                 let stats = value
@@ -641,5 +638,40 @@ mod tests {
     fn disconnect_serializes_to_no_error() {
         let text = Json(OutgoingMessage::new_disconnect()).to_string();
         assert_eq!(text, r#"{"type":"disconnect","reason":"NO-ERROR"}"#);
+    }
+
+    #[test]
+    fn offer_accepts_missing_ice_servers() {
+        // offer でも iceServers が無い場合は空リストとして受理する。
+        let message = IncomingMessage::parse(r#"{"type":"offer","sdp":"sdp","config":{}}"#)
+            .expect("iceServers が無い offer はパースできるべきです");
+        match message.data {
+            IncomingMessageData::Offer { ice_servers, .. } => {
+                assert!(
+                    ice_servers.is_empty(),
+                    "iceServers は空リストになるべきです"
+                );
+            }
+            _ => panic!("Offer としてパースされるべきです"),
+        }
+    }
+
+    #[test]
+    fn offer_parses_ice_servers() {
+        // offer の config.iceServers が正しくパースされることを確認する。
+        let text = r#"{"type":"offer","sdp":"sdp","config":{"iceServers":[{"urls":["stun:example.com:3478"]}]}}"#;
+        let message =
+            IncomingMessage::parse(text).expect("iceServers 付き offer のパースに失敗しました");
+        match message.data {
+            IncomingMessageData::Offer { ice_servers, .. } => {
+                assert_eq!(ice_servers.len(), 1, "iceServers の件数が期待と異なります");
+                assert_eq!(
+                    ice_servers[0].urls,
+                    vec!["stun:example.com:3478"],
+                    "iceServers の URL が期待と異なります"
+                );
+            }
+            _ => panic!("Offer としてパースされるべきです"),
+        }
     }
 }

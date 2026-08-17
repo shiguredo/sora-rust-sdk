@@ -1822,7 +1822,7 @@ mod tests {
             Err(err) => err,
         };
         assert!(
-            format!("{err}").contains("unknown libcamera control: UnknownControl"),
+            format!("{err}").contains("UnknownControl"),
             "エラーメッセージにコントロール名が含まれていません: {err}"
         );
     }

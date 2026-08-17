@@ -53,7 +53,7 @@
 
 - テスト用ヘルパー型の 3 ファイル重複（`NoopVideoEncoder` / `NoopVideoDecoder` / `TestVideoCodecCapability` が `src/video_codec.rs` / `src/video_codec_capability.rs` / `src/video_codec_preference.rs` の各テストモジュールに定義）
 - `find_capability` 関数の 2 ファイル重複（`src/video_codec.rs` / `src/video_codec_preference.rs`）
-- `parse_ice_servers` / `parse_ice_servers_optional` の統合余地（`src/signaling_types.rs`）
+- `parse_ice_servers` / `parse_ice_servers_optional` の統合（`src/signaling_types.rs`）: 「オプショナルなメンバーを取得して配列をパースする」処理を共通ヘルパー `parse_optional` に抽出し、`parse_ice_servers` に統合する。Sora ドキュメント「シグナリングの型定義」では offer の `config`（`SignalingOfferMessage`）はオプショナルのため、`config` / `iceServers` が無い場合は空リストとして受理する。re-offer（`SignalingReOfferMessage`）は `config` を持たないため、`ReOffer` から `ice_servers` を削除してパースしない。旧 offer 側の必須パースは仕様に対して過剰に厳しかった。挙動はテストで固定する
 - `examples/sumomo/src/args.rs` の Args 構造体リテラルの 3 重複
 
 ### 6. 軽微な可読性・設計
