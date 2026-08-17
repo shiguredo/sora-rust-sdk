@@ -1328,9 +1328,9 @@ checksum = "b475c218cf15d056ed3e48c9e98693135b261b79530881e63b162650b236fdec"
 
 [[package]]
 name = "shiguredo_v4l2"
-version = "2026.1.0"
+version = "2026.2.0-canary.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63fb9cee9e5b07d3fab3accbef9a4748101b752adcb155e2d3b3ede880990af4"
+checksum = "5ce36a539972173cdeefb572f4b0a9371a99957c3b7fcf402b9f37b3175e1d7e"
 dependencies = [
  "libc",
 ]
