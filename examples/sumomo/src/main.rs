@@ -49,10 +49,11 @@ use sora_sdk::V4l2VideoCodecCapability;
 #[cfg(feature = "vpl")]
 use sora_sdk::VplVideoCodecCapability;
 use sora_sdk::{
-    CodecDirection, InternalVideoCodecCapability, Mp4PassthroughVideoCodecCapability,
-    Mp4SampleReader, Mp4VideoCapturer, Openh264VideoCodecCapability, PreferenceCodec,
-    SoraConnection, SoraConnectionBuilder, SoraConnectionContext, SoraConnectionContextConfig,
-    SoraConnectionEventHandler, SoraConnectionHandle, VideoCodecCapability, VideoCodecPreference,
+    CodecDirection, InternalVideoCodecCapability, Mp4BitstreamMetadata,
+    Mp4PassthroughVideoCodecCapability, Mp4SampleReader, Mp4VideoCapturer,
+    Openh264VideoCodecCapability, PreferenceCodec, SoraConnection, SoraConnectionBuilder,
+    SoraConnectionContext, SoraConnectionContextConfig, SoraConnectionEventHandler,
+    SoraConnectionHandle, VideoCodecCapability, VideoCodecPreference,
 };
 use tokio::sync::mpsc;
 use video::{I420Frame, VideoFrameSinkHandler, VideoRenderer};
@@ -90,7 +91,7 @@ fn add_video_codec_capability(
 
 fn build_context_config(
     adm_config: sora_sdk::AdmConfig,
-    mp4_reader: Option<&Mp4SampleReader>,
+    mp4_metadata: Option<Mp4BitstreamMetadata>,
     openh264_path: Option<&str>,
     video_codec_implementation: VideoCodecImplementationSelections,
 ) -> Result<SoraConnectionContextConfig> {
@@ -219,12 +220,12 @@ fn build_context_config(
     // passthrough になる」ことの不変条件になっている。順序が変わると下のフィルタで
     // Encoder エントリが 0 件になり、MP4 送信が静かに成立しなくなる。
     //
-    // reader は借用で受け取り、この関数が返った後も呼び出し側で move できるようにする。
-    // 呼び出し側は「reader 構築 → capability を借用で作成 → context_config 登録 →
-    // reader を capturer へ move」の順を守ること。
-    if let Some(reader) = mp4_reader {
+    // metadata は値で受け取る。この関数呼び出しの後も reader は独立に move できる。
+    // 呼び出し側は「reader 構築 → bitstream_metadata で取り出し → capability 生成 →
+    // context_config 登録 → reader を capturer へ move」の順を守ること。
+    if let Some(metadata) = mp4_metadata {
         let passthrough_capability: Box<dyn VideoCodecCapability> =
-            Box::new(Mp4PassthroughVideoCodecCapability::new(reader));
+            Box::new(Mp4PassthroughVideoCodecCapability::new(metadata));
         let passthrough_implementation = passthrough_capability.get_implementation();
         add_video_codec_capability(&mut context_config, passthrough_capability);
 
@@ -562,13 +563,15 @@ fn build_and_run_connection(
     #[cfg(not(feature = "media-device"))]
     let adm_config = sora_sdk::AdmConfig::NoAudioDevice;
 
-    // build_context_config には reader の借用だけ渡し、この関数呼び出しが返ったら
-    // 借用が終了する。後段の attach_sender_tracks に対しては mp4_state を move
-    // できる（context 構築で identity Arc がすでに複製されているため、reader を
+    // build_context_config には metadata の cheap clone だけを渡す。この関数呼び出しが
+    // 返ったら metadata は消費され、後段の attach_sender_tracks に対しては mp4_state を
+    // move できる（context 構築で identity Arc がすでに複製されているため、reader を
     // capturer に move しても capability 側で照合できる）。
     let context_config = build_context_config(
         adm_config,
-        mp4_state.as_ref().map(|(reader, _)| reader),
+        mp4_state
+            .as_ref()
+            .map(|(reader, _)| reader.bitstream_metadata()),
         args.openh264_path.as_deref(),
         args.video_codec_implementation.clone(),
     )?;

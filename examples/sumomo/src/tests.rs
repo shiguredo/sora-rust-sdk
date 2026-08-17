@@ -619,7 +619,7 @@ fn build_context_config_mp4_encoder_preference_uses_only_passthrough() {
     let (reader, _fixture) = h264_reader_from_fixture("encoder-preference-uses-only-passthrough");
     let config = build_context_config(
         sora_sdk::AdmConfig::NoAudioDevice,
-        Some(&reader),
+        Some(reader.bitstream_metadata()),
         None,
         VideoCodecImplementationSelections::Auto,
     )
@@ -673,7 +673,7 @@ fn build_context_config_mp4_manual_internal_encoder_is_passthrough() {
     let (reader, _fixture) = h264_reader_from_fixture("mp4-manual-internal-encoder-is-passthrough");
     let config = build_context_config(
         sora_sdk::AdmConfig::NoAudioDevice,
-        Some(&reader),
+        Some(reader.bitstream_metadata()),
         None,
         VideoCodecImplementationSelections::Manual(vec![
             VideoCodecImplementationSelection::Internal,
