@@ -46,13 +46,13 @@
 
 ### misc
 
-- [UPDATE] preference の可否判定を `is_supported` に一本化する
-  - デフォルトの `is_supported` の実体は「コーデック名だけの `SdpVideoFormat` を `resolve_sdp_format` に通せるか」なので、同名の追加の既存検証は既存 capability では結果が一致するだけだった
+- [UPDATE] ビデオコーデック preference の可否判定を `is_supported` に一本化する
+  - デフォルトの `is_supported` の実体は「コーデック名だけの `SdpVideoFormat` を `resolve_sdp_format` に通せるか」なので、追加の既存検証は既存 capability では結果が一致するだけだった
   - 例えば MP4 パススルーが H.264 の `profile-level-id` などのコーデック固有 parameter を必須とする場合、以下の順序で `is_supported` の override が事実上無効化されていた
     1. capability が `is_supported(Encoder, H264)` の override で「使える」と表明する
     2. capability の `resolve_sdp_format` はコーデック固有 parameter を必須とし、parameter なしの入力を拒否するよう実装されている
-    3. しかし追加の既存検証はその capability の `resolve_sdp_format` に「H.264（parameter なし）」を渡す
+    3. しかしこの既存検証はその capability の `resolve_sdp_format` に「H.264（parameter なし）」を渡す
     4. capability が拒否 → preference 検証全体が失敗し、override が無効化される
-  - 一本化により、後続の MP4 パススルーやコーデック固有 required parameter を持つ capability が preference 検証で拒否されずに済む
+  - この追加の既存検証を `validate_video_codec_preference` から削除する。これにより後続の MP4 パススルーやコーデック固有 required parameter を持つ capability が preference 検証で拒否されずに済む
   - `SoraVideoEncoderFactory::create` / `SoraVideoDecoderFactory::create` の「解決済み format を create_video_encoder / create_video_decoder に渡す」既存配線を実装コメントと回帰テストで固定する（本体挙動は変えない）
   - @sile
