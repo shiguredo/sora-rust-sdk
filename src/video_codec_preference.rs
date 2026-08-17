@@ -273,14 +273,9 @@ fn validate_codec(
             ),
         });
     };
-    // preference の可否判定は `is_supported` に一本化する。
-    // デフォルトの `is_supported` の実体は「コーデック名だけの `SdpVideoFormat` を
-    // `resolve_sdp_format` に通せるか」なので、以前あった同名の追加の検証は既存 capability
-    // では結果が一致するだけだった。しかしその追加の検証は capability の `resolve_sdp_format`
-    // にコーデック名だけの `SdpVideoFormat` を渡す実装だったため、capability がコーデック
-    // 固有 parameter を必須としてこの入力を拒否する場合（例: MP4 パススルー）、
-    // `is_supported` の override で「使える」と表明しても preference 検証で落ちてしまい、
-    // override が事実上無効化される構造だった。
+    // preference の可否判定は `is_supported` の結果で完結させる。
+    // コーデック固有 parameter を必須とする capability も `is_supported` の
+    // override で可否を表明することでこの検証を通せる。
     // 実 format の解決は `SoraVideoEncoderFactory::create` /
     // `SoraVideoDecoderFactory::create` が行う。
     let encoder_supported = capability.is_supported(CodecDirection::Encoder, codec.codec_type());
