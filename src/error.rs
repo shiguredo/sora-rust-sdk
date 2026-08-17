@@ -10,7 +10,7 @@ use crate::video_codecs::mp4::Mp4Error;
 /// SDK のエラー型。
 #[derive(Debug)]
 pub enum Error {
-    /// `--role` に不正な値が指定された。
+    /// role に不正な値が指定された。
     InvalidRole {
         /// 指定された role 文字列。
         value: String,
@@ -130,8 +130,6 @@ pub enum Error {
     JsonParse(JsonParseError),
     /// WebRTC のエラー。内部エラーとして [`shiguredo_webrtc::Error`] を保持する。
     Webrtc(shiguredo_webrtc::Error),
-    /// [`PeerConnection`](shiguredo_webrtc::PeerConnection) が存在しない。
-    PeerConnectionMissing,
     /// SetRemoteDescription がタイムアウトした。
     SetRemoteDescriptionTimeout,
     /// SetRemoteDescription の応答を受信できなかった。
@@ -203,6 +201,11 @@ pub enum Error {
         /// 失敗したコマンド名。
         command: &'static str,
     },
+    /// コマンドの応答待機がタイムアウトした。
+    CommandTimeout {
+        /// タイムアウトしたコマンド名。
+        command: &'static str,
+    },
     /// ビデオコーデックの capability 指定が不正。
     InvalidVideoCodecCapability {
         /// 失敗理由。
@@ -222,6 +225,12 @@ pub enum Error {
     /// libcamera のエラー（`feature = "libcamera"` 時のみ有効）。内部エラーとして [`shiguredo_libcamera::Error`] を保持する。
     #[cfg(feature = "libcamera")]
     Libcamera(shiguredo_libcamera::Error),
+    /// unknown な libcamera コントロールが指定された（`feature = "libcamera"` 時のみ有効）。
+    #[cfg(feature = "libcamera")]
+    UnknownLibcameraControl {
+        /// 指定されたコントロール名。
+        name: String,
+    },
     /// OpenH264 のエラー（`feature = "openh264"` 時のみ有効）。内部エラーとして [`shiguredo_openh264::Error`] を保持する。
     #[cfg(feature = "openh264")]
     Openh264(shiguredo_openh264::Error),
@@ -318,7 +327,7 @@ impl std::fmt::Display for Error {
         match self {
             Error::InvalidRole { value } => write!(
                 f,
-                "--role は sendonly, recvonly, sendrecv のみ対応です: {value}"
+                "role は sendonly, recvonly, sendrecv のみ対応です: {value}"
             ),
             Error::HostEmpty => f.write_str("ホストが空です"),
             Error::HostInvalidFormat => f.write_str("ホストの指定が不正です"),
@@ -400,7 +409,6 @@ impl std::fmt::Display for Error {
             Error::Io(err) => write!(f, "IO エラー: {err}"),
             Error::JsonParse(err) => write!(f, "JSON エラー: {err}"),
             Error::Webrtc(err) => write!(f, "WebRTC エラー: {err}"),
-            Error::PeerConnectionMissing => f.write_str("PeerConnection がありません"),
             Error::SetRemoteDescriptionTimeout => {
                 f.write_str("SetRemoteDescription がタイムアウトしました")
             }
@@ -452,6 +460,9 @@ impl std::fmt::Display for Error {
                     "コマンドの応答を受信できませんでした: {command}: {source}"
                 )
             }
+            Error::CommandTimeout { command } => {
+                write!(f, "コマンドの応答待機がタイムアウトしました: {command}")
+            }
             Error::InvalidVideoCodecCapability { reason } => {
                 write!(f, "VideoCodecCapability が不正です: {reason}")
             }
@@ -459,19 +470,23 @@ impl std::fmt::Display for Error {
                 write!(f, "VideoCodecPreference が不正です: {reason}")
             }
             #[cfg(feature = "libcamera")]
-            Error::LibcameraMessage { message } => write!(f, "libcamera error: {message}"),
+            Error::LibcameraMessage { message } => write!(f, "libcamera エラー: {message}"),
             #[cfg(feature = "libcamera")]
-            Error::Libcamera(err) => write!(f, "libcamera error: {err}"),
+            Error::Libcamera(err) => write!(f, "libcamera エラー: {err}"),
+            #[cfg(feature = "libcamera")]
+            Error::UnknownLibcameraControl { name } => {
+                write!(f, "不明な libcamera コントロールです: {name}")
+            }
             #[cfg(feature = "openh264")]
-            Error::Openh264(err) => write!(f, "OpenH264 error: {err}"),
+            Error::Openh264(err) => write!(f, "OpenH264 エラー: {err}"),
             #[cfg(feature = "amf")]
-            Error::Amf { source } => write!(f, "AMF error: {source}"),
+            Error::Amf { source } => write!(f, "AMF エラー: {source}"),
             #[cfg(feature = "amf")]
-            Error::AmfMessage { reason } => write!(f, "AMF error: {reason}"),
+            Error::AmfMessage { reason } => write!(f, "AMF エラー: {reason}"),
             #[cfg(feature = "vpl")]
-            Error::Vpl { source } => write!(f, "VPL error: {source}"),
+            Error::Vpl { source } => write!(f, "VPL エラー: {source}"),
             #[cfg(feature = "vpl")]
-            Error::VplMessage { reason } => write!(f, "VPL error: {reason}"),
+            Error::VplMessage { reason } => write!(f, "VPL エラー: {reason}"),
             Error::RpcTimeout => f.write_str("RPC レスポンスがタイムアウトしました"),
             Error::RpcProtocolViolation { id } => match id {
                 Some(id) => {
@@ -500,13 +515,13 @@ impl std::fmt::Display for Error {
                 f.write_str("client_cert と client_key は両方を指定する必要があります")
             }
             #[cfg(feature = "nvcodec")]
-            Error::NvCodec { source } => write!(f, "NVCodec error: {source}"),
+            Error::NvCodec { source } => write!(f, "NVCodec エラー: {source}"),
             #[cfg(feature = "nvcodec")]
-            Error::NvCodecMessage { reason } => write!(f, "NVCodec error: {reason}"),
+            Error::NvCodecMessage { reason } => write!(f, "NVCodec エラー: {reason}"),
             #[cfg(feature = "v4l2")]
-            Error::V4l2 { source } => write!(f, "V4L2 error: {source}"),
+            Error::V4l2 { source } => write!(f, "V4L2 エラー: {source}"),
             #[cfg(feature = "v4l2")]
-            Error::V4l2Message { reason } => write!(f, "V4L2 error: {reason}"),
+            Error::V4l2Message { reason } => write!(f, "V4L2 エラー: {reason}"),
             Error::InvalidSystemTime { source } => {
                 write!(
                     f,

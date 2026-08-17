@@ -33,6 +33,7 @@ use crate::video_codec::{SimulcastCapabilityHelper, codec_type_from_format};
 use crate::video_codec_capability::{
     CodecDirection, VideoCodecCapability, VideoCodecImplementation,
 };
+use crate::video_codecs::helpers;
 
 fn v4l2_supported_formats() -> Vec<SdpVideoFormat> {
     vec![SdpVideoFormat::new_with_parameters(
@@ -43,12 +44,6 @@ fn v4l2_supported_formats() -> Vec<SdpVideoFormat> {
         ]),
         &[ScalabilityMode::L1T1],
     )]
-}
-
-fn requested_frame_type(
-    frame_types: Option<VideoFrameTypeVectorRef<'_>>,
-) -> Option<VideoFrameType> {
-    frame_types.and_then(|frame_types| frame_types.get(0))
 }
 
 fn build_i420_frame(
@@ -537,7 +532,7 @@ impl VideoEncoderHandler for V4l2VideoEncoder {
             return VideoCodecStatus::ErrParameter;
         }
 
-        let requested_frame_type = requested_frame_type(frame_types);
+        let requested_frame_type = helpers::requested_frame_type(frame_types);
         let force_keyframe = matches!(requested_frame_type, Some(VideoFrameType::Key));
         let timestamp_us = frame.timestamp_us();
         let rtp_timestamp = frame.rtp_timestamp();
@@ -1116,7 +1111,7 @@ impl V4l2VideoCodecCapability {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shiguredo_webrtc::{Environment, SdpVideoFormat, VideoFrameType, VideoFrameTypeVector};
+    use shiguredo_webrtc::{Environment, SdpVideoFormat};
 
     #[test]
     fn v4l2_capability_has_expected_implementation_name() {
@@ -1153,19 +1148,6 @@ mod tests {
         assert_eq!(
             params.get("level-asymmetry-allowed").map(String::as_str),
             Some("1")
-        );
-    }
-
-    #[test]
-    fn v4l2_requested_frame_type_uses_first_entry() {
-        assert_eq!(requested_frame_type(None), None);
-
-        let mut frame_types = VideoFrameTypeVector::new(2);
-        frame_types.push(VideoFrameType::Empty);
-        frame_types.push(VideoFrameType::Key);
-        assert_eq!(
-            requested_frame_type(Some(frame_types.as_ref())),
-            Some(VideoFrameType::Empty)
         );
     }
 

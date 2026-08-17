@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-07-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-16
 - Model: Composer
 - Branch: feature/refactor-pre-release-nonbreaking-cleanup
 - Polished: {YYYY-MM-DD}
@@ -75,3 +75,11 @@ Medium。
 3. 装飾コメント 3 ファイルを削除する
 4. `src/video_codec_capability.rs` と `src/video_codecs/{openh264,amf,nvcodec,v4l2,vpl}.rs` の未使用引数を `_` 接頭辞化し、`#[expect(unused_variables)]` を外す
 5. 完了条件のコマンドを実行する
+
+## 解決方法
+
+本 issue は `#0146`（リリース前の非破壊掃除を一括で行う）に統合した。
+
+旧 `#0049`・旧 `#0054`・旧 `#0130` はいずれも「重複の解消と SemVer 非影響の掃除」を目的とする同一カテゴリの issue であり、生成元（親 `#0020` の S6 と、コードベース全体レビュー）が別々だったために分裂していた。重複したカテゴリの issue が独立に残ると、実装時に対象ファイル・完了条件の検証が分断されるため、3 つを 1 つの `#0146` に統合して一括対応する。
+
+本 issue の内容（デッドコード削除・装飾コメント削除・未使用引数属性の除去）は `#0146` の「現状 2〜3」および「設計方針」「完了条件」「変更対象」「解決方法」に引き継がれている。

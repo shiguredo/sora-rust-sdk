@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-15
 - Model: deepseek-v4-flash
 - Branch: feature/fix-prek-pre-push-e2e-block
 - Polished: {YYYY-MM-DD}
@@ -33,3 +33,9 @@
 ## 変更対象
 
 - `prek.toml`
+
+## 解決方法
+
+- 本 issue は対応せず closed にする
+- 前提が誤っている: 「テスト環境を用意していない開発者が push できない」という問題は実在しない。開発者は全員テスト環境を持っている前提であり、pre-push で e2e を含む `cargo test --workspace` を走らせる現状が正しい
+- 本 issue の方針 (pre-push から e2e-tests を除外する) を実施すると、e2e が通っていない変更が push できるようになり、現状を悪くする可能性が高い

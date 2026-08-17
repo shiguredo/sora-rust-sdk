@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-15
 - Model: deepseek-v4-flash
 - Branch: feature/fix-sumomo-event-channel-overflow
 - Polished: 2026-08-14
@@ -38,3 +38,11 @@ sumomo のイベントチャネルが満杯になったときに `OnTrack` / `On
 - `examples/sumomo/src/main.rs`
 - `examples/sumomo/src/tests.rs`
 - `CHANGES.md`（`[FIX]` エントリを追加）
+
+## 解決方法
+
+- `examples/sumomo/src/main.rs` の `AppEventHandler` の送信側を `mpsc::Sender` から `mpsc::UnboundedSender` に変更し、`try_send` を `UnboundedSender::send` に変更した。イベントチャネルは `mpsc::unbounded_channel::<AppEvent>()` で生成するため、容量 32 を超えても `OnTrack` / `OnRemoveTrack` を含む全イベントが破棄されない
+- backpressure は採用しない。`SoraConnectionEventHandler` は同期トレイトであり、コールバックから `send().await` は await できない。`blocking_send` は `#[tokio::main(flavor = "current_thread")]` の runtime 内から呼ぶと panic するため、unbounded 以外に解がない
+- `examples/sumomo/src/tests.rs` に `event_channel_delivers_all_burst_events` テストを追加した。`Notify` / `Push` イベントを各 64 件（旧容量 32 を超過）送信し、全件が受信されることを実チャネルで検証する
+- 型変更の影響を受ける `build_connection_builder` / `build_and_run_connection` の引数と、`examples/sumomo/src/tests.rs` のイベントチャネル生成箇所も unbounded に合わせて更新した
+- `CHANGES.md` への記載は指示により行わなかった

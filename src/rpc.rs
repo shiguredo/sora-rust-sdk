@@ -140,7 +140,7 @@ impl RpcResponse {
                 let result_value = value
                     .to_member("result")?
                     .required()
-                    .expect("result_seen なので必ず存在する");
+                    .expect("result must exist since result_seen is true");
                 let result =
                     JsonString::from(RawJsonOwned::json(|f| DisplayJson::fmt(&result_value, f)));
                 Ok((trusted_id, RpcResponse::Success { result }))
@@ -149,7 +149,7 @@ impl RpcResponse {
                 let error_value = value
                     .to_member("error")?
                     .required()
-                    .expect("error_seen なので必ず存在する");
+                    .expect("error must exist since error_seen is true");
                 let (code, message, data) = parse_error_object(trusted_id, error_value)?;
                 Ok((
                     trusted_id,

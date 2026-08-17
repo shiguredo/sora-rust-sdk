@@ -2,7 +2,7 @@
 
 - Priority: Low
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-16
 - Model: deepseek-v4-flash
 - Branch: feature/refactor-pre-release-cleanup-2nd
 - Polished: {YYYY-MM-DD}
@@ -81,3 +81,11 @@
 - `examples/sumomo/src/main.rs`
 - `examples/sumomo/src/args.rs`
 - `examples/sumomo/src/fake.rs`
+
+## 解決方法
+
+本 issue は `#0146`（リリース前の非破壊掃除を一括で行う）に統合した。
+
+旧 `#0049`・旧 `#0054`・旧 `#0130` はいずれも「重複の解消と SemVer 非影響の掃除」を目的とする同一カテゴリの issue であり、生成元（親 `#0020` の S2 / S6 と、コードベース全体レビュー）が別々だったために分裂していた。重複したカテゴリの issue が独立に残ると、実装時に対象ファイル・完了条件の検証が分断されるため、3 つを 1 つの `#0146` に統合して一括対応する。
+
+本 issue の内容（デッドコード削除・過剰なログ削減・重複ロジック整理・軽微な可読性改善）は `#0146` の「現状 2・4・5・6」および「設計方針」「完了条件」「変更対象」「解決方法」に引き継がれている。

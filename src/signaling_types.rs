@@ -53,7 +53,6 @@ pub(crate) enum IncomingMessageData {
     },
     ReOffer {
         sdp: String,
-        ice_servers: Vec<IceServerConfig>,
     },
     Ping {
         stats: Option<bool>,
@@ -89,40 +88,44 @@ impl IncomingMessage {
         })
     }
 
-    pub fn parse_ice_servers(value: RawJsonValue) -> Result<Vec<IceServerConfig>> {
-        value
-            .to_member("config")?
-            .required()?
-            .to_member("iceServers")?
-            .required()?
-            .to_array()?
-            .map(|v| v.try_into())
-            .collect()
+    /// `config.iceServers` をパースする。
+    ///
+    /// `config` / `iceServers` が存在しない場合は空リストを返す。
+    fn parse_ice_servers(value: RawJsonValue) -> Result<Vec<IceServerConfig>> {
+        Self::parse_optional(value, "config", |config| {
+            Self::parse_optional(config, "iceServers", |ice_servers| {
+                ice_servers.to_array()?.map(|v| v.try_into()).collect()
+            })
+        })
     }
 
-    pub fn parse_ice_servers_optional(value: RawJsonValue) -> Result<Vec<IceServerConfig>> {
-        let Some(config) = value.to_member("config")?.optional() else {
-            return Ok(vec![]);
-        };
-        let Some(ice_servers) = config.to_member("iceServers")?.optional() else {
-            return Ok(vec![]);
-        };
-        ice_servers.to_array()?.map(|v| v.try_into()).collect()
+    fn parse_data_channels(value: RawJsonValue) -> Result<Vec<DataChannelConfig>> {
+        Self::parse_optional(value, "data_channels", |v| {
+            v.to_array()?.map(|v| v.try_into()).collect()
+        })
     }
 
-    pub fn parse_data_channels(value: RawJsonValue) -> Result<Vec<DataChannelConfig>> {
+    fn parse_simulcast_encodings(value: RawJsonValue) -> Result<Vec<SimulcastEncodingConfig>> {
+        Self::parse_optional(value, "encodings", |v| {
+            v.to_array()?.map(|v| v.try_into()).collect()
+        })
+    }
+
+    /// オプショナルなメンバーを取得して `parse` でパースする。
+    ///
+    /// `member` が存在しない場合は空リストを返す。
+    fn parse_optional<'text, 'raw, T, F>(
+        value: RawJsonValue<'text, 'raw>,
+        member: &str,
+        parse: F,
+    ) -> Result<Vec<T>>
+    where
+        F: FnOnce(RawJsonValue<'text, 'raw>) -> Result<Vec<T>>,
+    {
         value
-            .to_member("data_channels")?
+            .to_member(member)?
             .optional()
-            .map(|v| v.to_array()?.map(|v| v.try_into()).collect())
-            .unwrap_or(Ok(vec![]))
-    }
-
-    pub fn parse_simulcast_encodings(value: RawJsonValue) -> Result<Vec<SimulcastEncodingConfig>> {
-        value
-            .to_member("encodings")?
-            .optional()
-            .map(|v| v.to_array()?.map(|v| v.try_into()).collect())
+            .map(parse)
             .unwrap_or(Ok(vec![]))
     }
 }
@@ -155,9 +158,7 @@ impl<'text, 'raw> TryFrom<RawJsonValue<'text, 'raw>> for IncomingMessageData {
             }
             "re-offer" => {
                 let sdp = value.to_member("sdp")?.required()?.try_into()?;
-                // re-offer では config がオプショナル
-                let ice_servers = IncomingMessage::parse_ice_servers_optional(value)?;
-                Ok(Self::ReOffer { sdp, ice_servers })
+                Ok(Self::ReOffer { sdp })
             }
             "ping" => {
                 let stats = value
@@ -637,5 +638,40 @@ mod tests {
     fn disconnect_serializes_to_no_error() {
         let text = Json(OutgoingMessage::new_disconnect()).to_string();
         assert_eq!(text, r#"{"type":"disconnect","reason":"NO-ERROR"}"#);
+    }
+
+    #[test]
+    fn offer_accepts_missing_ice_servers() {
+        // offer でも iceServers が無い場合は空リストとして受理する。
+        let message = IncomingMessage::parse(r#"{"type":"offer","sdp":"sdp","config":{}}"#)
+            .expect("iceServers が無い offer はパースできるべきです");
+        match message.data {
+            IncomingMessageData::Offer { ice_servers, .. } => {
+                assert!(
+                    ice_servers.is_empty(),
+                    "iceServers は空リストになるべきです"
+                );
+            }
+            _ => panic!("Offer としてパースされるべきです"),
+        }
+    }
+
+    #[test]
+    fn offer_parses_ice_servers() {
+        // offer の config.iceServers が正しくパースされることを確認する。
+        let text = r#"{"type":"offer","sdp":"sdp","config":{"iceServers":[{"urls":["stun:example.com:3478"]}]}}"#;
+        let message =
+            IncomingMessage::parse(text).expect("iceServers 付き offer のパースに失敗しました");
+        match message.data {
+            IncomingMessageData::Offer { ice_servers, .. } => {
+                assert_eq!(ice_servers.len(), 1, "iceServers の件数が期待と異なります");
+                assert_eq!(
+                    ice_servers[0].urls,
+                    vec!["stun:example.com:3478"],
+                    "iceServers の URL が期待と異なります"
+                );
+            }
+            _ => panic!("Offer としてパースされるべきです"),
+        }
     }
 }

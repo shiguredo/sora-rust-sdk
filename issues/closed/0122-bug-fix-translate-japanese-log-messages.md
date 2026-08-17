@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-15
 - Model: deepseek-v4-flash
 - Branch: feature/fix-translate-japanese-log-messages
 - Polished: 2026-08-14
@@ -45,3 +45,23 @@ AGENTS.md の「ログメッセージは全て英語にすること」に違反�
 - `src/connection.rs`
 - `src/rpc.rs`
 - `CHANGES.md`
+
+## 解決方法
+
+- `src/connection.rs` の日本語ログ 6 箇所を既存の英語ログの文体に合わせて英語化した
+  - 「接続先:」→「Connection target:」
+  - 「リダイレクト先:」→「Redirect target:」
+  - 「DataChannel '{}' からメッセージを受信:」→「Received message from DataChannel '{}':」
+  - 「HTTP Proxy 経由で接続します:」→「Connecting via HTTP proxy:」
+  - 「接続試行:」→「Connection attempt:」
+  - 「接続成功:」→「Connection established:」
+- `src/connection.rs` と `src/rpc.rs` のプロダクションコードの `expect` メッセージ 6 種 8 箇所を英語に統一した
+  - 「event_handler は new() で設定されている」→「event_handler must be set in new()」
+  - 「response_tx は必ず存在する」→「response_tx must exist」
+  - 「notification でない場合は id が存在する」→「id must exist when notification is false」
+  - 「BUG: proxy 接続後は plain stream のはずです」→「BUG: stream must be plain after proxy connection」
+  - 「result_seen なので必ず存在する」→「result must exist since result_seen is true」
+  - 「error_seen なので必ず存在する」→「error must exist since error_seen is true」
+- テストコードのメッセージは変更していない
+- `cargo test --workspace` の成功を確認した
+- `CHANGES.md` はユーザー指示により変更していない

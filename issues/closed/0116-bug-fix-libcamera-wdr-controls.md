@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-15
 - Model: deepseek-v4-flash
 - Branch: feature/fix-libcamera-wdr-controls
 - Polished: 2026-08-14
@@ -39,3 +39,9 @@ libcamera の `WdrMode` コントロールを `--libcamera-control` で文字列
 
 - `src/libcamera.rs`
 - `CHANGES.md`（`[FIX]` エントリを追加）
+
+## 解決方法
+
+- `resolve_enum_value` に `WdrMode` の enum 解決分岐を追加し、`core::wdr_mode` の定数へ解決するようにした
+- `ControlValue` に `Debug` を導出してテストの assertion メッセージで値を表示できるようにした
+- 単体テストを追加した（全 enum 値・無効文字列・数値指定・小文字指定の各ケース）

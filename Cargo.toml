@@ -118,6 +118,12 @@ tokio = {
 }
 tokio-rustls.workspace = true
 
+[dev-dependencies]
+# テストでソケットの SO_LINGER を設定して RST を送るために利用
+socket2 = "0.6"
+# テストで仮想時刻 (start_paused) を使い、時間依存テストを決定論化するために利用
+tokio = { workspace = true, features = ["test-util"] }
+
 [features]
 default = ["openh264"]
 amf = ["dep:shiguredo_amf"]

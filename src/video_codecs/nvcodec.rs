@@ -1,7 +1,6 @@
 //! NVIDIA Video Codec SDK を使用したハードウェアエンコーダー/デコーダー実装。
 //!
 //! `#[cfg(feature = "nvcodec")]` でのみコンパイルされる。
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use shiguredo_nvcodec::{
@@ -12,14 +11,14 @@ use shiguredo_nvcodec::{
 };
 use shiguredo_webrtc::{
     CodecSpecificInfo, EncodedImage, EncodedImageBuffer, EncodedImageRef, EnvironmentRef,
-    H264PacketizationMode, NV12Buffer, ScalabilityMode, SdpVideoFormat, SdpVideoFormatRef,
-    VideoCodecRef, VideoCodecStatus, VideoCodecType, VideoDecoder,
-    VideoDecoderDecodedImageCallbackPtr, VideoDecoderDecoderInfo, VideoDecoderHandler,
-    VideoDecoderSettingsRef, VideoEncoder, VideoEncoderEncodedImageCallbackPtr,
-    VideoEncoderEncodedImageCallbackRef, VideoEncoderEncodedImageCallbackResultError,
-    VideoEncoderEncoderInfo, VideoEncoderHandler, VideoEncoderRateControlParametersRef,
-    VideoEncoderSettingsRef, VideoFrame, VideoFrameRef, VideoFrameType, VideoFrameTypeVectorRef,
-    i420_to_nv12, nv12_copy, rtc_log_error, rtc_log_warning,
+    H264PacketizationMode, NV12Buffer, SdpVideoFormat, SdpVideoFormatRef, VideoCodecRef,
+    VideoCodecStatus, VideoCodecType, VideoDecoder, VideoDecoderDecodedImageCallbackPtr,
+    VideoDecoderDecoderInfo, VideoDecoderHandler, VideoDecoderSettingsRef, VideoEncoder,
+    VideoEncoderEncodedImageCallbackPtr, VideoEncoderEncodedImageCallbackRef,
+    VideoEncoderEncodedImageCallbackResultError, VideoEncoderEncoderInfo, VideoEncoderHandler,
+    VideoEncoderRateControlParametersRef, VideoEncoderSettingsRef, VideoFrame, VideoFrameRef,
+    VideoFrameType, VideoFrameTypeVectorRef, i420_to_nv12, nv12_copy, rtc_log_error,
+    rtc_log_warning,
 };
 
 use crate::error::{Error, Result};
@@ -27,25 +26,9 @@ use crate::video_codec::{SimulcastCapabilityHelper, codec_type_from_format};
 use crate::video_codec_capability::{
     CodecDirection, VideoCodecCapability, VideoCodecImplementation,
 };
+use crate::video_codecs::helpers;
 
-fn supported_formats_for_codec(codec_type: VideoCodecType) -> Vec<SdpVideoFormat> {
-    match codec_type {
-        VideoCodecType::H264 => vec![SdpVideoFormat::new_with_parameters(
-            "H264",
-            &HashMap::from([
-                (String::from("level-asymmetry-allowed"), String::from("1")),
-                (String::from("packetization-mode"), String::from("1")),
-            ]),
-            &[ScalabilityMode::L1T1],
-        )],
-        VideoCodecType::H265 => vec![SdpVideoFormat::new("H265")],
-        VideoCodecType::Av1 => vec![SdpVideoFormat::new("AV1")],
-        VideoCodecType::Vp8 => vec![SdpVideoFormat::new("VP8")],
-        VideoCodecType::Vp9 => vec![SdpVideoFormat::new("VP9")],
-        _ => Vec::new(),
-    }
-}
-
+// コーデック種別から NVCODEC 固有のエンコーダー設定を返す。
 fn encoder_codec_config(codec_type: VideoCodecType) -> Option<CodecConfig> {
     match codec_type {
         VideoCodecType::H264 => Some(CodecConfig::H264(H264EncoderConfig {
@@ -64,6 +47,7 @@ fn encoder_codec_config(codec_type: VideoCodecType) -> Option<CodecConfig> {
     }
 }
 
+// コーデック種別から NVCODEC 固有のデコーダー設定を返す。
 fn decoder_codec(codec_type: VideoCodecType) -> Option<DecoderCodec> {
     match codec_type {
         VideoCodecType::H264 => Some(DecoderCodec::H264),
@@ -91,10 +75,10 @@ fn collect_supported_formats(device_id: i32) -> Result<(Vec<SdpVideoFormat>, Vec
         };
 
         if info.encoding.supported {
-            encoder_supported_formats.extend(supported_formats_for_codec(codec_type));
+            encoder_supported_formats.extend(helpers::supported_formats_for_codec(codec_type));
         }
         if info.decoding.supported {
-            decoder_supported_formats.extend(supported_formats_for_codec(codec_type));
+            decoder_supported_formats.extend(helpers::supported_formats_for_codec(codec_type));
         }
     }
     Ok((encoder_supported_formats, decoder_supported_formats))
@@ -109,12 +93,7 @@ fn nvcodec_reconfigure_params(target_bitrate_bps: u32, framerate: u32) -> Reconf
     }
 }
 
-fn requested_frame_type(
-    frame_types: Option<VideoFrameTypeVectorRef<'_>>,
-) -> Option<VideoFrameType> {
-    frame_types.and_then(|frame_types| frame_types.get(0))
-}
-
+// NVCODEC 固有の `PictureType` を `VideoFrameType` に変換する。
 fn frame_type_from_nvcodec(picture_type: PictureType) -> VideoFrameType {
     match picture_type {
         PictureType::Idr | PictureType::I => VideoFrameType::Key,
@@ -415,7 +394,7 @@ impl VideoEncoderHandler for NvCodecVideoEncoder {
         if frame_width == 0 || frame_height == 0 {
             return VideoCodecStatus::ErrParameter;
         }
-        let requested_frame_type = requested_frame_type(frame_types);
+        let requested_frame_type = helpers::requested_frame_type(frame_types);
         if matches!(requested_frame_type, Some(VideoFrameType::Empty)) {
             return VideoCodecStatus::NoOutput;
         }
@@ -785,13 +764,15 @@ impl NvCodecVideoCodecCapability {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
-    use shiguredo_webrtc::{Environment, SdpVideoFormat, VideoFrameTypeVector};
+    use shiguredo_webrtc::{Environment, SdpVideoFormat};
 
     fn test_supported_formats(codec_types: &[VideoCodecType]) -> Vec<SdpVideoFormat> {
         let mut supported_formats = Vec::new();
         for codec_type in codec_types {
-            supported_formats.extend(supported_formats_for_codec(*codec_type));
+            supported_formats.extend(helpers::supported_formats_for_codec(*codec_type));
         }
         supported_formats
     }
@@ -823,19 +804,6 @@ mod tests {
         assert_eq!(params.framerate_num, Some(1));
         assert_eq!(params.framerate_den, Some(1));
         assert_eq!(params.average_bitrate, Some(1));
-    }
-
-    #[test]
-    fn nvcodec_requested_frame_type_uses_first_entry() {
-        assert_eq!(requested_frame_type(None), None);
-
-        let mut frame_types = VideoFrameTypeVector::new(2);
-        frame_types.push(VideoFrameType::Empty);
-        frame_types.push(VideoFrameType::Key);
-        assert_eq!(
-            requested_frame_type(Some(frame_types.as_ref())),
-            Some(VideoFrameType::Empty)
-        );
     }
 
     #[test]

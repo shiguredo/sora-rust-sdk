@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-15
 - Model: deepseek-v4-flash
 - Branch: feature/fix-validate-public-api-parameters
 - Polished: 2026-08-14
@@ -54,3 +54,12 @@
 - `src/types.rs`
 - `src/error.rs`
 - `CHANGES.md`
+
+## 解決方法
+
+- 実装せず closed にした
+- 理由: 公開 API のパラメータ検証は利点に対してリスクが大きすぎる
+  - Sora と SDK は独立にリリースされ、サーバーのバージョンを知らずに検証するため、仕様が変わったときに旧 SDK と新 Sora の組合せで誤った拒否が起きる
+  - リリース済みの SDK を全ユーザーに更新してもらうことは現実的ではなく、追従コストが高すぎる
+  - サーバー側が最終的に検証するため、ローカル検証の利点は「早く分かりやすいエラーを返す」程度で、その割に未来永劫の保証が必要になる
+  - 結論として、サーバーに不正パラメータを送ってエラーを返してもらうのが最も頑健である

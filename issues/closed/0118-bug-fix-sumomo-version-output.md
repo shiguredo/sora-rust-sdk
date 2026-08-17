@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-15
 - Model: deepseek-v4-flash
 - Branch: feature/fix-sumomo-version-output
 - Polished: 2026-08-14
@@ -42,3 +42,10 @@
 - `examples/sumomo/src/args.rs`（`--version` 出力の `println!` 化と、未使用になる `rtc_log_info` import の削除）
 - `examples/sumomo/tests/`（`--version` の回帰テストを追加）
 - `CHANGES.md`（`[FIX]` エントリを追加）
+
+## 解決方法
+
+- `examples/sumomo/src/args.rs` の `parse_args` で `--version` 出力を `rtc_log_info!` から `println!` に変更した。stdout へログプレフィックスなしで直接出力し、末尾改行を付ける
+- 未使用になった `rtc_log_info` import を削除した
+- `examples/sumomo/tests/version.rs` に回帰テストを追加した。`CARGO_BIN_EXE_sumomo` を child process として起動し、`--version` が stdout に `sumomo 0.0.0` を出力して stderr には出力せず exit 0 することを検証する
+- `CHANGES.md` への記載は指示により行わなかった

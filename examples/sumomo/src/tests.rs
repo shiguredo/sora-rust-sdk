@@ -8,36 +8,9 @@ fn test_args(
         signaling_urls: vec!["wss://example.com/signaling".to_string()],
         channel_id: "test-channel".to_string(),
         role: Role::SendOnly,
-        audio: None,
-        video: None,
-        video_codec_type: None,
         video_codec_implementation,
-        video_bit_rate: None,
-        input_mp4: None,
         openh264_path: openh264_path.map(ToString::to_string),
-        video_codec_list: false,
-        data_channel_signaling: None,
-        ignore_disconnect_websocket: None,
-        simulcast: None,
-        insecure: false,
-        client_cert: None,
-        client_key: None,
-        ca_cert: None,
-        duration: None,
-        metadata: None,
-        turn_tls_insecure: false,
-        turn_tls_ca_cert: None,
-        use_libcamera: false,
-        use_libcamera_native: false,
-        libcamera_controls: Vec::new(),
-        #[cfg(feature = "raw-player")]
-        use_raw_player: false,
-        #[cfg(feature = "media-device")]
-        video_input_device: None,
-        #[cfg(feature = "media-device")]
-        audio_input_device: None,
-        #[cfg(feature = "media-device")]
-        list_devices: false,
+        ..Args::default()
     }
 }
 
@@ -919,7 +892,7 @@ fn build_context_config_manual_order_prefers_later_selection_on_apple() {
 #[tokio::test]
 async fn shutdown_connection_converts_task_panic_to_worker_panic() {
     let context = SoraConnectionContext::new().expect("context の作成に失敗しました");
-    let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(32);
+    let (event_tx, _event_rx) = mpsc::unbounded_channel::<AppEvent>();
     let builder = SoraConnection::builder(
         context,
         vec!["wss://127.0.0.1:1/signaling".to_string()],
@@ -954,7 +927,7 @@ async fn shutdown_connection_converts_task_panic_to_worker_panic() {
 #[tokio::test]
 async fn shutdown_connection_times_out() {
     let context = SoraConnectionContext::new().expect("context の作成に失敗しました");
-    let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(32);
+    let (event_tx, _event_rx) = mpsc::unbounded_channel::<AppEvent>();
     let builder = SoraConnection::builder(
         context,
         vec!["wss://127.0.0.1:1/signaling".to_string()],
@@ -976,6 +949,65 @@ async fn shutdown_connection_times_out() {
     let deadline = tokio::time::Instant::now() + Duration::from_millis(50);
     let result = shutdown_connection(handle, run_handle, deadline).await;
     assert!(matches!(result, Err(AppError::ConnectionShutdownTimeout)));
+}
+
+/// イベントチャネルは unbounded であり、旧 bounded channel の容量 32 を超える
+/// イベントバーストでも全イベントが失われずに受信されることを検証する。
+///
+/// OnTrack / OnRemoveTrack は RtpTransceiver / RtpReceiver が公開コンストラクタを
+/// 持たないため直接は検証できない。構築可能な Notify / Push イベントを 32 を超えて
+/// 送信し、全イベントが受信されることを実チャネルで確認する。
+#[tokio::test]
+async fn event_channel_delivers_all_burst_events() {
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AppEvent>();
+    let mut handler = AppEventHandler { event_tx };
+
+    // 旧 bounded channel の容量 32 を超える件数を送信する。
+    let notify_count = 64;
+    let push_count = 64;
+    for i in 0..notify_count {
+        handler.on_notify(&format!("notify-{i}"));
+    }
+    for i in 0..push_count {
+        handler.on_push(&format!("push-{i}"));
+    }
+    drop(handler);
+
+    let mut received_notify = Vec::new();
+    let mut received_push = Vec::new();
+    while let Some(event) = event_rx.recv().await {
+        match event {
+            AppEvent::Notify(text) => received_notify.push(text),
+            AppEvent::Push(text) => received_push.push(text),
+            AppEvent::OnTrack(_) => panic!("OnTrack は送信していないはずです"),
+            AppEvent::OnRemoveTrack(_) => panic!("OnRemoveTrack は送信していないはずです"),
+        }
+    }
+
+    assert_eq!(
+        received_notify.len(),
+        notify_count,
+        "Notify イベントが失われています"
+    );
+    assert_eq!(
+        received_push.len(),
+        push_count,
+        "Push イベントが失われています"
+    );
+    for (i, text) in received_notify.iter().enumerate() {
+        assert_eq!(
+            text,
+            &format!("notify-{i}"),
+            "Notify イベントの順序が壊れています"
+        );
+    }
+    for (i, text) in received_push.iter().enumerate() {
+        assert_eq!(
+            text,
+            &format!("push-{i}"),
+            "Push イベントの順序が壊れています"
+        );
+    }
 }
 
 /// read-only の実 OS file へ ANSI output helper から書き込み、write error が伝播する。

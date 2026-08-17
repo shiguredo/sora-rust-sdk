@@ -169,60 +169,25 @@ impl<'text, 'raw> TryFrom<RawJsonValue<'text, 'raw>> for VideoCodecImplementatio
     }
 }
 
+/// `capabilities` の中から指定した実装名の capability を探す。
+pub(crate) fn find_capability<'a>(
+    capabilities: &'a [Box<dyn VideoCodecCapability>],
+    implementation: &VideoCodecImplementation,
+) -> Option<&'a dyn VideoCodecCapability> {
+    let implementation_name = implementation.name();
+    capabilities
+        .iter()
+        .map(|capability| capability.as_ref())
+        .find(|capability| capability.get_implementation().name() == implementation_name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use nojson::Json;
-    use shiguredo_webrtc::{VideoDecoderHandler, VideoEncoderHandler};
+    use shiguredo_webrtc::VideoCodecType;
 
-    // VideoEncoderHandler を最小限に実装したテスト専用の型。
-    struct NoopVideoEncoder;
-    impl VideoEncoderHandler for NoopVideoEncoder {}
-
-    // VideoDecoderHandler を最小限に実装したテスト専用の型。
-    struct NoopVideoDecoder;
-    impl VideoDecoderHandler for NoopVideoDecoder {}
-
-    // VideoCodecCapability を本物のコードで実装したテスト専用の型。
-    struct TestVideoCodecCapability;
-
-    impl VideoCodecCapability for TestVideoCodecCapability {
-        fn get_implementation(&self) -> VideoCodecImplementation {
-            VideoCodecImplementation::new("test", "Test Codec")
-        }
-
-        fn get_supported_formats(&self, direction: CodecDirection) -> Vec<SdpVideoFormat> {
-            match direction {
-                CodecDirection::Encoder | CodecDirection::Decoder => {
-                    vec![SdpVideoFormat::new("H264")]
-                }
-            }
-        }
-
-        fn create_video_encoder(
-            &self,
-            _env: EnvironmentRef<'_>,
-            format: SdpVideoFormatRef<'_>,
-        ) -> Option<VideoEncoder> {
-            if format.name().ok().as_deref() == Some("H264") {
-                Some(VideoEncoder::new_with_handler(Box::new(NoopVideoEncoder)))
-            } else {
-                None
-            }
-        }
-
-        fn create_video_decoder(
-            &self,
-            _env: EnvironmentRef<'_>,
-            format: SdpVideoFormatRef<'_>,
-        ) -> Option<VideoDecoder> {
-            if format.name().ok().as_deref() == Some("H264") {
-                Some(VideoDecoder::new_with_handler(Box::new(NoopVideoDecoder)))
-            } else {
-                None
-            }
-        }
-    }
+    use crate::testing::TestVideoCodecCapability;
 
     #[test]
     fn video_codec_implementation_round_trip() {
@@ -235,7 +200,11 @@ mod tests {
 
     #[test]
     fn trait_works_with_trait_object() {
-        let capability: Box<dyn VideoCodecCapability> = Box::new(TestVideoCodecCapability);
+        let capability: Box<dyn VideoCodecCapability> = Box::new(TestVideoCodecCapability::new(
+            VideoCodecImplementation::new("test", "Test Codec"),
+            vec![VideoCodecType::H264],
+            vec![VideoCodecType::H264],
+        ));
         assert_eq!(capability.get_implementation().name(), "test");
         assert!(capability.is_supported(CodecDirection::Encoder, VideoCodecType::H264));
         assert!(capability.is_supported(CodecDirection::Decoder, VideoCodecType::H264));

@@ -7,7 +7,7 @@ use nojson::{DisplayJson, Json, JsonFormatter, JsonParseError, RawJsonValue};
 
 use crate::error::{Error, Result};
 use crate::video_codec_capability::{
-    CodecDirection, VideoCodecCapability, VideoCodecImplementation,
+    CodecDirection, VideoCodecCapability, VideoCodecImplementation, find_capability,
 };
 
 /// 特定の方向・コーデック・実装の優先設定。
@@ -304,17 +304,6 @@ fn validate_codec(
     Ok(())
 }
 
-fn find_capability<'a>(
-    capabilities: &'a [Box<dyn VideoCodecCapability>],
-    implementation: &VideoCodecImplementation,
-) -> Option<&'a dyn VideoCodecCapability> {
-    let implementation_name = implementation.name();
-    capabilities
-        .iter()
-        .map(|capability| capability.as_ref())
-        .find(|capability| capability.get_implementation().name() == implementation_name)
-}
-
 fn codec_capability_summary(
     capability: &dyn VideoCodecCapability,
     codec_type: VideoCodecType,
@@ -347,128 +336,7 @@ fn parse_video_codec_type(
 mod tests {
     use super::*;
     use crate::error::Error;
-    use shiguredo_webrtc::{
-        EnvironmentRef, SdpVideoFormat, SdpVideoFormatRef, VideoDecoder, VideoDecoderHandler,
-        VideoEncoder, VideoEncoderHandler,
-    };
-
-    // VideoEncoderHandler を最小限に実装したテスト専用の型。
-    struct NoopVideoEncoder;
-    impl VideoEncoderHandler for NoopVideoEncoder {}
-
-    // VideoDecoderHandler を最小限に実装したテスト専用の型。
-    struct NoopVideoDecoder;
-    impl VideoDecoderHandler for NoopVideoDecoder {}
-
-    // VideoCodecCapability を本物のコードで実装したテスト専用の型。
-    struct TestVideoCodecCapability {
-        implementation: VideoCodecImplementation,
-        encoder_supported: Vec<VideoCodecType>,
-        decoder_supported: Vec<VideoCodecType>,
-        // false のときは `is_supported` が true でも `resolve_sdp_format` は None を返す。
-        // コーデック固有 parameter を必須とし、bare format を拒否する capability を表す。
-        resolves_sdp_format: bool,
-    }
-
-    impl TestVideoCodecCapability {
-        fn new(
-            implementation: VideoCodecImplementation,
-            encoder_supported: Vec<VideoCodecType>,
-            decoder_supported: Vec<VideoCodecType>,
-        ) -> Self {
-            Self {
-                implementation,
-                encoder_supported,
-                decoder_supported,
-                resolves_sdp_format: true,
-            }
-        }
-
-        fn without_sdp_format_resolution(mut self) -> Self {
-            self.resolves_sdp_format = false;
-            self
-        }
-    }
-
-    impl VideoCodecCapability for TestVideoCodecCapability {
-        fn get_implementation(&self) -> VideoCodecImplementation {
-            self.implementation.clone()
-        }
-
-        fn is_supported(&self, direction: CodecDirection, codec_type: VideoCodecType) -> bool {
-            match direction {
-                CodecDirection::Encoder => self.encoder_supported.contains(&codec_type),
-                CodecDirection::Decoder => self.decoder_supported.contains(&codec_type),
-            }
-        }
-
-        fn get_supported_formats(&self, direction: CodecDirection) -> Vec<SdpVideoFormat> {
-            let supported = match direction {
-                CodecDirection::Encoder => &self.encoder_supported,
-                CodecDirection::Decoder => &self.decoder_supported,
-            };
-            supported
-                .iter()
-                .filter_map(|codec_type| codec_type.as_str().map(SdpVideoFormat::new))
-                .collect()
-        }
-
-        fn resolve_sdp_format(
-            &self,
-            direction: CodecDirection,
-            format: SdpVideoFormatRef<'_>,
-        ) -> Option<shiguredo_webrtc::SdpVideoFormat> {
-            if !self.resolves_sdp_format {
-                return None;
-            }
-            let codec_type = format
-                .name()
-                .ok()
-                .and_then(|name| VideoCodecType::try_from(name.as_str()).ok())?;
-            let supported = self.is_supported(direction, codec_type);
-            if !supported {
-                return None;
-            }
-            let codec_name = codec_type.as_str()?;
-            let mut format = shiguredo_webrtc::SdpVideoFormat::new(codec_name);
-            if codec_type == VideoCodecType::H264 {
-                format.parameters_mut().set("packetization-mode", "1");
-            }
-            Some(format)
-        }
-
-        fn create_video_encoder(
-            &self,
-            _env: EnvironmentRef<'_>,
-            format: SdpVideoFormatRef<'_>,
-        ) -> Option<VideoEncoder> {
-            let codec_type = format
-                .name()
-                .ok()
-                .and_then(|name| VideoCodecType::try_from(name.as_str()).ok())?;
-            if self.is_supported(CodecDirection::Encoder, codec_type) {
-                Some(VideoEncoder::new_with_handler(Box::new(NoopVideoEncoder)))
-            } else {
-                None
-            }
-        }
-
-        fn create_video_decoder(
-            &self,
-            _env: EnvironmentRef<'_>,
-            format: SdpVideoFormatRef<'_>,
-        ) -> Option<VideoDecoder> {
-            let codec_type = format
-                .name()
-                .ok()
-                .and_then(|name| VideoCodecType::try_from(name.as_str()).ok())?;
-            if self.is_supported(CodecDirection::Decoder, codec_type) {
-                Some(VideoDecoder::new_with_handler(Box::new(NoopVideoDecoder)))
-            } else {
-                None
-            }
-        }
-    }
+    use crate::testing::TestVideoCodecCapability;
 
     fn default_preference_codec(
         direction: CodecDirection,

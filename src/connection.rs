@@ -17,7 +17,7 @@ use shiguredo_webrtc::{
     CxxString, DataChannel, DataChannelObserver, DataChannelObserverHandler, DataChannelState,
     IceCandidateRef, IceServer, MediaStreamTrack, PeerConnection, PeerConnectionDependencies,
     PeerConnectionObserver, PeerConnectionObserverHandler, PeerConnectionOfferAnswerOptions,
-    PeerConnectionRtcConfiguration, PeerConnectionState, Resolution, RtcError,
+    PeerConnectionRtcConfiguration, PeerConnectionState, RTCStatsReport, Resolution, RtcError,
     RtpEncodingParameters, RtpEncodingParametersVector, RtpReceiver, RtpSender, RtpTransceiver,
     SSLCertChainRef, SSLCertificateVerifier, SSLCertificateVerifierHandler, SdpType,
     SessionDescription, SetLocalDescriptionObserver, SetLocalDescriptionObserverHandler,
@@ -53,7 +53,7 @@ use shiguredo_webrtc::{rtc_log_error, rtc_log_info, rtc_log_verbose, rtc_log_war
 ///
 /// TURN-TLS の TLS 設定は `SoraConnectionBuilder::turn_tls_insecure()` / `turn_tls_ca_cert()` で行う。
 #[derive(Clone, Default)]
-pub struct TlsConfig {
+pub(crate) struct TlsConfig {
     /// サーバー証明書の検証をスキップする。
     pub(crate) insecure: bool,
     /// クライアント証明書 (PEM 形式)。
@@ -454,6 +454,7 @@ impl SoraConnectionHandle {
     pub async fn selected_signaling_url(&self) -> Result<Option<String>> {
         self.send_command(
             "selected_signaling_url",
+            None,
             SoraConnectionCommand::GetSelectedSignalingUrl,
         )
         .await
@@ -467,6 +468,7 @@ impl SoraConnectionHandle {
     pub async fn connected_signaling_url(&self) -> Result<Option<String>> {
         self.send_command(
             "connected_signaling_url",
+            None,
             SoraConnectionCommand::GetConnectedSignalingUrl,
         )
         .await
@@ -476,7 +478,7 @@ impl SoraConnectionHandle {
     ///
     /// `run()` が切断要求を受け付けたことを確認してから戻る。
     pub async fn disconnect(&self) -> Result<()> {
-        self.send_command("disconnect", SoraConnectionCommand::Disconnect)
+        self.send_command("disconnect", None, SoraConnectionCommand::Disconnect)
             .await
     }
 
@@ -499,7 +501,7 @@ impl SoraConnectionHandle {
         params: Option<JsonString>,
         options: RpcRequestOptions,
     ) -> Result<Option<RpcResponse>> {
-        self.send_command("send_rpc_request", |tx| {
+        self.send_command("send_rpc_request", None, |tx| {
             SoraConnectionCommand::SendRpcRequest {
                 method: method.to_string(),
                 params,
@@ -517,10 +519,12 @@ impl SoraConnectionHandle {
     /// `#` プレフィックスのないラベルを渡すと `Error::InvalidDataChannelLabel` を返す。
     /// また、Offer 応答の `data_channels` に含まれていないラベルも同様に返す。
     pub async fn send_message(&self, label: &str, data: &[u8]) -> Result<()> {
-        self.send_command("send_message", |tx| SoraConnectionCommand::SendMessage {
-            label: label.to_string(),
-            data: data.to_vec(),
-            response_tx: tx,
+        self.send_command("send_message", None, |tx| {
+            SoraConnectionCommand::SendMessage {
+                label: label.to_string(),
+                data: data.to_vec(),
+                response_tx: tx,
+            }
         })
         .await?
     }
@@ -528,14 +532,20 @@ impl SoraConnectionHandle {
     /// 統計情報を取得する。
     ///
     /// PeerConnection の統計情報を JSON 形式で取得する。
+    /// 統計コールバックが 5 秒以内に発火しない場合は `Error::CommandTimeout` を返す。
     pub async fn get_stats(&self) -> Result<JsonString> {
-        self.send_command("get_stats", SoraConnectionCommand::GetStats)
-            .await?
+        self.send_command(
+            "get_stats",
+            Some(Duration::from_secs(5)),
+            SoraConnectionCommand::GetStats,
+        )
+        .await?
     }
 
     async fn send_command<R>(
         &self,
         command: &'static str,
+        timeout: Option<Duration>,
         build: impl FnOnce(oneshot::Sender<R>) -> SoraConnectionCommand,
     ) -> Result<R> {
         let (tx, rx) = oneshot::channel();
@@ -545,8 +555,17 @@ impl SoraConnectionHandle {
                 reason: e.to_string(),
                 command,
             })?;
-        rx.await
-            .map_err(|source| Error::CommandResponseMissing { source, command })
+        let result = match timeout {
+            Some(duration) => match tokio::time::timeout(duration, rx).await {
+                Ok(result) => result,
+                Err(_) => {
+                    rtc_log_warning!("Timed out waiting for {} result", command);
+                    return Err(Error::CommandTimeout { command });
+                }
+            },
+            None => rx.await,
+        };
+        result.map_err(|source| Error::CommandResponseMissing { source, command })
     }
 }
 
@@ -597,6 +616,8 @@ enum SoraEvent {
     DataChannelMessage { label: String, data: Vec<u8> },
     DataChannelRegister(DataChannel),
     DataChannelStateChange(String),
+    SendWebSocketMessage(String),
+    SendDataChannelMessage { label: String, message: String },
     RpcTimeout { id: u64 },
 }
 
@@ -657,6 +678,49 @@ impl SSLCertificateVerifierHandler for TurnTlsCaCertVerifier {
         )
         .is_ok()
     }
+}
+
+/// `RTCStatsReport` を `JsonString` に変換する。
+///
+/// `to_json()` で得た文字列を、JSON として妥当であることを検証した `JsonString` にパースする。
+fn report_to_json_string(report: &RTCStatsReport) -> Result<JsonString> {
+    report
+        .to_json()
+        .map_err(Error::from)
+        .and_then(|s| s.parse())
+}
+
+/// SDP 処理 (set remote/local description / create answer) のタイムアウト。
+const SDP_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// SetRemoteDescription / SetLocalDescription の完了通知を受け取る Observer。
+///
+/// どちらの操作も「エラー文字列の `Option` をチャネルで返す」点で同じ形をしているため、
+/// 1 つの構造体で 2 つのトレイトを実装して共有する。
+struct SetDescriptionObserverHandler {
+    tx: mpsc::UnboundedSender<Option<String>>,
+}
+
+impl SetRemoteDescriptionObserverHandler for SetDescriptionObserverHandler {
+    fn on_set_remote_description_complete(&mut self, error: RtcError) {
+        send_set_description_result(&self.tx, error);
+    }
+}
+
+impl SetLocalDescriptionObserverHandler for SetDescriptionObserverHandler {
+    fn on_set_local_description_complete(&mut self, error: RtcError) {
+        send_set_description_result(&self.tx, error);
+    }
+}
+
+/// SDP 適用の完了結果をエラー文字列の `Option` に変換して送信する。
+fn send_set_description_result(tx: &mpsc::UnboundedSender<Option<String>>, error: RtcError) {
+    let msg = if error.ok() {
+        None
+    } else {
+        Some(error.message().unwrap_or_else(|_| "unknown".to_string()))
+    };
+    let _ = tx.send(msg);
 }
 
 impl SoraConnection {
@@ -772,7 +836,7 @@ impl SoraConnection {
         let mut rtc_config = PeerConnectionRtcConfiguration::new();
         let pc = PeerConnection::create(pc_factory, &mut rtc_config, &mut deps)?;
 
-        let client = Self {
+        let connection = Self {
             data_channels: HashMap::new(),
             data_channel_configs: Vec::new(),
             offer_simulcast: false,
@@ -790,7 +854,7 @@ impl SoraConnection {
             pc_observer: observer,
             config,
         };
-        Ok((client, handle))
+        Ok((connection, handle))
     }
 
     /// メインループを開始する。
@@ -824,7 +888,7 @@ impl SoraConnection {
             .config
             .event_handler
             .take()
-            .expect("event_handler は new() で設定されている");
+            .expect("event_handler must be set in new()");
         let proxy = self.proxy.clone();
 
         if signaling_urls.is_empty() {
@@ -870,7 +934,7 @@ impl SoraConnection {
         let display_host = format_bracketed_host(&target.host);
         let scheme = if target.tls { "wss" } else { "ws" };
         rtc_log_info!(
-            "接続先: {}://{}:{}{}",
+            "Connection target: {}://{}:{}{}",
             scheme,
             display_host,
             target.port,
@@ -909,6 +973,10 @@ impl SoraConnection {
         // また、終了処理の close handshake で Sora の WebSocket Close フレームを受信した
         // 場合に on_websocket_close を通知するかどうかの判定にも使う。
         let mut server_close_received = false;
+        // ユーザー主導の切断 (SoraConnectionCommand::Disconnect) による終了かどうか。
+        // ユーザーが切断を要求している以上、終了処理の WebSocket close handshake で
+        // 発生する I/O エラーは warning に落として run の Ok(()) を覆さないために使う。
+        let mut user_initiated_disconnect = false;
 
         'run_loop: loop {
             // 期限切れの値を sleep_until で持つと即 Ready になりビジーループしてしまうため、
@@ -1026,11 +1094,25 @@ impl SoraConnection {
                         }
                         SoraEvent::RpcTimeout { id } => {
                             if let Some(mut pending) = self.pending_rpc_responses.remove(&id) {
-                                let _ = pending.response_tx.take().expect("response_tx は必ず存在する").send(Err(Error::RpcTimeout));
+                                let _ = pending.response_tx.take().expect("response_tx must exist").send(Err(Error::RpcTimeout));
                             }
                         }
                         SoraEvent::DataChannelStateChange(label) => {
                             self.handle_data_channel_state(&mut *handler, &label, &mut opened_data_channels, &mut use_data_channel_signaling, switched_received);
+                        }
+                        // このイベントを受信したら WebSocket メッセージを送信する
+                        // 送信時のエラーはログだけ出して無視する
+                        SoraEvent::SendWebSocketMessage(message) => {
+                            if let Err(e) = self.send_websocket_message(&mut ws, &message) {
+                                rtc_log_warning!("Failed to send WebSocket message: error={}", e);
+                            }
+                        }
+                        // このイベントを受信したら DataChannel メッセージを送信する
+                        // 送信時のエラーはログだけ出して無視する
+                        SoraEvent::SendDataChannelMessage { label, message } => {
+                            if let Err(e) = self.send_data_channel_message(&label, message.as_bytes()) {
+                                rtc_log_warning!("Failed to send DataChannel message: label='{}' error={}", label, e);
+                            }
                         }
                     }
                 }
@@ -1039,6 +1121,9 @@ impl SoraConnection {
                     match command {
                         SoraConnectionCommand::Disconnect(ack_tx) => {
                             rtc_log_info!("Received disconnect request");
+                            // ユーザー主導の切断として記録し、close handshake 中の
+                            // I/O エラーを warning に落とす対象に加える。
+                            user_initiated_disconnect = true;
                             // サーバーに切断を通知するため、disconnect メッセージを送信する。
                             // 送信失敗しても切断処理を中断せず、ログに残すだけにする。
                             let disconnect_message =
@@ -1069,8 +1154,13 @@ impl SoraConnection {
                             break;
                         }
                         SoraConnectionCommand::GetStats(stats_response_tx) => {
-                            let stats = self.get_stats().await;
-                            let _ = stats_response_tx.send(stats);
+                            // get_stats のコールバック内で直接応答を送信するため、
+                            // run ループはブロックされない。
+                            let pc = &self.pc;
+                            pc.get_stats(move |report| {
+                                let result = report_to_json_string(&report);
+                                let _ = stats_response_tx.send(result);
+                            });
                         }
                         SoraConnectionCommand::GetSelectedSignalingUrl(response_tx) => {
                             let _ = response_tx.send(self.selected_signaling_url.clone());
@@ -1086,7 +1176,7 @@ impl SoraConnection {
                                     if notification {
                                         let _ = response_tx.send(Ok(None));
                                     } else {
-                                        let id = rpc_id.expect("notification でない場合は id が存在する");
+                                        let id = rpc_id.expect("id must exist when notification is false");
                                         let event_tx = event_tx.clone();
                                         let timeout_handle = tokio::spawn(async move {
                                             tokio::time::sleep(timeout).await;
@@ -1104,13 +1194,7 @@ impl SoraConnection {
                             }
                         }
                         SoraConnectionCommand::SendMessage { label, data, response_tx } => {
-                            let result = if label.starts_with('#')
-                                && self.data_channel_configs.iter().any(|c| c.label == label)
-                            {
-                                self.send_data_channel_message(&label, &data)
-                            } else {
-                                Err(Error::InvalidDataChannelLabel { label })
-                            };
+                            let result = self.handle_send_message_command(&label, &data);
                             let _ = response_tx.send(result);
                         }
                     }
@@ -1207,13 +1291,13 @@ impl SoraConnection {
                                     );
                                     self.send_websocket_message(&mut ws, &answer_text)?;
                                 }
-                                IncomingMessageData::ReOffer { sdp, ice_servers } => {
+                                IncomingMessageData::ReOffer { sdp } => {
                                     handler.on_signaling_message(
                                         SignalingType::WebSocket,
                                         SignalingDirection::Received,
                                         &text,
                                     );
-                                    let answer_sdp = self.handle_offer(&sdp, &ice_servers).await?;
+                                    let answer_sdp = self.handle_offer(&sdp, &[]).await?;
                                     let reanswer_message =
                                         OutgoingMessage::new_reanswer(&answer_sdp);
                                     let reanswer_text = Json(reanswer_message).to_string();
@@ -1226,10 +1310,7 @@ impl SoraConnection {
                                 }
                                 IncomingMessageData::Ping { stats } => {
                                     if stats.unwrap_or(false) {
-                                        if self.request_stats_pong(&event_tx).is_err() {
-                                            // エラー時は通常の pong を送信する
-                                            self.send_pong(&event_tx);
-                                        }
+                                        self.request_stats_pong(&event_tx);
                                     } else {
                                         self.send_pong(&event_tx);
                                     }
@@ -1344,7 +1425,7 @@ impl SoraConnection {
                 let display_host = format_bracketed_host(&new_target.host);
                 let scheme = if new_target.tls { "wss" } else { "ws" };
                 rtc_log_info!(
-                    "リダイレクト先: {}://{}:{}{}",
+                    "Redirect target: {}://{}:{}{}",
                     scheme,
                     display_host,
                     new_target.port,
@@ -1428,104 +1509,53 @@ impl SoraConnection {
             }
         }
 
+        // run ループを抜けた時点で終了フェーズに入るため、以後のコマンド送信を拒否する。
+        close_command_channel_and_ack_pending_disconnects(
+            &mut self.command_rx,
+            &mut user_initiated_disconnect,
+        )
+        .await;
+
         // DataChannel シグナリングを利用している場合は、
         // disconnect_wait_timeout を上限にクローズ完了を待機する。
         if use_data_channel_signaling && !opened_data_channels.is_empty() {
             let deadline = tokio::time::Instant::now() + disconnect_wait_timeout;
-            while !opened_data_channels.is_empty() {
-                let timeout_result = tokio::time::timeout_at(deadline, async {
-                    while let Some(event) = self.event_rx.recv().await {
-                        if let SoraEvent::DataChannelStateChange(label) = event {
-                            return label;
-                        }
-                    }
-                    String::new()
-                })
-                .await;
-                match timeout_result {
-                    Ok(label) if !label.is_empty() => {
-                        if opened_data_channels.remove(&label) {
-                            rtc_log_info!("DataChannel '{}' closed", label);
-                            handler.on_data_channel_close(&label);
-                        }
-                    }
-                    _ => {
-                        rtc_log_warning!(
-                            "切断待機がタイムアウトしました (残り {} チャネル)",
-                            opened_data_channels.len()
-                        );
-                        // タイムアウトした残りチャネルにも close コールバックを通知する。
-                        // サーバーが DataChannel を閉じないまま切断された場合でも、
-                        // ユーザーへの close 通知が漏れないようにする。
-                        for label in &opened_data_channels {
-                            rtc_log_info!("DataChannel '{}' closed", label);
-                            handler.on_data_channel_close(label);
-                        }
-                        opened_data_channels.clear();
-                        break;
-                    }
-                }
-            }
+            // .await を超える値を渡す場合は Send である必要があるが、&data_channels は
+            // Send でないためエラーになるので、self.data_channels で所有権ごと渡す。
+            // これ以降 self.data_channels は利用できないので、
+            // 問題になるようならインターフェースを &mut data_channels に変更すること。
+            let data_channels = self.data_channels;
+            wait_data_channels_close(
+                &mut self.event_rx,
+                &mut *handler,
+                &mut opened_data_channels,
+                data_channels,
+                deadline,
+            )
+            .await;
         }
 
         // websocket_closed=true は WebSocket のソケットが死んでいるか ws 層が failed 状態で、
         // 正常な close handshake が成立しない。この状態で close handshake を実行すると
         // 死んだソケットへの I/O が失敗し、ユーザー主導の正常切断にもかかわらず
         // run() が Err を返してしまうため、close handshake をスキップする。
-        if ws.state() == ConnectionState::Connected && !websocket_closed {
-            // server Close、または switched 後の ignore 構成での切断は ws の終了処理が
-            // 確定的に進むため、この後始末で発生するエラーは warning として記録し、
-            // run の Ok(()) を覆さない。
-            // ignore 構成では切断と RST が同時に起きた場合に websocket_closed が
-            // 立つ前に close handshake へ入り、死んだソケットへの I/O が失敗して
-            // ユーザー主導の切断が Err になることがあるため、同様に warning に落とす。
-            let close_result = tokio::time::timeout(websocket_close_timeout, async {
-                ws.close(CloseCode::NORMAL, "shutdown")?;
-                loop {
-                    if flush_ws_output(&mut ws, &mut stream, &mut timers).await? {
-                        return Ok::<_, Error>(());
-                    }
-                    let mut buf = vec![0u8; 8192];
-                    let n = stream.read(&mut buf).await?;
-                    if n == 0 {
-                        return Ok(());
-                    }
-                    ws.feed_recv_buf(&buf[..n], now()?)?;
-                    // server Close の終了処理では、Sora が送信した WebSocket Close
-                    // フレームを検出して on_websocket_close を通知する。
-                    // server Close メッセージと WebSocket Close フレームは別経路で
-                    // 届くため、処理順のレースで Close フレームが未処理のまま残る
-                    // 場合がある。ここで読み取ることで、on_websocket_close を
-                    // 決定的に 1 回だけ通知する。
-                    // server Close 以外の終了経路では従来どおりイベントを破棄する。
-                    while let Some(event) = ws.poll_event() {
-                        if server_close_received
-                            && let ConnectionEvent::Close { code, reason } = event
-                        {
-                            handler.on_websocket_close(code.map(|c| c.0), &reason);
-                        }
-                    }
-                    if ws.state() == ConnectionState::Closed {
-                        return Ok(());
-                    }
-                }
-            })
-            .await;
-            match close_result {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    if server_close_received
-                        || (switched_ignore_disconnect_websocket && use_data_channel_signaling)
-                    {
-                        rtc_log_warning!("WebSocket close handshake failed: {}", e);
-                    } else {
-                        return Err(e);
-                    }
-                }
-                Err(_) => {
-                    rtc_log_warning!("WebSocket close timed out");
-                }
-            }
+        if !websocket_closed {
+            // close handshake 中の I/O エラーを吸収すべき終了経路を合成して渡す。
+            // ignore 構成とユーザー主導の切断は「接続を終了する意思が確定している」
+            // 点で共通するため、まとめて 1 つの吸収条件にする。server_close_received
+            // も吸収条件に含まれるが、close handshake 中に受信した WebSocket Close
+            // フレームで on_websocket_close を通知する判定にも使うため別引数のままにする。
+            close_websocket_handshake(
+                &mut ws,
+                &mut stream,
+                &mut timers,
+                &mut *handler,
+                server_close_received,
+                (switched_ignore_disconnect_websocket && use_data_channel_signaling)
+                    || user_initiated_disconnect,
+                websocket_close_timeout,
+            )
+            .await?;
         }
 
         rtc_log_info!("Shutting down");
@@ -1644,50 +1674,30 @@ impl SoraConnection {
 
     fn send_pong(&self, event_tx: &mpsc::UnboundedSender<SoraEvent>) {
         let message = OutgoingMessage::new_pong(None);
-        let _ = event_tx.send(SoraEvent::SignalingMessage(Json(message).to_string()));
+        // pong はシグナリングメッセージとして返信するが、on_signaling_message は発生させない
+        let _ = event_tx.send(SoraEvent::SendWebSocketMessage(Json(message).to_string()));
     }
 
-    fn request_stats_pong(&self, event_tx: &mpsc::UnboundedSender<SoraEvent>) -> Result<()> {
+    fn request_stats_pong(&self, event_tx: &mpsc::UnboundedSender<SoraEvent>) {
         let pc = &self.pc;
         let event_tx = event_tx.clone();
         pc.get_stats(move |report| {
-            let message = OutgoingMessage::new_pong(
-                report
-                    .to_json()
-                    .map_err(Error::from)
-                    .and_then(|s| s.parse())
-                    .ok(),
-            );
-            let _ = event_tx.send(SoraEvent::SignalingMessage(Json(message).to_string()));
+            let message = OutgoingMessage::new_pong(report_to_json_string(&report).ok());
+            // pong はシグナリングメッセージとして返信するが、on_signaling_message は発生させない
+            let _ = event_tx.send(SoraEvent::SendWebSocketMessage(Json(message).to_string()));
         });
-        Ok(())
     }
 
     fn request_stats_response(&self, event_tx: &mpsc::UnboundedSender<SoraEvent>) {
         let pc = &self.pc;
         let event_tx = event_tx.clone();
         pc.get_stats(move |report| {
-            if let Ok(reports) = report.to_json()
-                && let Ok(reports) = reports.parse()
-            {
+            if let Ok(reports) = report_to_json_string(&report) {
                 let message = OutgoingMessage::new_stats(reports);
-                let _ = event_tx.send(SoraEvent::SignalingMessage(Json(message).to_string()));
+                // req-stats はシグナリングメッセージとして返信するが、on_signaling_message は発生させない
+                let _ = event_tx.send(SoraEvent::SendWebSocketMessage(Json(message).to_string()));
             }
         });
-    }
-
-    async fn get_stats(&mut self) -> Result<JsonString> {
-        let pc = &self.pc;
-        let (tx, rx) = oneshot::channel();
-        pc.get_stats(move |report| {
-            let r = report.to_json();
-            let _ = tx.send(r);
-        });
-        let json = rx.await.map_err(|e| Error::CommandResponseMissing {
-            source: e,
-            command: "get_stats",
-        })??;
-        json.parse()
     }
 
     async fn handle_offer(&mut self, sdp: &str, ice_servers: &[IceServerConfig]) -> Result<String> {
@@ -1697,27 +1707,12 @@ impl SoraConnection {
         {
             let pc = &self.pc;
             let offer = SessionDescription::new(SdpType::Offer, sdp)?;
-            struct RemObsHandler {
-                tx: mpsc::UnboundedSender<Option<String>>,
-            }
-
-            impl SetRemoteDescriptionObserverHandler for RemObsHandler {
-                fn on_set_remote_description_complete(&mut self, error: RtcError) {
-                    let msg = if error.ok() {
-                        None
-                    } else {
-                        Some(error.message().unwrap_or_else(|_| "unknown".to_string()))
-                    };
-                    let _ = self.tx.send(msg);
-                }
-            }
-
-            let rem_obs = SetRemoteDescriptionObserver::new_with_handler(Box::new(RemObsHandler {
-                tx: rem_tx,
-            }));
+            let rem_obs = SetRemoteDescriptionObserver::new_with_handler(Box::new(
+                SetDescriptionObserverHandler { tx: rem_tx },
+            ));
             pc.set_remote_description(offer, &rem_obs);
         }
-        let rem_res = tokio::time::timeout(Duration::from_secs(5), rem_rx.recv())
+        let rem_res = tokio::time::timeout(SDP_OPERATION_TIMEOUT, rem_rx.recv())
             .await
             .map_err(|_| Error::SetRemoteDescriptionTimeout)?
             .ok_or_else(|| Error::SetRemoteDescriptionResponseMissing)?;
@@ -1761,35 +1756,21 @@ impl SoraConnection {
             let mut opts = PeerConnectionOfferAnswerOptions::new();
             pc.create_answer(&mut ans_obs, &mut opts);
         }
-        let answer_sdp = tokio::time::timeout(Duration::from_secs(5), ans_rx.recv())
+        let answer_sdp = tokio::time::timeout(SDP_OPERATION_TIMEOUT, ans_rx.recv())
             .await
             .map_err(|_| Error::AnswerTimeout)?
             .ok_or_else(|| Error::AnswerResponseMissing)??;
 
         let answer = SessionDescription::new(SdpType::Answer, &answer_sdp)?;
         let (loc_tx, mut loc_rx) = mpsc::unbounded_channel::<Option<String>>();
-        struct LocObsHandler {
-            tx: mpsc::UnboundedSender<Option<String>>,
-        }
-
-        impl SetLocalDescriptionObserverHandler for LocObsHandler {
-            fn on_set_local_description_complete(&mut self, error: RtcError) {
-                let msg = if error.ok() {
-                    None
-                } else {
-                    Some(error.message().unwrap_or_else(|_| "unknown".to_string()))
-                };
-                let _ = self.tx.send(msg);
-            }
-        }
-
-        let loc_obs =
-            SetLocalDescriptionObserver::new_with_handler(Box::new(LocObsHandler { tx: loc_tx }));
+        let loc_obs = SetLocalDescriptionObserver::new_with_handler(Box::new(
+            SetDescriptionObserverHandler { tx: loc_tx },
+        ));
         {
             let pc = &self.pc;
             pc.set_local_description(answer, &loc_obs);
         }
-        let loc_res = tokio::time::timeout(Duration::from_secs(5), loc_rx.recv())
+        let loc_res = tokio::time::timeout(SDP_OPERATION_TIMEOUT, loc_rx.recv())
             .await
             .map_err(|_| Error::SetLocalDescriptionTimeout)?
             .ok_or_else(|| Error::SetLocalDescriptionResponseMissing)?;
@@ -1864,18 +1845,6 @@ impl SoraConnection {
         }
     }
 
-    fn is_data_channel_open(&self, label: &str) -> bool {
-        self.data_channels
-            .get(label)
-            .is_some_and(|m| m.channel.state() == DataChannelState::Open)
-    }
-
-    fn is_data_channel_closed(&self, label: &str) -> bool {
-        self.data_channels
-            .get(label)
-            .is_some_and(|m| m.channel.state() == DataChannelState::Closed)
-    }
-
     fn handle_data_channel_state(
         &self,
         handler: &mut dyn SoraConnectionEventHandler,
@@ -1884,7 +1853,8 @@ impl SoraConnection {
         use_data_channel_signaling: &mut bool,
         switched_received: bool,
     ) {
-        if self.is_data_channel_open(label) && !opened_data_channels.contains(label) {
+        if is_data_channel_open(&self.data_channels, label) && !opened_data_channels.contains(label)
+        {
             rtc_log_info!("DataChannel '{}' opened", label);
             opened_data_channels.insert(label.to_string());
             handler.on_data_channel_open(label);
@@ -1897,10 +1867,8 @@ impl SoraConnection {
             {
                 *use_data_channel_signaling = true;
             }
-        } else if self.is_data_channel_closed(label) && opened_data_channels.contains(label) {
-            rtc_log_info!("DataChannel '{}' closed", label);
-            opened_data_channels.remove(label);
-            handler.on_data_channel_close(label);
+        } else if should_notify_close(&self.data_channels, opened_data_channels, label) {
+            notify_data_channel_closed(handler, opened_data_channels, label);
         }
     }
 
@@ -1968,7 +1936,7 @@ impl SoraConnection {
             data.to_vec()
         };
 
-        rtc_log_info!(
+        rtc_log_verbose!(
             "Sent message to DataChannel '{}': {} bytes",
             label,
             send_data.len()
@@ -1978,6 +1946,22 @@ impl SoraConnection {
             return Err(Error::DataChannelSendFailed);
         }
         Ok(())
+    }
+
+    /// SendMessage コマンドのラベル検証と DataChannel への送信を実行する。
+    ///
+    /// `#` プレフィックス付きで `data_channel_configs` に登録済みのラベルのみ送信を試みる。
+    /// それ以外のラベルは `Error::InvalidDataChannelLabel` を返す。
+    /// ラベルが登録済みでも実チャネル (`data_channels`) が無い場合は
+    /// `Error::DataChannelMissing` を返す。
+    fn handle_send_message_command(&mut self, label: &str, data: &[u8]) -> Result<()> {
+        if label.starts_with('#') && self.data_channel_configs.iter().any(|c| c.label == label) {
+            self.send_data_channel_message(label, data)
+        } else {
+            Err(Error::InvalidDataChannelLabel {
+                label: label.to_string(),
+            })
+        }
     }
 
     async fn handle_data_channel_message(
@@ -2011,8 +1995,8 @@ impl SoraConnection {
             data.to_vec()
         };
 
-        rtc_log_info!(
-            "DataChannel '{}' からメッセージを受信: {} bytes",
+        rtc_log_verbose!(
+            "Received message from DataChannel '{}': {} bytes",
             label,
             message_bytes.len()
         );
@@ -2035,8 +2019,8 @@ impl SoraConnection {
                 // メッセージをパースして処理
                 let incoming = IncomingMessage::parse(&text)?;
                 match incoming.data {
-                    IncomingMessageData::ReOffer { sdp, ice_servers } => {
-                        let answer_sdp = self.handle_offer(&sdp, &ice_servers).await?;
+                    IncomingMessageData::ReOffer { sdp } => {
+                        let answer_sdp = self.handle_offer(&sdp, &[]).await?;
                         let reanswer_message = OutgoingMessage::new_reanswer(&answer_sdp);
                         let reanswer_text = Json(reanswer_message).to_string();
                         handler.on_signaling_message(
@@ -2047,30 +2031,39 @@ impl SoraConnection {
                         self.send_data_channel_message("signaling", reanswer_text.as_bytes())?;
                     }
                     IncomingMessageData::Ping { stats } => {
-                        let pong = if stats.unwrap_or(false) {
-                            let reports = self.get_stats().await.ok();
-                            OutgoingMessage::new_pong(reports)
+                        if stats.unwrap_or(false) {
+                            // pc.get_stats() のコールバックから、event_tx 経由での DataChannel 送信で結果を返す
+                            let pc = &self.pc;
+                            let event_tx = self.event_tx.clone();
+                            pc.get_stats(move |report| {
+                                let message =
+                                    OutgoingMessage::new_pong(report_to_json_string(&report).ok());
+                                let text = Json(message).to_string();
+                                let _ = event_tx.send(SoraEvent::SendDataChannelMessage {
+                                    label: "signaling".to_string(),
+                                    message: text,
+                                });
+                            });
                         } else {
-                            OutgoingMessage::new_pong(None)
-                        };
-                        let pong_text = Json(pong).to_string();
-                        handler.on_signaling_message(
-                            SignalingType::DataChannel,
-                            SignalingDirection::Sent,
-                            &pong_text,
-                        );
-                        self.send_data_channel_message("signaling", pong_text.as_bytes())?;
+                            let pong = OutgoingMessage::new_pong(None);
+                            let pong_text = Json(pong).to_string();
+                            self.send_data_channel_message("signaling", pong_text.as_bytes())?;
+                        }
                     }
                     IncomingMessageData::ReqStats {} => {
-                        // 統計情報を含む stats メッセージを送信（stats チャンネル経由）
-                        let reports = self.get_stats().await;
-                        if let Ok(reports) = reports {
-                            let stats = OutgoingMessage::new_stats(reports);
-                            self.send_data_channel_message(
-                                "stats",
-                                Json(stats).to_string().as_bytes(),
-                            )?;
-                        }
+                        // pc.get_stats() のコールバックから、event_tx 経由での DataChannel 送信で結果を返す
+                        let pc = &self.pc;
+                        let event_tx = self.event_tx.clone();
+                        pc.get_stats(move |report| {
+                            if let Ok(reports) = report_to_json_string(&report) {
+                                let message = OutgoingMessage::new_stats(reports);
+                                let text = Json(message).to_string();
+                                let _ = event_tx.send(SoraEvent::SendDataChannelMessage {
+                                    label: "stats".to_string(),
+                                    message: text,
+                                });
+                            }
+                        });
                     }
                     IncomingMessageData::Notify {} => {
                         handler.on_notify(&text);
@@ -2115,7 +2108,7 @@ impl SoraConnection {
                             let _ = pending
                                 .response_tx
                                 .take()
-                                .expect("response_tx は必ず存在する")
+                                .expect("response_tx must exist")
                                 .send(Ok(Some(response)));
                         } else {
                             // 未知 / timeout 済み / 重複の id の正常 response は破棄する。
@@ -2146,7 +2139,7 @@ impl SoraConnection {
                             let _ = pending
                                 .response_tx
                                 .take()
-                                .expect("response_tx は必ず存在する")
+                                .expect("response_tx must exist")
                                 .send(Err(err));
                         } else {
                             // JSON syntax error と相関できない protocol violation は破棄する。
@@ -2260,6 +2253,156 @@ fn resolve_ws_disconnect_delay_start(
 /// 既存どおり unsupported message として扱う。
 fn is_server_close_label(label: &str) -> bool {
     label == "signaling"
+}
+
+/// 指定したラベルの DataChannel が Open 状態かどうかを返す。
+fn is_data_channel_open(data_channels: &HashMap<String, ManagedDataChannel>, label: &str) -> bool {
+    data_channels
+        .get(label)
+        .is_some_and(|m| m.channel.state() == DataChannelState::Open)
+}
+
+/// 指定したラベルの DataChannel が Closed 状態かどうかを返す。
+fn is_data_channel_closed(
+    data_channels: &HashMap<String, ManagedDataChannel>,
+    label: &str,
+) -> bool {
+    data_channels
+        .get(label)
+        .is_some_and(|m| m.channel.state() == DataChannelState::Closed)
+}
+
+/// DataChannel の状態遷移イベントを受信したときに、close コールバックを通知して
+/// opened_data_channels から remove すべきかを判定する関数。
+///
+/// チャネルが実際に Closed 状態で、かつ opened_data_channels にラベルが含まれる
+/// 場合のみ true を返す。Closing などの途中状態ではまだ閉じていないため false を
+/// 返し、誤った close 通知を防ぐ。
+fn should_notify_close(
+    data_channels: &HashMap<String, ManagedDataChannel>,
+    opened_data_channels: &HashSet<String>,
+    label: &str,
+) -> bool {
+    is_data_channel_closed(data_channels, label) && opened_data_channels.contains(label)
+}
+
+/// 残りチャネルへ close コールバックを通知し、opened_data_channels をクリアする。
+///
+/// タイムアウトやイベントチャネルクローズで待機を終了するときに使う。
+/// サーバーが DataChannel を閉じないまま切断された場合でも、
+/// ユーザーへの close 通知が漏れないようにする。
+fn notify_close_for_remaining(
+    handler: &mut dyn SoraConnectionEventHandler,
+    opened_data_channels: &mut HashSet<String>,
+) {
+    // イテレート中の opened_data_channels の変更を避けるため、ラベルを先に取り出す。
+    let labels: Vec<String> = opened_data_channels.iter().cloned().collect();
+    for label in &labels {
+        notify_data_channel_closed(handler, opened_data_channels, label);
+    }
+}
+
+/// DataChannel の close をログ出力し、opened_data_channels から remove してから
+/// コールバックを通知する。
+fn notify_data_channel_closed(
+    handler: &mut dyn SoraConnectionEventHandler,
+    opened_data_channels: &mut HashSet<String>,
+    label: &str,
+) {
+    rtc_log_info!("DataChannel '{}' closed", label);
+    opened_data_channels.remove(label);
+    handler.on_data_channel_close(label);
+}
+
+/// DataChannel クローズ待機ループの終了要因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DataChannelCloseWaitResult {
+    /// 全チャネルの Closed 遷移を確認して待機を完了した。
+    AllChannelsClosed,
+    /// 待機時間が経過した。
+    TimedOut,
+    /// イベントチャネルがクローズされた。
+    EventChannelClosed,
+}
+
+/// DataChannel のクローズを `deadline` まで待機する。
+///
+/// `event_rx` の状態遷移イベントを処理しながら、`opened_data_channels` が空になるまで待つ。
+///
+/// - DataChannelStateChange で閉じた DataChannel があった場合、on_data_channel_close を通知する
+/// - `deadline` が経過した場合と `event_rx` がクローズされた場合は、
+///   残りチャネルへ on_data_channel_close を通知して待機を終了する
+async fn wait_data_channels_close(
+    event_rx: &mut mpsc::UnboundedReceiver<SoraEvent>,
+    handler: &mut dyn SoraConnectionEventHandler,
+    opened_data_channels: &mut HashSet<String>,
+    data_channels: HashMap<String, ManagedDataChannel>,
+    deadline: tokio::time::Instant,
+) -> DataChannelCloseWaitResult {
+    loop {
+        tokio::select! {
+            event = event_rx.recv() => {
+                match event {
+                    Some(SoraEvent::DataChannelStateChange(label)) => {
+                        if should_notify_close(&data_channels, opened_data_channels, &label) {
+                            notify_data_channel_closed(handler, opened_data_channels, &label);
+                        }
+                    }
+                    Some(_) => {}
+                    None => {
+                        // event_rx がクローズされた場合は、残りチャネルへの close 通知を
+                        // 行ってから待機を終了する。
+                        rtc_log_warning!(
+                            "DataChannel close wait aborted because the event channel was closed ({} channels remain)",
+                            opened_data_channels.len()
+                        );
+                        notify_close_for_remaining(handler, opened_data_channels);
+                        return DataChannelCloseWaitResult::EventChannelClosed;
+                    }
+                }
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                // タイムアウトした場合も event_rx と同様、残りチャネルへの close 通知を
+                // 行ってから待機を終了する。
+                rtc_log_warning!(
+                    "DataChannel close wait timed out ({} channels remain)",
+                    opened_data_channels.len()
+                );
+                notify_close_for_remaining(handler, opened_data_channels);
+                return DataChannelCloseWaitResult::TimedOut;
+            }
+        }
+
+        if opened_data_channels.is_empty() {
+            return DataChannelCloseWaitResult::AllChannelsClosed;
+        }
+    }
+}
+
+/// `command_rx` を閉じ、残っているコマンドを処理する。
+///
+/// クローズ前に送信されたコマンドは次のように処理する。
+/// `Disconnect` には ack を返す (呼び出し側は成功する)。
+/// `Disconnect` 以外のコマンドは応答せず破棄する (その呼び出し側は
+/// `Error::CommandResponseMissing` になる)。
+///
+/// ドレインは `recv()` を `None` まで回して行う。UnboundedReceiver の close() のドキュメントには、
+/// メッセージを落とさないためには close() 後に recv() を None まで呼ぶことと記述されている。
+/// ref: https://docs.rs/tokio/latest/tokio/sync/mpsc/struct.UnboundedReceiver.html#method.close
+async fn close_command_channel_and_ack_pending_disconnects(
+    command_rx: &mut mpsc::UnboundedReceiver<SoraConnectionCommand>,
+    user_initiated_disconnect: &mut bool,
+) {
+    command_rx.close();
+    while let Some(command) = command_rx.recv().await {
+        if let SoraConnectionCommand::Disconnect(ack_tx) = command {
+            // ユーザー主導の切断として記録し、close handshake 中の
+            // I/O エラーを warning に落とす対象に加える。
+            *user_initiated_disconnect = true;
+            let _ = ack_tx.send(());
+        }
+        // Disconnect 以外のコマンドは応答せず破棄する。
+    }
 }
 
 struct ManagedDataChannel {
@@ -2591,6 +2734,9 @@ impl TimerManager {
     }
 
     fn set_timer(&mut self, id: TimerId, duration: u64) {
+        // 同じ id の実行中タイマーが残ったまま上書きすると、古いタイマーの
+        // 発火で誤ったタイマーイベントが届くため、上書き前に abort する。
+        self.clear_timer(id);
         let sender = self.sender.clone();
         let handle = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(duration)).await;
@@ -2759,7 +2905,7 @@ async fn connect_websocket(
     let deadline = tokio::time::Instant::now() + timeout;
     if let Some(proxy) = proxy {
         rtc_log_info!(
-            "HTTP Proxy 経由で接続します: {}:{}",
+            "Connecting via HTTP proxy: {}:{}",
             format_bracketed_host(proxy.host()),
             proxy.port
         );
@@ -2769,7 +2915,7 @@ async fn connect_websocket(
         if target.tls {
             let (tcp_stream, pending) = stream
                 .into_plain_parts()
-                .expect("BUG: proxy 接続後は plain stream のはずです");
+                .expect("BUG: stream must be plain after proxy connection");
             // TLS 接続では ClientHello をクライアントが先に送るため、
             // CONNECT 200 応答直後にサーバーからバイトが届くことはありえない。
             // 余剰バイトはプロキシの応答注入であるため接続を拒否する。
@@ -2923,7 +3069,7 @@ async fn connect_signaling_urls(
                 let display_host = format_bracketed_host(&target.host);
                 let scheme = if target.tls { "wss" } else { "ws" };
                 rtc_log_info!(
-                    "接続試行: {}://{}:{}{}",
+                    "Connection attempt: {}://{}:{}{}",
                     scheme,
                     display_host,
                     target.port,
@@ -2945,7 +3091,7 @@ async fn connect_signaling_urls(
                 let display_host = format_bracketed_host(&target.host);
                 let scheme = if target.tls { "wss" } else { "ws" };
                 rtc_log_info!(
-                    "接続成功: {}://{}:{}{}",
+                    "Connection established: {}://{}:{}{}",
                     scheme,
                     display_host,
                     target.port,
@@ -2995,6 +3141,94 @@ async fn flush_ws_output<R: RandomSource>(
         }
     }
     Ok(false)
+}
+
+/// WebSocket 接続の close handshake を実行する。
+///
+/// WebSocket が `Connected` の場合のみ Close フレーム (NORMAL, "shutdown") を送信し、
+/// 相手からの Close フレームまたは TCP の EOF を待って接続を終了する。Close フレーム
+/// の送受信が完了するか相手が EOF を返すと `Ok(())` を返す。
+///
+/// WebSocket が `Connected` 以外の場合は何もせず `Ok(())` を返す。
+///
+/// close handshake 全体は `websocket_close_timeout` を上限とする。タイムアウトした
+/// 場合は警告を出力して `Ok(())` を返す。
+///
+/// close handshake 中に I/O エラーが発生した場合は、`server_close_received` または
+/// `absorb_close_handshake_errors` が `true` なら警告を出力して `Ok(())` を返し、
+/// どちらも `false` なら `Err` を返す。
+///
+/// 引数:
+/// - `server_close_received`: DataChannel 経由の server Close による終了かどうか。
+///   相手からの Close フレームを `handler.on_websocket_close` で通知するかの判定と、
+///   I/O エラーを警告に落とすかの判定に使う。
+/// - `absorb_close_handshake_errors`: close handshake 中の I/O エラーを警告に落として
+///   `Ok(())` を返すべきかどうか。呼び出し元が
+///   `(switched_ignore_disconnect_websocket && use_data_channel_signaling) ||
+///   user_initiated_disconnect` の結果を渡す。
+async fn close_websocket_handshake<R: RandomSource>(
+    ws: &mut WebSocketClientConnection<R>,
+    stream: &mut ClientStream,
+    timers: &mut TimerManager,
+    handler: &mut dyn SoraConnectionEventHandler,
+    server_close_received: bool,
+    absorb_close_handshake_errors: bool,
+    websocket_close_timeout: Duration,
+) -> Result<()> {
+    if ws.state() == ConnectionState::Connected {
+        // server Close は server_close_received で終了経路が確定しているため、
+        // この後始末で発生するエラーは無視してよい。
+        // ignore 構成とユーザー主導の切断は、切断とサーバー側の RST が同時に
+        // 起きた場合に websocket_closed が立つ前に close handshake へ入り、
+        // 死んだソケットへの書き込みが失敗することがある。
+        // いずれも接続を終了する意思が確定しているため、close handshake の失敗は
+        // warning に落として run の Ok(()) を覆さない。
+        let close_result = tokio::time::timeout(websocket_close_timeout, async {
+            ws.close(CloseCode::NORMAL, "shutdown")?;
+            loop {
+                if flush_ws_output(ws, stream, timers).await? {
+                    return Ok::<_, Error>(());
+                }
+                let mut buf = vec![0u8; 8192];
+                let n = stream.read(&mut buf).await?;
+                if n == 0 {
+                    return Ok(());
+                }
+                ws.feed_recv_buf(&buf[..n], now()?)?;
+                // server Close の終了処理では、Sora が送信した WebSocket Close
+                // フレームを検出して on_websocket_close を通知する。
+                // server Close メッセージと WebSocket Close フレームは別経路で
+                // 届くため、処理順のレースで Close フレームが未処理のまま残る
+                // 場合がある。ここで読み取ることで、on_websocket_close を
+                // 決定的に 1 回だけ通知する。
+                // server Close 以外の終了経路では従来どおりイベントを破棄する。
+                while let Some(event) = ws.poll_event() {
+                    if server_close_received && let ConnectionEvent::Close { code, reason } = event
+                    {
+                        handler.on_websocket_close(code.map(|c| c.0), &reason);
+                    }
+                }
+                if ws.state() == ConnectionState::Closed {
+                    return Ok(());
+                }
+            }
+        })
+        .await;
+        match close_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                if server_close_received || absorb_close_handshake_errors {
+                    rtc_log_warning!("WebSocket close handshake failed: {}", e);
+                } else {
+                    return Err(e);
+                }
+            }
+            Err(_) => {
+                rtc_log_warning!("WebSocket close timed out");
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -3345,6 +3579,33 @@ mod tests {
         drop(timers);
     }
 
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn timer_manager_set_timer_same_id_aborts_previous() {
+        let (timer_tx, mut timer_rx) = mpsc::channel::<TimerId>(16);
+        let mut timers = TimerManager::new(timer_tx);
+        // 同じ id を 2 回設定すると最初のタイマーは abort される。
+        timers.set_timer(TimerId::Ping, 50);
+        timers.set_timer(TimerId::Ping, 100);
+        // 最初のタイマーの発火時刻 (50ms) を過ぎても 1 件目は届かない。
+        // 仮想時刻 (start_paused) を使うため CI 負荷で sleep がオーバーシュートしても
+        // 決定論的に検証できる。
+        tokio::time::sleep(Duration::from_millis(70)).await;
+        assert!(
+            matches!(timer_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "上書き前のタイマーが abort されていません"
+        );
+        // 2 件目のタイマーの発火時刻を過ぎると 1 件だけ届く。
+        let received = tokio::time::timeout(Duration::from_millis(200), timer_rx.recv())
+            .await
+            .expect("タイマーイベントが届きませんでした")
+            .expect("タイマーイベントの受信に失敗しました");
+        assert_eq!(received, TimerId::Ping, "受信した TimerId が一致しません");
+        assert!(
+            matches!(timer_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "同じ id のタイマーイベントが 2 件届いています"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn pending_rpc_request_drop_aborts_timeout_handle() {
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SoraEvent>();
@@ -3393,114 +3654,236 @@ mod tests {
         assert!(result.is_ok(), "now() は Ok を返す必要があります");
     }
 
-    fn spawn_message_server(
-        valid_labels: Vec<String>,
-    ) -> (SoraConnectionHandle, tokio::task::JoinHandle<()>) {
-        let (command_tx, mut command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
-        let handle = SoraConnectionHandle { command_tx };
-        let server = tokio::spawn(async move {
-            while let Some(command) = command_rx.recv().await {
-                if let SoraConnectionCommand::SendMessage {
-                    label,
-                    data: _,
-                    response_tx,
-                } = command
-                {
-                    let result = if valid_labels.contains(&label) && label.starts_with('#') {
-                        Ok(())
-                    } else {
-                        Err(Error::InvalidDataChannelLabel { label })
-                    };
-                    let _ = response_tx.send(result);
-                }
+    /// ユーザー主導の切断の close handshake が、サーバー側から RST で切断された
+    /// dead socket への書き込みで I/O エラーになっても `Ok(())` を返すべきことを
+    /// 検証する。
+    ///
+    /// e2e-tests/tests/messaging.rs の `test_messaging_sendrecv` で macOS self-hosted の
+    /// CI に一度だけ観測された「クライアント 2 の disconnect が
+    /// `Io(Os { code: 32, kind: BrokenPipe, message: "Broken pipe" })` で失敗する」
+    /// 現象の再現を意図する。
+    ///
+    /// クライアント 1 の切断を契機にサーバーがクライアント 2 の WebSocket を
+    /// RST で切断すると、クライアント 2 の run ループはそれを検知する前に
+    /// disconnect コマンドで抜けて close handshake に入る。このとき
+    /// `server_close_received` も ignore 構成でもないため、従来は close handshake の
+    /// 書き込みエラーがそのまま `run()` の `Err` になり、ユーザーが切断を要求した
+    /// にもかかわらず disconnect が失敗してしまう。
+    ///
+    /// 本テストは実 WebSocket コネクションをローカルの TCP 上で確立し、
+    /// サーバー側ソケットを RST で切断してから `close_websocket_handshake` を
+    /// 実行することで、この経路を決定的に再現する。ユーザー主導の切断は
+    /// `server_close_received=false` かつ吸収条件の合成 bool を `true` (ユーザー主導の
+    /// 切断を表す) にして表す。モックやスタブは使わない。
+    #[tokio::test]
+    async fn close_websocket_handshake_does_not_fail_user_disconnect_on_dead_socket() {
+        use shiguredo_websocket::{
+            ConnectionOutput, ServerConnectionOptions, WebSocketServerConnection,
+        };
+
+        // 実 TCP ペアを用意する。
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("TCP リスナーの起動に失敗しました");
+        let addr = listener
+            .local_addr()
+            .expect("リスナーアドレスの取得に失敗しました");
+        let client_tcp = TcpStream::connect(addr)
+            .await
+            .expect("クライアント側 TCP の接続に失敗しました");
+        let (mut server_tcp, _) = listener
+            .accept()
+            .await
+            .expect("サーバー側 TCP の受付に失敗しました");
+
+        // クライアント側の WebSocket を Connected まで駆動する。
+        let (timer_tx, _timer_rx) = mpsc::channel::<TimerId>(16);
+        let mut timers = TimerManager::new(timer_tx);
+        let mut client_stream = ClientStream::new_plain(client_tcp);
+        let options = ClientConnectionOptions::new("127.0.0.1", "/signaling");
+        let mut client_ws = WebSocketClientConnection::new(options, SecureRandom::new());
+        client_ws
+            .connect()
+            .expect("WebSocket クライアントの接続開始に失敗しました");
+        // ハンドシェイクリクエストを送信する。
+        flush_ws_output(&mut client_ws, &mut client_stream, &mut timers)
+            .await
+            .expect("ハンドシェイクリクエストの送信に失敗しました");
+
+        // サーバー側でリクエストを読み、自動受理して 101 応答を返す。
+        let mut server_ws = WebSocketServerConnection::new(ServerConnectionOptions::new());
+        let mut buf = vec![0u8; 8192];
+        loop {
+            let n = server_tcp
+                .read(&mut buf)
+                .await
+                .expect("サーバー側の読み込みに失敗しました");
+            assert!(n > 0, "ハンドシェイクリクエストが届きませんでした");
+            server_ws
+                .feed_recv_buf(&buf[..n])
+                .expect("ハンドシェイクリクエストの処理に失敗しました");
+            if server_ws.handshake_request().is_some() {
+                break;
             }
-        });
-        (handle, server)
-    }
+        }
+        server_ws
+            .accept_handshake_auto()
+            .expect("ハンドシェイクの自動受理に失敗しました");
+        while let Some(output) = server_ws.poll_output() {
+            if let ConnectionOutput::SendData(data) = output {
+                server_tcp
+                    .write_all(&data)
+                    .await
+                    .expect("101 応答の送信に失敗しました");
+            }
+        }
 
-    #[tokio::test]
-    async fn send_message_rejects_unknown_label() {
-        let (handle, _server) = spawn_message_server(vec!["#chat".to_string()]);
-        let err = handle
-            .send_message("#unknown", b"data")
+        // クライアント側で 101 応答を読み、Connected になることを確認する。
+        let n = client_stream
+            .read(&mut buf)
             .await
-            .expect_err("未指定ラベルは InvalidDataChannelLabel になるべき");
-        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label == "#unknown"));
-    }
-
-    #[tokio::test]
-    async fn send_message_rejects_signaling_label() {
-        let (handle, _server) = spawn_message_server(vec!["#chat".to_string()]);
-        let err = handle
-            .send_message("signaling", b"data")
-            .await
-            .expect_err("signaling ラベルは InvalidDataChannelLabel になるべき");
-        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label == "signaling"));
-    }
-
-    #[tokio::test]
-    async fn send_message_rejects_stats_label() {
-        let (handle, _server) = spawn_message_server(vec!["#chat".to_string()]);
-        let err = handle
-            .send_message("stats", b"data")
-            .await
-            .expect_err("stats ラベルは InvalidDataChannelLabel になるべき");
-        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label == "stats"));
-    }
-
-    #[tokio::test]
-    async fn send_message_rejects_push_label() {
-        let (handle, _server) = spawn_message_server(vec!["#chat".to_string()]);
-        let err = handle
-            .send_message("push", b"data")
-            .await
-            .expect_err("push ラベルは InvalidDataChannelLabel になるべき");
-        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label == "push"));
-    }
-
-    #[tokio::test]
-    async fn send_message_rejects_notify_label() {
-        let (handle, _server) = spawn_message_server(vec!["#chat".to_string()]);
-        let err = handle
-            .send_message("notify", b"data")
-            .await
-            .expect_err("notify ラベルは InvalidDataChannelLabel になるべき");
-        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label == "notify"));
-    }
-
-    #[tokio::test]
-    async fn send_message_rejects_rpc_label() {
-        let (handle, _server) = spawn_message_server(vec!["#chat".to_string()]);
-        let err = handle
-            .send_message("rpc", b"data")
-            .await
-            .expect_err("rpc ラベルは InvalidDataChannelLabel になるべき");
-        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label == "rpc"));
-    }
-
-    #[tokio::test]
-    async fn send_message_rejects_empty_label() {
-        let (handle, _server) = spawn_message_server(vec!["#chat".to_string()]);
-        let err = handle
-            .send_message("", b"data")
-            .await
-            .expect_err("空ラベルは InvalidDataChannelLabel になるべき");
-        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label.is_empty()));
-    }
-
-    #[tokio::test]
-    async fn send_message_rejects_all_labels_when_no_data_channels_configured() {
-        let (handle, _server) = spawn_message_server(Vec::new());
-        let err = handle.send_message("#chat", b"data").await.expect_err(
-            "data_channels 未設定時は通常の # ラベルでも InvalidDataChannelLabel になるべき",
+            .expect("クライアント側の読み込みに失敗しました");
+        assert!(n > 0, "101 応答が届きませんでした");
+        client_ws
+            .feed_recv_buf(&buf[..n], now().expect("現在時刻の取得に失敗しました"))
+            .expect("101 応答の処理に失敗しました");
+        assert_eq!(
+            client_ws.state(),
+            ConnectionState::Connected,
+            "WebSocket クライアントが Connected になっていません"
         );
-        assert!(matches!(err, Error::InvalidDataChannelLabel { label } if label == "#chat"));
+
+        // サーバー側ソケットを SO_LINGER=0 付きでクローズし、RST で切断する。
+        let std_server = server_tcp
+            .into_std()
+            .expect("サーバー側 TCP の std 変換に失敗しました");
+        let server_socket = socket2::Socket::from(std_server);
+        server_socket
+            .set_linger(Some(Duration::ZERO))
+            .expect("SO_LINGER の設定に失敗しました");
+        drop(server_socket);
+        drop(server_ws);
+        // RST がクライアント側に届くのを待つ。
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // ユーザー主導の切断 (server_close_received=false、吸収条件の合成 bool=true) の
+        // 条件で close handshake を実行する。これは messaging テストのクライアント 2
+        // と同じ条件である。ユーザーが切断を要求している以上、close handshake の
+        // 失敗は warning に落として Ok(()) を返すべきである。
+        let mut handler = RecordingHandler::default();
+        let result = close_websocket_handshake(
+            &mut client_ws,
+            &mut client_stream,
+            &mut timers,
+            &mut handler,
+            false,
+            true,
+            Duration::from_secs(3),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "ユーザー主導の切断の close handshake は Ok を返すべきですが Err になりました: {:?}",
+            result
+        );
     }
 
-    #[tokio::test]
-    async fn send_message_accepts_registered_label() {
-        let (handle, _server) = spawn_message_server(vec!["#chat".to_string()]);
-        assert!(handle.send_message("#chat", b"data").await.is_ok());
+    #[test]
+    fn send_message_rejects_unknown_label() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_data_channel_config(&mut connection, "#chat");
+        let result = connection.handle_send_message_command("#unknown", b"data");
+        assert!(
+            matches!(result, Err(Error::InvalidDataChannelLabel { label }) if label == "#unknown"),
+            "未登録ラベルは InvalidDataChannelLabel になるべき"
+        );
+    }
+
+    #[test]
+    fn send_message_rejects_signaling_label() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_data_channel_config(&mut connection, "#chat");
+        let result = connection.handle_send_message_command("signaling", b"data");
+        assert!(
+            matches!(result, Err(Error::InvalidDataChannelLabel { label }) if label == "signaling"),
+            "signaling ラベルは InvalidDataChannelLabel になるべき"
+        );
+    }
+
+    #[test]
+    fn send_message_rejects_stats_label() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_data_channel_config(&mut connection, "#chat");
+        let result = connection.handle_send_message_command("stats", b"data");
+        assert!(
+            matches!(result, Err(Error::InvalidDataChannelLabel { label }) if label == "stats"),
+            "stats ラベルは InvalidDataChannelLabel になるべき"
+        );
+    }
+
+    #[test]
+    fn send_message_rejects_push_label() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_data_channel_config(&mut connection, "#chat");
+        let result = connection.handle_send_message_command("push", b"data");
+        assert!(
+            matches!(result, Err(Error::InvalidDataChannelLabel { label }) if label == "push"),
+            "push ラベルは InvalidDataChannelLabel になるべき"
+        );
+    }
+
+    #[test]
+    fn send_message_rejects_notify_label() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_data_channel_config(&mut connection, "#chat");
+        let result = connection.handle_send_message_command("notify", b"data");
+        assert!(
+            matches!(result, Err(Error::InvalidDataChannelLabel { label }) if label == "notify"),
+            "notify ラベルは InvalidDataChannelLabel になるべき"
+        );
+    }
+
+    #[test]
+    fn send_message_rejects_rpc_label() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_data_channel_config(&mut connection, "#chat");
+        let result = connection.handle_send_message_command("rpc", b"data");
+        assert!(
+            matches!(result, Err(Error::InvalidDataChannelLabel { label }) if label == "rpc"),
+            "rpc ラベルは InvalidDataChannelLabel になるべき"
+        );
+    }
+
+    #[test]
+    fn send_message_rejects_empty_label() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_data_channel_config(&mut connection, "#chat");
+        let result = connection.handle_send_message_command("", b"data");
+        assert!(
+            matches!(result, Err(Error::InvalidDataChannelLabel { label }) if label.is_empty()),
+            "空ラベルは InvalidDataChannelLabel になるべき"
+        );
+    }
+
+    #[test]
+    fn send_message_rejects_all_labels_when_no_data_channels_configured() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        let result = connection.handle_send_message_command("#chat", b"data");
+        assert!(
+            matches!(result, Err(Error::InvalidDataChannelLabel { label }) if label == "#chat"),
+            "data_channels 未設定時は通常の # ラベルでも InvalidDataChannelLabel になるべき"
+        );
+    }
+
+    #[test]
+    fn send_message_returns_data_channel_missing_when_channel_not_registered() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_data_channel_config(&mut connection, "#chat");
+        let result = connection.handle_send_message_command("#chat", b"data");
+        assert!(
+            matches!(result, Err(Error::DataChannelMissing { label }) if label == "#chat"),
+            "config に登録済みでも実チャネル未登録なら DataChannelMissing になるべき"
+        );
     }
 
     #[test]
@@ -3688,6 +4071,314 @@ mod tests {
         );
     }
 
+    /// DataChannel が Closed 状態に遷移するまで待つ。
+    ///
+    /// libwebrtc の close() は非同期遷移のため、固定 sleep ではなく
+    /// state() が Closed になるまでポーリングして決定的に待つ。
+    async fn wait_data_channel_closed(connection: &mut SoraConnection, label: &str) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if connection.data_channels[label].channel.state() == DataChannelState::Closed {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "DataChannel '{}' が Closed 状態に遷移しませんでした",
+                label
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn should_notify_close_ignores_non_closed_state() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_compressed_data_channel(&mut connection, "signaling");
+        let opened = opened_labels(&["signaling"]);
+        // register 直後のチャネルは Closed 以外の状態 (テスト環境では Connecting) であり、
+        // 閉じたとは判定されない。Closing を含む Closed 以外の状態で remove しないことを
+        // 検証する (テスト環境では Closing 状態を作れないため)。
+        assert!(
+            !should_notify_close(&connection.data_channels, &opened, "signaling"),
+            "Closed 以外の状態では remove してはなりません"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_notify_close_accepts_closed_state() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_compressed_data_channel(&mut connection, "signaling");
+        // close() を呼ぶと Closed 状態に遷移する (テスト環境でも観測できる)。
+        connection.data_channels["signaling"].channel.close();
+        wait_data_channel_closed(&mut connection, "signaling").await;
+        let opened = opened_labels(&["signaling"]);
+        assert!(
+            should_notify_close(&connection.data_channels, &opened, "signaling"),
+            "Closed 状態では remove する必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_notify_close_ignores_unopened_label() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        // opened_data_channels に含まれない #chat を Closed 状態にする。
+        // #chat が Closed でも opened に含まれなければ remove されないことを確認する。
+        register_compressed_data_channel(&mut connection, "#chat");
+        connection.data_channels["#chat"].channel.close();
+        wait_data_channel_closed(&mut connection, "#chat").await;
+        let opened = opened_labels(&["signaling"]);
+        assert!(
+            !should_notify_close(&connection.data_channels, &opened, "#chat"),
+            "opened_data_channels に含まれない label は remove してはなりません"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_close_loop_keeps_waiting_on_non_closed_state_event() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_compressed_data_channel(&mut connection, "signaling");
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SoraEvent>();
+        let mut handler = RecordingHandler::default();
+        let mut opened = opened_labels(&["signaling"]);
+
+        // Closed 以外の状態 (register 直後は Connecting) の StateChange イベントを送信する。
+        // テスト環境では Closing 状態を作れないため、Closed 以外を代表する Connecting で
+        // 「Closed でない状態のイベントでは remove されない」ことを検証する。
+        event_tx
+            .send(SoraEvent::DataChannelStateChange("signaling".to_string()))
+            .expect("Closed 以外の状態のイベントの送信に失敗しました");
+        // イベントを処理させた後、event_rx をクローズして待機を終了させる。
+        drop(event_tx);
+        let data_channels = connection.data_channels;
+
+        let result = wait_data_channels_close(
+            &mut event_rx,
+            &mut handler,
+            &mut opened,
+            data_channels,
+            tokio::time::Instant::now() + tokio::time::Duration::from_secs(60),
+        )
+        .await;
+
+        // Closed 以外の状態のイベントでは remove されないため、待機は AllChannelsClosed
+        // ではなく event_rx クローズで終了する必要がある。
+        assert_eq!(
+            result,
+            DataChannelCloseWaitResult::EventChannelClosed,
+            "Closed 以外の状態のイベントで AllChannelsClosed として終了してはいけません"
+        );
+        // close 通知は event_rx クローズ時の残りチャネル通知のみ (1 回)。
+        assert_eq!(
+            handler.data_channel_close_count, 1,
+            "close 通知は残りチャネルへの通知 1 回だけである必要があります"
+        );
+        assert_eq!(
+            handler.data_channel_close_labels,
+            vec!["signaling".to_string()],
+            "close 通知の label が一致する必要があります"
+        );
+        assert!(
+            opened.is_empty(),
+            "event_rx クローズ時の残りチャネル通知で opened がクリアされる必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_close_loop_notifies_close_when_all_channels_closed() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_compressed_data_channel(&mut connection, "signaling");
+        register_compressed_data_channel(&mut connection, "#chat");
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SoraEvent>();
+        let mut handler = RecordingHandler::default();
+        let mut opened = opened_labels(&["signaling", "#chat"]);
+
+        // 全チャネルを close() して Closed 状態に遷移させる。
+        connection.data_channels["signaling"].channel.close();
+        connection.data_channels["#chat"].channel.close();
+        wait_data_channel_closed(&mut connection, "signaling").await;
+        wait_data_channel_closed(&mut connection, "#chat").await;
+
+        // 全チャネルの Closed イベントを送信する。
+        event_tx
+            .send(SoraEvent::DataChannelStateChange("signaling".to_string()))
+            .expect("signaling の Closed イベントの送信に失敗しました");
+        event_tx
+            .send(SoraEvent::DataChannelStateChange("#chat".to_string()))
+            .expect("#chat の Closed イベントの送信に失敗しました");
+        let data_channels = connection.data_channels;
+
+        let result = wait_data_channels_close(
+            &mut event_rx,
+            &mut handler,
+            &mut opened,
+            data_channels,
+            tokio::time::Instant::now() + tokio::time::Duration::from_secs(60),
+        )
+        .await;
+
+        assert_eq!(
+            result,
+            DataChannelCloseWaitResult::AllChannelsClosed,
+            "全チャネル Closed なら待機が正常終了する必要があります"
+        );
+        assert!(
+            opened.is_empty(),
+            "全チャネル Closed 後に opened がクリアされる必要があります"
+        );
+        assert_eq!(
+            handler.data_channel_close_count, 2,
+            "各チャネルへ close 通知が 1 回ずつ呼ばれる必要があります"
+        );
+        assert_eq!(
+            handler.data_channel_close_labels,
+            vec!["signaling".to_string(), "#chat".to_string()],
+            "close 通知の label が受信順と一致する必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_command_channel_acks_queued_disconnect() {
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
+        // 終了フェーズに入る直前に 2 回目の disconnect() が送信された状況を作る。
+        let (ack_tx, ack_rx) = oneshot::channel();
+        command_tx
+            .send(SoraConnectionCommand::Disconnect(ack_tx))
+            .expect("Disconnect コマンドの送信に失敗しました");
+        let mut user_initiated_disconnect = false;
+
+        close_command_channel_and_ack_pending_disconnects(
+            &mut command_rx,
+            &mut user_initiated_disconnect,
+        )
+        .await;
+
+        // クローズ前に送信された Disconnect には ack が返る必要がある。
+        ack_rx
+            .await
+            .expect("disconnect の ack が送信される必要があります");
+        // キュー済み Disconnect を ack した場合はユーザー主導の切断として扱う。
+        assert!(
+            user_initiated_disconnect,
+            "キュー済み Disconnect の ack 時は user_initiated_disconnect が立つ必要があります"
+        );
+        // close() 後の送信は失敗する (CommandSendFailed になる)。
+        let (ack_tx2, _ack_rx2) = oneshot::channel();
+        assert!(
+            command_tx
+                .send(SoraConnectionCommand::Disconnect(ack_tx2))
+                .is_err(),
+            "close() 後の送信は失敗する必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_command_channel_discards_non_disconnect_command() {
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
+        // 終了フェーズに入る直前に GetStats が送信された状況を作る。
+        let (stats_tx, stats_rx) = oneshot::channel();
+        command_tx
+            .send(SoraConnectionCommand::GetStats(stats_tx))
+            .expect("GetStats コマンドの送信に失敗しました");
+        let mut user_initiated_disconnect = false;
+
+        close_command_channel_and_ack_pending_disconnects(
+            &mut command_rx,
+            &mut user_initiated_disconnect,
+        )
+        .await;
+
+        // GetStats には応答が返らず、呼び出し側は CommandResponseMissing になる
+        // (response_tx が send されずに drop されるため RecvError になる)。
+        assert!(
+            stats_rx.await.is_err(),
+            "Disconnect 以外のコマンドには応答してはいけません"
+        );
+        // Disconnect 以外のコマンドのみの場合はユーザー主導の切断として扱わない。
+        assert!(
+            !user_initiated_disconnect,
+            "Disconnect 以外のコマンドでは user_initiated_disconnect が立たない必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_close_loop_distinguishes_event_channel_closed() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_compressed_data_channel(&mut connection, "signaling");
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SoraEvent>();
+        let mut handler = RecordingHandler::default();
+        let mut opened = opened_labels(&["signaling"]);
+
+        // event_rx をクローズして待機を終了させる。
+        drop(event_tx);
+        let data_channels = connection.data_channels;
+
+        let result = wait_data_channels_close(
+            &mut event_rx,
+            &mut handler,
+            &mut opened,
+            data_channels,
+            tokio::time::Instant::now() + tokio::time::Duration::from_secs(60),
+        )
+        .await;
+
+        // event_rx クローズはタイムアウトとは区別された終了要因で返る。
+        assert_eq!(
+            result,
+            DataChannelCloseWaitResult::EventChannelClosed,
+            "event_rx クローズは EventChannelClosed として終了する必要があります"
+        );
+        // クローズ時もタイムアウト時と同じく残りチャネルへ close 通知される。
+        assert_eq!(
+            handler.data_channel_close_count, 1,
+            "event_rx クローズ時に残りチャネルへ close 通知される必要があります"
+        );
+        assert!(
+            opened.is_empty(),
+            "event_rx クローズ時の残りチャネル通知で opened がクリアされる必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_close_loop_distinguishes_timeout_and_notifies_remaining() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_compressed_data_channel(&mut connection, "signaling");
+        register_compressed_data_channel(&mut connection, "#chat");
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SoraEvent>();
+        let mut handler = RecordingHandler::default();
+        let mut opened = opened_labels(&["signaling", "#chat"]);
+
+        // 期限切れを即座に発生させるため、過去の時刻を deadline にする。
+        let deadline = tokio::time::Instant::now() - tokio::time::Duration::from_secs(1);
+        // event_rx を開いたままにして、クローズ終了と区別する。
+        let _event_tx = event_tx;
+        let data_channels = connection.data_channels;
+
+        let result = wait_data_channels_close(
+            &mut event_rx,
+            &mut handler,
+            &mut opened,
+            data_channels,
+            deadline,
+        )
+        .await;
+
+        // タイムアウトは event_rx クローズとは区別された終了要因で返る。
+        assert_eq!(
+            result,
+            DataChannelCloseWaitResult::TimedOut,
+            "期限切れは TimedOut として終了する必要があります"
+        );
+        // タイムアウト時に残りチャネルへ close 通知される現状維持の挙動。
+        assert_eq!(
+            handler.data_channel_close_count, 2,
+            "タイムアウト時に残りチャネルへ close 通知される必要があります"
+        );
+        assert!(
+            opened.is_empty(),
+            "タイムアウト時に opened がクリアされる必要があります"
+        );
+    }
+
     use shiguredo_webrtc::DataChannelInit;
 
     /// 実際の `SoraConnectionContext` と `SoraConnection` を構築するテスト用ヘルパー。
@@ -3711,6 +4402,8 @@ mod tests {
     #[derive(Default)]
     struct RecordingHandler {
         data_channel_message_count: usize,
+        data_channel_close_count: usize,
+        data_channel_close_labels: Vec<String>,
         signaling_received_count: usize,
         notify_count: usize,
         push_count: usize,
@@ -3748,15 +4441,26 @@ mod tests {
         fn on_data_channel_message(&mut self, _label: &str, _data: &[u8]) {
             self.data_channel_message_count += 1;
         }
+
+        fn on_data_channel_close(&mut self, label: &str) {
+            self.data_channel_close_count += 1;
+            self.data_channel_close_labels.push(label.to_string());
+        }
     }
 
-    /// compress 有効の DataChannel を実 PeerConnection 経由で登録するテスト用ヘルパー。
-    fn register_compressed_data_channel(connection: &mut SoraConnection, label: &str) {
+    /// DataChannel の設定 (`data_channel_configs`) だけを登録するテスト用ヘルパー。
+    /// 実チャネルは作成しないため、`DataChannelMissing` エラーパスの再現に使う。
+    fn register_data_channel_config(connection: &mut SoraConnection, label: &str) {
         connection.data_channel_configs.push(DataChannelConfig {
             label: label.to_string(),
             compress: true,
             direction: "sendrecv".to_string(),
         });
+    }
+
+    /// compress 有効の DataChannel を実 PeerConnection 経由で登録するテスト用ヘルパー。
+    fn register_compressed_data_channel(connection: &mut SoraConnection, label: &str) {
+        register_data_channel_config(connection, label);
         let mut init = DataChannelInit::new();
         let channel = connection
             .pc
@@ -3984,6 +4688,102 @@ mod tests {
                 Err(Error::DataChannelMissing { label }) if label == "signaling"
             ),
             "signaling DataChannel 未登録の ping は DataChannelMissing になる必要があります"
+        );
+    }
+
+    /// `SoraConnectionCommand::GetStats` を受信して応答を送らず、
+    /// 受信した oneshot の Sender をテスト側へ渡すサーバーを生成する。
+    ///
+    /// 戻り値は `SoraConnectionHandle` と、サーバーが受信した Sender を受け取るための channel。
+    /// コールバックの発火タイミングはテスト側が制御する。
+    fn spawn_get_stats_server() -> (
+        SoraConnectionHandle,
+        mpsc::UnboundedReceiver<oneshot::Sender<Result<JsonString>>>,
+    ) {
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel::<SoraConnectionCommand>();
+        let handle = SoraConnectionHandle { command_tx };
+        let (sender_tx, sender_rx) =
+            mpsc::unbounded_channel::<oneshot::Sender<Result<JsonString>>>();
+        tokio::spawn(async move {
+            while let Some(command) = command_rx.recv().await {
+                if let SoraConnectionCommand::GetStats(tx) = command {
+                    let _ = sender_tx.send(tx);
+                }
+            }
+        });
+        (handle, sender_rx)
+    }
+
+    /// get_stats の応答待機が、コールバック不発時にタイムアウトして
+    /// `Error::CommandTimeout` を返すことを確認する。
+    ///
+    /// あわせて、タイムアウト後に遅延して届くコールバック送信が無視されることを
+    /// 確認する。タイムアウトで受信側がドロップ済みのため、送信は失敗する。
+    #[tokio::test]
+    async fn get_stats_times_out_and_ignores_late_callback() {
+        let (handle, mut sender_rx) = spawn_get_stats_server();
+
+        // コールバックが発火しないままタイムアウトする。
+        let result = handle
+            .send_command(
+                "get_stats",
+                Some(Duration::from_millis(50)),
+                SoraConnectionCommand::GetStats,
+            )
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(Error::CommandTimeout { command }) if command == "get_stats"
+            ),
+            "コールバック不発時は Error::CommandTimeout になる必要があります"
+        );
+
+        // タイムアウト後に遅延してコールバックが発火しても、受信側は
+        // ドロップ済みのため送信は失敗し、無視される。
+        let tx = sender_rx
+            .recv()
+            .await
+            .expect("GetStats コマンドがサーバーに到達していません");
+        let json = "{}"
+            .parse::<JsonString>()
+            .expect("JSON のパースに失敗しました");
+        let send_result = tx.send(Ok(json));
+        assert!(
+            send_result.is_err(),
+            "タイムアウト後のコールバック送信は失敗 (無視) される必要があります"
+        );
+    }
+
+    /// get_stats の応答待機が、コールバック発火時に結果を返すことを確認する。
+    #[tokio::test]
+    async fn get_stats_returns_result_when_callback_fires() {
+        let (handle, mut sender_rx) = spawn_get_stats_server();
+        let json = "{}"
+            .parse::<JsonString>()
+            .expect("JSON のパースに失敗しました");
+        let expected = json.clone();
+
+        // get_stats の呼び出しと並行して、サーバー経由でコールバック相当の応答を送る。
+        let send_task = tokio::spawn(async move {
+            let tx = sender_rx
+                .recv()
+                .await
+                .expect("GetStats コマンドがサーバーに到達していません");
+            let _ = tx.send(Ok(expected));
+        });
+        let result = handle.get_stats().await;
+        send_task
+            .await
+            .expect("コールバック相当の送信タスクが失敗しました");
+
+        assert_eq!(
+            result
+                .as_ref()
+                .expect("コールバック発火時は Ok を返す必要があります")
+                .to_string(),
+            json.to_string(),
+            "get_stats の結果はコールバックが送信した値と一致する必要があります"
         );
     }
 
