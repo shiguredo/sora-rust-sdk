@@ -173,14 +173,10 @@ impl From<shiguredo_mp4::demux::DemuxError> for Mp4Error {
 
 type Result<T> = std::result::Result<T, Mp4Error>;
 
-/// MP4 パススルー用の capability を構築するために必要な bitstream 情報の
-/// スナップショット。ファイル I/O は含まず、reader 構築時に確定した値の
-/// cheap clone だけを内包する。
+/// MP4 パススルー用の capability を構築するために必要なビットストリーム情報の
+/// スナップショット。
 ///
-/// `Mp4SampleReader::bitstream_metadata` で取り出し、
-/// `Mp4PassthroughVideoCodecCapability::new` に渡す。
-///
-/// 全フィールド private。生成は `Mp4SampleReader::bitstream_metadata` だけが行う。
+/// `Mp4SampleReader::bitstream_metadata` で取り出す。
 pub struct Mp4BitstreamMetadata {
     /// この MP4 のビデオコーデック種別。
     codec_type: VideoCodecType,
@@ -201,12 +197,12 @@ impl Clone for Mp4BitstreamMetadata {
 }
 
 impl Mp4BitstreamMetadata {
-    /// この bitstream のビデオコーデック種別を返す。
+    /// このビットストリームのビデオコーデック種別を返す。
     pub fn codec_type(&self) -> VideoCodecType {
         self.codec_type
     }
 
-    /// この bitstream のパススルー送信に必要な `SdpVideoFormat` の clone を返す。
+    /// このビットストリームのパススルー送信に必要な `SdpVideoFormat` の clone を返す。
     pub fn required_sdp_format(&self) -> SdpVideoFormat {
         self.required_format.clone()
     }
@@ -677,10 +673,7 @@ impl Mp4SampleReader {
         self.track_info.codec_type
     }
 
-    /// この reader の bitstream 情報を `Mp4BitstreamMetadata` として取り出す。
-    ///
-    /// ファイル I/O は行わず、reader 構築時に確定した値の cheap clone だけを含む。
-    /// 取り出した metadata は `Mp4PassthroughVideoCodecCapability::new` に渡す。
+    /// この reader のビットストリーム情報を `Mp4BitstreamMetadata` として取り出す。
     pub fn bitstream_metadata(&self) -> Mp4BitstreamMetadata {
         Mp4BitstreamMetadata {
             codec_type: self.track_info.codec_type,
@@ -688,7 +681,7 @@ impl Mp4SampleReader {
         }
     }
 
-    /// この MP4 の bitstream 実態から、パススルー送信に必要な `SdpVideoFormat` を返す。
+    /// この MP4 のビットストリーム実態から、パススルー送信に必要な `SdpVideoFormat` を返す。
     ///
     /// reader 構築時に確定するため、呼び出しごとに同じ内容を返す。
     /// 現在は各 codec について以下を返す:
