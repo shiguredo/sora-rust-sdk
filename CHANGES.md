@@ -15,11 +15,10 @@
   - @voluntas
 - [CHANGE] Mp4Error の InputPositionOutOfRange と InconsistentSampleTable の file_size フィールドを usize から u64 に変更する
   - @sile
-- [CHANGE] `Mp4PassthroughVideoCodecCapability::new` の signature を `VideoCodecType` から `Mp4BitstreamMetadata` へ変更する
-  - `Mp4SampleReader::bitstream_metadata` で取り出せる `Mp4BitstreamMetadata` を capability の唯一の入力にする。この型は reader 構築時に確定した required `SdpVideoFormat` と bitstream identity を cheap clone 可能な値として保持し、ファイル I/O は行わない
-  - reader / metadata / capability / encoder / 各 sample が identity の `Arc` clone を共有する。`Mp4PassthroughEncoder` は encode 時に受信 sample の identity を `Arc::ptr_eq` で照合し、別 reader 由来の sample を差し込まれた場合は callback を呼ばず `VideoCodecStatus::Error` を返す
-  - `Mp4PassthroughVideoCodecCapability::is_supported` を override し、Encoder かつ metadata の codec type と一致する場合のみ true を返す（コーデック固有 required parameter を持つ format を将来 advertise しても preference 検証が破綻しないようにする土台）
-  - sumomo の `build_context_config` は `mp4_metadata: Option<Mp4BitstreamMetadata>` を値で受け取る形に変更し、reader 構築 → `bitstream_metadata` で取り出し → capability 生成 → context に登録 → その後 reader を capturer へ move する順序で扱う
+- [CHANGE] `Mp4PassthroughVideoCodecCapability::new` のシグネチャを `VideoCodecType` から `Mp4BitstreamMetadata` へ変更する
+  - MP4 パススルーを利用している既存コードは `Mp4PassthroughVideoCodecCapability::new(reader.bitstream_metadata())` の形に書き換える必要がある
+    - `Mp4BitstreamMetadata` は `Mp4SampleReader::bitstream_metadata` で取り出す
+  - 後続の H.264 profile-level-id 対応や AV1 configOBUs 対応など、コーデック固有の必須 SDP parameter を capability から表明する経路の土台になる
   - @sile
 - [UPDATE] `shiguredo_webrtc` を 0.150.3 に上げ、Ubuntu 26.04 LTS に対応する
   - @voluntas
@@ -48,6 +47,11 @@
 - [FIX] MP4 の累積再生時間をオーバーフローしない変換で管理するようにする
   - 今まではタイムスケール単位の累積再生時間をマイクロ秒へ事前変換しており、累積再生時間が極めて大きい入力ファイルを処理した場合に、パニックまたはラップアラウンドする可能性があった
   - 正常な MP4 ファイルでは、このような再生時間を含むことはまずないが、壊れた MP4 ファイルが渡された場合に備えての防御的な対応を追加した
+  - @sile
+- [FIX] MP4 パススルーのエンコーダーが対応する `Mp4SampleReader` 以外由来のサンプルを実行時に拒否するようにする
+  - 別 reader 由来のサンプルを受け取ると `VideoCodecStatus::Error` を返してエンコードをスキップする
+  - 従来は無検査で通っていたため、サイレントに壊れた映像が送信される可能性があった
+  - 単一 reader / capability / capturer の通常の使い方では挙動は変わらない
   - @sile
 
 ### misc
