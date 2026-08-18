@@ -15,9 +15,9 @@
   - @voluntas
 - [CHANGE] Mp4Error の InputPositionOutOfRange と InconsistentSampleTable の file_size フィールドを usize から u64 に変更する
   - @sile
-- [CHANGE] `Mp4PassthroughVideoCodecCapability::new` のシグネチャを `VideoCodecType` から `Mp4BitstreamMetadata` へ変更する
-  - MP4 パススルーを利用している既存コードは `Mp4PassthroughVideoCodecCapability::new(reader.bitstream_metadata())` の形に書き換える必要がある
-    - `Mp4BitstreamMetadata` は `Mp4SampleReader::bitstream_metadata` で取り出す
+- [CHANGE] `Mp4PassthroughVideoCodecCapability` の構築を `Mp4SampleReader::passthrough_capability()` に一本化する
+  - MP4 パススルーを利用している既存コードは `Mp4PassthroughVideoCodecCapability::new(codec_type)` を `reader.passthrough_capability()` に書き換える必要がある
+  - `Mp4PassthroughVideoCodecCapability::new` は撤去し、reader からの生成だけを外部に公開する
   - 後続の H.264 profile-level-id 対応や AV1 configOBUs 対応など、コーデック固有の必須 SDP parameter を capability から表明する経路の土台になる
   - @sile
 - [UPDATE] `shiguredo_webrtc` を 0.150.3 に上げ、Ubuntu 26.04 LTS に対応する
