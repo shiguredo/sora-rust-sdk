@@ -60,6 +60,8 @@ fn encoder_codec_config(codec_type: VideoCodecType) -> Option<CodecConfig> {
         VideoCodecType::H265 => Some(CodecConfig::Hevc(HevcEncoderConfig { profile: None })),
         VideoCodecType::Vp9 => Some(CodecConfig::Vp9(Vp9EncoderConfig {
             profile: Some(Vp9Profile::Profile0),
+            // IVF ヘッダー出力を無効化する
+            write_ivf_headers: false,
         })),
         VideoCodecType::Av1 => Some(CodecConfig::Av1(Av1EncoderConfig { profile: None })),
         _ => None,
@@ -88,25 +90,6 @@ fn vpl_force_frame_type(codec_type: VideoCodecType, requested: Option<VideoFrame
     } else {
         frame_type::UNKNOWN
     }
-}
-
-fn vp9_payload_from_vpl(data: &[u8]) -> std::result::Result<&[u8], &'static str> {
-    let mut payload = data;
-    if payload.starts_with(b"DKIF") {
-        // VPL 実装によっては IVF ファイルヘッダー + フレームヘッダー付きで返るため除去する。
-        if payload.len() < 32 {
-            return Err("VP9 IVF file header is truncated");
-        }
-        payload = &payload[32..];
-    }
-    if payload.len() < 12 {
-        return Err("VP9 IVF frame header is truncated");
-    }
-    payload = &payload[12..];
-    if payload.is_empty() {
-        return Err("VP9 payload is empty after stripping IVF headers");
-    }
-    Ok(payload)
 }
 
 // VPL 固有の `PictureType` を `VideoFrameType` に変換する。
@@ -172,20 +155,8 @@ fn handle_vpl_encode_callback(
     let frame_height = encoded.user_data().frame_height;
 
     let data = encoded.into_data();
-    let encoded_payload = if codec_type == VideoCodecType::Vp9 {
-        match vp9_payload_from_vpl(&data) {
-            Ok(payload) => payload,
-            Err(err) => {
-                rtc_log_error!("VPL VP9 payload normalization failed: {}", err);
-                return;
-            }
-        }
-    } else {
-        &data
-    };
-
     let mut encoded_image = EncodedImage::new();
-    let encoded_buffer = EncodedImageBuffer::from_bytes(encoded_payload);
+    let encoded_buffer = EncodedImageBuffer::from_bytes(&data);
     encoded_image.set_encoded_data(&encoded_buffer);
     encoded_image.set_rtp_timestamp(rtp_timestamp);
     encoded_image.set_encoded_width(frame_width);
@@ -1033,26 +1004,6 @@ mod tests {
             vpl_rate_control_mode(VideoCodecType::H264),
             RateControlMode::Cbr
         );
-    }
-
-    #[test]
-    fn vp9_payload_from_vpl_strips_ivf_headers() {
-        let mut data = Vec::new();
-        data.extend_from_slice(b"DKIF");
-        data.resize(32, 0);
-        data.extend_from_slice(&[4, 0, 0, 0]);
-        data.extend_from_slice(&[0; 8]);
-        data.extend_from_slice(&[1, 2, 3, 4]);
-        let payload = vp9_payload_from_vpl(&data).expect("vp9 payload の抽出に失敗しました");
-        assert_eq!(payload, &[1, 2, 3, 4]);
-    }
-
-    #[test]
-    fn vp9_payload_from_vpl_rejects_truncated_frame_header() {
-        let data = vec![0u8; 11];
-        let err = vp9_payload_from_vpl(&data)
-            .expect_err("切り詰められたフレームヘッダーは失敗するはずです");
-        assert_eq!(err, "VP9 IVF frame header is truncated");
     }
 
     #[test]
