@@ -1349,9 +1349,9 @@ dependencies = [
 
 [[package]]
 name = "shiguredo_vpl"
-version = "2026.3.0"
+version = "2026.4.0-canary.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c623b31f830ff7c33c840f8d61274f1dea696e59f698081612629ff3ad22def"
+checksum = "ab2d42d40c9d98c67cae0459d4209de3113986ff6f445baf96bb60c843b13295"
 dependencies = [
  "bindgen",
  "shiguredo_cmake",
