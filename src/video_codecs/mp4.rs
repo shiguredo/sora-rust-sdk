@@ -1278,31 +1278,22 @@ mod tests {
         let preference = VideoCodecPreference::new_from_capability(&capability);
         let codecs = preference.codecs();
 
-        // Encoder 方向で H.264 のエントリが 1 件だけあるべき。
-        let encoder_entries: Vec<_> = codecs
-            .iter()
-            .filter(|codec| {
-                codec.direction() == CodecDirection::Encoder
-                    && codec.codec_type() == VideoCodecType::H264
-            })
-            .collect();
+        // is_supported override が Encoder + reader の codec_type にだけ true を返す
+        // ことを保証する目的で、preference のエントリ数までを直接検証する。
+        // 他 codec type や Decoder 方向で is_supported が誤って true を返すと、
+        // ここで余計なエントリが載って failure になる。
         assert_eq!(
-            encoder_entries.len(),
+            codecs.len(),
             1,
-            "preference は Encoder かつ H.264 のエントリを 1 件持つはずです"
+            "preference は Encoder + H.264 のエントリを 1 件だけ持つはずです"
         );
+        let entry = &codecs[0];
+        assert_eq!(entry.direction(), CodecDirection::Encoder);
+        assert_eq!(entry.codec_type(), VideoCodecType::H264);
         assert_eq!(
-            encoder_entries[0].implementation(),
+            entry.implementation(),
             &capability.get_implementation(),
             "エントリの implementation は passthrough capability のものと一致するはずです"
-        );
-
-        // Decoder 方向のエントリは無いはず (is_supported が false)。
-        assert!(
-            codecs
-                .iter()
-                .all(|codec| codec.direction() != CodecDirection::Decoder),
-            "Decoder 方向のエントリは持たないはずです"
         );
     }
 
