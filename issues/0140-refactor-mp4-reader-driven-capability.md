@@ -175,6 +175,30 @@ metadata は値で渡すため build_context_config の呼び出し後に借用�
 
 **将来の再検討観点**: 複数の MP4 パススルーを同一プロセスで並行運用するユースケース（マルチストリーム配信など）が具体化した際に、そのときの routing 設計と誤配線リスクを再評価する。それまでは型システム（`Mp4EncodedSample` の crate 可視性）と `codec_type` 一致チェックで十分な防御と見なす。
 
+### 設計から更新した項目
+
+以下は本 issue の設計方針・完了条件で提案していた設計から、実装中に判断を変更した項目。設計そのものは削らずに残し、この節で差分と理由を記録する。
+
+#### `Mp4BitstreamMetadata` のフィールドを pub にし、getter を廃止する
+
+**対象**: 「### bitstream metadata の切り出し」節の以下:
+
+- 「内部フィールドは private とする。既存の `PreferenceCodec` / `VideoCodecImplementation` と同じ『private フィールド + getter』流儀で以下を保持する」
+- 「対応 getter: `codec_type()`」「対応 getter: `required_sdp_format()` — clone を返す」
+- 「bitstream identity `Arc`（getter を露出せず、内部でのみ capability 構築時に消費する）」
+- 「`Clone` を実装する（`Arc::clone` と `SdpVideoFormat` の clone だけの軽量コピー）」
+- 完了条件のうち「`pub struct Mp4BitstreamMetadata` が pub で公開され、フィールドは全て private、getter として `codec_type()` と `required_sdp_format()` を持つ。identity は getter を露出しない」
+- 完了条件のうち「`Mp4BitstreamMetadata` は `Clone` を実装し、内部は `Arc::clone` と `SdpVideoFormat` clone のみで cheap にコピーできる」
+
+**更新後の設計**:
+
+- 全フィールドを pub にする
+- getter (`codec_type()` / `required_sdp_format()`) は削除する
+- `Clone` は `#[derive(Clone)]` で自動生成する
+- フィールド名を `required_format` → `required_sdp_format` にリネームする（reader 側 method 名と揃える）
+
+**理由**: 「### 実装で見送った項目」で identity check を削除した結果、`Mp4BitstreamMetadata` はコンストラクタ経由でしか守れない不変条件を失った。残るフィールド (`VideoCodecType` / `SdpVideoFormat`) は POD 相当で、コードベースの `ProxyInfo` / `VideoH264Params` などの「pub フィールドの data bundle」流儀に合致する。`private + getter` のボイラープレートは追加価値を持たなくなった。
+
 ## 変更対象
 
 - `src/video_codecs/mp4.rs`
