@@ -177,15 +177,28 @@ type Result<T> = std::result::Result<T, Mp4Error>;
 /// スナップショット。
 ///
 /// [`Mp4SampleReader::bitstream_metadata`] で取り出す。
+/// フィールドは private で、`codec_type` と `required_sdp_format` の内部一貫性
+/// （format 名が codec_type と一致する）を構造的に守る。
 #[derive(Clone)]
 pub struct Mp4BitstreamMetadata {
-    /// この MP4 のビデオコーデック種別。
-    pub codec_type: VideoCodecType,
-    /// この MP4 のパススルー送信に必要な [`SdpVideoFormat`]。
+    codec_type: VideoCodecType,
+    required_sdp_format: SdpVideoFormat,
+}
+
+impl Mp4BitstreamMetadata {
+    /// このビットストリームのビデオコーデック種別を返す。
+    pub fn codec_type(&self) -> VideoCodecType {
+        self.codec_type
+    }
+
+    /// このビットストリームのパススルー送信に必要な [`SdpVideoFormat`] の clone を返す。
+    ///
     /// H.264 は `packetization-mode=1`、H.265 / VP8 / VP9 / AV1 は bare codec name。
     /// コーデック固有の必須パラメータ（H.264 profile-level-id, AV1 configOBUs など）は
     /// 後続対応で拡張する。
-    pub required_sdp_format: SdpVideoFormat,
+    pub fn required_sdp_format(&self) -> SdpVideoFormat {
+        self.required_sdp_format.clone()
+    }
 }
 
 /// MP4 から抽出したエンコード済みビデオサンプル。
