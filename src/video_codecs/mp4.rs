@@ -8,6 +8,9 @@
 //! 3. Mp4PassthroughVideoCodecCapability - パススルーエンコーダーを WebRTC のコーデックパイプラインに登録する
 //! 4. Mp4VideoCapturer - フレームペーシングを行い、MP4 のタイミングに従ってフレームを WebRTC に供給する
 //!
+//! Mp4PassthroughVideoCodecCapability は [`Mp4SampleReader::bitstream_metadata`] で
+//! 取り出した [`Mp4BitstreamMetadata`] から構築する。
+//!
 //! データフロー:
 //!   Mp4SampleReader --[Mp4EncodedSample を内包した VideoFrame]--> Mp4PassthroughEncoder --> WebRTC RTP
 //!                                         (native VideoFrameBuffer)
@@ -662,6 +665,8 @@ impl Mp4SampleReader {
     }
 
     /// この MP4 のビデオコーデック種別を返す。
+    ///
+    /// [`Self::bitstream_metadata`] 経由の [`Mp4BitstreamMetadata::codec_type`] と同じ値。
     pub fn codec_type(&self) -> VideoCodecType {
         self.track_info.codec_type
     }
