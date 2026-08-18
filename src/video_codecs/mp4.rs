@@ -934,22 +934,15 @@ impl VideoEncoderHandler for Mp4PassthroughEncoder {
 /// WebRTC のコーデックパイプラインにパススルーエンコーダーを登録するためのアダプター。
 /// MP4 から検出されたコーデック種別のみをサポートし、デコーダーは提供しない (送信専用)。
 ///
-/// [`Mp4BitstreamMetadata`] から構築し、reader が確定した required [`SdpVideoFormat`]
-/// を capability が保持する。
+/// 内部に [`Mp4BitstreamMetadata`] を保持する。
 pub struct Mp4PassthroughVideoCodecCapability {
-    /// MP4 から検出されたコーデック種別。
-    codec_type: VideoCodecType,
-    /// metadata 由来の required `SdpVideoFormat`。`get_supported_formats(Encoder)` が返す。
-    required_format: SdpVideoFormat,
+    metadata: Mp4BitstreamMetadata,
 }
 
 impl Mp4PassthroughVideoCodecCapability {
     /// [`Mp4BitstreamMetadata`] から [`Mp4PassthroughVideoCodecCapability`] を生成する。
     pub fn new(metadata: Mp4BitstreamMetadata) -> Self {
-        Self {
-            codec_type: metadata.codec_type,
-            required_format: metadata.required_sdp_format,
-        }
+        Self { metadata }
     }
 }
 
@@ -962,21 +955,21 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
         if direction != CodecDirection::Encoder {
             return Vec::new();
         }
-        // reader 由来の required format だけを広告する。コーデック固有の
+        // metadata 由来の required format だけを広告する。コーデック固有の
         // 必須パラメータ（例: H.264 の profile-level-id）を持つ format も
         // ここから返せる。
-        vec![self.required_format.clone()]
+        vec![self.metadata.required_sdp_format.clone()]
     }
 
     /// この capability が preference に載るかを判定する。
     ///
     /// デフォルト実装は bare `SdpVideoFormat` を組み立てて `resolve_sdp_format`
-    /// に通す形だが、reader 由来 required format がコーデック固有のパラメータを
+    /// に通す形だが、metadata 由来 required format がコーデック固有のパラメータを
     /// 要求する場合に bare 入力が拒否され、false になってしまう。それを避けるため
-    /// override し、Encoder かつ reader の codec type と一致する場合のみ true を返す。
+    /// override し、Encoder かつ metadata の codec type と一致する場合のみ true を返す。
     /// preference の可否判定はこの結果を source of truth として扱われる。
     fn is_supported(&self, direction: CodecDirection, codec_type: VideoCodecType) -> bool {
-        direction == CodecDirection::Encoder && codec_type == self.codec_type
+        direction == CodecDirection::Encoder && codec_type == self.metadata.codec_type
     }
 
     fn create_video_encoder(
@@ -990,7 +983,7 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
         let Ok(format_codec_type) = VideoCodecType::try_from(format_name.as_str()) else {
             return None;
         };
-        if format_codec_type != self.codec_type {
+        if format_codec_type != self.metadata.codec_type {
             return None;
         }
         Some(VideoEncoder::new_with_handler(Box::new(
