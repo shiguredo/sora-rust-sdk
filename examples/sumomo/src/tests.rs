@@ -1,5 +1,32 @@
 use super::*;
 use sora_sdk::{CodecDirection, Role};
+
+/// H.264 の fixture MP4 から `Mp4PassthroughVideoCodecCapability` を取り出す。
+///
+/// build_context_config 系のテストは capability 構築だけを検証するので、reader も
+/// 一時ファイルも呼び出し側に残す必要がない。helper 内で capability を生成したあと
+/// 一時ファイルを削除し、capability だけを返す（capability はファイル I/O を持たない）。
+/// なお reader は関数末尾で drop されるため、Unix では open 中のファイルを
+/// 削除できる挙動に依存している（既存の mp4 テスト群と同じ流儀）。
+fn h264_capability_from_fixture(tag: &str) -> Mp4PassthroughVideoCodecCapability {
+    let fixture: &[u8] = include_bytes!("../../../testdata/red-320x320-h264.mp4");
+    let tmp_name = format!(
+        "sumomo-mp4-{}-{}-{}.mp4",
+        tag,
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("システム時刻は UNIX_EPOCH より後である必要があります")
+            .as_nanos()
+    );
+    let path = std::env::temp_dir().join(tmp_name);
+    std::fs::write(&path, fixture).expect("一時 fixture の書き込みに失敗しました");
+    let reader = Mp4SampleReader::new(&path).expect("fixture MP4 のパースに失敗しました");
+    let capability = reader.passthrough_capability();
+    let _ = std::fs::remove_file(&path);
+    capability
+}
+
 fn test_args(
     video_codec_implementation: VideoCodecImplementationSelections,
     openh264_path: Option<&str>,
@@ -578,9 +605,11 @@ fn build_context_config_manual_internal_only() {
 #[serial_test::serial]
 #[test]
 fn build_context_config_mp4_encoder_preference_uses_only_passthrough() {
+    // 実 H.264 MP4 fixture から capability を生成する (mock 禁止)。
+    let capability = h264_capability_from_fixture("encoder-preference-uses-only-passthrough");
     let config = build_context_config(
         sora_sdk::AdmConfig::NoAudioDevice,
-        Some(shiguredo_webrtc::VideoCodecType::H264),
+        Some(capability),
         None,
         VideoCodecImplementationSelections::Auto,
     )
@@ -630,9 +659,11 @@ fn build_context_config_mp4_encoder_preference_uses_only_passthrough() {
 #[serial_test::serial]
 #[test]
 fn build_context_config_mp4_manual_internal_encoder_is_passthrough() {
+    // 実 H.264 MP4 fixture から capability を生成する (mock 禁止)。
+    let capability = h264_capability_from_fixture("mp4-manual-internal-encoder-is-passthrough");
     let config = build_context_config(
         sora_sdk::AdmConfig::NoAudioDevice,
-        Some(shiguredo_webrtc::VideoCodecType::H264),
+        Some(capability),
         None,
         VideoCodecImplementationSelections::Manual(vec![
             VideoCodecImplementationSelection::Internal,

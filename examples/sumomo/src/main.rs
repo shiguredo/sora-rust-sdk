@@ -90,7 +90,7 @@ fn add_video_codec_capability(
 
 fn build_context_config(
     adm_config: sora_sdk::AdmConfig,
-    mp4_codec_type: Option<VideoCodecType>,
+    mp4_capability: Option<Mp4PassthroughVideoCodecCapability>,
     openh264_path: Option<&str>,
     video_codec_implementation: VideoCodecImplementationSelections,
 ) -> Result<SoraConnectionContextConfig> {
@@ -218,9 +218,8 @@ fn build_context_config(
     // implementation を上書きする) のため、この順序が「MP4 の実 codec の Encoder が
     // passthrough になる」ことの不変条件になっている。順序が変わると下のフィルタで
     // Encoder エントリが 0 件になり、MP4 送信が静かに成立しなくなる。
-    if let Some(codec_type) = mp4_codec_type {
-        let passthrough_capability: Box<dyn VideoCodecCapability> =
-            Box::new(Mp4PassthroughVideoCodecCapability::new(codec_type));
+    if let Some(capability) = mp4_capability {
+        let passthrough_capability: Box<dyn VideoCodecCapability> = Box::new(capability);
         let passthrough_implementation = passthrough_capability.get_implementation();
         add_video_codec_capability(&mut context_config, passthrough_capability);
 
@@ -248,11 +247,9 @@ struct TrackEntry {
     video_track: VideoTrack,
 }
 
-fn prepare_mp4_state(args: &Args) -> Result<Option<(Mp4SampleReader, VideoCodecType)>> {
+fn prepare_mp4_state(args: &Args) -> Result<Option<Mp4SampleReader>> {
     if let Some(ref mp4_path) = args.input_mp4 {
-        let reader = Mp4SampleReader::new(mp4_path)?;
-        let codec_type = reader.codec_type();
-        Ok(Some((reader, codec_type)))
+        Ok(Some(Mp4SampleReader::new(mp4_path)?))
     } else {
         Ok(None)
     }
@@ -547,7 +544,7 @@ fn build_and_run_connection(
 
     // --input-mp4 が指定されている場合は MP4 を読み込んでパススルーの準備をする
     let mp4_state = prepare_mp4_state(args)?;
-    let mp4_codec_type = mp4_state.as_ref().map(|(_, codec_type)| *codec_type);
+    let mp4_codec_type = mp4_state.as_ref().map(|reader| reader.codec_type());
 
     #[cfg(feature = "media-device")]
     let adm_config = if let Some(external_adm) = &external_adm {
@@ -560,7 +557,9 @@ fn build_and_run_connection(
 
     let context_config = build_context_config(
         adm_config,
-        mp4_codec_type,
+        mp4_state
+            .as_ref()
+            .map(|reader| reader.passthrough_capability()),
         args.openh264_path.as_deref(),
         args.video_codec_implementation.clone(),
     )?;
@@ -586,8 +585,7 @@ fn build_and_run_connection(
     };
 
     let builder = build_connection_builder(context.clone(), args, event_tx, mp4_codec_type)?;
-    let (builder, video_capturer) =
-        attach_sender_tracks(builder, &context, args, mp4_state.map(|(reader, _)| reader))?;
+    let (builder, video_capturer) = attach_sender_tracks(builder, &context, args, mp4_state)?;
 
     let (connection, handle) = builder.build()?;
     let run_handle = tokio::spawn(async move {
