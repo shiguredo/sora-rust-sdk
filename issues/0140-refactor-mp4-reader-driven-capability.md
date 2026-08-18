@@ -153,6 +153,28 @@ metadata は値で渡すため build_context_config の呼び出し後に借用�
 
 `examples/sumomo/src/tests.rs` の `build_context_config_mp4_encoder_preference_uses_only_passthrough` と `build_context_config_mp4_manual_internal_encoder_is_passthrough` は現状 `Some(VideoCodecType::H264)` を直接渡しているため、`testdata/` 配下の実 H.264 MP4 fixture から `Mp4SampleReader` を構築し、`bitstream_metadata()` で取り出した値を渡す形に書き替える（AGENTS.md により mock / stub は使わない）。
 
+### 実装で見送った項目
+
+以下は本 issue の設計方針・完了条件で提案していたが、コストと現実的な発生可能性を比較検討した結果、実装を見送った。将来この判断を再検討する際に前提が変わっていないかを見直せるよう、設計そのものは削らずに残す。
+
+#### bitstream identity と `Arc::ptr_eq` による reader 照合
+
+**対象**: 「### bitstream identity」節、および「### metadata から capability を構築する」「### resolve_sdp_format と factory 経路」「## 完了条件」で bitstream identity `Arc` 共有・`Arc::ptr_eq` 照合・`Mp4PassthroughEncoder` の identity mismatch 拒否 に言及している箇所すべて。
+
+**判断**: 実装しない。`Mp4BitstreamMetadata` の導入（reader/metadata の分離）だけを取り込む。
+
+**コスト**: 追加約 95 行（`Mp4BitstreamIdentity` struct、4 型への `identity` フィールド、`Arc::clone` の連鎖、`Mp4PassthroughEncoder::new` / `identity_matches` / encode 内の照合分岐、専用テスト）+ ZST identity token という exotic な概念の学習コスト。
+
+**現実的な発生可能性**: 極めて低い。
+
+- `Mp4EncodedSample` は `pub(crate)` なので、外部から直接構築できない
+- `Mp4PassthroughVideoCodecCapability::create_video_encoder` の既存 `codec_type` 一致チェックが、コーデック違いの reader mix を encoder 生成時点で `None` で塞ぐ
+- identity check が catch する残余ケースは「同じコーデックの複数 reader を並行して扱い、かつサンプル routing を意図せず配線ミスした場合」のみ
+- 通常の 1 reader / 1 capability / 1 capturer 構成では発生しない
+- 万一ヒットしても壊れるのは「同コーデックの意図と違う映像」であり、不正なビットストリームを生成する catastrophic な問題ではない
+
+**将来の再検討観点**: 複数の MP4 パススルーを同一プロセスで並行運用するユースケース（マルチストリーム配信など）が具体化した際に、そのときの routing 設計と誤配線リスクを再評価する。それまでは型システム（`Mp4EncodedSample` の crate 可視性）と `codec_type` 一致チェックで十分な防御と見なす。
+
 ## 変更対象
 
 - `src/video_codecs/mp4.rs`
