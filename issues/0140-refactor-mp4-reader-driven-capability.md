@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-08-13
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-18
 - Branch: feature/refactor-mp4-reader-driven-capability-v2
 - Polished: 2026-08-13
 - Updated: 2026-08-17
@@ -228,3 +228,25 @@ metadata は値で渡すため build_context_config の呼び出し後に借用�
 - `cargo clippy --workspace --all-targets -- -D warnings` が成功する
 - `CHANGES.md` の develop セクションに `[CHANGE]` を追記する（`Mp4PassthroughVideoCodecCapability::new` の signature 変更と `Mp4BitstreamMetadata` の新設が破壊的変更のため）
 - production log は英語、コメントとテストの assertion message は日本語にする
+
+## 解決方法
+
+### 実装
+
+- `pub struct Mp4BitstreamMetadata`（`#[derive(Clone)]`、pub フィールド `codec_type` / `required_sdp_format`）を新設し、`Mp4SampleReader::bitstream_metadata()` で reader から cheap clone のスナップショットを取り出せるようにした
+- `Mp4PassthroughVideoCodecCapability::new` のシグネチャを `VideoCodecType` から `Mp4BitstreamMetadata` を値で受け取る形へ変更し、capability は内部に metadata をそのまま保持するようにした
+- `Mp4PassthroughVideoCodecCapability::is_supported` を override し、Encoder かつ metadata の codec type と一致する場合のみ true を返すようにした（コーデック固有の必須パラメータを持つ format を将来表明しても preference 検証が破綻しない土台）
+- `Mp4SampleReader::required_sdp_format` を `pub(crate)` に降格し、外部からは `Mp4BitstreamMetadata` 経由で参照する経路に一本化した
+- ついでに `Mp4SampleReader::new` を `<P: AsRef<Path>>` ジェネリックに変更し、`&str` / `String` / `&Path` / `PathBuf` を直接渡せるようにした
+- `examples/sumomo/src/main.rs` の `build_context_config` を `mp4_metadata: Option<Mp4BitstreamMetadata>` に追従させた
+
+「## 設計方針」の一部は実装中の判断で変更している。詳細は「### 実装で見送った項目」（bitstream identity + `Arc::ptr_eq` による reader 照合を実装しない）と「### 設計から更新した項目」（`Mp4BitstreamMetadata` を pub フィールドの data bundle にする）を参照。
+
+### テスト
+
+- fixture MP4 から `Mp4SampleReader` を組み立てて `bitstream_metadata()` から capability を作る unit test を追加した（`passthrough_capability_advertises_only_reader_required_format` / `passthrough_capability_is_supported_only_for_encoder_and_reader_codec_type` / `passthrough_capability_creates_encoder_only_for_reader_codec_type` / `passthrough_capability_preference_registers_encoder_entry`）
+- `examples/sumomo/src/tests.rs` の `build_context_config_mp4_encoder_preference_uses_only_passthrough` / `build_context_config_mp4_manual_internal_encoder_is_passthrough` を、fixture helper `h264_metadata_from_fixture` 経由で実 H.264 MP4 fixture から metadata を取り出す形に書き替えた（mock / stub 未使用）
+
+### CHANGES.md
+
+- `[CHANGE] Mp4PassthroughVideoCodecCapability::new のシグネチャを VideoCodecType から Mp4BitstreamMetadata へ変更する` を追加した
