@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-08-01
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-18
 - Model: deepseek-v4-flash
 - Branch: feature/add-vpl-vp9-ivf-header-branching
 - Polished: 2026-08-07
@@ -72,3 +72,12 @@ e2e-tests の既存 VP9 テスト（`test_vpl_sendrecv` 等）が回帰確認を
 - `cargo test --workspace --features vpl` と `cargo clippy --workspace --features vpl --all-targets -- -D warnings` が成功する
 - `CHANGES.md` の develop セクションへ `[UPDATE]`（shiguredo_vpl の更新）と担当者 `@voluntas` を追記する
 - production log は英語、コメントとテストの assertion message は日本語にする（書き換え・新規の VP9 テストに適用）
+
+## 解決方法
+
+初期方針は「shiguredo_vpl に `write_ivf_headers` フィールドを追加し、getter で読み取った値で IVF 付き / raw を分岐して DKIF パースを維持する」だったが、**`write_ivf_headers: false` で出力自体を raw に固定すれば分岐が不要になる**ため、よりシンプルなこの方針で解決した。
+
+- shiguredo_vpl を `=2026.4.0-canary.2` に更新する（`Vp9EncoderConfig.write_ivf_headers` が追加されたバージョン）
+- `encoder_codec_config` で `write_ivf_headers: false` を明示設定し、VP9 encoder の出力を raw VP9 に固定する
+- これにより IVF ヘッダーが出力されなくなるため、`vp9_payload_from_vpl`（DKIF / IVF フレームヘッダー除去）とその単体テストを削除し、`handle_vpl_encode_callback` は `into_data()` の結果をそのまま `EncodedImageBuffer` へ渡す
+- byte 列による「IVF か raw か」の推測は残っていない（完了条件のうち推測廃止の要件を満たす）
