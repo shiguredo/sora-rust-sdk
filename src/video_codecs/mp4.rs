@@ -176,14 +176,14 @@ type Result<T> = std::result::Result<T, Mp4Error>;
 /// MP4 パススルー用の capability を構築するために必要なビットストリーム情報の
 /// スナップショット。
 ///
-/// `Mp4SampleReader::bitstream_metadata` で取り出す。
+/// [`Mp4SampleReader::bitstream_metadata`] で取り出す。
 #[derive(Clone)]
 pub struct Mp4BitstreamMetadata {
     /// この MP4 のビデオコーデック種別。
     pub codec_type: VideoCodecType,
-    /// この MP4 のパススルー送信に必要な `SdpVideoFormat`。
+    /// この MP4 のパススルー送信に必要な [`SdpVideoFormat`]。
     /// H.264 は `packetization-mode=1`、H.265 / VP8 / VP9 / AV1 は bare codec name。
-    /// コーデック固有の必須 parameter（H.264 profile-level-id, AV1 configOBUs など）は
+    /// コーデック固有の必須パラメータ（H.264 profile-level-id, AV1 configOBUs など）は
     /// 後続対応で拡張する。
     pub required_sdp_format: SdpVideoFormat,
 }
@@ -653,7 +653,7 @@ impl Mp4SampleReader {
         self.track_info.codec_type
     }
 
-    /// この reader のビットストリーム情報を `Mp4BitstreamMetadata` として取り出す。
+    /// この reader のビットストリーム情報を [`Mp4BitstreamMetadata`] として取り出す。
     pub fn bitstream_metadata(&self) -> Mp4BitstreamMetadata {
         Mp4BitstreamMetadata {
             codec_type: self.track_info.codec_type,
@@ -661,7 +661,7 @@ impl Mp4SampleReader {
         }
     }
 
-    /// この MP4 のビットストリーム実態から、パススルー送信に必要な `SdpVideoFormat` を返す。
+    /// この MP4 のビットストリーム実態から、パススルー送信に必要な [`SdpVideoFormat`] を返す。
     ///
     /// reader 構築時に確定するため、呼び出しごとに同じ内容を返す。
     /// 現在は各 codec について以下を返す:
@@ -671,10 +671,10 @@ impl Mp4SampleReader {
     /// - VP9: `VP9`
     /// - AV1: `AV1`
     ///
-    /// codec 固有 parameter（H.264 の profile-level-id、AV1 の
-    /// profile / level / tier など）は、各 codec の別対応で拡張する。
+    /// コーデック固有のパラメータ（H.264 の profile-level-id、AV1 の
+    /// profile / level / tier など）は、各コーデックの別対応で拡張する。
     ///
-    /// 外部からは `Mp4BitstreamMetadata` の `required_sdp_format` フィールドから参照する。
+    /// 外部からは [`Mp4BitstreamMetadata`] の `required_sdp_format` フィールドから参照する。
     pub(crate) fn required_sdp_format(&self) -> SdpVideoFormat {
         match self.track_info.codec_type {
             VideoCodecType::H264 => {
@@ -934,7 +934,7 @@ impl VideoEncoderHandler for Mp4PassthroughEncoder {
 /// WebRTC のコーデックパイプラインにパススルーエンコーダーを登録するためのアダプター。
 /// MP4 から検出されたコーデック種別のみをサポートし、デコーダーは提供しない (送信専用)。
 ///
-/// `Mp4BitstreamMetadata` から構築し、reader が確定した required `SdpVideoFormat`
+/// [`Mp4BitstreamMetadata`] から構築し、reader が確定した required [`SdpVideoFormat`]
 /// を capability が保持する。
 pub struct Mp4PassthroughVideoCodecCapability {
     /// MP4 から検出されたコーデック種別。
@@ -944,7 +944,7 @@ pub struct Mp4PassthroughVideoCodecCapability {
 }
 
 impl Mp4PassthroughVideoCodecCapability {
-    /// `Mp4BitstreamMetadata` から `Mp4PassthroughVideoCodecCapability` を生成する。
+    /// [`Mp4BitstreamMetadata`] から [`Mp4PassthroughVideoCodecCapability`] を生成する。
     pub fn new(metadata: Mp4BitstreamMetadata) -> Self {
         Self {
             codec_type: metadata.codec_type,
@@ -962,8 +962,8 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
         if direction != CodecDirection::Encoder {
             return Vec::new();
         }
-        // reader 由来の required format だけを広告する。codec 固有の
-        // required parameter（例: H.264 の profile-level-id）を持つ format も
+        // reader 由来の required format だけを広告する。コーデック固有の
+        // 必須パラメータ（例: H.264 の profile-level-id）を持つ format も
         // ここから返せる。
         vec![self.required_format.clone()]
     }
@@ -971,7 +971,7 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
     /// この capability が preference に載るかを判定する。
     ///
     /// デフォルト実装は bare `SdpVideoFormat` を組み立てて `resolve_sdp_format`
-    /// に通す形だが、reader 由来 required format が codec 固有 parameter を
+    /// に通す形だが、reader 由来 required format がコーデック固有のパラメータを
     /// 要求する場合に bare 入力が拒否され、false になってしまう。それを避けるため
     /// override し、Encoder かつ reader の codec type と一致する場合のみ true を返す。
     /// preference の可否判定はこの結果を source of truth として扱われる。
