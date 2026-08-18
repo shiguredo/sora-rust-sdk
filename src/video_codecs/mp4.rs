@@ -177,35 +177,15 @@ type Result<T> = std::result::Result<T, Mp4Error>;
 /// スナップショット。
 ///
 /// `Mp4SampleReader::bitstream_metadata` で取り出す。
+#[derive(Clone)]
 pub struct Mp4BitstreamMetadata {
     /// この MP4 のビデオコーデック種別。
-    codec_type: VideoCodecType,
+    pub codec_type: VideoCodecType,
     /// この MP4 のパススルー送信に必要な `SdpVideoFormat`。
     /// H.264 は `packetization-mode=1`、H.265 / VP8 / VP9 / AV1 は bare codec name。
     /// コーデック固有の必須 parameter（H.264 profile-level-id, AV1 configOBUs など）は
     /// 後続対応で拡張する。
-    required_format: SdpVideoFormat,
-}
-
-impl Clone for Mp4BitstreamMetadata {
-    fn clone(&self) -> Self {
-        Self {
-            codec_type: self.codec_type,
-            required_format: self.required_format.clone(),
-        }
-    }
-}
-
-impl Mp4BitstreamMetadata {
-    /// このビットストリームのビデオコーデック種別を返す。
-    pub fn codec_type(&self) -> VideoCodecType {
-        self.codec_type
-    }
-
-    /// このビットストリームのパススルー送信に必要な `SdpVideoFormat` の clone を返す。
-    pub fn required_sdp_format(&self) -> SdpVideoFormat {
-        self.required_format.clone()
-    }
+    pub required_sdp_format: SdpVideoFormat,
 }
 
 /// MP4 から抽出したエンコード済みビデオサンプル。
@@ -677,7 +657,7 @@ impl Mp4SampleReader {
     pub fn bitstream_metadata(&self) -> Mp4BitstreamMetadata {
         Mp4BitstreamMetadata {
             codec_type: self.track_info.codec_type,
-            required_format: self.required_sdp_format(),
+            required_sdp_format: self.required_sdp_format(),
         }
     }
 
@@ -694,7 +674,7 @@ impl Mp4SampleReader {
     /// codec 固有 parameter（H.264 の profile-level-id、AV1 の
     /// profile / level / tier など）は、各 codec の別対応で拡張する。
     ///
-    /// 外部からは `Mp4BitstreamMetadata::required_sdp_format` を経由する。
+    /// 外部からは `Mp4BitstreamMetadata` の `required_sdp_format` フィールドから参照する。
     pub(crate) fn required_sdp_format(&self) -> SdpVideoFormat {
         match self.track_info.codec_type {
             VideoCodecType::H264 => {
@@ -968,7 +948,7 @@ impl Mp4PassthroughVideoCodecCapability {
     pub fn new(metadata: Mp4BitstreamMetadata) -> Self {
         Self {
             codec_type: metadata.codec_type,
-            required_format: metadata.required_format,
+            required_format: metadata.required_sdp_format,
         }
     }
 }
