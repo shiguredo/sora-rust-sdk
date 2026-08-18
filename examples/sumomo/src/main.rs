@@ -49,11 +49,10 @@ use sora_sdk::V4l2VideoCodecCapability;
 #[cfg(feature = "vpl")]
 use sora_sdk::VplVideoCodecCapability;
 use sora_sdk::{
-    CodecDirection, InternalVideoCodecCapability, Mp4BitstreamMetadata,
-    Mp4PassthroughVideoCodecCapability, Mp4SampleReader, Mp4VideoCapturer,
-    Openh264VideoCodecCapability, PreferenceCodec, SoraConnection, SoraConnectionBuilder,
-    SoraConnectionContext, SoraConnectionContextConfig, SoraConnectionEventHandler,
-    SoraConnectionHandle, VideoCodecCapability, VideoCodecPreference,
+    CodecDirection, InternalVideoCodecCapability, Mp4PassthroughVideoCodecCapability,
+    Mp4SampleReader, Mp4VideoCapturer, Openh264VideoCodecCapability, PreferenceCodec,
+    SoraConnection, SoraConnectionBuilder, SoraConnectionContext, SoraConnectionContextConfig,
+    SoraConnectionEventHandler, SoraConnectionHandle, VideoCodecCapability, VideoCodecPreference,
 };
 use tokio::sync::mpsc;
 use video::{I420Frame, VideoFrameSinkHandler, VideoRenderer};
@@ -91,7 +90,7 @@ fn add_video_codec_capability(
 
 fn build_context_config(
     adm_config: sora_sdk::AdmConfig,
-    mp4_metadata: Option<Mp4BitstreamMetadata>,
+    mp4_capability: Option<Mp4PassthroughVideoCodecCapability>,
     openh264_path: Option<&str>,
     video_codec_implementation: VideoCodecImplementationSelections,
 ) -> Result<SoraConnectionContextConfig> {
@@ -219,9 +218,8 @@ fn build_context_config(
     // implementation を上書きする) のため、この順序が「MP4 の実 codec の Encoder が
     // passthrough になる」ことの不変条件になっている。順序が変わると下のフィルタで
     // Encoder エントリが 0 件になり、MP4 送信が静かに成立しなくなる。
-    if let Some(metadata) = mp4_metadata {
-        let passthrough_capability: Box<dyn VideoCodecCapability> =
-            Box::new(Mp4PassthroughVideoCodecCapability::new(metadata));
+    if let Some(capability) = mp4_capability {
+        let passthrough_capability: Box<dyn VideoCodecCapability> = Box::new(capability);
         let passthrough_implementation = passthrough_capability.get_implementation();
         add_video_codec_capability(&mut context_config, passthrough_capability);
 
@@ -559,7 +557,9 @@ fn build_and_run_connection(
 
     let context_config = build_context_config(
         adm_config,
-        mp4_state.as_ref().map(|reader| reader.bitstream_metadata()),
+        mp4_state
+            .as_ref()
+            .map(|reader| reader.passthrough_capability()),
         args.openh264_path.as_deref(),
         args.video_codec_implementation.clone(),
     )?;

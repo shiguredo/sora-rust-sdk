@@ -8,8 +8,8 @@
 //! 3. Mp4PassthroughVideoCodecCapability - パススルーエンコーダーを WebRTC のコーデックパイプラインに登録する
 //! 4. Mp4VideoCapturer - フレームペーシングを行い、MP4 のタイミングに従ってフレームを WebRTC に供給する
 //!
-//! Mp4PassthroughVideoCodecCapability は [`Mp4SampleReader::bitstream_metadata`] で
-//! 取り出した [`Mp4BitstreamMetadata`] から構築する。
+//! Mp4PassthroughVideoCodecCapability は [`Mp4SampleReader::passthrough_capability`]
+//! で reader から直接生成する。
 //!
 //! データフロー:
 //!   Mp4SampleReader --[Mp4EncodedSample を内包した VideoFrame]--> Mp4PassthroughEncoder --> WebRTC RTP
@@ -175,34 +175,6 @@ impl From<shiguredo_mp4::demux::DemuxError> for Mp4Error {
 }
 
 type Result<T> = std::result::Result<T, Mp4Error>;
-
-/// MP4 パススルー用の capability を構築するために必要なビットストリーム情報の
-/// スナップショット。
-///
-/// [`Mp4SampleReader::bitstream_metadata`] で取り出す。
-/// フィールドは private で、`codec_type` と `required_sdp_format` の内部一貫性
-/// （format 名が codec_type と一致する）を構造的に守る。
-#[derive(Clone)]
-pub struct Mp4BitstreamMetadata {
-    codec_type: VideoCodecType,
-    required_sdp_format: SdpVideoFormat,
-}
-
-impl Mp4BitstreamMetadata {
-    /// このビットストリームのビデオコーデック種別を返す。
-    pub fn codec_type(&self) -> VideoCodecType {
-        self.codec_type
-    }
-
-    /// このビットストリームのパススルー送信に必要な [`SdpVideoFormat`] の clone を返す。
-    ///
-    /// H.264 は `packetization-mode=1`、H.265 / VP8 / VP9 / AV1 は bare codec name。
-    /// コーデック固有の必須パラメータ（H.264 profile-level-id, AV1 configOBUs など）は
-    /// 後続対応で拡張する。
-    pub fn required_sdp_format(&self) -> SdpVideoFormat {
-        self.required_sdp_format.clone()
-    }
-}
 
 /// MP4 から抽出したエンコード済みビデオサンプル。
 ///
@@ -665,17 +637,18 @@ impl Mp4SampleReader {
     }
 
     /// この MP4 のビデオコーデック種別を返す。
-    ///
-    /// [`Self::bitstream_metadata`] 経由の [`Mp4BitstreamMetadata::codec_type`] と同じ値。
     pub fn codec_type(&self) -> VideoCodecType {
         self.track_info.codec_type
     }
 
-    /// この reader のビットストリーム情報を [`Mp4BitstreamMetadata`] として取り出す。
-    pub fn bitstream_metadata(&self) -> Mp4BitstreamMetadata {
-        Mp4BitstreamMetadata {
+    /// この reader から MP4 パススルー用の [`Mp4PassthroughVideoCodecCapability`] を生成する。
+    ///
+    /// ファイル I/O は行わず、reader 構築時に確定した値の cheap clone だけを渡す。
+    /// この経路が capability の唯一の構築ルート。
+    pub fn passthrough_capability(&self) -> Mp4PassthroughVideoCodecCapability {
+        Mp4PassthroughVideoCodecCapability {
             codec_type: self.track_info.codec_type,
-            required_sdp_format: self.required_sdp_format(),
+            required_format: self.required_sdp_format(),
         }
     }
 
@@ -691,9 +664,7 @@ impl Mp4SampleReader {
     ///
     /// コーデック固有のパラメータ（H.264 の profile-level-id、AV1 の
     /// profile / level / tier など）は、各コーデックの別対応で拡張する。
-    ///
-    /// 外部からは [`Mp4BitstreamMetadata`] の `required_sdp_format` フィールドから参照する。
-    pub(crate) fn required_sdp_format(&self) -> SdpVideoFormat {
+    fn required_sdp_format(&self) -> SdpVideoFormat {
         match self.track_info.codec_type {
             VideoCodecType::H264 => {
                 let mut format = SdpVideoFormat::new("H264");
@@ -952,16 +923,12 @@ impl VideoEncoderHandler for Mp4PassthroughEncoder {
 /// WebRTC のコーデックパイプラインにパススルーエンコーダーを登録するためのアダプター。
 /// MP4 から検出されたコーデック種別のみをサポートし、デコーダーは提供しない (送信専用)。
 ///
-/// 内部に [`Mp4BitstreamMetadata`] を保持する。
+/// [`Mp4SampleReader::passthrough_capability`] から生成する。
+/// フィールドは private で、`codec_type` と `required_format` の内部一貫性
+/// （format 名が codec_type と一致する）を構造的に守る。
 pub struct Mp4PassthroughVideoCodecCapability {
-    metadata: Mp4BitstreamMetadata,
-}
-
-impl Mp4PassthroughVideoCodecCapability {
-    /// [`Mp4BitstreamMetadata`] から [`Mp4PassthroughVideoCodecCapability`] を生成する。
-    pub fn new(metadata: Mp4BitstreamMetadata) -> Self {
-        Self { metadata }
-    }
+    codec_type: VideoCodecType,
+    required_format: SdpVideoFormat,
 }
 
 impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
@@ -973,19 +940,19 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
         if direction != CodecDirection::Encoder {
             return Vec::new();
         }
-        // metadata 由来の required format だけを広告する。コーデック固有の
+        // reader 由来の required format だけを広告する。コーデック固有の
         // 必須パラメータ（例: H.264 の profile-level-id）を持つ format も
         // ここから返せる。
-        vec![self.metadata.required_sdp_format.clone()]
+        vec![self.required_format.clone()]
     }
 
     // デフォルト実装は bare `SdpVideoFormat` を組み立てて `resolve_sdp_format`
-    // に通す形だが、metadata 由来 required format がコーデック固有のパラメータを
+    // に通す形だが、reader 由来 required format がコーデック固有のパラメータを
     // 要求する場合に bare 入力が拒否され、false になってしまう。それを避けるため
-    // override し、Encoder かつ metadata の codec type と一致する場合のみ true を返す。
+    // override し、Encoder かつ reader の codec type と一致する場合のみ true を返す。
     // preference の可否判定はこの結果を source of truth として扱われる。
     fn is_supported(&self, direction: CodecDirection, codec_type: VideoCodecType) -> bool {
-        direction == CodecDirection::Encoder && codec_type == self.metadata.codec_type
+        direction == CodecDirection::Encoder && codec_type == self.codec_type
     }
 
     fn create_video_encoder(
@@ -999,7 +966,7 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
         let Ok(format_codec_type) = VideoCodecType::try_from(format_name.as_str()) else {
             return None;
         };
-        if format_codec_type != self.metadata.codec_type {
+        if format_codec_type != self.codec_type {
             return None;
         }
         Some(VideoEncoder::new_with_handler(Box::new(
@@ -1188,7 +1155,7 @@ mod tests {
     #[test]
     fn passthrough_capability_advertises_only_reader_required_format() {
         let (reader, _fixture) = h264_reader_from_fixture("required-format");
-        let capability = Mp4PassthroughVideoCodecCapability::new(reader.bitstream_metadata());
+        let capability = reader.passthrough_capability();
 
         assert_eq!(capability.get_implementation().name(), "mp4-passthrough");
 
@@ -1227,7 +1194,7 @@ mod tests {
     #[test]
     fn passthrough_capability_is_supported_only_for_encoder_and_reader_codec_type() {
         let (reader, _fixture) = h264_reader_from_fixture("is-supported");
-        let capability = Mp4PassthroughVideoCodecCapability::new(reader.bitstream_metadata());
+        let capability = reader.passthrough_capability();
 
         // Encoder かつ reader の codec type (H.264) と一致する場合だけ true。
         assert!(
@@ -1247,7 +1214,7 @@ mod tests {
     #[test]
     fn passthrough_capability_creates_encoder_only_for_reader_codec_type() {
         let (reader, _fixture) = h264_reader_from_fixture("create-encoder");
-        let capability = Mp4PassthroughVideoCodecCapability::new(reader.bitstream_metadata());
+        let capability = reader.passthrough_capability();
         let env = shiguredo_webrtc::Environment::new();
 
         // reader の codec type と一致する H.264 では encoder が生成される。
@@ -1276,7 +1243,7 @@ mod tests {
     #[test]
     fn passthrough_capability_preference_registers_encoder_entry() {
         let (reader, _fixture) = h264_reader_from_fixture("preference");
-        let capability = Mp4PassthroughVideoCodecCapability::new(reader.bitstream_metadata());
+        let capability = reader.passthrough_capability();
 
         // is_supported override の結果が VideoCodecPreference::new_from_capability に
         // そのまま反映されることを確認する。
