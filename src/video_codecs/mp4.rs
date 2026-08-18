@@ -173,31 +173,12 @@ impl From<shiguredo_mp4::demux::DemuxError> for Mp4Error {
 
 type Result<T> = std::result::Result<T, Mp4Error>;
 
-/// MP4 パススルー経路の bitstream 出処を識別するトークン。
-///
-/// zero-sized struct。`Mp4SampleReader` が構築時に `Arc` で 1 度だけ生成し、
-/// `Mp4BitstreamMetadata`・`Mp4PassthroughVideoCodecCapability`・各
-/// `Mp4EncodedSample`・`Mp4PassthroughEncoder` に `Arc::clone` で配布する。
-/// `Arc::ptr_eq` により「同じ reader から派生した sample か」を判定する
-/// 用途にだけ使い、外部には露出しない。
-///
-/// アドレス比較の安全性は、identity Arc のすべての clone
-/// （reader・metadata・capability・各 sample・encoder handler が保持）が
-/// 生存中に手放されないことで担保する。
-/// allocator によるアドレス再利用は zero-sized wrap 型では防げないため、
-/// この生存管理を前提とする。
-/// 加えて、crate 内の他の `Arc<()>` と型で区別し、外部から偶然同型 `Arc`
-/// を渡されないよう固有型で wrap する。
-pub(crate) struct Mp4BitstreamIdentity;
-
 /// MP4 パススルー用の capability を構築するために必要な bitstream 情報の
 /// スナップショット。ファイル I/O は含まず、reader 構築時に確定した値の
 /// cheap clone だけを内包する。
 ///
 /// `Mp4SampleReader::bitstream_metadata` で取り出し、
-/// `Mp4PassthroughVideoCodecCapability::new` に渡す。内包する identity Arc により
-/// この metadata・派生する capability / encoder・reader が生成する sample の
-/// 対応関係が実行時に `Arc::ptr_eq` で照合される。
+/// `Mp4PassthroughVideoCodecCapability::new` に渡す。
 ///
 /// 全フィールド private。生成は `Mp4SampleReader::bitstream_metadata` だけが行う。
 pub struct Mp4BitstreamMetadata {
@@ -205,12 +186,9 @@ pub struct Mp4BitstreamMetadata {
     codec_type: VideoCodecType,
     /// この MP4 のパススルー送信に必要な `SdpVideoFormat`。
     /// H.264 は `packetization-mode=1`、H.265 / VP8 / VP9 / AV1 は bare codec name。
-    /// codec 固有 required parameter（H.264 profile-level-id, AV1 configOBUs など）は
+    /// コーデック固有の必須 parameter（H.264 profile-level-id, AV1 configOBUs など）は
     /// 後続対応で拡張する。
     required_format: SdpVideoFormat,
-    /// この metadata と reader / capability / encoder / sample の対応関係を
-    /// 実行時に識別するトークン。
-    identity: Arc<Mp4BitstreamIdentity>,
 }
 
 impl Clone for Mp4BitstreamMetadata {
@@ -218,7 +196,6 @@ impl Clone for Mp4BitstreamMetadata {
         Self {
             codec_type: self.codec_type,
             required_format: self.required_format.clone(),
-            identity: self.identity.clone(),
         }
     }
 }
@@ -252,10 +229,6 @@ pub(crate) struct Mp4EncodedSample {
     pub height: u32,
     /// ビデオコーデック種別。
     pub codec_type: VideoCodecType,
-    /// この sample を生成した `Mp4SampleReader` の identity。
-    /// `Mp4PassthroughEncoder` の `encode` で `Arc::ptr_eq` により
-    /// 「capability が期待する reader と同一の reader 由来か」を照合する。
-    pub identity: Arc<Mp4BitstreamIdentity>,
 }
 
 impl VideoFrameBufferHandler for Mp4EncodedSample {
@@ -344,10 +317,6 @@ pub struct Mp4SampleReader {
     /// 長さは samples.len() + 1 で、末尾が動画全体の長さ。
     /// フレームペーシングで絶対時刻ベースの待機に使用する。
     cumulative: Vec<Mp4Timestamp>,
-    /// この reader 由来の sample を識別するトークン。
-    /// `Mp4PassthroughVideoCodecCapability`・各 `Mp4EncodedSample`・
-    /// `Mp4PassthroughEncoder` に `Arc::clone` で共有する。
-    identity: Arc<Mp4BitstreamIdentity>,
 }
 
 impl Mp4SampleReader {
@@ -507,7 +476,6 @@ impl Mp4SampleReader {
             track_info,
             samples,
             cumulative,
-            identity: Arc::new(Mp4BitstreamIdentity),
         })
     }
 
@@ -713,13 +681,10 @@ impl Mp4SampleReader {
     ///
     /// ファイル I/O は行わず、reader 構築時に確定した値の cheap clone だけを含む。
     /// 取り出した metadata は `Mp4PassthroughVideoCodecCapability::new` に渡す。
-    /// この経路で reader → metadata → capability → encoder → sample の identity Arc が
-    /// 共有され、実行時の `Arc::ptr_eq` 照合が成立する。
     pub fn bitstream_metadata(&self) -> Mp4BitstreamMetadata {
         Mp4BitstreamMetadata {
             codec_type: self.track_info.codec_type,
             required_format: self.required_sdp_format(),
-            identity: self.identity.clone(),
         }
     }
 
@@ -794,7 +759,6 @@ impl Mp4SampleReader {
             width: self.track_info.width as u32,
             height: self.track_info.height as u32,
             codec_type: self.track_info.codec_type,
-            identity: self.identity.clone(),
         })
     }
 
@@ -869,38 +833,12 @@ fn length_prefixed_nalu_to_annex_b(data: &[u8], nal_length_size: u8) -> Vec<u8> 
 /// 実際のエンコード処理は行わず、`VideoFrame` の native `VideoFrameBuffer` から
 /// 事前エンコード済みのサンプルを取り出して `EncodedImage` として WebRTC に渡す。
 ///
-/// `Mp4PassthroughVideoCodecCapability::create_video_encoder` が生成し、
-/// 生成元 capability と同じ `Mp4BitstreamIdentity` を握る。`encode` で
-/// 受信 sample の identity と `Arc::ptr_eq` で照合し、別の reader 由来の sample
-/// を差し込まれた場合は callback を呼ばず `VideoCodecStatus::Error` を返す。
-///
 /// `has_trusted_rate_controller=true` を設定することで、
 /// WebRTC のビットレート制御がこのエンコーダーに対して介入しないようにする。
 /// パススルーなのでビットレートの調整は不可能であり、
 /// 代わりに `--video-bit-rate` で十分な帯域を確保する必要がある。
 struct Mp4PassthroughEncoder {
     callback: Option<VideoEncoderEncodedImageCallbackPtr>,
-    /// この encoder を生成した capability が保持する identity。
-    /// `encode` で受信 sample の identity と `Arc::ptr_eq` で照合する。
-    expected_identity: Arc<Mp4BitstreamIdentity>,
-}
-
-impl Mp4PassthroughEncoder {
-    fn new(expected_identity: Arc<Mp4BitstreamIdentity>) -> Self {
-        Self {
-            callback: None,
-            expected_identity,
-        }
-    }
-
-    /// 受信 sample の identity が、この encoder が期待する identity と同一かを判定する。
-    ///
-    /// `Arc::ptr_eq` によるアドレス比較で、同じ `Mp4SampleReader` から派生した
-    /// sample かを判定する。codec configuration が偶然一致する別 reader の sample も
-    /// ここで拒否する。
-    fn identity_matches(&self, sample: &Mp4EncodedSample) -> bool {
-        Arc::ptr_eq(&sample.identity, &self.expected_identity)
-    }
 }
 
 impl VideoEncoderHandler for Mp4PassthroughEncoder {
@@ -940,14 +878,6 @@ impl VideoEncoderHandler for Mp4PassthroughEncoder {
                 return VideoCodecStatus::Error;
             }
         };
-
-        // 別 reader 由来の sample を差し込まれた場合の防御。
-        if !self.identity_matches(sample) {
-            rtc_log_warning!(
-                "MP4Passthrough: rejected sample from a different reader (bitstream identity mismatch)"
-            );
-            return VideoCodecStatus::Error;
-        }
 
         rtc_log_verbose!(
             "MP4Passthrough: encode() keyframe={} size={} bytes",
@@ -1032,37 +962,20 @@ impl VideoEncoderHandler for Mp4PassthroughEncoder {
 /// MP4 から検出されたコーデック種別のみをサポートし、デコーダーは提供しない (送信専用)。
 ///
 /// `Mp4BitstreamMetadata` から構築し、reader が確定した required `SdpVideoFormat`
-/// と bitstream identity を capability・生成される encoder handler で共有する。
-/// これにより、この capability が生成する encoder が受け取る `VideoFrame` が
-/// 「同じ reader 由来の sample」であることを実行時に保証できる。
+/// を capability が保持する。
 pub struct Mp4PassthroughVideoCodecCapability {
     /// MP4 から検出されたコーデック種別。
     codec_type: VideoCodecType,
     /// metadata 由来の required `SdpVideoFormat`。`get_supported_formats(Encoder)` が返す。
     required_format: SdpVideoFormat,
-    /// metadata から複製した bitstream identity。
-    /// 生成する `Mp4PassthroughEncoder` に `Arc::clone` で渡し、encoder は
-    /// 受信 sample の identity と `Arc::ptr_eq` で照合する。
-    identity: Arc<Mp4BitstreamIdentity>,
 }
 
 impl Mp4PassthroughVideoCodecCapability {
     /// `Mp4BitstreamMetadata` から `Mp4PassthroughVideoCodecCapability` を生成する。
-    ///
-    /// reader / capability / capturer は 1 対 1 対 1 で使う。呼び出し側は
-    /// 1. `Mp4SampleReader` を構築する
-    /// 2. `Mp4SampleReader::bitstream_metadata` で metadata を取り出す
-    /// 3. metadata を渡してこの capability を作る
-    /// 4. capability を context に登録する
-    /// 5. 同じ reader を [`Mp4VideoCapturer::new`] へ move する
-    ///
-    /// の順序を守ること。この順序により、encoder が受け取る sample の identity が
-    /// capability の identity と一致することが保証される。
     pub fn new(metadata: Mp4BitstreamMetadata) -> Self {
         Self {
             codec_type: metadata.codec_type,
             required_format: metadata.required_format,
-            identity: metadata.identity,
         }
     }
 }
@@ -1107,9 +1020,8 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
         if format_codec_type != self.codec_type {
             return None;
         }
-        // encoder handler にも identity を共有し、受信 sample との照合を可能にする。
         Some(VideoEncoder::new_with_handler(Box::new(
-            Mp4PassthroughEncoder::new(self.identity.clone()),
+            Mp4PassthroughEncoder { callback: None },
         )))
     }
 }
@@ -1414,39 +1326,6 @@ mod tests {
                 .iter()
                 .all(|codec| codec.direction() != CodecDirection::Decoder),
             "Decoder 方向のエントリは持たないはずです"
-        );
-    }
-
-    #[test]
-    fn passthrough_encoder_identity_matches_only_same_reader_sample() {
-        // Arc::ptr_eq による identity 照合が、同じ reader 由来の sample だけを受理し、
-        // codec configuration が一致する別 reader の sample は拒否することを確認する。
-        let (mut reader_a, _fixture_a) = h264_reader_from_fixture("identity-a");
-        let (mut reader_b, _fixture_b) = h264_reader_from_fixture("identity-b");
-
-        // 両 reader は同じ fixture 由来なので codec_type / 解像度 / avcC は等値になる。
-        assert_eq!(reader_a.codec_type(), reader_b.codec_type());
-
-        // reader_a の metadata の identity を握らせた encoder を組む。
-        // 実運用では `Mp4PassthroughVideoCodecCapability::create_video_encoder` が
-        // 同じ identity を持つ encoder を生成する。ここでは identity 照合ロジックを
-        // 直接検証するため、encoder を直接組み立てる。
-        let encoder = Mp4PassthroughEncoder::new(reader_a.bitstream_metadata().identity);
-
-        let sample_a = reader_a
-            .get_sample(0)
-            .expect("reader_a のサンプル取得に失敗しました");
-        let sample_b = reader_b
-            .get_sample(0)
-            .expect("reader_b のサンプル取得に失敗しました");
-
-        assert!(
-            encoder.identity_matches(&sample_a),
-            "同じ reader 由来の sample は identity が一致するはずです"
-        );
-        assert!(
-            !encoder.identity_matches(&sample_b),
-            "別 reader 由来の sample は codec configuration が等しくても identity が不一致のはずです"
         );
     }
 
