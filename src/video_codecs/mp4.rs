@@ -961,13 +961,11 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
         vec![self.metadata.required_sdp_format.clone()]
     }
 
-    /// この capability が preference に載るかを判定する。
-    ///
-    /// デフォルト実装は bare `SdpVideoFormat` を組み立てて `resolve_sdp_format`
-    /// に通す形だが、metadata 由来 required format がコーデック固有のパラメータを
-    /// 要求する場合に bare 入力が拒否され、false になってしまう。それを避けるため
-    /// override し、Encoder かつ metadata の codec type と一致する場合のみ true を返す。
-    /// preference の可否判定はこの結果を source of truth として扱われる。
+    // デフォルト実装は bare `SdpVideoFormat` を組み立てて `resolve_sdp_format`
+    // に通す形だが、metadata 由来 required format がコーデック固有のパラメータを
+    // 要求する場合に bare 入力が拒否され、false になってしまう。それを避けるため
+    // override し、Encoder かつ metadata の codec type と一致する場合のみ true を返す。
+    // preference の可否判定はこの結果を source of truth として扱われる。
     fn is_supported(&self, direction: CodecDirection, codec_type: VideoCodecType) -> bool {
         direction == CodecDirection::Encoder && codec_type == self.metadata.codec_type
     }
