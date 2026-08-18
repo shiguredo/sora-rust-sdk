@@ -199,6 +199,18 @@ metadata は値で渡すため build_context_config の呼び出し後に借用�
 
 **理由**: 「### 実装で見送った項目」で identity check を削除した結果、`Mp4BitstreamMetadata` はコンストラクタ経由でしか守れない不変条件を失った。残るフィールド (`VideoCodecType` / `SdpVideoFormat`) は POD 相当で、コードベースの `ProxyInfo` / `VideoH264Params` などの「pub フィールドの data bundle」流儀に合致する。`private + getter` のボイラープレートは追加価値を持たなくなった。
 
+**追記 (2026-08-18): 上記の pub フィールド化を revert する**
+
+review 指摘により、pub フィールドは `codec_type` と `required_sdp_format` の内部一貫性を破れることが判明した。具体的には、`Mp4BitstreamMetadata { codec_type: H264, required_sdp_format: SdpVideoFormat::new("VP8") }` のように mismatch を持ったリテラル構築が可能で、その場合の挙動は「preference には H.264 Encoder エントリが載るが factory の公開 format は 0 件（`collect_supported_formats` の codec_type 照合で弾かれる）」というサイレント失敗になり、診断が困難になる。
+
+**revert 後の設計**:
+
+- フィールドは private に戻し、getter (`codec_type()` / `required_sdp_format()`) を復活させる
+- `Mp4BitstreamMetadata` の唯一の構築経路は `Mp4SampleReader::bitstream_metadata()` に限定される
+- `#[derive(Clone)]` は維持する
+
+**revert 理由**: `Mp4BitstreamMetadata` は「reader が確定した値」を切り出したスナップショットで、`codec_type` と `required_sdp_format` の間には内部一貫性の invariant がある。この invariant はコンストラクタ経由でしか守れない。pub フィールド化を選んだ当初は「POD 相当」として `ProxyInfo` / `Video*Params` 流儀に揃えたが、これらの POD には cross-field invariant が無いため類推が不完全だった。private + getter に戻して invariant を構造的に守る。
+
 ## 変更対象
 
 - `src/video_codecs/mp4.rs`
@@ -233,14 +245,14 @@ metadata は値で渡すため build_context_config の呼び出し後に借用�
 
 ### 実装
 
-- `pub struct Mp4BitstreamMetadata`（`#[derive(Clone)]`、pub フィールド `codec_type` / `required_sdp_format`）を新設し、`Mp4SampleReader::bitstream_metadata()` で reader から cheap clone のスナップショットを取り出せるようにした
+- `pub struct Mp4BitstreamMetadata`（`#[derive(Clone)]`、private フィールド + getter `codec_type()` / `required_sdp_format()`）を新設し、`Mp4SampleReader::bitstream_metadata()` で reader から cheap clone のスナップショットを取り出せるようにした
 - `Mp4PassthroughVideoCodecCapability::new` のシグネチャを `VideoCodecType` から `Mp4BitstreamMetadata` を値で受け取る形へ変更し、capability は内部に metadata をそのまま保持するようにした
 - `Mp4PassthroughVideoCodecCapability::is_supported` を override し、Encoder かつ metadata の codec type と一致する場合のみ true を返すようにした（コーデック固有の必須パラメータを持つ format を将来表明しても preference 検証が破綻しない土台）
 - `Mp4SampleReader::required_sdp_format` を `pub(crate)` に降格し、外部からは `Mp4BitstreamMetadata` 経由で参照する経路に一本化した
 - ついでに `Mp4SampleReader::new` を `<P: AsRef<Path>>` ジェネリックに変更し、`&str` / `String` / `&Path` / `PathBuf` を直接渡せるようにした
 - `examples/sumomo/src/main.rs` の `build_context_config` を `mp4_metadata: Option<Mp4BitstreamMetadata>` に追従させた
 
-「## 設計方針」の一部は実装中の判断で変更している。詳細は「### 実装で見送った項目」（bitstream identity + `Arc::ptr_eq` による reader 照合を実装しない）と「### 設計から更新した項目」（`Mp4BitstreamMetadata` を pub フィールドの data bundle にする）を参照。
+「## 設計方針」の一部は実装中の判断で変更している。詳細は「### 実装で見送った項目」（bitstream identity + `Arc::ptr_eq` による reader 照合を実装しない）と「### 設計から更新した項目」（`Mp4BitstreamMetadata` を pub フィールド化 → review 指摘により revert）を参照。
 
 ### テスト
 
