@@ -4,9 +4,11 @@ use sora_sdk::{CodecDirection, Role};
 /// H.264 の fixture MP4 から `Mp4BitstreamMetadata` だけを取り出す。
 ///
 /// build_context_config 系のテストは capability 構築だけを検証するので、reader も
-/// 一時ファイルも呼び出し側に残す必要がない。helper 内で reader を drop し、
-/// 一時ファイルを削除してから metadata だけを返す（metadata は identity Arc の clone を
-/// 持つのでファイルハンドルと独立に生存する）。
+/// 一時ファイルも呼び出し側に残す必要がない。helper 内で metadata を取り出したあと
+/// 一時ファイルを削除し、metadata だけを返す（metadata は `VideoCodecType` と
+/// `SdpVideoFormat` の cheap clone だけを内包し、ファイル I/O を持たない）。
+/// なお reader は関数末尾で drop されるため、Unix では open 中のファイルを
+/// 削除できる挙動に依存している（既存の mp4 テスト群と同じ流儀）。
 fn h264_metadata_from_fixture(tag: &str) -> Mp4BitstreamMetadata {
     let fixture: &[u8] = include_bytes!("../../../testdata/red-320x320-h264.mp4");
     let tmp_name = format!(
