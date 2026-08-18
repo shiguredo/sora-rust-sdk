@@ -249,11 +249,9 @@ struct TrackEntry {
     video_track: VideoTrack,
 }
 
-fn prepare_mp4_state(args: &Args) -> Result<Option<(Mp4SampleReader, VideoCodecType)>> {
+fn prepare_mp4_state(args: &Args) -> Result<Option<Mp4SampleReader>> {
     if let Some(ref mp4_path) = args.input_mp4 {
-        let reader = Mp4SampleReader::new(mp4_path)?;
-        let codec_type = reader.codec_type();
-        Ok(Some((reader, codec_type)))
+        Ok(Some(Mp4SampleReader::new(mp4_path)?))
     } else {
         Ok(None)
     }
@@ -548,7 +546,7 @@ fn build_and_run_connection(
 
     // --input-mp4 が指定されている場合は MP4 を読み込んでパススルーの準備をする
     let mp4_state = prepare_mp4_state(args)?;
-    let mp4_codec_type = mp4_state.as_ref().map(|(_, codec_type)| *codec_type);
+    let mp4_codec_type = mp4_state.as_ref().map(|reader| reader.codec_type());
 
     #[cfg(feature = "media-device")]
     let adm_config = if let Some(external_adm) = &external_adm {
@@ -561,9 +559,7 @@ fn build_and_run_connection(
 
     let context_config = build_context_config(
         adm_config,
-        mp4_state
-            .as_ref()
-            .map(|(reader, _)| reader.bitstream_metadata()),
+        mp4_state.as_ref().map(|reader| reader.bitstream_metadata()),
         args.openh264_path.as_deref(),
         args.video_codec_implementation.clone(),
     )?;
@@ -589,8 +585,7 @@ fn build_and_run_connection(
     };
 
     let builder = build_connection_builder(context.clone(), args, event_tx, mp4_codec_type)?;
-    let (builder, video_capturer) =
-        attach_sender_tracks(builder, &context, args, mp4_state.map(|(reader, _)| reader))?;
+    let (builder, video_capturer) = attach_sender_tracks(builder, &context, args, mp4_state)?;
 
     let (connection, handle) = builder.build()?;
     let run_handle = tokio::spawn(async move {
