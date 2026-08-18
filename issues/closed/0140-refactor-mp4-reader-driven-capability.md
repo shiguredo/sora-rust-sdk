@@ -211,6 +211,26 @@ review 指摘により、pub フィールドは `codec_type` と `required_sdp_f
 
 **revert 理由**: `Mp4BitstreamMetadata` は「reader が確定した値」を切り出したスナップショットで、`codec_type` と `required_sdp_format` の間には内部一貫性の invariant がある。この invariant はコンストラクタ経由でしか守れない。pub フィールド化を選んだ当初は「POD 相当」として `ProxyInfo` / `Video*Params` 流儀に揃えたが、これらの POD には cross-field invariant が無いため類推が不完全だった。private + getter に戻して invariant を構造的に守る。
 
+**追記 (2026-08-18): `Mp4BitstreamMetadata` 中継そのものを撤去し、`Mp4SampleReader::passthrough_capability()` で直接 capability を生成する形に変更する**
+
+上記の private + getter で invariant は守られているが、そもそも metadata という中継型を経由する必要があるかを再検討した結果、削除する判断に至った。
+
+**撤去後の設計**:
+
+- `Mp4BitstreamMetadata` 型と `Mp4SampleReader::bitstream_metadata()` メソッドを撤去する
+- 代わりに `Mp4SampleReader::passthrough_capability(&self) -> Mp4PassthroughVideoCodecCapability` を追加する
+- `Mp4PassthroughVideoCodecCapability::new` は撤去し、reader 経由でのみ生成できるようにする
+- capability の内部フィールドは `codec_type` と `required_format` を直接保持する
+- sumomo の `build_context_config` は `Option<Mp4PassthroughVideoCodecCapability>` を受け取る形に変更する
+
+**撤去理由**: metadata の存在価値として設計時に挙げていた「reader と capability の decoupling」「外部から inspect できるスナップショット型」「将来のコーデック固有 parameter 追加時の拡張点」は、いずれも実益が薄いと判明した。
+
+- decoupling: reader / metadata / capability の 3 型は同じ `src/video_codecs/mp4.rs` モジュール内で、intra-module coupling は問題にならない
+- 外部 inspection: metadata の外部消費者は build_context_config だけで、独立に inspect している例は無い。codec 種別は `reader.codec_type()` で取れる
+- 拡張性: `Mp4SampleReader::required_sdp_format()` を拡張すれば、metadata 経由でも直接生成でも同じく反映される
+
+Rust 慣習でも `File::open(path) -> File` のように中継型を挟まないのが自然。中継型を置く強い理由がないため、公開 API 表面積を減らし生成経路を「reader → capability」の 1 段に統一する方が簡潔と判断した。
+
 ## 変更対象
 
 - `src/video_codecs/mp4.rs`
@@ -245,14 +265,14 @@ review 指摘により、pub フィールドは `codec_type` と `required_sdp_f
 
 ### 実装
 
-- `pub struct Mp4BitstreamMetadata`（`#[derive(Clone)]`、private フィールド + getter `codec_type()` / `required_sdp_format()`）を新設し、`Mp4SampleReader::bitstream_metadata()` で reader から cheap clone のスナップショットを取り出せるようにした
-- `Mp4PassthroughVideoCodecCapability::new` のシグネチャを `VideoCodecType` から `Mp4BitstreamMetadata` を値で受け取る形へ変更し、capability は内部に metadata をそのまま保持するようにした
+- `Mp4SampleReader::passthrough_capability()` を新設し、reader から `Mp4PassthroughVideoCodecCapability` を直接生成できるようにした
+- `Mp4PassthroughVideoCodecCapability::new` を撤去し、reader 経由での生成に一本化した
 - `Mp4PassthroughVideoCodecCapability::is_supported` を override し、Encoder かつ metadata の codec type と一致する場合のみ true を返すようにした（コーデック固有の必須パラメータを持つ format を将来表明しても preference 検証が破綻しない土台）
 - `Mp4SampleReader::required_sdp_format` を `pub(crate)` に降格し、外部からは `Mp4BitstreamMetadata` 経由で参照する経路に一本化した
 - ついでに `Mp4SampleReader::new` を `<P: AsRef<Path>>` ジェネリックに変更し、`&str` / `String` / `&Path` / `PathBuf` を直接渡せるようにした
-- `examples/sumomo/src/main.rs` の `build_context_config` を `mp4_metadata: Option<Mp4BitstreamMetadata>` に追従させた
+- `examples/sumomo/src/main.rs` の `build_context_config` を `mp4_capability: Option<Mp4PassthroughVideoCodecCapability>` に追従させた
 
-「## 設計方針」の一部は実装中の判断で変更している。詳細は「### 実装で見送った項目」（bitstream identity + `Arc::ptr_eq` による reader 照合を実装しない）と「### 設計から更新した項目」（`Mp4BitstreamMetadata` を pub フィールド化 → review 指摘により revert）を参照。
+「## 設計方針」の一部は実装中の判断で変更している。詳細は「### 実装で見送った項目」（bitstream identity + `Arc::ptr_eq` による reader 照合を実装しない）と「### 設計から更新した項目」（`Mp4BitstreamMetadata` を pub フィールド化 → review 指摘により revert → 更に metadata 中継そのものを撤去し `reader.passthrough_capability()` に一本化）を参照。
 
 ### テスト
 
