@@ -126,7 +126,7 @@ issue 0140 で `Mp4SampleReader::new_inner` は全 `sample.sample_entry` を `ex
 Main Profile の実 H.264 fixture（B frame を含まない I / P のみ）を `testdata/` に追加する。
 fixture はリポジトリへ commit し、生成に使用した ffmpeg の version と command、`avcC` の `AVCProfileIndication` / `profile_compatibility` / `AVCLevelIndication` の値、期待する `profile-level-id`、SPS の profile / constraint / level 3 byte をテストコメントへ記録する。
 CI で ffmpeg を起動したり、ネットワークから fixture を取得したりしない。
-既存の Baseline Profile fixture については、抽出される `profile-level-id` が Baseline Profile Level 1 相当と一致する回帰テストを追加する。
+既存の High Profile Level 2.1 fixture（`red-320x320-h264.mp4` は `avcC` の `AVCProfileIndication=0x64` / `profile_compatibility=0x00` / `AVCLevelIndication=0x15`、期待する `profile-level-id` は `640015`）については、抽出される `profile-level-id` が `640015` と一致する回帰テストを追加する。
 
 ## 変更対象
 
@@ -156,7 +156,7 @@ CI で ffmpeg を起動したり、ネットワークから fixture を取得し
   - compatible higher level の negotiated format を parameter ごと保持して encoder handler へ渡す
   - incompatible sub-profile と lower level の negotiated format では encoder を生成しない
 - Main Profile 実 fixture の reader test で、抽出された `profile-level-id` が期待値と一致する
-- 既存の Baseline Profile fixture について、抽出される `profile-level-id` が Baseline Profile Level 1 相当と一致する回帰テストがある
+- 既存の High Profile Level 2.1 fixture について、抽出される `profile-level-id` が `640015` と一致する回帰テストがある
 - 固定 libwebrtc commit `1f975dfd761af6e5d76d28333191973b258d82a8` の `api/video_codecs/h264_profile_level_id.cc` の `ParseSdpForH264ProfileLevelId`、`H264IsSameProfile`、`kProfilePatterns` を source audit し、production コメントへ記録する
 - RFC 6184 Section 8.1 と Table 5 を参照し、profile-level-id 判定の根拠を production code の日本語コメントに記載する
 - reader / capability / encoder handler の unit test は mock / stub、sleep、`#[ignore]`、外部 command、ネットワークを使用しない
