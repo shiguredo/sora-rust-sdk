@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-08-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-19
 - Model: deepseek-v4-flash
 - Branch: feature/fix-libcamera-crop-ignore
 - Polished: {YYYY-MM-DD}
@@ -49,3 +49,13 @@ crop が非ゼロになるのは `AdaptFrame` がアスペクト比・ピクセ�
 - `src/video_codecs/v4l2.rs`
 - `shiguredo_v4l2`（crop サポート追加とバージョン更新）
 - `CHANGES.md`
+
+## 解決方法
+
+実機 (Raspberry Pi 4 Model B / kernel 6.18.39) での検証の結果、本 issue の前提が成立しないことが判明したため closed にする。
+
+- `AdaptedVideoTrackSource::adapt_frame` を実 PeerConnection + エンコーダ wants (OpenH264, 1280x720) の構成で実行し、アスペクト比不一致のカメラ解像度 (640x480 / 1920x1080 / 1280x960) で crop 値 (`crop_x` / `crop_y` / `crop_width` / `crop_height`) を確認した
+- 結果、`adapt_frame` は常にフルフレームの crop (`crop_x = 0` / `crop_y = 0`) を返し、crop は一切発生しなかった。adapted サイズもソースのアスペクト比を維持する (例: 1280x960 入力 → 960x720)
+- これは libwebrtc M150 の `VideoStreamEncoder` が `OnOutputFormatRequest` (アスペクト比 crop を発生させる唯一の経路) を呼ばず、`VideoAdapter::AdaptFrameResolution` の `target_aspect_ratio` が設定されないためである
+- そのため「`adapt_frame` が返す crop 情報を native パスで反映して歪みを直す」という本 issue の設計は機能せず、`shiguredo_v4l2` の crop サポートも使われない
+- 仮に歪みが観測される場合、原因は crop 無視ではなくコンバータ/エンコーダの解像度設定側にあるため、issue を書き直して改めて調査する必要がある
