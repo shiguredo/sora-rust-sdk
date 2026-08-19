@@ -27,6 +27,12 @@ README の「MP4 ファイルから無変換での音声・映像送信対応」
 - libwebrtc の公開 `RtpSenderInterface` に encoded audio や RTP packet を直接送信する API はない
 - `SumomoAdm` と `examples/sumomo/src/adm.rs` は現在 `media-device` feature で条件付きコンパイルされるが、MP4 音声入力は実オーディオデバイスに依存しない
 
+## 前提
+
+- 方式 2-b（カスタム AudioEncoder）は、「AudioEncoder / AudioDecoder をユーザー側でカスタム可能にする」issue を前提とする
+- 前提 issue が提供する `AudioCodecCapability` / `SoraAudioEncoderFactory` 上に、MP4 パススルー用の capability を sumomo 側で実装して登録する
+- 方式 1 または 2-a を採用する場合は、この前提は不要になる
+
 ## 設計方針
 
 ### 音声送信方式の選択肢
@@ -53,7 +59,7 @@ README の「MP4 ファイルから無変換での音声・映像送信対応」
 
 #### 2-b. カスタム AudioEncoder
 
-- `shiguredo_webrtc` にカスタム `AudioEncoderFactory` / `AudioEncoder` の C / Rust ラッパーを追加し、エンコーダーから MP4 の Opus packet を直接返す
+- 前提 issue が提供する `AudioCodecCapability` フレームワークでカスタム `AudioEncoder` を登録し、エンコーダーから MP4 の Opus packet を直接返す
 - MP4 の Opus packet をデコードも再エンコードもせず、10 ms の整数倍であれば 2-a より自然に packet duration を扱える
 - libwebrtc の音声エンコード処理を駆動する 10 ms 単位の PCM 入力は引き続き必要だが、カスタムエンコーダーは PCM の内容を使用しない
 - 2-a より `shiguredo_webrtc` の変更範囲が大きく、無音区間、ネットワーク適応要求、可変 packet duration の扱いを定義する必要がある
@@ -159,7 +165,7 @@ Opus packet を無変換で送信できる 2-a と 2-b が有力だが、現時�
 
 - 1、2-a、2-b のどの音声送信方式を採用するか
 - 2-a を採用する場合、`shiguredo_webrtc` の frame transformer API、固定 ptime、RTP audio level をどう扱うか
-- 2-b を採用する場合、`shiguredo_webrtc` のカスタム AudioEncoder API、無音区間、ネットワーク適応要求、RTP audio level をどう扱うか
+- 2-b を採用する場合、前提 issue のカスタム AudioEncoder API 上での無音区間、ネットワーク適応要求、RTP audio level をどう扱うか
 - 方式 1 を採用する場合、全対象 OS で利用する Opus デコーダークレートとビルド方法
 - 方式 2-a / 2-b で `dOps.output_gain` が非ゼロのファイルと、sample duration が packet duration と一致しないファイルをどう扱うか
 - 方式 2-a / 2-b で Opus packet が映像のループ境界をまたぐ場合を未対応エラーにするか、ループ周期を調整するか
@@ -170,14 +176,14 @@ Opus packet を無変換で送信できる 2-a と 2-b が有力だが、現時�
 ## 変更対象
 
 - `src/video_codecs/mp4.rs`（音声トラックのサンプル・SampleEntry 情報の抽出拡張）
-- `examples/sumomo/` 配下の MP4 音声入力モジュール（新規）
+- `examples/sumomo/` 配下の MP4 音声入力モジュール（新規、方式 2-b では `AudioCodecCapability` の実装を含む）
 - `examples/sumomo/Cargo.toml`（採用方式で必要な依存）
 - `examples/sumomo/src/adm.rs`（`media-device` feature からの分離、recording 開始通知、供給エラーの伝播）
 - `examples/sumomo/src/args.rs`（入力オプションの排他検証）
-- `examples/sumomo/src/main.rs`（MP4 音声キャプチャーの起動、外部 ADM の生成条件、エラー伝播）
-- `src/connection.rs` / `src/connection_context.rs`（方式 2-a / 2-b で必要となる音声送信経路との連携）
-- `Cargo.toml` / `Cargo.lock`（方式 2-a / 2-b で必要となる `shiguredo_webrtc` の更新）
-- `shiguredo_webrtc`（方式 2-a の frame transformer API または方式 2-b のカスタム AudioEncoder API。別リポジトリ）
+- `examples/sumomo/src/main.rs`（MP4 音声キャプチャーの起動、外部 ADM の生成条件、方式 2-b では `AudioCodecCapability` の登録、エラー伝播）
+- `src/connection.rs` / `src/connection_context.rs`（方式 2-a の frame transformer 対応。方式 2-b は前提 issue のフレームワークを使うため本 issue では変更しない）
+- `Cargo.toml` / `Cargo.lock`（方式 2-a で必要となる `shiguredo_webrtc` の更新。方式 2-b の更新は前提 issue 側）
+- `shiguredo_webrtc`（方式 2-a の frame transformer API。方式 2-b のカスタム AudioEncoder API は前提 issue 側。別リポジトリ）
 - `testdata/`（Opus 音声を含む実 MP4 fixture）
 - `README.md` / `docs/INPUT_MP4.md`
 - `CHANGES.md`
