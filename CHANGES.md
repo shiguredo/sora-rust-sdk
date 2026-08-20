@@ -26,6 +26,10 @@
   - @voluntas
 - [UPDATE] MP4 読み込みをファイルベースに変更し、ファイル全体をメモリに保持しないようにする
   - @sile
+- [UPDATE] VPL の VP9 出力を raw 化して IVF ヘッダー除去を撤去する
+  - VP9 は `write_ivf_headers: false` を明示して raw 出力にする
+  - 不要になった IVF ヘッダー除去処理とテストを削除する
+  - @melpon
 - [FIX] MP4 の `length_size_minus_one` が reserved 値のときに panic せずエラーを返すようにする
   - @voluntas
 - [FIX] 非ゼロの composition time offset (B フレーム) を含む MP4 を `Mp4SampleReader` の初期化時に拒否する
