@@ -33,7 +33,7 @@ fn test_audio_device_enumerate() {
     let result = AudioDeviceList::enumerate_input();
     assert!(result.is_ok(), "デバイス列挙に失敗: {:?}", result.err());
 
-    let device_list = result.unwrap();
+    let device_list = result.expect("デバイス列挙に失敗しました");
     println!("検出されたオーディオデバイス数: {}", device_list.len());
 
     for device in &device_list {
@@ -70,7 +70,7 @@ fn test_audio_device_info() {
 
     let name = device.name();
     assert!(name.is_ok(), "デバイス名の取得に失敗: {:?}", name.err());
-    let name = name.unwrap();
+    let name = name.expect("デバイス名の取得に失敗しました");
     assert!(!name.is_empty(), "デバイス名が空");
 
     let unique_id = device.unique_id();
@@ -79,7 +79,7 @@ fn test_audio_device_info() {
         "デバイス ID の取得に失敗: {:?}",
         unique_id.err()
     );
-    let unique_id = unique_id.unwrap();
+    let unique_id = unique_id.expect("デバイス ID の取得に失敗しました");
     assert!(!unique_id.is_empty(), "デバイス ID が空");
 
     let channels = device.channels();
@@ -124,7 +124,7 @@ fn test_audio_capture_session_create() {
         capture.err()
     );
 
-    let capture = capture.unwrap();
+    let capture = capture.expect("キャプチャセッションの作成に失敗しました");
     assert!(capture.sample_rate() > 0);
     assert!(capture.channels() > 0);
 

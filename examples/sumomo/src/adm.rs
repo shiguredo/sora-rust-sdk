@@ -23,7 +23,10 @@ impl SumomoAdmState {
             return;
         }
         let transport = {
-            let stored = self.audio_transport.lock().unwrap();
+            let stored = self
+                .audio_transport
+                .lock()
+                .expect("audio_transport のロックを取得できませんでした");
             *stored
         };
         let transport = match transport {
@@ -62,7 +65,10 @@ struct SumomoAdmHandler {
 
 impl AudioDeviceModuleHandler for SumomoAdmHandler {
     fn register_audio_callback(&self, transport: Option<AudioTransportRef>) -> i32 {
-        let mut stored = self.audio_transport.lock().unwrap();
+        let mut stored = self
+            .audio_transport
+            .lock()
+            .expect("audio_transport のロックを取得できませんでした");
         *stored = transport;
         0
     }

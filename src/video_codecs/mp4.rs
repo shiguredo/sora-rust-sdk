@@ -1821,9 +1821,21 @@ mod tests {
     // それぞれ nal_length_size 1/2/4 に変換することを確認する。
     #[test]
     fn validated_nal_length_size_accepts_valid_values() {
-        assert_eq!(Mp4SampleReader::validated_nal_length_size(0).unwrap(), 1);
-        assert_eq!(Mp4SampleReader::validated_nal_length_size(1).unwrap(), 2);
-        assert_eq!(Mp4SampleReader::validated_nal_length_size(3).unwrap(), 4);
+        assert_eq!(
+            Mp4SampleReader::validated_nal_length_size(0)
+                .expect("length_size_minus_one=0 は受け入れられる必要があります"),
+            1
+        );
+        assert_eq!(
+            Mp4SampleReader::validated_nal_length_size(1)
+                .expect("length_size_minus_one=1 は受け入れられる必要があります"),
+            2
+        );
+        assert_eq!(
+            Mp4SampleReader::validated_nal_length_size(3)
+                .expect("length_size_minus_one=3 は受け入れられる必要があります"),
+            4
+        );
     }
 
     // validated_nal_length_size が reserved 値 (length_size_minus_one=2) を
@@ -1833,7 +1845,7 @@ mod tests {
         let result = Mp4SampleReader::validated_nal_length_size(2);
         assert!(result.is_err());
         assert!(matches!(
-            result.unwrap_err(),
+            result.expect_err("reserved 値はエラーになる必要があります"),
             Mp4Error::InvalidNalLengthSize(3)
         ));
     }

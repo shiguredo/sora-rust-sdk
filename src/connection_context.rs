@@ -124,6 +124,12 @@ impl SoraConnectionContext {
         } = config;
         validate_video_codec_preference(&video_codec_preference, &video_codec_capabilities)?;
 
+        // video_codec_capabilities は WebRTC 内部のエンコーダー/デコーダーファクトリが
+        // ワーカースレッド等から並行に参照するため、Mutex で保護する。
+        // チャネル構成ではファクトリが同期的に capability を参照する WebRTC 内部スレッドとの
+        // 往復待ちが必要になり、処理をブロックするため採用しない。
+        // ロック保持は各 get_supported_formats / create の呼び出し内だけであり、
+        // await をまたいだ保持やロック順序の入れ替えは発生しない。
         let shared_video_codec_capabilities = Arc::new(Mutex::new(video_codec_capabilities));
         let video_encoder_factory =
             VideoEncoderFactory::new_with_handler(Box::new(SoraVideoEncoderFactory::new(
