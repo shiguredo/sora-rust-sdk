@@ -30,7 +30,7 @@ shiguredo_mp4 = "~2026.4"
 # NVIDIA Video Codec によるハードウェアエンコード/デコード
 shiguredo_nvcodec = "~2026.2"
 # OpenH264 による H.264 ソフトウェアエンコード/デコード
-shiguredo_openh264 = "~2026.1"
+shiguredo_openh264 = "~2026.2"
 # V4L2 M2M によるハードウェアコーデックと画像変換 (Linux 向け)
 shiguredo_v4l2 = "=2026.2.0-canary.1"
 # Intel VPL によるハードウェアエンコード/デコード
@@ -43,7 +43,7 @@ shiguredo_websocket = "~2026.3"
 # 外部クレート
 
 # rustls の暗号バックエンドおよび WebSocket の SecureRandom 実装に利用
-aws-lc-rs = "1.17"
+aws-lc-rs = "1.18"
 # libcamera のフレームバッファを mmap/munmap するための POSIX FFI
 libc = "0.2"
 # DataChannel メッセージの zlib 圧縮/解凍に利用
