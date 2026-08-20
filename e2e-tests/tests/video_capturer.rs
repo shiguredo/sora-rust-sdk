@@ -9,37 +9,44 @@ use shiguredo_video_device::{
 
 use e2e_tests::is_running_on_ci;
 
-/// テスト用: 最初のデバイスの対応フォーマットに基づくキャプチャ設定を取得する。
-/// デバイスがない、またはフォーマットが取得できない場合は None を返す。
-fn first_device_capture_config() -> Option<VideoCaptureConfig> {
+/// テスト用: 実カメラの対応フォーマットに基づくキャプチャ設定を取得する。
+///
+/// フォーマットが取得できるデバイス（実カメラ）を優先し、フォーマットが取得できない
+/// 仮想カメラ（OBS Virtual Camera 等）はスキップする。デバイスがない、または
+/// フォーマットが取得できるデバイスがない場合は None を返す。
+fn capture_config() -> Option<VideoCaptureConfig> {
     let device_list = VideoDeviceList::enumerate().ok()?;
     if device_list.is_empty() {
         return None;
     }
 
-    let device = &device_list.as_slice()[0];
-    let device_id = device.unique_id().ok();
-    let formats = device.formats();
+    for device in device_list.as_slice() {
+        // フォーマットが取得できない仮想カメラはキャプチャに使えないためスキップする
+        let formats = device.formats();
+        if formats.is_empty() {
+            continue;
+        }
 
-    if formats.is_empty() {
-        return None;
+        let device_id = device.unique_id().ok();
+
+        // 640x480 に対応するフォーマットを優先、なければ最初のフォーマットを使用
+        let format = formats
+            .iter()
+            .find(|f| f.width == 640 && f.height == 480)
+            .unwrap_or(&formats[0]);
+
+        // VideoFormat の min_fps/max_fps がデバイスの実際の対応フレームレート（離散値）と
+        // 一致しない場合があるため、広く対応されている 30fps を使用する
+        return Some(VideoCaptureConfig {
+            device_id,
+            width: format.width,
+            height: format.height,
+            fps: 30,
+            pixel_format: None,
+        });
     }
 
-    // 640x480 に対応するフォーマットを優先、なければ最初のフォーマットを使用
-    let format = formats
-        .iter()
-        .find(|f| f.width == 640 && f.height == 480)
-        .unwrap_or(&formats[0]);
-
-    // VideoFormat の min_fps/max_fps がデバイスの実際の対応フレームレート（離散値）と
-    // 一致しない場合があるため、広く対応されている 30fps を使用する
-    Some(VideoCaptureConfig {
-        device_id,
-        width: format.width,
-        height: format.height,
-        fps: 30,
-        pixel_format: None,
-    })
+    None
 }
 
 #[test]
@@ -118,7 +125,16 @@ fn test_video_device_formats() {
         return;
     }
 
-    let device = &device_list.as_slice()[0];
+    // フォーマットが取得できるデバイス（実カメラ）を探す。
+    // OBS Virtual Camera 等の仮想カメラはフォーマットを返さないためスキップする。
+    let Some(device) = device_list
+        .as_slice()
+        .iter()
+        .find(|device| !device.formats().is_empty())
+    else {
+        println!("フォーマットが取得できるビデオデバイスが見つかりません（スキップ）");
+        return;
+    };
     let formats = device.formats();
 
     println!("デバイス: {}", device.name().unwrap_or_default());
@@ -150,9 +166,6 @@ fn test_video_device_formats() {
             "不明なピクセルフォーマット"
         );
     }
-
-    // 少なくとも 1 つのフォーマットがあることを確認
-    assert!(!formats.is_empty(), "対応フォーマットがありません");
 }
 
 #[test]
@@ -163,7 +176,7 @@ fn test_video_capture_session_create() {
         return;
     }
 
-    let config = match first_device_capture_config() {
+    let config = match capture_config() {
         Some(c) => c,
         None => {
             println!("ビデオデバイスが見つかりません（スキップ）");
@@ -196,7 +209,7 @@ fn test_video_capture_start_stop() {
         return;
     }
 
-    let config = match first_device_capture_config() {
+    let config = match capture_config() {
         Some(c) => c,
         None => {
             println!("ビデオデバイスが見つかりません（スキップ）");
@@ -234,7 +247,7 @@ fn test_video_capture_frame_received() {
         return;
     }
 
-    let config = match first_device_capture_config() {
+    let config = match capture_config() {
         Some(c) => c,
         None => {
             println!("ビデオデバイスが見つかりません（スキップ）");

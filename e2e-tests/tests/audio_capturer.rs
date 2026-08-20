@@ -10,22 +10,31 @@ use shiguredo_audio_device::{
     AudioCapture, AudioCaptureConfig, AudioDeviceList, AudioFormat, AudioFrame,
 };
 
-/// テスト用: 最初のオーディオデバイスの ID を含むキャプチャ設定を取得する。
-/// デバイスがない場合は None を返す。
-fn first_audio_device_config() -> Option<AudioCaptureConfig> {
+/// テスト用: 実オーディオデバイスの ID を含むキャプチャ設定を取得する。
+///
+/// 入力デバイスとして利用できる（チャンネル数とサンプルレートが正の）デバイスを優先し、
+/// 利用できない仮想デバイス等はスキップする。デバイスがない場合は None を返す。
+fn audio_capture_config() -> Option<AudioCaptureConfig> {
     let device_list = AudioDeviceList::enumerate_input().ok()?;
     if device_list.is_empty() {
         return None;
     }
 
-    let device = &device_list.as_slice()[0];
-    let device_id = device.unique_id().ok();
+    for device in device_list.as_slice() {
+        // チャンネル数・サンプルレートが正でないデバイスはキャプチャに使えないためスキップする
+        if device.channels() == 0 || device.sample_rate() == 0 {
+            continue;
+        }
 
-    Some(AudioCaptureConfig {
-        device_id,
-        sample_rate: 48000,
-        channels: 1,
-    })
+        let device_id = device.unique_id().ok();
+        return Some(AudioCaptureConfig {
+            device_id,
+            sample_rate: 48000,
+            channels: 1,
+        });
+    }
+
+    None
 }
 
 #[test]
@@ -66,7 +75,16 @@ fn test_audio_device_info() {
         return;
     }
 
-    let device = &device_list.as_slice()[0];
+    // 入力デバイスとして利用できる（チャンネル数とサンプルレートが正の）デバイスを探す。
+    // 利用できない仮想デバイス等はスキップする。
+    let Some(device) = device_list
+        .as_slice()
+        .iter()
+        .find(|device| device.channels() > 0 && device.sample_rate() > 0)
+    else {
+        println!("利用できるオーディオデバイスが見つかりません（スキップ）");
+        return;
+    };
 
     let name = device.name();
     assert!(name.is_ok(), "デバイス名の取得に失敗: {:?}", name.err());
@@ -109,7 +127,7 @@ fn test_audio_capture_session_create() {
         return;
     }
 
-    let config = match first_audio_device_config() {
+    let config = match audio_capture_config() {
         Some(c) => c,
         None => {
             println!("オーディオデバイスが見つかりません（スキップ）");
@@ -142,7 +160,7 @@ fn test_audio_capture_start_stop() {
         return;
     }
 
-    let config = match first_audio_device_config() {
+    let config = match audio_capture_config() {
         Some(c) => c,
         None => {
             println!("オーディオデバイスが見つかりません（スキップ）");
@@ -179,7 +197,7 @@ fn test_audio_capture_frame_received() {
         return;
     }
 
-    let config = match first_audio_device_config() {
+    let config = match audio_capture_config() {
         Some(c) => c,
         None => {
             println!("オーディオデバイスが見つかりません（スキップ）");
@@ -230,7 +248,7 @@ fn test_audio_frame_format_conversion() {
         return;
     }
 
-    let config = match first_audio_device_config() {
+    let config = match audio_capture_config() {
         Some(c) => c,
         None => {
             println!("オーディオデバイスが見つかりません（スキップ）");
