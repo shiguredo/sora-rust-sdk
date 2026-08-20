@@ -3,12 +3,24 @@
 //! 各バックエンドが共通で使う関数を集約する。
 //! `shiguredo_webrtc` の型に依存するが、バックエンド固有の型
 //! （`shiguredo_vpl::CodecConfig` 等）には依存しない。
-#[cfg(any(feature = "vpl", feature = "amf", feature = "nvcodec"))]
+//!
+//! VPL は Linux 専用のため、vpl feature が有効でも他 OS では vpl モジュールが
+//! コンパイルされない。その場合に vpl 専用ヘルパーが未使用で dead_code 警告に
+//! ならないよう、vpl 関連の条件には `target_os = "linux"` を含める。
+#[cfg(any(
+    all(feature = "vpl", target_os = "linux"),
+    feature = "amf",
+    feature = "nvcodec"
+))]
 use std::collections::HashMap;
 
 use shiguredo_webrtc::{VideoFrameType, VideoFrameTypeVectorRef};
 
-#[cfg(any(feature = "vpl", feature = "amf", feature = "nvcodec"))]
+#[cfg(any(
+    all(feature = "vpl", target_os = "linux"),
+    feature = "amf",
+    feature = "nvcodec"
+))]
 use shiguredo_webrtc::{ScalabilityMode, SdpVideoFormat, VideoCodecType};
 
 /// エンコード要求されたフレームタイプのうち、最初の要素を返す。
@@ -30,7 +42,11 @@ pub(crate) fn requested_frame_type(
 ///
 /// H.264 専用の v4l2 / openh264 からは利用しないため、それらの feature のみの
 /// ビルドでは未使用にならないように feature 条件でコンパイルを制御する。
-#[cfg(any(feature = "vpl", feature = "amf", feature = "nvcodec"))]
+#[cfg(any(
+    all(feature = "vpl", target_os = "linux"),
+    feature = "amf",
+    feature = "nvcodec"
+))]
 pub(crate) fn supported_formats_for_codec(codec_type: VideoCodecType) -> Vec<SdpVideoFormat> {
     match codec_type {
         VideoCodecType::H264 => vec![SdpVideoFormat::new_with_parameters(
@@ -60,7 +76,7 @@ pub(crate) fn supported_formats_for_codec(codec_type: VideoCodecType) -> Vec<Sdp
 ///
 /// v4l2 / nvcodec / openh264 からは利用しないため、それらの feature のみの
 /// ビルドでは未使用にならないように feature 条件でコンパイルを制御する。
-#[cfg(any(feature = "vpl", feature = "amf"))]
+#[cfg(any(all(feature = "vpl", target_os = "linux"), feature = "amf"))]
 pub(crate) fn target_kbps_from_bps(target_bitrate_bps: u32) -> u32 {
     (target_bitrate_bps.max(1) as u64).div_ceil(1000) as u32
 }
@@ -83,7 +99,11 @@ mod tests {
         );
     }
 
-    #[cfg(any(feature = "vpl", feature = "amf", feature = "nvcodec"))]
+    #[cfg(any(
+        all(feature = "vpl", target_os = "linux"),
+        feature = "amf",
+        feature = "nvcodec"
+    ))]
     #[test]
     fn supported_formats_for_codec_covers_all_codecs() {
         let mut h264 = supported_formats_for_codec(VideoCodecType::H264);
@@ -130,7 +150,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(feature = "vpl", feature = "amf"))]
+    #[cfg(any(all(feature = "vpl", target_os = "linux"), feature = "amf"))]
     #[test]
     fn target_kbps_from_bps_rounds_up_and_clamps_zero() {
         assert_eq!(target_kbps_from_bps(1_000), 1);

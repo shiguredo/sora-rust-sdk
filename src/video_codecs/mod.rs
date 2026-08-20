@@ -22,5 +22,8 @@ pub mod nvcodec;
 pub mod openh264;
 #[cfg(feature = "v4l2")]
 pub mod v4l2;
-#[cfg(feature = "vpl")]
+// VPL は Linux 専用 (README 参照) のため、feature が有効でも他 OS ではモジュールをコンパイルしない。
+// shiguredo_vpl の `supported_codecs` 等は `#[cfg(target_os = "linux")]` でしか定義されておらず、
+// 他 OS で有効化するとビルドエラーになるため、モジュール単位で OS ガードする。
+#[cfg(all(feature = "vpl", target_os = "linux"))]
 pub mod vpl;

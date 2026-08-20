@@ -1,6 +1,8 @@
 //! Intel VPL ハードウェアエンコーダー/デコーダー実装。
 //!
-//! `#[cfg(feature = "vpl")]` でのみコンパイルされる。
+//! `#[cfg(all(feature = "vpl", target_os = "linux"))]` でのみコンパイルされる。
+//!
+//! VPL は Linux 専用のため、モジュールは Linux でのみコンパイルされる。
 use std::sync::{Arc, Mutex};
 
 use shiguredo_vpl::{
@@ -734,7 +736,7 @@ impl VideoDecoderHandler for VplVideoDecoder {
 
 /// Intel VPL を使用する [VideoCodecCapability]。
 ///
-/// `#[cfg(feature = "vpl")]` でのみ利用可能。
+/// `#[cfg(all(feature = "vpl", target_os = "linux"))]` でのみ利用可能。
 /// H.264 / H.265 / VP9 / AV1 のエンコード・デコードをサポートする。
 pub struct VplVideoCodecCapability {
     adapter: AdapterSelector,

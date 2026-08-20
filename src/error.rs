@@ -247,13 +247,15 @@ pub enum Error {
         reason: String,
     },
     /// VPL のエラー（`feature = "vpl"` 時のみ有効）。内部エラーとして [`shiguredo_vpl::Error`] を保持する。
-    #[cfg(feature = "vpl")]
+    /// VPL は Linux 専用のため、他の OS では有効にならない。
+    #[cfg(all(feature = "vpl", target_os = "linux"))]
     Vpl {
         /// 発生した VPL エラー。
         source: shiguredo_vpl::Error,
     },
     /// VPL からのエラーメッセージ（`feature = "vpl"` 時のみ有効）。
-    #[cfg(feature = "vpl")]
+    /// VPL は Linux 専用のため、他の OS では有効にならない。
+    #[cfg(all(feature = "vpl", target_os = "linux"))]
     VplMessage {
         /// エラーメッセージ。
         reason: String,
@@ -483,9 +485,9 @@ impl std::fmt::Display for Error {
             Error::Amf { source } => write!(f, "AMF エラー: {source}"),
             #[cfg(feature = "amf")]
             Error::AmfMessage { reason } => write!(f, "AMF エラー: {reason}"),
-            #[cfg(feature = "vpl")]
+            #[cfg(all(feature = "vpl", target_os = "linux"))]
             Error::Vpl { source } => write!(f, "VPL エラー: {source}"),
-            #[cfg(feature = "vpl")]
+            #[cfg(all(feature = "vpl", target_os = "linux"))]
             Error::VplMessage { reason } => write!(f, "VPL エラー: {reason}"),
             Error::RpcTimeout => f.write_str("RPC レスポンスがタイムアウトしました"),
             Error::RpcProtocolViolation { id } => match id {
@@ -555,7 +557,7 @@ impl std::error::Error for Error {
             Error::Openh264(err) => Some(err),
             #[cfg(feature = "amf")]
             Error::Amf { source } => Some(source),
-            #[cfg(feature = "vpl")]
+            #[cfg(all(feature = "vpl", target_os = "linux"))]
             Error::Vpl { source } => Some(source),
             Error::SimulcastSetParametersFailed { source } => Some(source),
             Error::Utf8DecodeFailed(err) => Some(err),
@@ -650,7 +652,7 @@ impl From<shiguredo_amf::Error> for Error {
     }
 }
 
-#[cfg(feature = "vpl")]
+#[cfg(all(feature = "vpl", target_os = "linux"))]
 impl From<shiguredo_vpl::Error> for Error {
     fn from(err: shiguredo_vpl::Error) -> Self {
         Error::Vpl { source: err }

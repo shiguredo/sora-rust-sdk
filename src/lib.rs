@@ -114,5 +114,5 @@ pub use crate::video_codecs::nvcodec::NvCodecVideoCodecCapability;
 pub use crate::video_codecs::openh264::Openh264VideoCodecCapability;
 #[cfg(feature = "v4l2")]
 pub use crate::video_codecs::v4l2::V4l2VideoCodecCapability;
-#[cfg(feature = "vpl")]
+#[cfg(all(feature = "vpl", target_os = "linux"))]
 pub use crate::video_codecs::vpl::VplVideoCodecCapability;
