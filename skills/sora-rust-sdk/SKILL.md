@@ -239,7 +239,7 @@ H.264 / H.265 の `b_frame: true` は Sora 側の `sora.conf` で対応する設
 |----|---------------|----------|------|
 | `InternalVideoCodecCapability` | 常時 | `new() -> Self` | libwebrtc 内蔵 (VP8 / VP9 / AV1 など) |
 | `InternalAppleVideoCodecCapability` | macOS / iOS | `new() -> Option<Self>` | VideoToolbox による H.264 / H.265 |
-| `Mp4PassthroughVideoCodecCapability` | 常時 | `new(VideoCodecType) -> Self` | MP4 ファイル無変換送信 |
+| `Mp4PassthroughVideoCodecCapability` | 常時 | `Mp4SampleReader::passthrough_capability() -> Self` | MP4 ファイル無変換送信 |
 | `Openh264VideoCodecCapability` | `openh264` | `new(path) -> Result<Self>` | OpenH264 ソフトウェア H.264 |
 | `AmfVideoCodecCapability` | `amf` | `new() -> Result<Self>` | AMD AMF |
 | `NvCodecVideoCodecCapability` | `nvcodec` | `new() -> Result<Self>` / `new_with_device_id(i32) -> Result<Self>` | NVIDIA Video Codec |
