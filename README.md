@@ -40,18 +40,18 @@ Please read <https://github.com/shiguredo/oss/blob/master/README.en.md> before u
 - TURN-TLS 対応
 - HTTP プロキシ対応
 - VP8 / VP9 / AV1 / H.264 / H.265 対応
-- OpenH264 による H.264 ソフトウェアエンコード/デコード対応
-- AMD AMF (Advanced Media Framework) によるハードウェアエンコード/デコード対応 (Windows / Linux)
-- NVIDIA Video Codec によるハードウェアエンコード/デコード対応 (Windows / Linux)
-- Intel VPL によるハードウェアエンコード/デコード対応 (Linux)
+- OpenH264 による H.264 ソフトウェアエンコード / デコード対応
+- AMD AMF (Advanced Media Framework) によるハードウェアエンコード / デコード対応 (Windows / Linux)
+- NVIDIA Video Codec によるハードウェアエンコード / デコード対応 (Windows / Linux)
+- Intel VPL によるハードウェアエンコード / デコード対応 (Linux)
 - Raspberry Pi 向け libcamera による映像入力対応
-- Raspberry Pi 向け V4L2-M2M によるハードウェアエンコード/デコード対応
-- MP4 ファイルから無変換での音声・映像送信対応
+- Raspberry Pi 向け V4L2-M2M によるハードウェアエンコード / デコード対応
+- MP4 ファイルから無変換での映像送信対応
 - 複数クライアント同時実行対応
 
 ## 対応コーデック
 
-ハードウェアエンコード/デコードの実際の対応状況は GPU やドライバの対応状況に依存します。
+ハードウェアエンコード / デコードの実際の対応状況は GPU やドライバの対応状況に依存します。
 
 | バックエンド | 対応プラットフォーム | エンコード | デコード |
 |---|---|---|---|
@@ -65,10 +65,12 @@ Please read <https://github.com/shiguredo/oss/blob/master/README.en.md> before u
 
 ### MP4 無変換送信
 
-MP4 ファイルに含まれる音声・映像トラックをデコード/エンコードを挟まず、そのまま Sora に送信できる独自機能です。
+MP4 ファイルに含まれる映像トラックをデコード / エンコードを挟まず、そのまま Sora に送信できる独自機能です。
+音声トラックは送信せずに無視します。
 
 - 対応プラットフォーム: 全プラットフォーム
 - 対応映像コーデック: H.264 / H.265 / VP8 / VP9 / AV1
+- B フレーム: 非対応
 
 ## 使い方
 
@@ -78,12 +80,14 @@ MP4 ファイルに含まれる音声・映像トラックをデコード/エン
 
 ```toml
 [dependencies]
-sora_sdk = "<version>"
-shiguredo_webrtc = "<version>"
+sora_sdk = "2026.1.0"
+shiguredo_webrtc = "~0.150"
 tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
 ```
 
 `shiguredo_webrtc` は `VideoTrack` や `AudioTrack`、`RtpTransceiver` など sora_sdk の公開 API で必要な型を提供します。
+この例は tokio の current-thread ランタイムを使用します。
+multi-thread ランタイムを使用する場合は、利用側で tokio の `rt-multi-thread` feature を追加してください。
 
 ### sendrecv で接続する
 
@@ -99,11 +103,11 @@ impl SoraConnectionEventHandler for MyEventHandler {
         println!("notify: {text}");
     }
     fn on_track(&mut self, transceiver: shiguredo_webrtc::RtpTransceiver) {
-        println!("track added: {:?}", transceiver.mid());
+        println!("track added: {:?}", transceiver.receiver().track().id());
     }
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), sora_sdk::Error> {
     // 1. SoraConnectionContext を作成する
     //    PeerConnectionFactory や WebRTC 関連スレッドを管理します。
@@ -154,7 +158,7 @@ impl SoraConnectionEventHandler for MyEventHandler {
     }
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), sora_sdk::Error> {
     let context = SoraConnectionContext::new()?;
 
@@ -197,7 +201,7 @@ impl SoraConnectionEventHandler for MyEventHandler {
     }
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), sora_sdk::Error> {
     let context = SoraConnectionContext::new()?;
 
@@ -323,10 +327,14 @@ impl SoraConnectionEventHandler for MyEventHandler {
 handle.send_message("#my-channel", b"hello").await?;
 ```
 
+`compress: true` を指定した DataChannel メッセージは、zlib 展開後 16 MiB まで受信できます。
+上限を超えるメッセージや不正な zlib ストリームはメッセージ単位で破棄し、接続を継続します。
+
 ### RPC
 
 `SoraConnectionHandle` を使って JSON-RPC 2.0 over DataChannel でリクエストを送信できます。
 SDK が JSON-RPC 2.0 メッセージの組み立てと id 採番を行います。
+応答が JSON-RPC 2.0 の要件を満たさず、応答待機中の Request ID と対応付けられる場合は `Error::RpcProtocolViolation` を返します。
 
 ```rust
 use sora_sdk::{JsonString, RpcRequestOptions, RpcResponse};
@@ -408,7 +416,12 @@ sora-rust-sdk/
 ├── src/                      # sora_sdk クレート
 ├── examples/
 │   └── sumomo/               # Sora クライアントサンプル
-└── e2e-tests/                # エンドツーエンドテスト
+├── e2e-tests/                # エンドツーエンドテスト
+├── pbt/                      # Property-Based Testing
+├── tests/                    # sora_sdk の結合テスト
+├── docs/                     # 補足ドキュメント
+└── skills/
+    └── sora-rust-sdk/        # AI エージェント向けリファレンス
 ```
 
 ## サンプル
@@ -430,7 +443,23 @@ cargo run -p sumomo -- \
 
 - Rust 1.93 以上
 - libclang (bindgen 用)
-- Python 3 (webrtc ビルド用)
+- Python 3 (WebRTC ビルド用)
+
+Ubuntu 上の CI は、以下のパッケージをインストールしてビルドしています。
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  build-essential \
+  libx11-dev libxext-dev libxrandr-dev libxi-dev libxfixes-dev \
+  libxcursor-dev libxss-dev libxtst-dev \
+  libwayland-dev libxkbcommon-dev \
+  libasound2-dev libpulse-dev libpipewire-0.3-dev \
+  libvulkan-dev libdbus-1-dev libudev-dev libdrm-dev libgbm-dev \
+  libclang-dev
+```
+
+`amf` / `nvcodec` / `vpl` / `v4l2` / `libcamera` feature を利用する場合は、対応するハードウェア、ドライバー、SDK、システムライブラリも必要です。
 
 ### ビルド手順
 
@@ -454,10 +483,11 @@ cargo build
 - macOS Sequoia 15 arm64
 - Windows 11 x86_64
 - Windows Server 2025 x86_64
+- Raspberry Pi (Linux arm64)
 
 ### Ubuntu の対応バージョン
 
-直近の LTS 2 バージョンをサポートします。
+直近の LTS 3 バージョンをサポートします。
 
 ### macOS の対応バージョン
 
