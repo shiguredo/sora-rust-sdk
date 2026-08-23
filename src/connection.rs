@@ -1533,6 +1533,12 @@ impl SoraConnection {
                 deadline,
             )
             .await;
+        } else if !opened_data_channels.is_empty() {
+            // WebSocket シグナリングの場合は、オープン中の DataChannel に対して
+            // close コールバックを呼ぶ。DataChannel シグナリングは無効でも
+            // ユーザーが作成した DataChannel は存在しうるため、通知が漏れないようにする。
+            // (Disconnect コマンド経路の connection.rs と同じ方針)
+            notify_close_for_remaining(&mut *handler, &mut opened_data_channels);
         }
 
         // websocket_closed=true は WebSocket のソケットが死んでいるか ws 層が failed 状態で、
