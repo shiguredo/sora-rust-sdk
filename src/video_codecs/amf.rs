@@ -391,7 +391,18 @@ impl VideoEncoderHandler for AmfVideoEncoder {
         let y_stride = plane_y.get_hpitch();
         let uv_stride = plane_uv.get_hpitch();
         let surface_height = plane_y.get_height();
-        assert_eq!(surface_height as u32, frame_height);
+        // ドライバが返す平面高さがフレーム高さと一致しない場合はエラーを返す。
+        // 奇数高さなどでドライバが平面高さをパディングする場合に
+        // assert で panic してプロセスを abort させないため。
+        if u32::try_from(surface_height).ok() != Some(frame_height) {
+            rtc_log_error!(
+                "AMF surface height mismatch for {:?}: surface={}, frame={}",
+                self.codec_type,
+                surface_height,
+                frame_height
+            );
+            return VideoCodecStatus::Error;
+        }
 
         let Some(y_size) = (y_stride as usize).checked_mul(surface_height as usize) else {
             return VideoCodecStatus::ErrParameter;
