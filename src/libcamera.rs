@@ -927,7 +927,9 @@ fn build_mapped_frame_buffer_planes(layout: &FrameBufferLayout) -> Result<Vec<Ma
 // 複製した fd を OwnedFd として所有する。
 // 複製に失敗した場合は fallback せずエラーを返す。
 fn dup_fd_for_native_frame(fd: i32) -> Result<OwnedFd> {
-    let dup_fd = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC) };
+    // F_DUPFD_CLOEXEC は最低 fd 番号 (minfd) の指定が必須。
+    // 第 3 引数を省略すると可変長引数が不定値を読むため、minfd=0 を明示する。
+    let dup_fd = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
     if dup_fd < 0 {
         return Err(std::io::Error::last_os_error().into());
     }
