@@ -34,7 +34,7 @@ shiguredo_openh264 = "~2026.2"
 # V4L2 M2M によるハードウェアコーデックと画像変換 (Linux 向け)
 shiguredo_v4l2 = "=2026.2.0-canary.1"
 # Intel VPL によるハードウェアエンコード/デコード
-shiguredo_vpl = "=2026.4.0-canary.2"
+shiguredo_vpl = "~2026.4"
 # WebRTC スタック本体 (PeerConnection、メディアエンジン等)
 shiguredo_webrtc = "~0.150"
 # Sora シグナリングへの接続で利用する WebSocket クライアント実装
