@@ -72,7 +72,13 @@ fn build_i420_frame(
     let src_stride_u = i32::try_from(chroma_stride).ok()?;
     let src_stride_v = i32::try_from(chroma_stride).ok()?;
 
-    let mut i420 = I420Buffer::new(width as i32, height as i32);
+    // width / height を i32::try_from で検証してから使う。
+    // ドライバが不正な解像度を報告した場合に負値へ切り詰められて
+    // I420Buffer::new が panic するのを防ぐ。
+    let width_i32 = i32::try_from(width).ok()?;
+    let height_i32 = i32::try_from(height).ok()?;
+
+    let mut i420 = I420Buffer::new(width_i32, height_i32);
     let dst_stride_y = i420.stride_y();
     let dst_stride_u = i420.stride_u();
     let dst_stride_v = i420.stride_v();
