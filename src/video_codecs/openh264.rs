@@ -126,7 +126,10 @@ impl Openh264VideoEncoder {
         };
 
         self.encoder = Some(Encoder::new(self.library.clone(), config)?);
-        self.max_spatial_bitrate_bps = self.target_bitrate_bps * 2;
+        // 現実的なビットレートで 2.1 Gbps 超になることはまずありえないが、
+        // u32 乗算のオーバーフローによる panic (debug) や 0 へのラップ (release) を
+        // 防ぐため saturating_mul で最大値に丸める。
+        self.max_spatial_bitrate_bps = self.target_bitrate_bps.saturating_mul(2);
         self.reconfigure_needed = false;
         Ok(())
     }
