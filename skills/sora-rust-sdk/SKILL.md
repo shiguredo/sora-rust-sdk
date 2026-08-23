@@ -43,7 +43,7 @@ WebRTC SFU Sora のクライアントを Rust で実装するための SDK。シ
 | `v4l2` | 無効 | V4L2-M2M によるハードウェアエンコード / デコード (Raspberry Pi) |
 | `libcamera` | 無効 | libcamera による映像入力 (Raspberry Pi) |
 
-機能フラグは加算式。複数バックエンドを同時に有効化可能。フラグを有効にしても GPU / ドライバが無ければ各 `*::new()` がランタイムでエラーを返す。
+機能フラグは加算式。複数バックエンドを同時に有効化可能。フラグを有効にしても GPU / ドライバが無ければ各 `*::new()` がランタイムでエラーを返す。`vpl` は Linux 専用で、他の OS ではフラグを有効にしてもモジュールごとコンパイルされない。
 
 ## コア API
 
@@ -242,7 +242,7 @@ H.264 / H.265 の `b_frame: true` は Sora 側の `sora.conf` で対応する設
 | `Openh264VideoCodecCapability` | `openh264` | `new(path) -> Result<Self>` | OpenH264 ソフトウェア H.264 |
 | `AmfVideoCodecCapability` | `amf` | `new() -> Result<Self>` | AMD AMF |
 | `NvCodecVideoCodecCapability` | `nvcodec` | `new() -> Result<Self>` / `new_with_device_id(i32) -> Result<Self>` | NVIDIA Video Codec |
-| `VplVideoCodecCapability` | `vpl` | `new() -> Result<Self>` | Intel VPL |
+| `VplVideoCodecCapability` | `vpl` (Linux のみ) | `new() -> Result<Self>` | Intel VPL (Linux 専用) |
 | `V4l2VideoCodecCapability` | `v4l2` | `new() -> Result<Self>` | V4L2-M2M (Raspberry Pi) |
 
 新しい capability を加えるたびに、対応する `VideoCodecPreference` を `merge` して preference 側にも追加すること。`SoraConnectionContextConfig::default()` は Internal と (macOS/iOS 上では) InternalApple を自動登録する。
@@ -558,7 +558,7 @@ if let Some(url) = handle.selected_signaling_url().await? {
 | TLS 証明書 | `TurnTlsCaCert`, `ClientCertParse`, `ClientKeyParse`, `CaCertParse`, `ClientCertKeyIncomplete` |
 | コーデック | `InvalidVideoCodecCapability`, `InvalidVideoCodecPreference` |
 | 内部コマンド | `CommandSendFailed`, `CommandResponseMissing`, `CommandTimeout` |
-| バックエンド固有 (feature 付き) | `Libcamera`, `LibcameraMessage`, `UnknownLibcameraControl`, `Openh264`, `Amf { source }`, `AmfMessage`, `Vpl { source }`, `VplMessage`, `NvCodec { source }`, `NvCodecMessage`, `V4l2 { source }`, `V4l2Message` |
+| バックエンド固有 (feature 付き) | `Libcamera`, `LibcameraMessage`, `UnknownLibcameraControl`, `Openh264`, `Amf { source }`, `AmfMessage`, `Vpl { source }`, `VplMessage` (後者 2 つは Linux のみ), `NvCodec { source }`, `NvCodecMessage`, `V4l2 { source }`, `V4l2Message` |
 | その他 | `Mp4 { source: Mp4Error }`, `InvalidSystemTime { source }` |
 
 エラーメッセージ (`Display`) は日本語。ログメッセージは英語、というプロジェクト方針と分けて扱うこと。
@@ -571,6 +571,7 @@ if let Some(url) = handle.selected_signaling_url().await? {
 - **HTTP プロキシは `http://` のみ**: `https://` プロキシ、パス、クエリ、userinfo はサポート外。
 - **TLS 設定の単位の違い**: WebSocket TLS の証明書は PEM、TURN-TLS の CA 証明書は DER。
 - **ハードウェアコーデックは feature + runtime 両方の条件**: feature 有効化だけでなく GPU / ドライバが揃わないと `*Capability::new()` がエラーを返す。
+- **VPL は Linux 専用**: `vpl` feature は Linux 以外の OS ではコンパイルされず、`VplVideoCodecCapability` と `Error::Vpl` 系のバリアントも Linux 限定。
 - **`VideoTrackSource` は本クレートでは作らない**: `shiguredo_webrtc` 側の capturer / source、もしくは本クレートの `Mp4VideoCapturer` / `LibcameraVideoCapturer` から生成する。
 - **MP4 パススルーの入力制約**: B フレーム (非ゼロ composition time offset) を含む MP4 と、途中でサンプルエントリー (コーデック・解像度など) が切り替わる MP4 は `Mp4SampleReader::new()` が拒否する。
 - **`send_message` のラベル制約**: SDK 内部用ラベル（`signaling`、`stats`、`push`、`notify`、`rpc`）および `#` プレフィックスのないラベル、Offer 応答の `data_channels` に含まれていないラベルを渡すと `Error::InvalidDataChannelLabel` を返す。`on_message` は `#` プレフィックスのユーザー定義 DataChannel 専用。
