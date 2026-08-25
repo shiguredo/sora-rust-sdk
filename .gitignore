@@ -1,0 +1,19 @@
+/target
+
+target/
+
+# Agents
+.claude/
+.codex/
+
+# macos
+.DS_Store
+
+# blend2d
+*.png
+
+.cargo/config.toml
+
+libopenh264*.so
+libopenh264*.dylib
+openh264*.dll

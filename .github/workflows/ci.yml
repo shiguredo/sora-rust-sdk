@@ -1,0 +1,161 @@
+name: CI
+
+on:
+  push:
+    paths-ignore:
+      - "**.md"
+
+env:
+  TEST_SIGNALING_URLS: ${{ secrets.TEST_SIGNALING_URLS }}
+  TEST_CHANNEL_ID_PREFIX: ${{ secrets.TEST_CHANNEL_ID_PREFIX }}
+  TEST_SECRET_KEY: ${{ secrets.TEST_SECRET_KEY }}
+  TEST_API_URL: ${{ secrets.TEST_API_URL }}
+  OPENH264_VERSION: "2.6.0"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  ci:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-26.04
+          - ubuntu-26.04-arm
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
+          - ubuntu-22.04
+          - ubuntu-22.04-arm
+          - windows-2025-vs2026
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential \
+            libx11-dev libxext-dev libxrandr-dev libxi-dev libxfixes-dev libxcursor-dev libxss-dev libxtst-dev \
+            libwayland-dev libxkbcommon-dev \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev \
+            libvulkan-dev \
+            libdbus-1-dev libudev-dev libdrm-dev libgbm-dev \
+            libclang-dev
+
+      - run: rustup update stable
+      - uses: shiguredo/github-actions/.github/actions/rust-cache@main
+        with:
+          os: ${{ matrix.os }}
+          toolchain: stable
+
+      - uses: shiguredo/github-actions/.github/actions/download-openh264@main
+        if: ${{ runner.environment != 'self-hosted' }}
+        id: openh264
+        with:
+          openh264_version: ${{ env.OPENH264_VERSION }}
+          use-cache: true
+      - name: Set OpenH264 path
+        if: ${{ runner.environment != 'self-hosted' && steps.openh264.outputs.openh264_path }}
+        run: echo "OPENH264_PATH=${{ steps.openh264.outputs.openh264_path }}" >> $GITHUB_ENV
+        shell: bash
+
+      # Tailscale のセットアップ（self-hosted runner 以外）
+      - if: ${{ runner.environment != 'self-hosted' }}
+        uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888 # v4.1.3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: ${{ secrets.TS_TAGS }}
+          ping: ${{ secrets.TEST_TS_DOMAIN }}
+          version: latest
+          use-cache: true
+
+      - run: cp .cargo/config.toml.ci .cargo/config.toml
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace -- -D warnings
+      - run: cargo test --workspace
+
+  ci-self-hosted:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - labels: [self-hosted, macOS, ARM64, Apple-M1]
+            features: "--features openh264"
+          - labels: [self-hosted, linux, x64, NVIDIA-Video-Codec-SDK]
+            features: "--features openh264,nvcodec"
+          - labels:  [self-hosted, linux, x64, AMD-AMF]
+            features: "--features openh264,amf"
+          - labels: [self-hosted, linux, x64, Intel-VPL]
+            features: "--features openh264,vpl"
+          - labels: [self-hosted, linux, arm64, Raspberry-Pi]
+            features: "--features openh264,libcamera,v4l2"
+    runs-on:
+      group: Self
+      labels: ${{ matrix.labels }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Remove old target
+        run: rm -rf target/
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+      - name: Update PATH
+        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - run: cp .cargo/config.toml.ci .cargo/config.toml
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace ${{ matrix.features }} -- -D warnings
+      - run: cargo test --workspace ${{ matrix.features }}
+
+  # sumomo の raw-player は SDL を利用するため、Linux (Ubuntu 24.04) の
+  # 独立 job で clippy とテストを実行する。
+  ci-raw-player:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          # git / curl / build-essential / ca-certificates は runner にプリインストール済み。
+          # raw-player は prebuilt SDL3 を利用する。
+          # - libclang-dev: raw_player の bindgen で必要
+          # - libx11-dev: prebuilt SDL3 のリンクで必要
+          # - libasound2t64: SDL3 が実行時に動的ロードする (Ubuntu 24.04 のパッケージ名)
+          sudo apt-get install -y --no-install-recommends \
+            libclang-dev \
+            libx11-dev \
+            libasound2t64
+
+      - run: rustup update stable
+      - uses: shiguredo/github-actions/.github/actions/rust-cache@main
+        with:
+          os: ubuntu-24.04
+          toolchain: stable
+
+      - run: cp .cargo/config.toml.ci .cargo/config.toml
+      - run: cargo clippy -p sumomo --features raw-player --all-targets -- -D warnings
+      - run: SDL_VIDEODRIVER=dummy cargo test -p sumomo --features raw-player
+
+  slack_notify:
+    needs: [ci, ci-self-hosted, ci-raw-player]
+    runs-on: ubuntu-slim
+    if: ${{ !cancelled() }}
+    steps:
+      - name: Slack Notification
+        uses: shiguredo/github-actions/.github/actions/slack-notify@main
+        with:
+          status: ${{ job.status }}
+          slack_webhook: ${{ secrets.SLACK_WEBHOOK }}
+          slack_channel: sora-rust-sdk
+          notify_mode: failure_and_fixed
+        env:
+          GH_TOKEN: ${{ github.token }}

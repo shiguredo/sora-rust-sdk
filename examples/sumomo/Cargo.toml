@@ -1,0 +1,45 @@
+[package]
+name = "sumomo"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+noargs = "0.4"
+nojson.workspace = true
+raw_player = { version = "2026.2", optional = true }
+rustls-pki-types = "1.15"
+shiguredo_audio_device = { version = "2026.3", optional = true }
+shiguredo_video_device = { version = "2026.3", optional = true }
+shiguredo_webrtc.workspace = true
+sora_sdk.workspace = true
+tokio = {
+  workspace = true,
+  features = [
+    "io-util",
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "sync",
+    "time",
+  ]
+}
+
+[dev-dependencies]
+# access_token (JWT) の HMAC-SHA256 署名に利用
+aws-lc-rs.workspace = true
+# JWT の Base64URL エンコードに利用
+base64ct = "1.8"
+serial_test = "4.0"
+
+[features]
+default = []
+amf = ["sora_sdk/amf"]
+libcamera = ["sora_sdk/libcamera"]
+# Linux では追加で pipewire-pulse と libpulse-dev が必要:
+#   sudo apt install pipewire-pulse libpulse-dev
+media-device = ["dep:shiguredo_audio_device", "dep:shiguredo_video_device"]
+nvcodec = ["sora_sdk/nvcodec"]
+raw-player = ["dep:raw_player"]
+v4l2 = ["sora_sdk/v4l2"]
+vpl = ["sora_sdk/vpl"]

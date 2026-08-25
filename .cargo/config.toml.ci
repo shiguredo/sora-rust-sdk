@@ -1,0 +1,8 @@
+[patch.crates-io]
+# webrtc-rs の開発中ブランチの機能を利用する場合はこれを有効にすること
+# shiguredo_webrtc = { git = "https://github.com/shiguredo/webrtc-rs.git", branch = "develop" }
+
+[env]
+# webrtc-rs の開発中ブランチの機能が、
+# リリースされていない webrtc_c の機能に依存している場合はこれを有効にすること
+# CARGO_FEATURE_SOURCE_BUILD = "1"

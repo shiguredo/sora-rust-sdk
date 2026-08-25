@@ -1,0 +1,49 @@
+[package]
+name = "e2e-tests"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.93"
+publish = false
+
+[dependencies]
+# access_token (JWT) の HMAC-SHA256 署名に利用
+aws-lc-rs.workspace = true
+# JWT の Base64URL エンコードに利用
+base64ct = "1.8"
+# シグナリングメッセージ等の JSON パース・生成
+nojson.workspace = true
+# FakeVideoCapturer のテスト用映像描画に利用
+raden = "2026.2"
+# DisconnectChannel API への TLS 接続 (https://) で利用
+rustls.workspace = true
+# DisconnectChannel API への TLS 接続での OS 標準のルート証明書検証に利用
+rustls-platform-verifier.workspace = true
+# プロキシ E2E テストの HTTP リクエスト/レスポンス処理と
+# DisconnectChannel API E2E のリクエストエンコード/レスポンスデコードに利用
+shiguredo_http11.workspace = true
+# 映像キャプチャデバイスの E2E テストに利用
+shiguredo_video_device = "2026.3"
+# WebRTC のトラック・コーデック型など E2E テストで利用
+shiguredo_webrtc.workspace = true
+# テスト対象の SDK 本体
+sora_sdk.workspace = true
+# E2E テストの非同期処理を支える非同期ランタイム
+tokio = { workspace = true, features = ["full"] }
+# tokio 上で rustls を利用して DisconnectChannel API へ TLS 接続するために利用
+tokio-rustls.workspace = true
+
+[dev-dependencies]
+# ハードウェア共有テストの直列実行に利用
+serial_test = "4.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# 音声キャプチャデバイスの E2E テストに利用
+shiguredo_audio_device = "2026.3"
+
+[features]
+default = []
+amf = ["sora_sdk/amf"]
+libcamera = ["sora_sdk/libcamera"]
+nvcodec = ["sora_sdk/nvcodec"]
+v4l2 = ["sora_sdk/v4l2"]
+vpl = ["sora_sdk/vpl"]
