@@ -22,7 +22,7 @@ rustls-platform-verifier.workspace = true
 # DisconnectChannel API E2E のリクエストエンコード/レスポンスデコードに利用
 shiguredo_http11.workspace = true
 # 映像キャプチャデバイスの E2E テストに利用
-shiguredo_video_device = "2026.2"
+shiguredo_video_device = "2026.3"
 # WebRTC のトラック・コーデック型など E2E テストで利用
 shiguredo_webrtc.workspace = true
 # テスト対象の SDK 本体
@@ -38,7 +38,7 @@ serial_test = "4.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # 音声キャプチャデバイスの E2E テストに利用
-shiguredo_audio_device = "2026.2"
+shiguredo_audio_device = "2026.3"
 
 [features]
 default = []

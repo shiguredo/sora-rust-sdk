@@ -32,7 +32,7 @@ shiguredo_nvcodec = "~2026.2"
 # OpenH264 による H.264 ソフトウェアエンコード/デコード
 shiguredo_openh264 = "~2026.2"
 # V4L2 M2M によるハードウェアコーデックと画像変換 (Linux 向け)
-shiguredo_v4l2 = "=2026.2.0-canary.1"
+shiguredo_v4l2 = "~2026.2"
 # Intel VPL によるハードウェアエンコード/デコード
 shiguredo_vpl = "~2026.4"
 # WebRTC スタック本体 (PeerConnection、メディアエンジン等)
