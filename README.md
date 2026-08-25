@@ -54,7 +54,7 @@ Please read <https://github.com/shiguredo/oss/blob/master/README.en.md> before u
 ハードウェアエンコード / デコードの実際の対応状況は GPU やドライバの対応状況に依存します。
 
 | バックエンド | 対応プラットフォーム | エンコード | デコード |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | ソフトウェア | 全プラットフォーム | VP8 / VP9 / AV1 | VP8 / VP9 / AV1 |
 | OpenH264 | 全プラットフォーム | H.264 | H.264 |
 | Apple VideoToolbox | macOS | H.264 / H.265 | H.264 / H.265 |
@@ -469,7 +469,7 @@ cargo build
 
 ## 対応 WebRTC SFU Sora
 
-- Sora 2025.1.0 以降
+- Sora 2025.2.0 以降
 
 ## 対応プラットフォーム
 

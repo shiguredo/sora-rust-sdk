@@ -23,11 +23,11 @@ WebRTC SFU Sora のクライアントを Rust で実装するための SDK。シ
 ## バージョン情報
 
 - crate 名: `sora_sdk`
-- バージョン: 2026.1.0 (正式リリース前、canary リリース中)
+- バージョン: 2026.1.0
 - Rust Edition: 2024
 - 最小 Rust バージョン: 1.93
 - ライセンス: Apache-2.0
-- 対応 Sora: 2025.1.0 以降
+- 対応 Sora: 2025.2.0 以降
 - 対応プラットフォーム: Ubuntu 22.04 / 24.04 / 26.04 (x86_64, arm64), macOS 15 / 26 (arm64), Windows 11 / Server 2025 (x86_64), Raspberry Pi (Linux, arm64)
 
 `shiguredo_webrtc` クレートが提供する `AudioTrack` / `VideoTrack` / `VideoTrackSource` / `RtpTransceiver` / `RtpReceiver` / `IceServer` 等を直接受け取る公開 API があるため、利用側の `Cargo.toml` に `shiguredo_webrtc` を追加する必要がある。
