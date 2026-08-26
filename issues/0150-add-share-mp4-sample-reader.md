@@ -3,7 +3,7 @@
 - Created: 2026-08-24
 - Completed: {YYYY-MM-DD}
 - Branch: feature/add-share-mp4-sample-reader
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-08-26
 - Reporter: @voluntas
 
 ## 目的
@@ -27,13 +27,13 @@ SDK が提供するのは「demux とファイル I/O の共有」と「capturer
 - `Mp4SampleReader` は `Clone` を実装しておらず、`BufReader<File>` を 1 つだけ保持する
 - `Mp4VideoCapturer::new(mut reader: Mp4SampleReader)` は reader を消費 (move) するため、1 つの reader から作れる capturer は 1 つに限られる
 
-さらに、`Mp4VideoCapturer::video_source()` が返す単一の `VideoTrackSource` を複数 PeerConnection の encoder に共有すると、`shiguredo_webrtc` 側の per-buffer スレッド固定 assertion (`api/video_codec_common.rs` の `assert_video_frame_buffer_handler_thread` / `VideoFrameBufferHandlerState::callback_thread`) に引っかかり、以下の panic に至る。
+さらに、`Mp4VideoCapturer::video_source()` が返す単一の `VideoTrackSource` を複数 PeerConnection の encoder に共有すると、同じ native `VideoFrameBuffer` を複数 encoder スレッドが触ることになる。`shiguredo_webrtc` の `api/video_codec_common.rs` では、`VideoFrameBufferHandlerState` インスタンス 1 個ごと (バッファ 1 個ごと) に `callback_thread` を記録し、C callback (`type` / `width` / `height` / `ToI420` / `CropAndScale`) から `assert_video_frame_buffer_handler_thread` を呼ぶ。この検査は `#[cfg(debug_assertions)]` 付きなので、debug ビルドでは次のメッセージで abort する。release では同 assertion は無い。
 
 ```
 assertion `left == right` failed: video_frame_buffer callback called from multiple threads
 ```
 
-この assertion は `VideoFrameBufferHandlerState` インスタンス 1 個ごと (バッファ 1 個ごと) の `callback_thread` に対する検査である。同じ `VideoFrameBuffer` を複数 encoder スレッドが触ると落ちる。`Mp4PassthroughEncoder::encode` の `as_native_ref` はこの検査を通らない。SDK 利用者から見ると **「1 つの MP4 パススルー `video_source` を複数 encoder に配れない」** という制約になる。
+`Mp4PassthroughEncoder::encode` の `as_native_ref` はこの assertion を呼び出さない。ただし safety コメントは同一実体への同時アクセスを禁止しており、release でも同じ `video_source()` を複数 encoder に配ることは非対応である。SDK 利用者から見ると **「1 つの MP4 パススルー `video_source` を複数 encoder に配れない」** という制約になる。
 
 現状の SDK API では、この制約を回避するには VC の数だけ `Mp4SampleReader::new` と `Mp4VideoCapturer::new` を実行するしかない。副作用として:
 
@@ -41,12 +41,11 @@ assertion `left == right` failed: video_frame_buffer callback called from multip
 - オープン FD 数が N 個 (各 reader が `BufReader<File>` を保持)
 - feeder OS スレッド数が N 個 (各 `Mp4VideoCapturer` が `thread::spawn` する)
 
-`--vcs` が数百のオーダーになると、`ulimit -n` の既定値 1024 のうち WebRTC のソケットと競合して枯渇したり、プロセスあたりのスレッド上限に触れやすくなる。ただし panic 自体は reader を共有しなくても、VC ごとに capturer を分ければ回避できる。reader 共有の性能上の価値は、主に demux の 1 回化と、同じ index をまとめて読む余地である。実行中のディスク I/O は、N 本が同じファイルを読んでもページキャッシュに乗ることが多く、共有しなくてもディスクはほぼ 1 回になる。
+`--vcs` が数百のオーダーになると、WebRTC のソケットと追加の MP4 FD がプロセスの FD 上限と競合しやすく、feeder スレッド数も N に比例する。ただし当該 panic 自体は reader を共有しなくても、VC ごとに capturer を分ければ回避できる。reader 共有の性能上の価値は、主に demux の 1 回化と、同じ index をまとめて読む余地である。
 
-### 実測
+### 起票時の報告
 
-- shiguredo_webrtc 0.150.3 と sora_sdk 2026.1.0-canary.21 の組で、zakuro-rs の `--input-mp4 --vcs 10 --sora-video-codec-type h264` を Linux 上で実行したところ、2 番目の VC の encoder が動き出したタイミングで上記 panic により abort した
-- 同 zakuro-rs リポジトリでは `src/main.rs` の VC spawn ループで VC ごとに `Mp4SampleReader::new` + `Mp4VideoCapturer::new` を実行する per-VC 分離で回避しており、同ファイルの `TODO(sora_sdk)` コメントに本 issue と同趣旨の SDK 側改善希望が記載されている
+起票時の報告として、shiguredo_webrtc 0.150.3 と sora_sdk 2026.1.0-canary.21 の組で、zakuro-rs の `--input-mp4 --vcs 10 --sora-video-codec-type h264` を Linux 上で実行したところ、2 番目の VC の encoder が動き出したタイミングで上記メッセージにより abort した、とある。現行 SDK の `shiguredo_webrtc` は `~0.152.1-canary.0` である。zakuro-rs のソースと実行は本リポジトリ外であり、本 issue の polish では再検証していない。回避手段として VC ごとに `Mp4SampleReader::new` + `Mp4VideoCapturer::new` する形は、現行 SDK の公開 API（reader 非 `Clone`、capturer が move 消費）と一致する。
 
 ## 設計方針
 
@@ -55,11 +54,11 @@ assertion `left == right` failed: video_frame_buffer callback called from multip
 ### 公開 API
 
 - `Mp4SampleReader` を `Clone` 可能にする。clone は cheap で、内部状態は `Arc` 等で共有する。再生 cursor は reader に持たせない （index は capturer のループが渡す）
-- `get_sample` は `&self` にする。複数 capturer スレッドから同時に呼んでよい
+- `get_sample` は公開しない。現状どおりモジュール非公開のまま、内部で `&self` に変える。戻り値の `Mp4EncodedSample` も `pub(crate)` のまま再公開しない
 - `Mp4VideoCapturer::new` は引き続き reader を受け取る。共有するときは `reader.clone()` して渡す
 - 既存の 1 対 1 (`Mp4SampleReader::new` → `Mp4VideoCapturer::new` → 単一の `video_source()`) は破壊しない。内部が I/O スレッドになっても、利用者から見た手順は同じでよい
 - `passthrough_capability()` は共有されたどの clone からでも取れる。codec 登録は今どおり 1 回でよい
-- `video_source()` を複数 PeerConnection に配る使い方は、今どおり非対応とする。公開ドキュメントに、panic する条件、capturer を分ける回避策、その場合でも reader は共有できることを書く（後述）
+- `video_source()` を複数 PeerConnection に配る使い方は、今どおり非対応とする。公開ドキュメントに、debug での abort 条件、capturer を分ける回避策、その場合でも reader は共有できることを書く（後述）
 - 対象コーデックは H.264 / H.265 / VP8 / VP9 / AV1 すべて。共有点は `get_sample` より手前なので、初期から限定しない
 - `shiguredo_webrtc` の変更はしない
 
@@ -77,18 +76,18 @@ let capturer2 = Mp4VideoCapturer::new(reader.clone())?;
 
 - `Mp4SampleReader::new` の demux は 1 回だけ行う
 - ファイル I/O は reader 内部のスレッド 1 本に限る。今の `BufReader` + `seek` を複数スレッドで奪い合わない。I/O をそのスレッドに閉じれば、位置指定読み出し (`pread`) は必須ではない
-- capturer から reader への受け渡しは request / response にする。公開 API に mpsc は出さない。`get_sample(index)` が内部で依頼し、応答を待って返す
+- capturer から reader への受け渡しは request / response にする。公開 API に mpsc は出さない。内部の `get_sample(index)` (`&self`) が I/O スレッドへ依頼し、応答を待って返す。複数 capturer スレッドから同時に呼んでよい
 - 最後の clone が drop されたら I/O スレッドを止める
 - capturer スレッドは今どおり sleep し、`adapt_frame` が `applied=false` なら `get_sample` しない。捨てるフレームまで読まない
-- 各 capturer は受け取ったサンプルから **自分の** `VideoFrameBuffer` を作って `on_frame` する。サンプルバイトを `Arc` で共有する場合でも、handler / `VideoFrameBuffer` は capturer ごとに新規作成する。バッファを使い回すと per-buffer スレッド固定 assertion に当たる
+- 各 capturer は受け取ったサンプルから **自分の** `VideoFrameBuffer` を作って `on_frame` する。サンプルバイトを `Arc` で共有する場合でも、handler / `VideoFrameBuffer` は capturer ごとに新規作成する。バッファを使い回すと debug では per-buffer スレッド固定 assertion に当たり、release でも同一実体への同時アクセスとして非対応である
 
 この形なら、zakuro が VC ごとに capturer を分ける使い方のまま panic を回避できる。直るのは「同じ `video_source` を複数 encoder に載せる」ことではなく、「1 つの reader から N 個の capturer を作れる」ことである。
 
 ### I/O のまとめ方と先読み
 
-汎用の先読み窓は初期実装に入れない。1 capturer は今も deadline 到来後に読んでおり、逐次読みとページキャッシュで足りている。
+汎用の先読み窓は初期実装に入れない。1 capturer は今も deadline 到来後に読んでおり、逐次読みで足りている。
 
-実行中に効くのは先読み窓より、同じ index の依頼を 1 回の読み出しで応答することである。I/O スレッドへ依頼を直列化するだけで合流しないと、N スレッドがページキャッシュを並列に読む今より遅くなることがある。同一 index の連続・同時依頼は 1 回読んで配ってよい。直近サンプルの短いキャッシュも、その実装に含めてよい。
+同一 index の連続・同時依頼を 1 回読んで配ること、および直近サンプルの短いキャッシュは、入れてよいが初期実装の必須条件ではない。完了条件にも含めない。I/O を 1 スレッドに直列化するだけだと、同じ index を N 回変換するコストは残る。
 
 sleep 中に次の 1 枚だけ依頼するパイプラインは必須にしない。必要なら後から足せる。
 
@@ -116,8 +115,8 @@ sleep 中に次の 1 枚だけ依頼するパイプラインは必須にしな�
 
 読者に伝える事実は次の 3 点である。実装時の文言はこれに沿う。
 
-1. **いつ panic するか**
-   同じ `Mp4VideoCapturer` の `video_source()` を、複数の PeerConnection の映像 encoder に渡したとき。1 つの `VideoTrackSource` が運ぶ native `VideoFrameBuffer` を、複数の encoder スレッドが処理するため。メッセージは次のとおり。
+1. **いつ失敗するか**
+   同じ `Mp4VideoCapturer` の `video_source()` を、複数の PeerConnection の映像 encoder に渡してはならない。1 つの `VideoTrackSource` が運ぶ native `VideoFrameBuffer` を複数の encoder スレッドが処理することになる。debug ビルド (`debug_assertions` 有効時) では次のメッセージで abort する。release ではこの assertion は無いが、同じ使い方は非対応のままである。
 
    ```
    assertion `left == right` failed: video_frame_buffer callback called from multiple threads
@@ -134,14 +133,14 @@ sleep 中に次の 1 枚だけ依頼するパイプラインは必須にしな�
 ## 完了条件
 
 - 1 つの `Mp4SampleReader` を `clone` し、N 個の `Mp4VideoCapturer` を作れる公開 API がある
-- 各 capturer の `video_source()` を別々の PeerConnection の encoder に接続しても `video_frame_buffer callback called from multiple threads` の panic が発生しない
+- debug ビルドで、各 capturer の `video_source()` を別々の PeerConnection の encoder に接続しても `video_frame_buffer callback called from multiple threads` の panic が発生しない
 - 共有時のリソースは次のとおりである。実装後に本 issue へ実測または根拠付きで記録する
   - demux 回数: 1
   - オープン FD 数: 共有 reader 1 つにつき 1
   - capturer feeder スレッド数: capturer 数に比例 (削減しない)
 - 既存の 1 対 1 (`Mp4SampleReader::new` → `Mp4VideoCapturer::new` → 単一の `VideoTrackSource`) の利用形態は破壊せず引き続き動作する
 - `docs/INPUT_MP4.md` の SDK 向け節に、次の 3 点が利用者向けの言葉で書かれている
-  - 同じ `video_source()` を複数 encoder に渡すと、上記メッセージで panic する
+  - 同じ `video_source()` を複数 encoder に渡してはならない。debug ビルドでは上記メッセージで abort し、release でも非対応である
   - 回避は PeerConnection ごとに `Mp4VideoCapturer` を分けること
   - capturer を分けても、同じファイルの `Mp4SampleReader` は `clone` して共有できる (`reader.clone()` の例付き)
 - `Mp4VideoCapturer::video_source` と `Mp4SampleReader` の rustdoc が、この制約と回避策を案内する
@@ -155,7 +154,7 @@ sleep 中に次の 1 枚だけ依頼するパイプラインは必須にしな�
 ## 変更対象
 
 - `src/video_codecs/mp4.rs` (`Mp4SampleReader` の共有と I/O スレッド、`get_sample` の request / response、`Mp4VideoCapturer` は clone した reader を受け取る)
-- `docs/INPUT_MP4.md` (SDK 向け節: panic する条件、capturer 分離による回避、reader の共有)
+- `docs/INPUT_MP4.md` (SDK 向け節: 同じ `video_source` を複数 encoder に渡せないこと、debug での abort メッセージ、capturer 分離による回避、reader の共有)
 - `Mp4VideoCapturer::video_source` / `Mp4SampleReader` の rustdoc
 - `testdata/` (必要に応じて共有動作確認用の fixture 追加)
 - `CHANGES.md`
