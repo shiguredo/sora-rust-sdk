@@ -235,7 +235,6 @@ struct Mp4VideoTrackInfo {
 }
 
 /// MP4 のビデオサンプルのメタデータ。
-#[derive(Clone)]
 struct Mp4SampleMeta {
     /// サンプルデータのファイル内オフセット。
     data_offset: u64,
@@ -291,8 +290,9 @@ pub struct Mp4SampleReader {
 /// `Mp4SampleReader` のクローン間で共有される内部状態。
 struct Mp4SampleReaderInner {
     track_info: Mp4VideoTrackInfo,
-    /// 各サンプルのメタデータ。
-    samples: Vec<Mp4SampleMeta>,
+    /// サンプル数。サンプルメタデータ自体は I/O スレッド側が保持する
+    /// (二重保持を避けるため、`len()` / `is_empty()` に必要な数だけを残す)。
+    sample_count: usize,
     /// 各フレームの累積再生時刻。
     /// cumulative[0] = 0, cumulative[i] = フレーム 0..i の合計再生時間。
     /// 長さは samples.len() + 1 で、末尾が動画全体の長さ。
@@ -505,16 +505,17 @@ impl Mp4SampleReader {
         // ファイル I/O を内部スレッド 1 本に集約する。
         // 複数の Mp4VideoCapturer が同一 reader の clone から同時に get_sample を呼んでも、
         // スレッドが要求を直列化して処理するため BufReader + seek を奪い合わない。
+        // サンプル数は Inner 側の len() / is_empty() でも使うため、move の前に控えておく。
+        let sample_count = samples.len();
         let (io_sender, io_receiver) = mpsc::channel::<Mp4SampleIoRequest>();
         // I/O スレッドは Mp4SampleReaderInner を Arc で共有しない。
         // 共有すると最後のクローンが drop されても refcount が 0 にならず、
         // Mp4SampleReaderIo の Drop (構造体 doc 参照) による終了・join が走らない。
-        // そのため必要最小限のデータの clone を move する。
+        // samples は全体をスレッドへ move し、Inner にはサンプル数だけを残す。
         let io_track_info = track_info.clone();
-        let io_samples = samples.clone();
         let io_thread = thread::spawn(move || {
             while let Ok(request) = io_receiver.recv() {
-                let result = read_sample(&mut file, &io_track_info, &io_samples, request.index);
+                let result = read_sample(&mut file, &io_track_info, &samples, request.index);
                 let _ = request.response.send(result);
             }
         });
@@ -522,7 +523,7 @@ impl Mp4SampleReader {
         Ok(Self {
             inner: Arc::new(Mp4SampleReaderInner {
                 track_info,
-                samples,
+                sample_count,
                 cumulative,
                 io: Mp4SampleReaderIo {
                     sender: Some(io_sender),
@@ -717,12 +718,12 @@ impl Mp4SampleReader {
 
     /// サンプル数を返す。
     pub fn len(&self) -> usize {
-        self.inner.samples.len()
+        self.inner.sample_count
     }
 
     /// サンプルが 0 件かどうかを返す。
     pub fn is_empty(&self) -> bool {
-        self.inner.samples.is_empty()
+        self.inner.sample_count == 0
     }
 
     /// この MP4 のビデオコーデック種別を返す。
@@ -778,6 +779,9 @@ impl Mp4SampleReader {
     /// サンプルデータは内部の I/O スレッドがファイルから読み込むため、I/O エラーを返し得る。
     /// 複数のクローンから同時に呼び出してよい (読み出しは I/O スレッドに直列化される)。
     ///
+    /// 応答待ちの間も `stop` をポーリングし、設定されていたら `Ok(None)` を返す
+    /// (共有 I/O スレッドが他 capturer の要求で塞がっていても、停止・join を妨げない)。
+    ///
     /// H.264/H.265 の場合:
     /// - MP4 内の AVCC/HVCC 形式 (4 バイト長さプレフィックス) を
     ///   Annex B 形式 (0x00000001 スタートコード) に変換する。
@@ -785,7 +789,7 @@ impl Mp4SampleReader {
     ///
     /// VP8/VP9/AV1 の場合:
     /// - MP4 から抽出したデータをそのまま使用する。
-    fn get_sample(&self, index: usize) -> Result<Mp4EncodedSample> {
+    fn get_sample(&self, index: usize, stop: &AtomicBool) -> Result<Option<Mp4EncodedSample>> {
         let (response_tx, response_rx) = mpsc::channel();
         let sender = self.inner.io.sender.as_ref().expect(
             "BUG: I/O thread sender must be available while an Mp4SampleReader clone is alive",
@@ -796,9 +800,20 @@ impl Mp4SampleReader {
                 response: response_tx,
             })
             .expect("BUG: I/O thread receiver must not be closed while an Mp4SampleReader clone is alive");
-        response_rx
-            .recv()
-            .expect("BUG: I/O thread must respond exactly once per request")
+        loop {
+            if stop.load(Ordering::Acquire) {
+                return Ok(None);
+            }
+            match response_rx.recv_timeout(std::time::Duration::from_millis(1)) {
+                Ok(result) => return result.map(Some),
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                // 依頼を送信できているのに応答チャネルが閉じるのは、
+                // I/O スレッドが応答前に panic した場合のみ (実装バグ)。
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("BUG: I/O thread must respond exactly once per request")
+                }
+            }
+        }
     }
 
     /// 先頭からフレーム index までの累積再生時間を返す。
@@ -1172,8 +1187,10 @@ impl Mp4VideoCapturer {
                         source.adapt_frame(width, height, timestamp_us);
                     if applied {
                         // サンプルデータの読み込みに失敗したらフィーダースレッドを終了する。
-                        let sample = match reader.get_sample(i) {
-                            Ok(sample) => sample,
+                        // 停止フラグが設定されて中断された場合 (Ok(None)) も終了する。
+                        let sample = match reader.get_sample(i, &stop_clone) {
+                            Ok(Some(sample)) => sample,
+                            Ok(None) => return,
                             Err(err) => {
                                 rtc_log_error!("MP4: failed to read sample: {err:?}");
                                 return;
@@ -1237,7 +1254,8 @@ impl Drop for Mp4VideoCapturer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(handle) = self.thread_handle.take() {
-            // フィーダースレッドは最大 MAX_SLEEP_DURATION ごとに停止フラグを確認するため、
+            // フィーダースレッドは待機中 (最大 MAX_SLEEP_DURATION ごと) と
+            // I/O 応答待ち中 (最大 1ms ごと) のどちらも停止フラグを確認するため、
             // join は停止フラグ設定後すぐに完了する。
             let _ = handle.join();
         }
@@ -1710,9 +1728,12 @@ mod tests {
         let reader = reader;
         assert_eq!(reader.codec_type(), VideoCodecType::H264);
         assert!(!reader.is_empty());
+        // 中断テストではないため、停止フラグは常に false のまま渡す。
+        let stop = AtomicBool::new(false);
         let sample = reader
-            .get_sample(0)
-            .expect("サンプルデータの読み込みに失敗しました");
+            .get_sample(0, &stop)
+            .expect("サンプルデータの読み込みに失敗しました")
+            .expect("停止フラグは未設定のため中断されないはずです");
 
         // サンプル 0 のファイル内オフセットは stco ボックスの先頭エントリから求める。
         // ボックス構造: size(4) + type(4) + version/flags(4) + entry_count(4) + [offset(4) * entry_count]
@@ -1941,7 +1962,9 @@ mod tests {
         file.set_len(0).expect("ファイルの縮小に失敗しました");
         drop(file);
 
-        let result = reader.get_sample(0);
+        // 中断テストではないため、停止フラグは常に false のまま渡す。
+        let stop = AtomicBool::new(false);
+        let result = reader.get_sample(0, &stop);
         assert!(
             matches!(result, Err(Mp4Error::Io(_))),
             "縮小されたファイルからの読み込みは Io エラーになるべきです"
@@ -2306,11 +2329,14 @@ mod tests {
             .map(|_| {
                 let reader = reader.clone();
                 thread::spawn(move || {
+                    // 中断テストではないため、停止フラグは常に false のまま渡す。
+                    let stop = AtomicBool::new(false);
                     let mut samples = Vec::new();
                     for i in 0..sample_count {
                         let sample = reader
-                            .get_sample(i)
-                            .expect("共有 reader からのサンプル読み出しに失敗しました");
+                            .get_sample(i, &stop)
+                            .expect("共有 reader からのサンプル読み出しに失敗しました")
+                            .expect("停止フラグは未設定のため中断されないはずです");
                         samples.push(sample);
                     }
                     samples
@@ -2352,6 +2378,25 @@ mod tests {
             first.codec_type,
             VideoCodecType::H264,
             "先頭サンプルのコーデックは H.264 のはずです"
+        );
+    }
+
+    // 停止フラグが設定された状態で get_sample を呼ぶと、I/O 応答を待たずに
+    // Ok(None) を返すことを確認する。
+    //
+    // 共有 I/O スレッドが他 capturer の要求で塞がっていても停止・join を妨げない
+    // という契約の回帰テスト。依頼は送信済みだが、応答を待つ前に stop を観測して
+    // 中断する (中断された依頼は I/O スレッドが後で処理し、送信先が無いため破棄される)。
+    #[test]
+    fn get_sample_returns_none_when_stopped() {
+        let (reader, _fixture) = h264_reader_from_fixture("get-sample-stopped");
+        let stop = AtomicBool::new(true);
+        let result = reader
+            .get_sample(0, &stop)
+            .expect("停止時の読み出しは I/O エラーにはならないはずです");
+        assert!(
+            result.is_none(),
+            "停止フラグ設定時は応答を待たずに None を返すはずです"
         );
     }
 
