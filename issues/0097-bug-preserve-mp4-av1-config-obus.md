@@ -4,7 +4,7 @@
 - Created: 2026-07-29
 - Completed: {YYYY-MM-DD}
 - Model: GPT-5
-- Branch: feature/fix-mp4-av1-config-obus
+- Branch: feature/fix-mp4-av1-config-obus-v2
 - Polished: 2026-07-30
 - Updated: 2026-08-18
 
@@ -31,16 +31,37 @@ AV1 Codec ISO Media File Format Binding v1.3.0 Section 2.3.4 は、任意の syn
 関連 sample に sync sample が存在しない場合に `configOBUs` の Sequence Header OBU が必須になるが、現在の capturer は track の先頭からループ再生し、AV1ForwardKeyFrameSampleGroupEntry による delayed random access を解釈しない。
 そのため `configOBUs` だけに Sequence Header OBU がある no-sync track を「先頭 key frame から再生可能」とは扱えない。
 
-固定する `shiguredo_webrtc` の libwebrtc は `m150.7871.3.1`、対応 commit は `1f975dfd761af6e5d76d28333191973b258d82a8` である。
+固定する `shiguredo_webrtc` の libwebrtc は `m152.7977.0.0`、対応 commit は `6f37672d358475cd17544121a12494da454d85fb` である。
 同 commit の `modules/rtp_rtcp/source/rtp_packetizer_av1.cc` にある `RtpPacketizerAv1::ParseObus` は、encoder callback の payload を Low Overhead Bitstream Format の OBU 列として再解析する。
 malformed payload では OBU 列が空になり、packet を生成しない。
 また aggregation header の N bit は key frame かつ先頭 OBU が Sequence Header OBU の場合だけ設定する。
+同ファイルは m150 (`1f975dfd761af6e5d76d28333191973b258d82a8`) のものと同一であり、`RtpPacketizerAv1` の挙動に差分はない。
+`api/video_codecs/av1_profile.cc` は m150 との間に `params.find(std::string(kAv1FmtpProfile))` の std::string ラップという 1 行の差分だけがあり、`ParseSdpForAV1Profile` / `AV1IsSameProfile` の挙動は変わらない。
+
+## 前提
+
+本 issue は以下の基盤を前提とする。いずれも develop へ merge 済みである。
+
+- issue 0140（reader-driven capability）: `Mp4SampleReader::required_sdp_format()` / `passthrough_capability()` が導入され、`Mp4PassthroughVideoCodecCapability` は reader 由来の required format を握る
+- issue 0142（sample entry 一貫性）: 全 `sample.sample_entry` の一貫性検証（`Mp4Error::InconsistentSampleDescription` + `collect_mismatched_track_info_fields`）が動作している
+- issue 0143（preference validation + factory pass-through）: `SoraVideoEncoderFactory::create` の `resolve_sdp_format` pass-through が回帰テストで固定され、`is_supported` の結果が preference validation の source of truth になっている
+
+加えて、`shiguredo_mp4` を `2026.5.0-canary.0` に更新し、`bitstream::av1` モジュールの汎用 parser を前提とする。
+
+- `parse_obus(input, Av1ObuParseContext)` が Low Overhead Bitstream Format の OBU 列を byte range 付きで返す（`ConfigObus` / `Sample` の 2 コンテキストで size field 規則を区別する）
+- `decode_leb128` が AV1 specification Section 4.10.5 の LEB128 を検証する
+- `parse_sequence_header(payload)` が Sequence Header の `Av1cBox` 対応 field、寸法、`reduced_still_picture_header` を返す
+- `parse_frame_header_prefix(payload, seq)` が Frame Header / Frame OBU の payload 先頭から RAP 判定に必要な field を返す（`Av1FrameHeaderPrefix::is_rap()`）
+
+OBU / LEB128 / Sequence Header / Frame Header の汎用解析は mp4-rs 側（mp4-rs の issue 0064 で提供済み）に寄せ、本 issue ではそれらを利用して MP4 特有の検証と passthrough 再構成だけを実装する。
+実装は、mp4-rs の issue 0084 で提供される `Av1SequenceHeader` の `operating_points_cnt_minus_1` / `operating_point_idc_0` 公開と `chroma_sample_position` 予約値検証の対応を待つ。
 
 ## 設計方針
 
 ### 対象範囲
 
-- `src/video_codecs/mp4.rs` の AV1 track configuration、AV1 sample framing、passthrough encoder callback payload を対象とする
+- `src/video_codecs/mp4.rs` の AV1 track configuration、AV1 sample framing、passthrough encoder callback payload と、`src/video_codecs/av1.rs` の SDK 固有ポリシーを対象とする
+- OBU / Sequence Header / Frame Header の汎用 parser は `shiguredo_mp4::bitstream::av1` を利用し、`src/video_codecs/av1.rs` に自前の bit reader を再実装しない
 - AV1 Codec ISO Media File Format Binding v1.3.0 Sections 2.3.4、2.4 と AV1 RTP Payload Format Sections 4.4、4.5 を根拠にする
 - AV1 OBU の framing と、AV1CodecConfigurationRecord に必要な Sequence Header field の検証までを対象とする
 - 固定 packetizer が operating point の選択・除去を行わないため、Sequence Header が operating point を 1 個だけ持ち、その `operating_point_idc[0] == 0` である bitstream に限定する
@@ -50,30 +71,28 @@ malformed payload では OBU 列が空になり、packet を生成しない。
 
 ### OBU parser
 
-外部 command や decoder に依存しない pure helper で、Low Overhead Bitstream Format の OBU 列を reader 初期化時に解析する。
-parser は OBU ごとに byte range、OBU type、extension header の有無、`obu_has_size_field`、payload range を返す。
-
-共通して次を検証する。
+OBU 列の解析は `shiguredo_mp4::bitstream::av1::parse_obus` を利用し、`Av1ObuParseContext::ConfigObus` / `Sample` の 2 コンテキストで size field 規則を区別する。
+`parse_obus` は OBU ごとに OBU type、extension header の temporal / spatial id、header / payload / OBU 全体の byte range を返し、次を検証する。
 
 - 空でない OBU header がある
 - `obu_forbidden_bit == 0`、`obu_reserved_1bit == 0` である
 - `obu_extension_flag == 1` なら extension header があり、その reserved 3 bit が 0 である
-- Sequence Header OBU は non-layer-specific であるため、`obu_extension_flag == 0` でなければならない
-- LEB128 は AV1 specification Section 4.10.5 に従い、最大 8 byte、8 byte 目の continuation bit は 0、値は `u32::MAX` 以下とし、shift、加算、`usize` 変換を checked arithmetic で行う
+- Sequence Header OBU と Temporal Delimiter OBU は non-layer-specific であるため、`obu_extension_flag == 0` でなければならない
+- LEB128 は AV1 specification Section 4.10.5 に従い、最大 8 byte、8 byte 目の continuation bit は 0、値は `u32::MAX` 以下とし、checked arithmetic で行う
 - LEB128 の非最短表現は同 Section が許容するため受理する
-- 宣言 payload size が残り byte 数以下であり、truncation、overflow、解釈不能な trailing byte を拒否する
-- OBU type と byte offset を error に含める
+- 宣言 payload size が残り byte 数以下であり、truncation、overflow を拒否する
+- Tile List OBU は AV1 Codec ISO Media File Format Binding v1.3.0 が許容しないため、両コンテキストで拒否する
 
-`configOBUs` と sample data では size field の規則が異なるため、parse mode を分ける。
+`parse_obus` は汎用 parser であり、本 issue の SDK 固有の検証は `Mp4SampleReader` 側で追加する。
 
 - `configOBUs` は空を許容する
-- `configOBUs` 内の全 OBU は `obu_has_size_field == 1` でなければならない
-- `configOBUs` の Sequence Header OBU は最大 1 個で、存在する場合は先頭 OBU でなければならない
-- `configOBUs` 内の Tile List OBU は固定 libwebrtc の packetizer が送信対象から除外するため、unsupported AV1 RTP OBU error とする
-- AV1CodecConfigurationRecord の `seq_profile`、`seq_level_idx_0`、`seq_tier_0`、`high_bitdepth`、`twelve_bit`、`monochrome`、`chroma_subsampling_x`、`chroma_subsampling_y`、`chroma_sample_position` と、`configOBUs` 内 Sequence Header OBU の対応 field を pure bit reader で比較する
-- sample data は空を拒否し、最後以外の全 OBU に `obu_has_size_field == 1` を要求する
-- sample の最後の OBU だけは size field の省略を許可し、省略時は sample の末尾までを payload とする
-- sample 内の Tile List OBU は AV1 Codec ISO Media File Format Binding v1.3.0 Section 2.4 が禁止するため、invalid AV1 sample OBU error とする
+- `configOBUs` 内の全 OBU は `obu_has_size_field == 1` でなければならない（`parse_obus` が検証する）
+- `configOBUs` の Sequence Header OBU は最大 1 個で、存在する場合は先頭 OBU でなければならない。`parse_obus` はこの制約を検証しないため、返却された OBU 列から SDK 側で確認する
+- `configOBUs` 内の Tile List OBU は `parse_obus` が Binding の根拠で拒否する
+- AV1CodecConfigurationRecord の `seq_profile`、`seq_level_idx_0`、`seq_tier_0`、`high_bitdepth`、`twelve_bit`、`monochrome`、`chroma_subsampling_x`、`chroma_subsampling_y`、`chroma_sample_position` と、`configOBUs` 内 Sequence Header OBU の対応 field を `parse_sequence_header` の結果と比較する
+- sample data は空を拒否し、最後以外の全 OBU に `obu_has_size_field == 1` を要求する（`parse_obus` が検証する）
+- sample の最後の OBU だけは size field の省略を許可し、省略時は sample の末尾までを payload とする（`parse_obus` が検証する）
+- sample 内の Tile List OBU は `parse_obus` が Binding の根拠で拒否する
 - sample の byte 列は書き換えず、parser は検証と OBU 順序の確認にだけ使う
 
 全 AV1 sample を feeder thread の開始前に解析し、malformed OBU は sample index、sample 内 byte offset、理由を含む `Mp4Error` で reader 初期化を失敗させる。
@@ -89,16 +108,11 @@ capturer は sample index 0 から再生と loop 再開を行うため、最初�
 `configOBUs` の Sequence Header OBU が存在しても、この sync sample 自身の条件を省略しない。
 
 MP4 の sync flag だけで AV1 random access point を保証しない。
-Sequence Header bit reader が返す `reduced_still_picture_header` などの必要な context を用い、各 sync sample の最初の Frame Header OBU または Frame OBU の uncompressed header 冒頭を pure bit reader で解析する。
-AV1 Codec ISO Media File Format Binding v1.3.0 Section 2.4 に従い、次をすべて要求する。
-
-- `show_existing_frame == 0`
-- `frame_type == KEY_FRAME`
-- `show_frame == 1`
-
-`reduced_still_picture_header == 1` で AV1 specification が暗黙に定める値も同じ条件として扱う。
+各 sync sample の最初の Frame Header OBU または Frame OBU の payload を `shiguredo_mp4::bitstream::av1::parse_frame_header_prefix` に通し、`parse_sequence_header` が返す `reduced_still_picture_header` を context として RAP 判定する。
+`Av1FrameHeaderPrefix::is_rap()` が AV1 Codec ISO Media File Format Binding v1.3.0 Section 2.4 の条件（`show_existing_frame == 0`、`frame_type == KEY_FRAME`、`show_frame == 1`）を判定する。
+`reduced_still_picture_header == 1` のときは `parse_frame_header_prefix` が暗黙の Key / shown frame を返す。
 入力不足、条件不一致、最初の frame より前に解釈不能な frame header がある場合は、sample index と OBU offset を含む invalid AV1 sync sample error で reader 初期化を失敗させる。
-Frame Header の残りは本 issue で意味解析せず、上記 field を得るために必要な分岐だけを読む。
+Frame Header の残りは本 issue で意味解析しない。
 
 encoder callback へ渡す AV1 payload は次の byte 列とする。
 
@@ -123,7 +137,7 @@ AV1 ISOBMFF では Sequence Header より前の Metadata OBU も許容される�
 AV1 RTP Payload Format Section 7.2 では、`profile`、`level-idx`、`tier` の省略値はそれぞれ 0、5、0 である。
 現行の bare `AV1` capability はこの既定値を広告するため、AV1CodecConfigurationRecord の値が既定値を超える bitstream をそのまま送ると、受信側が宣言した能力を超える可能性がある。
 
-issue 0140 で導入した reader 由来の required `SdpVideoFormat` 経路（`Mp4SampleReader::required_sdp_format` から `Mp4SampleReader::passthrough_capability()` を通じて `Mp4PassthroughVideoCodecCapability` に伝える）を AV1 にも拡張する。
+issue 0140 で導入された reader 由来の required `SdpVideoFormat` 経路（`Mp4SampleReader::required_sdp_format` から `Mp4SampleReader::passthrough_capability()` を通じて `Mp4PassthroughVideoCodecCapability` に伝える）を AV1 にも拡張する。
 AV1 required format には AV1CodecConfigurationRecord の `seq_profile`、`seq_level_idx_0`、`seq_tier_0` を 10 進文字列の `profile`、`level-idx`、`tier` parameter として必ず設定し、省略値へ fallback しない。
 
 `Mp4PassthroughVideoCodecCapability` は AV1 reader について required format だけを encoder format として返す。
@@ -157,13 +171,14 @@ issue 0142 で導入した全 `sample.sample_entry` の一貫性検証（`Mp4Err
 
 ### Sequence Header の field 検証
 
-AV1 Sequence Header OBU の pure bit reader は AV1CodecConfigurationRecord との比較に必要な field だけを返すが、対象 field へ到達するまでの条件分岐と可変長構造を AV1 specification に従って読み飛ばす。
-入力不足、予約値、算術 overflow は invalid AV1 sequence header error とする。
+Sequence Header OBU の解析は `shiguredo_mp4::bitstream::av1::parse_sequence_header` を利用し、AV1CodecConfigurationRecord との比較に必要な field（`seq_profile`、`seq_level_idx_0`、`seq_tier_0`、`high_bitdepth`、`twelve_bit`、`monochrome`、`chroma_subsampling_x`、`chroma_subsampling_y`、`chroma_sample_position`）と `reduced_still_picture_header` を取得する。
+`parse_sequence_header` は timing_info / decoder_model_info / operating point を AV1 specification に従って正しく走査し、truncation と予約値の `seq_profile` を error にする。
 decoder を起動して検証の代用にしない。
 
 AV1 RTP の SDP `level-idx` / `tier` は RTP stream で使用され得る最大値を表すが、AV1CodecConfigurationRecord が直接保持するのは operating point 0 の値だけである。
 複数 operating point の能力を過小広告しないため、全 Sequence Header で `operating_points_cnt_minus_1 == 0` かつ `operating_point_idc[0] == 0` を要求する。
-それ以外は unsupported AV1 operating points error で reader 初期化を失敗させる。
+`parse_sequence_header` は複数 operating point を汎用解析するが、その拒否は本 SDK のポリシーであり、`Av1SequenceHeader` が公開する `operating_points_cnt_minus_1` / `operating_point_idc_0` を使って SDK 側で判定し、unsupported AV1 operating points error で reader 初期化を失敗させる。
+予約値の `chroma_sample_position == 3`（CSP_RESERVED）は `parse_sequence_header` が検証する。
 single operating point では `seq_level_idx_0` / `seq_tier_0` が送信 stream の required SDP 値になる。
 
 全 sample 内の全 Sequence Header OBU について同じ field を抽出し、その sample entry の AV1CodecConfigurationRecord と一致することを確認する。
@@ -207,6 +222,8 @@ CI で外部 command を起動したり、ネットワークから fixture を�
 ## 変更対象
 
 - `src/video_codecs/mp4.rs`
+- `src/video_codecs/av1.rs`（SDK 固有のポリシーと統合ロジックだけに縮小。OBU / Sequence Header / Frame Header の汎用 parser は `shiguredo_mp4::bitstream::av1` を利用する）
+- `Cargo.toml`（`shiguredo_mp4` を `2026.5.0-canary.0` へ更新）
 - `testdata/` の AV1 fixture
 - `CHANGES.md`
 
@@ -219,18 +236,8 @@ CI で外部 command を起動したり、ネットワークから fixture を�
 - `configOBUs` と sample の双方に同一 Sequence Header OBU がある fixture で、callback payload に両方が格納順のまま残る
 - 空の `configOBUs` では sync / non-sync sample の payload が従来と一致する
 - callback の frame type は sync sample で Key、non-sync sample で Delta のまま変わらない
-- pure OBU parser の table-driven test で次を確認する
-  - config の複数 OBU と sample の複数 OBU
-  - sample の最終 OBUだけが size field を省略する入力
-  - 空 config の受理と空 sample の拒否
-  - forbidden bit、reserved bit、欠落 extension header、extension reserved bit の拒否
-  - extension header を持つ Sequence Header OBU の拒否
-  - 8 byte 目で終端する LEB128 と非最短表現の受理
-  - 8 byte 目の continuation bit、unterminated LEB128、`u32::MAX` 超過、size 算術 overflow、宣言長超過、trailing byte の拒否
-  - config 内 OBU の size field 省略と、sample の最終以外の OBU の size field 省略を拒否する
-  - config 内の複数 Sequence Header と、先頭以外の Sequence Header を拒否する
-  - config と sample の Tile List OBU をそれぞれの error で拒否する
-- Sequence Header bit reader の table-driven test で AV1CodecConfigurationRecord の各 field の一致と不一致、truncation、予約値を確認する
+- OBU / LEB128 / Sequence Header / Frame Header の汎用 parser の table-driven test と property test は `shiguredo_mp4::bitstream::av1` 側（mp4-rs の issue 0064）で確認され、SDK ではそれらを利用した統合テストだけを持つ
+- `configOBUs` の複数 Sequence Header と先頭以外の Sequence Header を、`parse_obus` の返却 OBU 列から SDK 側で拒否する
 - single operating point かつ `operating_point_idc[0] == 0` を受理し、複数 operating point と非 0 の `operating_point_idc[0]` を unsupported AV1 operating points error で拒否する
 - sync sample の先頭 Frame Header OBU と Frame OBU の双方で `show_existing_frame == 0`、`frame_type == KEY_FRAME`、`show_frame == 1` を受理する
 - `show_existing_frame == 1`、KEY_FRAME 以外、`show_frame == 0`、truncated uncompressed header、必要な Sequence Header context の欠落を invalid AV1 sync sample error で拒否する
@@ -255,9 +262,8 @@ CI で外部 command を起動したり、ネットワークから fixture を�
   - bare `AV1` は preference の codec type 判定にだけ使用し、実 format 解決で required parameter を省略しない
 - 後続 sample entry の AV1CodecConfigurationRecord または `configOBUs` が変わる場合を、sample index と相違 field を含む error で拒否する
 - malformed fixture / synthetic byte table は reader 構築時に失敗し、feeder thread と encoder callback を開始しない
-- bounded な input byte 列を対象に、pure OBU parser が成功した場合の OBU range が入力を順序どおり隙間なく被覆し、各 header / payload range が入力範囲内にあり、各 range の元 byte を連結すると入力と一致する property test がある
 - direct encoder test は実 `Mp4PassthroughEncoder` と実 `VideoEncoderEncodedImageCallback` を使い、mock / stub、sleep、`#[ignore]`、外部 command、ネットワークを使用しない
-- 固定 libwebrtc commit `1f975dfd761af6e5d76d28333191973b258d82a8` の `RtpPacketizerAv1::ParseObus`、aggregation header の N bit、marker 設定、`ParseSdpForAV1Profile`、`AV1IsSameProfile` を source audit し、production code の日本語コメントへ記録する
+- 固定 libwebrtc commit `6f37672d358475cd17544121a12494da454d85fb` の `RtpPacketizerAv1::ParseObus`、aggregation header の N bit、marker 設定、`ParseSdpForAV1Profile`、`AV1IsSameProfile` を source audit し、production code の日本語コメントへ記録する
 - `cargo test --workspace` が成功する
 - `cargo clippy --workspace --all-targets -- -D warnings` が成功する
 - `CHANGES.md` の develop セクションに `[FIX]` を追記する
