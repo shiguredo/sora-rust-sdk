@@ -641,9 +641,12 @@ async fn main() -> Result<()> {
         return run_video_codec_list(&args);
     }
 
-    log::log_to_debug(log::Severity::Info);
-    log::enable_timestamps();
-    log::enable_threads();
+    // ログの設定は最初のログ出力前に行う必要がある。
+    let mut log_config = log::LoggingConfig::new();
+    log_config.set_debug_severity(log::Severity::Info);
+    log_config.set_log_timestamp(true);
+    log_config.set_log_thread(true);
+    log::initialize_logging(log_config);
 
     validate_args(&args)?;
 

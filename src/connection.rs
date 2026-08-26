@@ -15,8 +15,9 @@ use shiguredo_http11::{Request, ResponseDecoder, auth::BasicAuth, uri::Uri};
 use shiguredo_webrtc::{
     AudioTrack, CreateSessionDescriptionObserver, CreateSessionDescriptionObserverHandler,
     CxxString, DataChannel, DataChannelObserver, DataChannelObserverHandler, DataChannelState,
-    IceCandidateRef, IceServer, MediaStreamTrack, PeerConnection, PeerConnectionDependencies,
-    PeerConnectionObserver, PeerConnectionObserverHandler, PeerConnectionOfferAnswerOptions,
+    FrameTransformer, FrameTransformerHandler, IceCandidateRef, IceServer, MediaStreamTrack,
+    PeerConnection, PeerConnectionDependencies, PeerConnectionObserver,
+    PeerConnectionObserverHandler, PeerConnectionOfferAnswerOptions,
     PeerConnectionRtcConfiguration, PeerConnectionState, RTCStatsReport, Resolution, RtcError,
     RtpEncodingParameters, RtpEncodingParametersVector, RtpReceiver, RtpSender, RtpTransceiver,
     SSLCertChainRef, SSLCertificateVerifier, SSLCertificateVerifierHandler, SdpType,
@@ -80,6 +81,8 @@ pub struct SoraConnectionBuilder {
     event_handler: Option<Box<dyn SoraConnectionEventHandler + Send>>,
     sender_video_track: Option<VideoTrack>,
     sender_audio_track: Option<AudioTrack>,
+    sender_video_transform: Option<Box<dyn FrameTransformerHandler + Send>>,
+    receiver_video_transform: Option<Box<dyn FrameTransformerHandler + Send>>,
 
     // connect 時の設定
     client_id: Option<String>,
@@ -125,6 +128,8 @@ impl SoraConnectionBuilder {
             event_handler: Some(event_handler),
             sender_video_track: None,
             sender_audio_track: None,
+            sender_video_transform: None,
+            receiver_video_transform: None,
             client_id: None,
             bundle_id: None,
             metadata: None,
@@ -168,6 +173,33 @@ impl SoraConnectionBuilder {
     /// [AudioTrack] を渡す。
     pub fn sender_audio_track(mut self, track: AudioTrack) -> Self {
         self.sender_audio_track = Some(track);
+        self
+    }
+
+    /// 送信する映像のエンコード済みフレーム変換を設定する。
+    ///
+    /// [FrameTransformerHandler] を実装した型のインスタンスを渡すと、
+    /// エンコーダーとパケタイザーの間でエンコード済みフレームを加工できる。
+    /// 音声トラックには適用されない。
+    pub fn sender_video_transform(
+        mut self,
+        transform: Box<dyn FrameTransformerHandler + Send>,
+    ) -> Self {
+        self.sender_video_transform = Some(transform);
+        self
+    }
+
+    /// 受信する映像のエンコード済みフレーム変換を設定する。
+    ///
+    /// [FrameTransformerHandler] を実装した型のインスタンスを渡すと、
+    /// デパケタイザーとデコーダーの間でエンコード済みフレームを加工できる。
+    /// 適用対象は全ての受信ビデオトラックで、渡された 1 つの transform を共有する。
+    /// 音声トラックには適用されない。
+    pub fn receiver_video_transform(
+        mut self,
+        transform: Box<dyn FrameTransformerHandler + Send>,
+    ) -> Self {
+        self.receiver_video_transform = Some(transform);
         self
     }
 
@@ -580,6 +612,8 @@ pub struct SoraConnection {
     offer_simulcast: bool,
     simulcast_encodings: Vec<SimulcastEncodingConfig>,
     video_sender: Option<RtpSender>,
+    sender_video_frame_transformer: Option<FrameTransformer>,
+    receiver_video_frame_transformer: Option<FrameTransformer>,
     command_rx: mpsc::UnboundedReceiver<SoraConnectionCommand>,
     event_tx: mpsc::UnboundedSender<SoraEvent>,
     event_rx: mpsc::UnboundedReceiver<SoraEvent>,
@@ -842,6 +876,8 @@ impl SoraConnection {
             offer_simulcast: false,
             simulcast_encodings: Vec::new(),
             video_sender: None,
+            sender_video_frame_transformer: None,
+            receiver_video_frame_transformer: None,
             command_rx,
             event_tx,
             event_rx,
@@ -1078,6 +1114,30 @@ impl SoraConnection {
                             }
                         }
                         SoraEvent::Track(transceiver) => {
+                            // receiver_video_transform が設定されている、または既に
+                            // 共有の receiver transform を作成済みの場合のみ適用する。
+                            let receiver_transform_enabled =
+                                self.config.receiver_video_transform.is_some()
+                                    || self.receiver_video_frame_transformer.is_some();
+                            if receiver_transform_enabled {
+                                let mut receiver = transceiver.receiver();
+                                if matches!(receiver.track().kind().as_deref(), Ok("video")) {
+                                    if self.receiver_video_frame_transformer.is_none() {
+                                        let handler = self
+                                            .config
+                                            .receiver_video_transform
+                                            .take()
+                                            .expect("receiver_video_transform は設定済み");
+                                        self.receiver_video_frame_transformer =
+                                            Some(FrameTransformer::new_with_handler(handler));
+                                    }
+                                    let transformer = self
+                                        .receiver_video_frame_transformer
+                                        .as_ref()
+                                        .expect("設定直後に Some になる");
+                                    receiver.set_frame_transformer(transformer);
+                                }
+                            }
                             handler.on_track(transceiver);
                         }
                         SoraEvent::RemoveTrack(receiver) => {
@@ -1571,7 +1631,13 @@ impl SoraConnection {
     fn add_sender_tracks(&mut self) -> Result<()> {
         if let Some(track) = self.config.sender_video_track.take() {
             let media_track = track.cast_to_media_stream_track();
-            let sender = self.add_sender_media_track(&media_track)?;
+            let mut sender = self.add_sender_media_track(&media_track)?;
+            if let Some(handler) = self.config.sender_video_transform.take() {
+                // add_track 直後に設定することで最初のフレームから変換を適用する。
+                let transformer = FrameTransformer::new_with_handler(handler);
+                sender.set_frame_transformer(&transformer);
+                self.sender_video_frame_transformer = Some(transformer);
+            }
             self.video_sender = Some(sender);
         }
         if let Some(track) = self.config.sender_audio_track.take() {

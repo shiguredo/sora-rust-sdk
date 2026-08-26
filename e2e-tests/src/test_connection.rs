@@ -2,7 +2,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use shiguredo_webrtc::{AudioTrack, IceServer, VideoTrack};
+use shiguredo_webrtc::{AudioTrack, FrameTransformerHandler, IceServer, VideoTrack};
 use sora_sdk::{
     Audio, ConnectDataChannel, ForwardingFilter, JsonString, ProxyInfo, Result, Role,
     RpcRequestOptions, RpcResponse, SignalingDirection, SignalingType, SoraConnection,
@@ -153,6 +153,22 @@ impl SoraTestConnectionBuilder {
 
     pub fn sender_audio_track(mut self, track: AudioTrack) -> Self {
         self.inner = self.inner.sender_audio_track(track);
+        self
+    }
+
+    pub fn sender_video_transform(
+        mut self,
+        transform: Box<dyn FrameTransformerHandler + Send>,
+    ) -> Self {
+        self.inner = self.inner.sender_video_transform(transform);
+        self
+    }
+
+    pub fn receiver_video_transform(
+        mut self,
+        transform: Box<dyn FrameTransformerHandler + Send>,
+    ) -> Self {
+        self.inner = self.inner.receiver_video_transform(transform);
         self
     }
 

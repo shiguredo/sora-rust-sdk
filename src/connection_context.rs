@@ -3,9 +3,9 @@ use std::sync::{Arc, Mutex};
 
 use shiguredo_webrtc::{
     AudioDecoderFactory, AudioDeviceModule, AudioDeviceModuleAudioLayer, AudioEncoderFactory,
-    AudioProcessingBuilder, AudioTrack, AudioTrackSource, ConnectionContext, Environment,
-    PeerConnectionFactory, PeerConnectionFactoryDependencies, RtcEventLogFactory, Thread,
-    VideoDecoderFactory, VideoEncoderFactory, VideoTrack, VideoTrackSource, random_string,
+    AudioOptions, AudioProcessingBuilder, AudioTrack, AudioTrackSource, ConnectionContext,
+    Environment, PeerConnectionFactory, PeerConnectionFactoryDependencies, RtcEventLogFactory,
+    Thread, VideoDecoderFactory, VideoEncoderFactory, VideoTrack, VideoTrackSource, random_string,
 };
 
 use crate::error::Result;
@@ -191,7 +191,8 @@ impl SoraConnectionContext {
 
     /// AudioTrackSource を作成する。
     pub fn create_audio_source(&self) -> Result<AudioTrackSource> {
-        Ok(self.factory.create_audio_source()?)
+        let options = AudioOptions::new();
+        Ok(self.factory.create_audio_source(&options)?)
     }
 
     /// AudioTrack を作成する。
