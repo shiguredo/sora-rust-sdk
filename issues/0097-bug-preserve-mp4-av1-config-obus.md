@@ -46,7 +46,7 @@ malformed payload では OBU 列が空になり、packet を生成しない。
 - issue 0142（sample entry 一貫性）: 全 `sample.sample_entry` の一貫性検証（`Mp4Error::InconsistentSampleDescription` + `collect_mismatched_track_info_fields`）が動作している
 - issue 0143（preference validation + factory pass-through）: `SoraVideoEncoderFactory::create` の `resolve_sdp_format` pass-through が回帰テストで固定され、`is_supported` の結果が preference validation の source of truth になっている
 
-加えて、`shiguredo_mp4` を `2026.5.0-canary.0` に更新し、`bitstream::av1` モジュールの汎用 parser を前提とする。
+加えて、`shiguredo_mp4` を `2026.5.0-canary.1` に更新し、`bitstream::av1` モジュールの汎用 parser を前提とする。
 
 - `parse_obus(input, Av1ObuParseContext)` が Low Overhead Bitstream Format の OBU 列を byte range 付きで返す（`ConfigObus` / `Sample` の 2 コンテキストで size field 規則を区別する）
 - `decode_leb128` が AV1 specification Section 4.10.5 の LEB128 を検証する
@@ -54,7 +54,7 @@ malformed payload では OBU 列が空になり、packet を生成しない。
 - `parse_frame_header_prefix(payload, seq)` が Frame Header / Frame OBU の payload 先頭から RAP 判定に必要な field を返す（`Av1FrameHeaderPrefix::is_rap()`）
 
 OBU / LEB128 / Sequence Header / Frame Header の汎用解析は mp4-rs 側（mp4-rs の issue 0064 で提供済み）に寄せ、本 issue ではそれらを利用して MP4 特有の検証と passthrough 再構成だけを実装する。
-実装は、mp4-rs の issue 0084 で提供される `Av1SequenceHeader` の `operating_points_cnt_minus_1` / `operating_point_idc_0` 公開と `chroma_sample_position` 予約値検証の対応を待つ。
+`Av1SequenceHeader` の `operating_points_cnt_minus_1` / `operating_point_idc_0` 公開と `chroma_sample_position` 予約値検証（mp4-rs の issue 0084）は `2026.5.0-canary.1` に含まれている。
 
 ## 設計方針
 
@@ -223,7 +223,7 @@ CI で外部 command を起動したり、ネットワークから fixture を�
 
 - `src/video_codecs/mp4.rs`
 - `src/video_codecs/av1.rs`（SDK 固有のポリシーと統合ロジックだけに縮小。OBU / Sequence Header / Frame Header の汎用 parser は `shiguredo_mp4::bitstream::av1` を利用する）
-- `Cargo.toml`（`shiguredo_mp4` を `2026.5.0-canary.0` へ更新）
+- `Cargo.toml`（`shiguredo_mp4` を `2026.5.0-canary.1` へ更新）
 - `testdata/` の AV1 fixture
 - `CHANGES.md`
 
