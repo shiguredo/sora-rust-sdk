@@ -276,12 +276,14 @@ impl Mp4Timestamp {
 /// コンストラクタでファイルを開き、全サンプルのメタデータを事前解析する。
 /// `clone()` で安価に共有でき、複数の [`Mp4VideoCapturer`] から同時にサンプルを読み出せる。
 /// demux とファイル I/O は reader 1 つにつき 1 回・1 スレッドに集約される。
+/// 再生位置や再生時計はクローン側に持たないため、各 [`Mp4VideoCapturer`] が独立して再生できる。
 ///
 /// ファイルデータはメモリに保持せず、必要に応じて内部の I/O スレッドがファイルから読み込む。
 /// 最後のクローンがドロップされると I/O スレッドを停止する。
 ///
 /// [`Mp4VideoCapturer::video_source`] を複数の encoder に渡せない制約と回避策は、
 /// `docs/INPUT_MP4.md` の「SDK での利用」を参照すること。
+#[derive(Clone)]
 pub struct Mp4SampleReader {
     /// 全クローンで共有する内部状態。
     inner: Arc<Mp4SampleReaderInner>,
@@ -300,20 +302,6 @@ struct Mp4SampleReaderInner {
     cumulative: Vec<Mp4Timestamp>,
     /// ファイル I/O を担う内部スレッドの制御ハンドル。
     io: Mp4SampleReaderIo,
-}
-
-impl Clone for Mp4SampleReader {
-    /// 安価なクローンを作る。
-    ///
-    /// 内部状態 (`Mp4SampleReaderInner`) は `Arc` で共有され、
-    /// demux 結果とファイル I/O スレッドは全クローンで共通になる。
-    /// 再生位置や再生時計はクローン側に持たないため、各 [`Mp4VideoCapturer`] が
-    /// 独立して再生できる。
-    fn clone(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-        }
-    }
 }
 
 /// ファイル I/O スレッドへのサンプル読み出し依頼。
@@ -344,8 +332,15 @@ impl Drop for Mp4SampleReaderIo {
         // チャネルを閉じてから join する (仕組みは構造体の doc コメント参照)。
         self.sender.take();
         if let Some(handle) = self.thread.take() {
-            // チャネルが閉じられると I/O スレッドはすぐに終了するため、join はすぐ完了する。
-            let _ = handle.join();
+            // チャネルが閉じられると I/O スレッドは進行中の読み出し (最大 1 回) の
+            // 完了後に終了するため、join はすぐ完了する。
+            if let Err(payload) = handle.join() {
+                // I/O スレッドが panic した場合 (実装バグ) は、ここでもログに残す。
+                rtc_log_error!(
+                    "MP4: I/O thread panicked: {:?}",
+                    payload.downcast_ref::<&str>()
+                );
+            }
         }
     }
 }
@@ -510,7 +505,7 @@ impl Mp4SampleReader {
         let (io_sender, io_receiver) = mpsc::channel::<Mp4SampleIoRequest>();
         // I/O スレッドは Mp4SampleReaderInner を Arc で共有しない。
         // 共有すると最後のクローンが drop されても refcount が 0 にならず、
-        // Mp4SampleReaderIo の Drop (構造体 doc 参照) による終了・join が走らない。
+        // Mp4SampleReaderIo の Drop (構造体 doc 参照) による終了・ join が走らない。
         // samples は全体をスレッドへ move し、Inner にはサンプル数だけを残す。
         let io_track_info = track_info.clone();
         let io_thread = thread::spawn(move || {
@@ -780,7 +775,7 @@ impl Mp4SampleReader {
     /// 複数のクローンから同時に呼び出してよい (読み出しは I/O スレッドに直列化される)。
     ///
     /// 応答待ちの間も `stop` をポーリングし、設定されていたら `Ok(None)` を返す
-    /// (共有 I/O スレッドが他 capturer の要求で塞がっていても、停止・join を妨げない)。
+    /// (共有 I/O スレッドが他 capturer の要求で塞がっていても、停止・ join を妨げない)。
     ///
     /// H.264/H.265 の場合:
     /// - MP4 内の AVCC/HVCC 形式 (4 バイト長さプレフィックス) を
@@ -790,6 +785,13 @@ impl Mp4SampleReader {
     /// VP8/VP9/AV1 の場合:
     /// - MP4 から抽出したデータをそのまま使用する。
     fn get_sample(&self, index: usize, stop: &AtomicBool) -> Result<Option<Mp4EncodedSample>> {
+        // 範囲外の index は内部の利用バグ。共有 I/O スレッド側の panic だと全 capturer の
+        // 呼び出しが BUG panic 連鎖になるため、送信前に呼び出し側で明確に panic させる。
+        assert!(
+            index < self.inner.sample_count,
+            "BUG: sample index {index} is out of range (sample_count={})",
+            self.inner.sample_count
+        );
         let (response_tx, response_rx) = mpsc::channel();
         let sender = self.inner.io.sender.as_ref().expect(
             "BUG: I/O thread sender must be available while an Mp4SampleReader clone is alive",
@@ -826,8 +828,8 @@ impl Mp4SampleReader {
 /// 指定インデックスのサンプルデータをファイルから読み出し、送信用に変換して返す。
 ///
 /// I/O スレッド上で実行され、複数のキャプチャラーの要求を直列化する。
-/// 変換内容は `get_sample` と同じ (H.264/H.265 は Annex B 変換 + parameter sets 付与、
-/// VP8/VP9/AV1 はそのまま)。
+/// H.264/H.265 は AVCC/HVCC を Annex B に変換し、キーフレームには parameter sets を付与する。
+/// VP8/VP9/AV1 は抽出したデータをそのまま返す。
 fn read_sample(
     file: &mut BufReader<std::fs::File>,
     track_info: &Mp4VideoTrackInfo,
@@ -1257,7 +1259,13 @@ impl Drop for Mp4VideoCapturer {
             // フィーダースレッドは待機中 (最大 MAX_SLEEP_DURATION ごと) と
             // I/O 応答待ち中 (最大 1ms ごと) のどちらも停止フラグを確認するため、
             // join は停止フラグ設定後すぐに完了する。
-            let _ = handle.join();
+            if let Err(payload) = handle.join() {
+                // フィーダースレッドが panic した場合 (実装バグ) は、ここでもログに残す。
+                rtc_log_error!(
+                    "MP4: feeder thread panicked: {:?}",
+                    payload.downcast_ref::<&str>()
+                );
+            }
         }
     }
 }
@@ -1725,7 +1733,6 @@ mod tests {
                 .expect("パスは有効な UTF-8 である必要があります"),
         )
         .expect("フィクスチャ MP4 のパースに失敗しました");
-        let reader = reader;
         assert_eq!(reader.codec_type(), VideoCodecType::H264);
         assert!(!reader.is_empty());
         // 中断テストではないため、停止フラグは常に false のまま渡す。
@@ -1953,7 +1960,6 @@ mod tests {
                 .expect("パスは有効な UTF-8 である必要があります"),
         )
         .expect("フィクスチャ MP4 のパースに失敗しました");
-        let reader = reader;
 
         let file = std::fs::File::options()
             .write(true)
@@ -2384,7 +2390,7 @@ mod tests {
     // 停止フラグが設定された状態で get_sample を呼ぶと、I/O 応答を待たずに
     // Ok(None) を返すことを確認する。
     //
-    // 共有 I/O スレッドが他 capturer の要求で塞がっていても停止・join を妨げない
+    // 共有 I/O スレッドが他 capturer の要求で塞がっていても停止・ join を妨げない
     // という契約の回帰テスト。依頼は送信済みだが、応答を待つ前に stop を観測して
     // 中断する (中断された依頼は I/O スレッドが後で処理し、送信先が無いため破棄される)。
     #[test]
@@ -2431,11 +2437,7 @@ mod tests {
     }
 
     // 1 つの reader を clone して複数の Mp4VideoCapturer を同時に動かし、
-    // 各 video_source() がそれぞれ正常なフレームを供給できることを確認する。
-    //
-    // 各 capturer は専用の VideoFrameBuffer を作るため、debug ビルドの
-    // per-buffer スレッド固定 assertion (video_frame_buffer callback called
-    // from multiple threads) に抵触しないことの回帰テストでもある。
+    // 各 video_source() がそれぞれ正常なフレームを供給し続けられることを確認する。
     #[test]
     fn multiple_capturers_share_single_reader() {
         // 実フレームを観測するため、実際の VideoTrack を生成できるコンテキストを使う。
@@ -2462,19 +2464,17 @@ mod tests {
             sinks.push((sink, rx));
         }
 
-        // フィクスチャは 25 サンプル × 40ms = 1 ループ 1 秒のため、
-        // 1 ループ以上待ってフレームが供給され続けることを確認する。
-        thread::sleep(std::time::Duration::from_millis(1200));
-
+        // 各 capturer が 10 フレームを連続受信できることを、タイムアウト付きで待って確認する。
+        // フィクスチャは 25fps のため 10 フレームは約 400ms 分に相当し、供給が継続している
+        // ことを表す。固定 sleep は負荷時にフレークし得るため、recv_timeout で必要数を受信する。
         for (index, (_sink, rx)) in sinks.iter().enumerate() {
             // sink と track は保持し続ける必要がある (drop すると登録が解除される)。
-            let frames: Vec<_> = rx.try_iter().collect();
-            assert!(
-                frames.len() >= 10,
-                "capturer {index} は 10 フレーム以上供給できるはずですが、実際は {} フレームでした",
-                frames.len()
-            );
-            for frame in &frames {
+            for _ in 0..10 {
+                let frame = rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap_or_else(|_| {
+                        panic!("capturer {index} は 5 秒以内に 10 フレーム供給できるはずです")
+                    });
                 assert_eq!(
                     frame.width, 320,
                     "capturer {index} のフレーム幅は 320 のはずです"

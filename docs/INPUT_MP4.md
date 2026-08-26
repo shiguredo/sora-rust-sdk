@@ -68,7 +68,7 @@ release ビルドではこの assertion はありませんが、同じ使い方�
 
 ### reader は共有できる
 
-capturer を分けても、同じファイルなら `Mp4SampleReader` は `clone` して共有できます。
+capturer を分けても、同じファイルなら `Mp4SampleReader` は `clone()` して共有できます。
 
 ```rust
 let reader = Mp4SampleReader::new(path)?;
