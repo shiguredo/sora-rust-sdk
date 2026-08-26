@@ -571,7 +571,7 @@ fn build_and_run_connection(
         if let Some(ref device_id) = args.audio_input_device {
             let state = external_adm
                 .as_ref()
-                .expect("BUG: external_adm が None です")
+                .expect("BUG: external_adm must not be None")
                 .state();
             let mut capturer = AudioDeviceCapturer::new(Some(device_id.clone()), state)?;
             capturer.start()?;
@@ -685,7 +685,7 @@ async fn main() -> Result<()> {
                 // server 起因で run() が先に完了した場合も shutdown_connection が結果を返す。
                 break;
             }
-            _ = async { duration_sleep.as_mut().as_pin_mut().expect("duration_sleep は Some である必要があります").await }, if duration_sleep.is_some() && renderer_error.is_none() => {
+            _ = async { duration_sleep.as_mut().as_pin_mut().expect("BUG: duration_sleep must be Some when this branch is taken").await }, if duration_sleep.is_some() && renderer_error.is_none() => {
                 rtc_log_info!("Specified duration elapsed, disconnecting");
                 break;
             }
