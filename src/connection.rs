@@ -1127,14 +1127,14 @@ impl SoraConnection {
                                             .config
                                             .receiver_video_transform
                                             .take()
-                                            .expect("receiver_video_transform は設定済み");
+                                            .expect("BUG: receiver_video_transform must be set when transform is enabled");
                                         self.receiver_video_frame_transformer =
                                             Some(FrameTransformer::new_with_handler(handler));
                                     }
                                     let transformer = self
                                         .receiver_video_frame_transformer
                                         .as_ref()
-                                        .expect("設定直後に Some になる");
+                                        .expect("BUG: receiver_video_frame_transformer must be Some right after assignment");
                                     receiver.set_frame_transformer(transformer);
                                 }
                             }

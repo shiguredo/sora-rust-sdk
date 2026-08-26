@@ -1049,14 +1049,14 @@ fn write_ansi_output_fails_on_readonly_file() {
         std::process::id(),
         "write",
     ));
-    std::fs::write(&path, "test").expect("temp file write failed");
+    std::fs::write(&path, "test").expect("一時ファイルの書き込みに失敗しました");
     let mut perms = std::fs::metadata(&path)
-        .expect("metadata failed")
+        .expect("メタデータの取得に失敗しました")
         .permissions();
     perms.set_readonly(true);
-    std::fs::set_permissions(&path, perms).expect("set readonly failed");
+    std::fs::set_permissions(&path, perms).expect("読み取り専用属性の設定に失敗しました");
 
-    let file = std::fs::File::open(&path).expect("open readonly file failed");
+    let file = std::fs::File::open(&path).expect("読み取り専用ファイルのオープンに失敗しました");
     let mut writer = file;
     let result = ansi_renderer::write_ansi_output(&mut writer, "output");
     assert!(
@@ -1069,15 +1069,15 @@ fn write_ansi_output_fails_on_readonly_file() {
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
-            .expect("restore permissions failed");
+            .expect("権限の復元に失敗しました");
     }
     #[cfg(not(unix))]
     {
         let mut perms = std::fs::metadata(&path)
-            .expect("metadata failed")
+            .expect("メタデータの取得に失敗しました")
             .permissions();
         perms.set_readonly(false);
-        std::fs::set_permissions(&path, perms).expect("unset readonly failed");
+        std::fs::set_permissions(&path, perms).expect("読み取り専用属性の解除に失敗しました");
     }
-    std::fs::remove_file(&path).expect("remove temp file failed");
+    std::fs::remove_file(&path).expect("一時ファイルの削除に失敗しました");
 }
