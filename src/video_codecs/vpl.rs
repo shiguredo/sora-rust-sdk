@@ -1,7 +1,8 @@
 //! Intel VPL ハードウェアエンコーダー/デコーダー実装。
 //!
-//! `#[cfg(feature = "vpl")]` でのみコンパイルされる。
-use std::collections::HashMap;
+//! `#[cfg(all(feature = "vpl", target_os = "linux"))]` でのみコンパイルされる。
+//!
+//! VPL は Linux 専用のため、モジュールは Linux でのみコンパイルされる。
 use std::sync::{Arc, Mutex};
 
 use shiguredo_vpl::{
@@ -13,14 +14,14 @@ use shiguredo_vpl::{
 };
 use shiguredo_webrtc::{
     CodecSpecificInfo, EncodedImage, EncodedImageBuffer, EncodedImageRef, EnvironmentRef,
-    H264PacketizationMode, NV12Buffer, ScalabilityMode, SdpVideoFormat, SdpVideoFormatRef,
-    VideoCodecRef, VideoCodecStatus, VideoCodecType, VideoDecoder,
-    VideoDecoderDecodedImageCallbackPtr, VideoDecoderDecoderInfo, VideoDecoderHandler,
-    VideoDecoderSettingsRef, VideoEncoder, VideoEncoderEncodedImageCallbackPtr,
-    VideoEncoderEncodedImageCallbackRef, VideoEncoderEncodedImageCallbackResultError,
-    VideoEncoderEncoderInfo, VideoEncoderHandler, VideoEncoderRateControlParametersRef,
-    VideoEncoderSettingsRef, VideoFrame, VideoFrameRef, VideoFrameType, VideoFrameTypeVectorRef,
-    i420_to_nv12, nv12_copy, rtc_log_error, rtc_log_warning,
+    H264PacketizationMode, NV12Buffer, SdpVideoFormat, SdpVideoFormatRef, VideoCodecRef,
+    VideoCodecStatus, VideoCodecType, VideoDecoder, VideoDecoderDecodedImageCallbackPtr,
+    VideoDecoderDecoderInfo, VideoDecoderHandler, VideoDecoderSettingsRef, VideoEncoder,
+    VideoEncoderEncodedImageCallbackPtr, VideoEncoderEncodedImageCallbackRef,
+    VideoEncoderEncodedImageCallbackResultError, VideoEncoderEncoderInfo, VideoEncoderHandler,
+    VideoEncoderRateControlParametersRef, VideoEncoderSettingsRef, VideoFrame, VideoFrameRef,
+    VideoFrameType, VideoFrameTypeVectorRef, i420_to_nv12, nv12_copy, rtc_log_error,
+    rtc_log_warning,
 };
 
 use crate::error::Result;
@@ -28,6 +29,7 @@ use crate::video_codec::{SimulcastCapabilityHelper, codec_type_from_format};
 use crate::video_codec_capability::{
     CodecDirection, VideoCodecCapability, VideoCodecImplementation,
 };
+use crate::video_codecs::helpers;
 
 fn collect_supported_formats(
     adapter: AdapterSelector,
@@ -44,48 +46,31 @@ fn collect_supported_formats(
             VplCodecType::Av1 => VideoCodecType::Av1,
         };
         if info.encoding.supported {
-            encoder_supported_formats.extend(supported_formats_for_codec(codec_type));
+            encoder_supported_formats.extend(helpers::supported_formats_for_codec(codec_type));
         }
         if info.decoding.supported {
-            decoder_supported_formats.extend(supported_formats_for_codec(codec_type));
+            decoder_supported_formats.extend(helpers::supported_formats_for_codec(codec_type));
         }
     }
     Ok((encoder_supported_formats, decoder_supported_formats))
 }
 
-fn supported_formats_for_codec(codec_type: VideoCodecType) -> Vec<SdpVideoFormat> {
-    match codec_type {
-        VideoCodecType::H264 => vec![SdpVideoFormat::new_with_parameters(
-            "H264",
-            &HashMap::from([
-                (String::from("level-asymmetry-allowed"), String::from("1")),
-                (String::from("packetization-mode"), String::from("1")),
-            ]),
-            &[ScalabilityMode::L1T1],
-        )],
-        VideoCodecType::H265 => vec![SdpVideoFormat::new("H265")],
-        VideoCodecType::Vp9 => vec![SdpVideoFormat::new_with_parameters(
-            "VP9",
-            &HashMap::from([(String::from("profile-id"), String::from("0"))]),
-            &[],
-        )],
-        VideoCodecType::Av1 => vec![SdpVideoFormat::new("AV1")],
-        _ => Vec::new(),
-    }
-}
-
+// コーデック種別から VPL 固有のエンコーダー設定を返す。
 fn encoder_codec_config(codec_type: VideoCodecType) -> Option<CodecConfig> {
     match codec_type {
         VideoCodecType::H264 => Some(CodecConfig::H264(H264EncoderConfig { profile: None })),
         VideoCodecType::H265 => Some(CodecConfig::Hevc(HevcEncoderConfig { profile: None })),
         VideoCodecType::Vp9 => Some(CodecConfig::Vp9(Vp9EncoderConfig {
             profile: Some(Vp9Profile::Profile0),
+            // IVF ヘッダー出力を無効化する
+            write_ivf_headers: false,
         })),
         VideoCodecType::Av1 => Some(CodecConfig::Av1(Av1EncoderConfig { profile: None })),
         _ => None,
     }
 }
 
+// コーデック種別から VPL 固有のデコーダー設定を返す。
 fn decoder_codec(codec_type: VideoCodecType) -> Option<DecoderCodec> {
     match codec_type {
         VideoCodecType::H264 => Some(DecoderCodec::H264),
@@ -94,12 +79,6 @@ fn decoder_codec(codec_type: VideoCodecType) -> Option<DecoderCodec> {
         VideoCodecType::Av1 => Some(DecoderCodec::Av1),
         _ => None,
     }
-}
-
-fn requested_frame_type(
-    frame_types: Option<VideoFrameTypeVectorRef<'_>>,
-) -> Option<VideoFrameType> {
-    frame_types.and_then(|frame_types| frame_types.get(0))
 }
 
 fn vpl_force_frame_type(codec_type: VideoCodecType, requested: Option<VideoFrameType>) -> u16 {
@@ -115,25 +94,7 @@ fn vpl_force_frame_type(codec_type: VideoCodecType, requested: Option<VideoFrame
     }
 }
 
-fn vp9_payload_from_vpl(data: &[u8]) -> std::result::Result<&[u8], &'static str> {
-    let mut payload = data;
-    if payload.starts_with(b"DKIF") {
-        // VPL 実装によっては IVF ファイルヘッダー + フレームヘッダー付きで返るため除去する。
-        if payload.len() < 32 {
-            return Err("VP9 IVF file header is truncated");
-        }
-        payload = &payload[32..];
-    }
-    if payload.len() < 12 {
-        return Err("VP9 IVF frame header is truncated");
-    }
-    payload = &payload[12..];
-    if payload.is_empty() {
-        return Err("VP9 payload is empty after stripping IVF headers");
-    }
-    Ok(payload)
-}
-
+// VPL 固有の `PictureType` を `VideoFrameType` に変換する。
 fn frame_type_from_vpl(picture_type: PictureType) -> VideoFrameType {
     match picture_type {
         PictureType::Idr | PictureType::I => VideoFrameType::Key,
@@ -141,9 +102,12 @@ fn frame_type_from_vpl(picture_type: PictureType) -> VideoFrameType {
     }
 }
 
-fn target_kbps_from_bps(target_bitrate_bps: u32) -> u16 {
-    let target_kbps = (target_bitrate_bps.max(1) as u64).div_ceil(1000);
-    u16::try_from(target_kbps).unwrap_or(u16::MAX)
+// VPL の受け口 (`EncoderConfig::target_kbps` / `ReconfigureParams::target_kbps`) は
+// `u16` のため、共通ヘルパーの戻り値 (`u32`) を変換する。65,535 kbps 超は
+// 現行どおり `u16::MAX` でクリップする（サイレントに壊れるリスクは
+// VPL の API 上限自体に由来するため）。
+fn target_kbps_u16(target_bitrate_bps: u32) -> u16 {
+    u16::try_from(helpers::target_kbps_from_bps(target_bitrate_bps)).unwrap_or(u16::MAX)
 }
 
 fn vpl_rate_control_mode(codec_type: VideoCodecType) -> RateControlMode {
@@ -193,20 +157,8 @@ fn handle_vpl_encode_callback(
     let frame_height = encoded.user_data().frame_height;
 
     let data = encoded.into_data();
-    let encoded_payload = if codec_type == VideoCodecType::Vp9 {
-        match vp9_payload_from_vpl(&data) {
-            Ok(payload) => payload,
-            Err(err) => {
-                rtc_log_error!("VPL VP9 payload normalization failed: {}", err);
-                return;
-            }
-        }
-    } else {
-        &data
-    };
-
     let mut encoded_image = EncodedImage::new();
-    let encoded_buffer = EncodedImageBuffer::from_bytes(encoded_payload);
+    let encoded_buffer = EncodedImageBuffer::from_bytes(&data);
     encoded_image.set_encoded_data(&encoded_buffer);
     encoded_image.set_rtp_timestamp(rtp_timestamp);
     encoded_image.set_encoded_width(frame_width);
@@ -308,7 +260,7 @@ impl VplVideoEncoder {
             1,
             vpl_rate_control_mode(self.codec_type),
         );
-        config.target_kbps = Some(target_kbps_from_bps(self.target_bitrate_bps));
+        config.target_kbps = Some(target_kbps_u16(self.target_bitrate_bps));
 
         let callback_state_for_callback = self.callback_state.clone();
         let callback_codec_type = self.codec_type;
@@ -336,7 +288,7 @@ impl VplVideoEncoder {
             });
         };
         let params = ReconfigureParams {
-            target_kbps: Some(target_kbps_from_bps(self.target_bitrate_bps)),
+            target_kbps: Some(target_kbps_u16(self.target_bitrate_bps)),
             framerate_num: Some(self.framerate.max(1)),
             framerate_den: Some(1),
             ..ReconfigureParams::default()
@@ -497,7 +449,7 @@ impl VideoEncoderHandler for VplVideoEncoder {
             }
         }
 
-        let requested = requested_frame_type(frame_types);
+        let requested = helpers::requested_frame_type(frame_types);
         let force_frame_type = vpl_force_frame_type(self.codec_type, requested);
         let encode_options = EncodeOptions {
             frame_type: force_frame_type,
@@ -785,7 +737,7 @@ impl VideoDecoderHandler for VplVideoDecoder {
 
 /// Intel VPL を使用する [VideoCodecCapability]。
 ///
-/// `#[cfg(feature = "vpl")]` でのみ利用可能。
+/// `#[cfg(all(feature = "vpl", target_os = "linux"))]` でのみ利用可能。
 /// H.264 / H.265 / VP9 / AV1 のエンコード・デコードをサポートする。
 pub struct VplVideoCodecCapability {
     adapter: AdapterSelector,
@@ -896,13 +848,15 @@ impl VplVideoCodecCapability {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
-    use shiguredo_webrtc::{Environment, SdpVideoFormat, VideoFrameType, VideoFrameTypeVector};
+    use shiguredo_webrtc::{Environment, SdpVideoFormat, VideoFrameType};
 
     fn test_supported_formats(codec_types: &[VideoCodecType]) -> Vec<SdpVideoFormat> {
         let mut supported_formats = Vec::new();
         for codec_type in codec_types {
-            supported_formats.extend(supported_formats_for_codec(*codec_type));
+            supported_formats.extend(helpers::supported_formats_for_codec(*codec_type));
         }
         supported_formats
     }
@@ -1028,19 +982,6 @@ mod tests {
     }
 
     #[test]
-    fn vpl_requested_frame_type_uses_first_entry() {
-        assert_eq!(requested_frame_type(None), None);
-
-        let mut frame_types = VideoFrameTypeVector::new(2);
-        frame_types.push(VideoFrameType::Empty);
-        frame_types.push(VideoFrameType::Key);
-        assert_eq!(
-            requested_frame_type(Some(frame_types.as_ref())),
-            Some(VideoFrameType::Empty)
-        );
-    }
-
-    #[test]
     fn vpl_force_frame_type_matches_codec_requirements() {
         assert_eq!(
             vpl_force_frame_type(VideoCodecType::Vp9, Some(VideoFrameType::Key)),
@@ -1066,26 +1007,6 @@ mod tests {
             vpl_rate_control_mode(VideoCodecType::H264),
             RateControlMode::Cbr
         );
-    }
-
-    #[test]
-    fn vp9_payload_from_vpl_strips_ivf_headers() {
-        let mut data = Vec::new();
-        data.extend_from_slice(b"DKIF");
-        data.resize(32, 0);
-        data.extend_from_slice(&[4, 0, 0, 0]);
-        data.extend_from_slice(&[0; 8]);
-        data.extend_from_slice(&[1, 2, 3, 4]);
-        let payload = vp9_payload_from_vpl(&data).expect("vp9 payload の抽出に失敗しました");
-        assert_eq!(payload, &[1, 2, 3, 4]);
-    }
-
-    #[test]
-    fn vp9_payload_from_vpl_rejects_truncated_frame_header() {
-        let data = vec![0u8; 11];
-        let err = vp9_payload_from_vpl(&data)
-            .expect_err("切り詰められたフレームヘッダーは失敗するはずです");
-        assert_eq!(err, "VP9 IVF frame header is truncated");
     }
 
     #[test]

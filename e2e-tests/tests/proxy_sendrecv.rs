@@ -167,7 +167,10 @@ async fn handle_proxy_connection(
     traffic_stats: Arc<ProxyTrafficStats>,
 ) -> Result<()> {
     let target = decode_connect_request(&mut downstream).await?;
-    connect_log.lock().unwrap().push(target.clone());
+    connect_log
+        .lock()
+        .expect("connect_log のロックを取得できませんでした")
+        .push(target.clone());
 
     let mut upstream = TcpStream::connect((target.host.as_str(), target.port)).await?;
     let response = Response::new(200, "Connection Established")
@@ -294,7 +297,10 @@ impl ProxyHarness {
     }
 
     fn connect_targets(&self) -> Vec<ConnectTarget> {
-        self.connect_log.lock().unwrap().clone()
+        self.connect_log
+            .lock()
+            .expect("connect_log のロックを取得できませんでした")
+            .clone()
     }
 
     fn transferred_bytes(&self) -> (u64, u64) {

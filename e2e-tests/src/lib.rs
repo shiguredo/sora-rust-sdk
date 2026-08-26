@@ -434,13 +434,6 @@ pub fn openh264_path() -> Option<String> {
     env::var("OPENH264_PATH").ok()
 }
 
-pub async fn wait_task_finished(task: tokio::task::JoinHandle<()>, name: &str) {
-    let joined = tokio::time::timeout(Duration::from_secs(10), task)
-        .await
-        .unwrap_or_else(|_| panic!("{name} はタイムアウト時間内に完了しませんでした"));
-    joined.unwrap_or_else(|err| panic!("{name} がパニックを起こしました: {err}"));
-}
-
 fn parse_stats_lossy(stats_json: &JsonString) -> Vec<WebRtcStat> {
     use nojson::RawJson;
 
@@ -720,4 +713,7 @@ pub mod fake_video_capturer;
 pub mod stats;
 pub mod test_connection;
 pub use fake_video_capturer::{FakeVideoCapturer, FakeVideoCapturerConfig};
-pub use test_connection::{SoraTestConnection, SoraTestConnectionBuilder, SoraTestEvent};
+pub use test_connection::{
+    SoraTestConnection, SoraTestConnectionBuilder, SoraTestEvent,
+    build_recvonly_data_channel_signaling_connection,
+};

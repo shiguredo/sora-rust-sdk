@@ -570,7 +570,7 @@ fn run_libcamera_loop_inner(
         let _ = tx.send((completed.cookie(), Some(timestamp_us)));
     });
 
-    let parsed_controls = parse_controls(&controls);
+    let parsed_controls = parse_controls(&controls)?;
 
     let stride_i32 = i32::try_from(stride).map_err(|_| Error::LibcameraMessage {
         message: format!("stride is too large: {}", stride),
@@ -927,7 +927,9 @@ fn build_mapped_frame_buffer_planes(layout: &FrameBufferLayout) -> Result<Vec<Ma
 // 複製した fd を OwnedFd として所有する。
 // 複製に失敗した場合は fallback せずエラーを返す。
 fn dup_fd_for_native_frame(fd: i32) -> Result<OwnedFd> {
-    let dup_fd = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC) };
+    // F_DUPFD_CLOEXEC は最低 fd 番号 (minfd) の指定が必須。
+    // 第 3 引数を省略すると可変長引数が不定値を読むため、minfd=0 を明示する。
+    let dup_fd = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
     if dup_fd < 0 {
         return Err(std::io::Error::last_os_error().into());
     }
@@ -1102,7 +1104,7 @@ fn requeue_request(
 }
 
 // パース済みコントロール値
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 enum ControlValue {
     Bool(bool),
     I32(i32),
@@ -1293,6 +1295,14 @@ fn resolve_enum_value(control_name: &str, value_str: &str) -> Option<i32> {
             "Night" => Some(core::hdr_mode::NIGHT),
             _ => None,
         },
+        "WdrMode" => match value_str {
+            "Off" => Some(core::wdr_mode::OFF),
+            "Linear" => Some(core::wdr_mode::LINEAR),
+            "Power" => Some(core::wdr_mode::POWER),
+            "Exponential" => Some(core::wdr_mode::EXPONENTIAL),
+            "HistogramEqualization" => Some(core::wdr_mode::HISTOGRAM_EQUALIZATION),
+            _ => None,
+        },
         "NoiseReductionMode" => match value_str {
             "Off" => Some(draft::noise_reduction_mode::OFF),
             "Fast" => Some(draft::noise_reduction_mode::FAST),
@@ -1383,13 +1393,12 @@ fn parse_control_value(id: &ControlId, value: &str) -> Option<ControlValue> {
     }
 }
 
-fn parse_controls(controls: &[(String, String)]) -> Vec<ParsedControl> {
+fn parse_controls(controls: &[(String, String)]) -> Result<Vec<ParsedControl>> {
     let mut parsed = Vec::with_capacity(controls.len());
 
     for (key, raw_value) in controls {
         let Some(id) = find_control_id(key) else {
-            rtc_log_warning!("unknown libcamera control: {}", key);
-            continue;
+            return Err(Error::UnknownLibcameraControl { name: key.clone() });
         };
 
         if id.direction() == Direction::Out {
@@ -1414,7 +1423,7 @@ fn parse_controls(controls: &[(String, String)]) -> Vec<ParsedControl> {
         parsed.push(ParsedControl { id, value });
     }
 
-    parsed
+    Ok(parsed)
 }
 
 fn apply_controls(request: &shiguredo_libcamera::Request, controls: &[ParsedControl]) {
@@ -1468,6 +1477,80 @@ mod tests {
 
         assert_eq!(&buffer.y_data()[..8], &[0_u8, 1, 2, 3, 4, 5, 6, 7]);
         assert_eq!(&buffer.uv_data()[..4], &[10_u8, 11, 12, 13]);
+    }
+
+    #[test]
+    fn copy_i420_planes_to_buffer_skips_stride_padding() {
+        // 幅 4・高さ 2 で Y plane 長 16 (stride 8)・U/V plane 長 8 の stride > width な入力
+        // padding バイトには 0xFF を入れ、行ごとにデータの直後に配置する
+        let planes = vec![
+            vec![
+                0_u8, 1, 2, 3, 0xFF, 0xFF, 0xFF, 0xFF, // 行 0
+                4, 5, 6, 7, 0xFF, 0xFF, 0xFF, 0xFF, // 行 1
+            ],
+            vec![10_u8, 11, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+            vec![20_u8, 21, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+        ];
+
+        let buffer = copy_i420_planes_to_buffer(&planes, 4, 2)
+            .expect("copy_i420_planes_to_buffer は成功するはずです");
+
+        // Y 平面は各行の先頭 4 バイトだけがコピーされ、padding (0xFF) はスキップされる
+        let dst_stride_y = buffer.stride_y() as usize;
+        for row in 0..2 {
+            let expected = &[0_u8, 1, 2, 3, 4, 5, 6, 7][row * 4..(row + 1) * 4];
+            let actual = &buffer.y_data()[row * dst_stride_y..row * dst_stride_y + 4];
+            assert_eq!(
+                actual, expected,
+                "Y 平面の行 {row} のデータが正しくコピーされていません"
+            );
+        }
+
+        // U/V 平面は chroma_width 2 バイトだけがコピーされ、padding (0xFF) はスキップされる
+        assert_eq!(
+            &buffer.u_data()[..2],
+            &[10_u8, 11],
+            "U 平面のデータが正しくコピーされていません"
+        );
+        assert_eq!(
+            &buffer.v_data()[..2],
+            &[20_u8, 21],
+            "V 平面のデータが正しくコピーされていません"
+        );
+    }
+
+    #[test]
+    fn copy_nv12_planes_to_buffer_skips_stride_padding() {
+        // 幅 4・高さ 2 で Y plane 長 16 (stride 8)・UV plane 長 8 の stride > width な入力
+        // padding バイトには 0xFF を入れ、行ごとにデータの直後に配置する
+        let planes = vec![
+            vec![
+                0_u8, 1, 2, 3, 0xFF, 0xFF, 0xFF, 0xFF, // 行 0
+                4, 5, 6, 7, 0xFF, 0xFF, 0xFF, 0xFF, // 行 1
+            ],
+            vec![10_u8, 11, 12, 13, 0xFF, 0xFF, 0xFF, 0xFF],
+        ];
+
+        let buffer = copy_nv12_planes_to_buffer(&planes, 4, 2)
+            .expect("copy_nv12_planes_to_buffer は成功するはずです");
+
+        // Y 平面は各行の先頭 4 バイトだけがコピーされ、padding (0xFF) はスキップされる
+        let dst_stride_y = buffer.stride_y() as usize;
+        for row in 0..2 {
+            let expected = &[0_u8, 1, 2, 3, 4, 5, 6, 7][row * 4..(row + 1) * 4];
+            let actual = &buffer.y_data()[row * dst_stride_y..row * dst_stride_y + 4];
+            assert_eq!(
+                actual, expected,
+                "Y 平面の行 {row} のデータが正しくコピーされていません"
+            );
+        }
+
+        // UV 平面は chroma_width * 2 バイトだけがコピーされ、padding (0xFF) はスキップされる
+        assert_eq!(
+            &buffer.uv_data()[..4],
+            &[10_u8, 11, 12, 13],
+            "UV 平面のデータが正しくコピーされていません"
+        );
     }
 
     #[test]
@@ -1655,5 +1738,139 @@ mod tests {
             CapturedFrameBuffers::Native(_) => None,
         };
         assert!(mapped_view.is_none());
+    }
+
+    #[test]
+    fn parse_control_value_resolves_wdr_mode_off_to_i32() {
+        // --libcamera-control WdrMode=Off の文字列指定が I32(0) へ解決されることを検証する
+        let value = parse_control_value(&core::WDR_MODE, "Off")
+            .expect("WdrMode=Off のパースに失敗しました");
+        assert!(
+            matches!(&value, ControlValue::I32(0)),
+            "WdrMode=Off が I32(0) へ解決されませんでした: {value:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_enum_value_resolves_all_wdr_mode_enum_values() {
+        // WdrMode の全 enum 値が対応する定数値へ解決されることを検証する
+        let cases = [
+            ("Off", core::wdr_mode::OFF),
+            ("Linear", core::wdr_mode::LINEAR),
+            ("Power", core::wdr_mode::POWER),
+            ("Exponential", core::wdr_mode::EXPONENTIAL),
+            (
+                "HistogramEqualization",
+                core::wdr_mode::HISTOGRAM_EQUALIZATION,
+            ),
+        ];
+        for (value_str, expected) in cases {
+            assert_eq!(
+                resolve_enum_value("WdrMode", value_str),
+                Some(expected),
+                "WdrMode={value_str} の解決に失敗しました"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_enum_value_rejects_invalid_wdr_mode_strings() {
+        // 無効文字列と小文字は厳密一致のため解決されないことを検証する
+        for value_str in ["Foo", "off", "OFF", "LinearX"] {
+            assert_eq!(
+                resolve_enum_value("WdrMode", value_str),
+                None,
+                "WdrMode={value_str} は解決されるべきではありません"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_control_value_resolves_wdr_mode_numeric_value() {
+        // WdrMode=1 は数値指定として I32(1) へ解決されることを検証する
+        let value =
+            parse_control_value(&core::WDR_MODE, "1").expect("WdrMode=1 のパースに失敗しました");
+        assert!(
+            matches!(&value, ControlValue::I32(1)),
+            "WdrMode=1 が I32(1) へ解決されませんでした: {value:?}"
+        );
+    }
+
+    #[test]
+    fn parse_control_value_rejects_invalid_wdr_mode_string() {
+        // WdrMode=Foo は enum 解決にも数値解決にも失敗して None になることを検証する
+        assert!(
+            parse_control_value(&core::WDR_MODE, "Foo").is_none(),
+            "WdrMode=Foo はパースされるべきではありません"
+        );
+    }
+
+    #[test]
+    fn parse_control_value_rejects_lowercase_wdr_mode_string() {
+        // WdrMode=off は小文字のため enum 解決に失敗して None になることを検証する
+        assert!(
+            parse_control_value(&core::WDR_MODE, "off").is_none(),
+            "WdrMode=off はパースされるべきではありません"
+        );
+    }
+
+    #[test]
+    fn parse_controls_rejects_unknown_control() {
+        // --libcamera-control に find_control_id が解決できないコントロール名を
+        // 指定するとエラーを返し、コントロール名がエラーに含まれることを検証する
+        let controls = vec![("UnknownControl".to_string(), "1".to_string())];
+        let err = match parse_controls(&controls) {
+            Ok(_) => panic!("unknown コントロールはエラーになるべきです"),
+            Err(err) => err,
+        };
+        assert!(
+            format!("{err}").contains("UnknownControl"),
+            "エラーメッセージにコントロール名が含まれていません: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_controls_parses_normal_control() {
+        // Brightness は InOut の Float コントロールであり、通常どおりパースされることを検証する
+        let controls = vec![("Brightness".to_string(), "0.5".to_string())];
+        let parsed =
+            parse_controls(&controls).expect("正常なコントロールのパースは成功するはずです");
+        assert_eq!(parsed.len(), 1, "パース結果の件数が期待と異なります");
+        assert_eq!(
+            parsed[0].id.name(),
+            "Brightness",
+            "パースされたコントロール名が期待と異なります"
+        );
+        assert!(
+            matches!(&parsed[0].value, ControlValue::F32(0.5)),
+            "Brightness=0.5 が F32(0.5) へ解決されませんでした: {:?}",
+            parsed[0].value
+        );
+    }
+
+    #[test]
+    fn parse_controls_skips_invalid_value_control() {
+        // Brightness は Float コントロールなので abc は値のパースに失敗する。
+        // invalid value は従来どおり警告のみでスキップされ、エラーにならないことを検証する
+        let controls = vec![("Brightness".to_string(), "abc".to_string())];
+        let parsed = parse_controls(&controls)
+            .expect("invalid value のコントロールはエラーになるべきではありません");
+        assert!(
+            parsed.is_empty(),
+            "invalid value のコントロールはスキップされるべきです"
+        );
+    }
+
+    #[test]
+    fn parse_controls_skips_read_only_control() {
+        // AeState は Direction::Out (read-only) のコントロールである。
+        // read-only コントロールは従来どおり警告のみでスキップされ、エラーにならないことを検証する
+        let controls = vec![("AeState".to_string(), "1".to_string())];
+        let parsed = parse_controls(&controls)
+            .expect("read-only コントロールはエラーになるべきではありません");
+        assert!(
+            parsed.is_empty(),
+            "read-only コントロールはスキップされるべきです"
+        );
     }
 }

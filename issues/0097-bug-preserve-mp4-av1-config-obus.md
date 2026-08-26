@@ -6,6 +6,7 @@
 - Model: GPT-5
 - Branch: feature/fix-mp4-av1-config-obus
 - Polished: 2026-07-30
+- Updated: 2026-08-18
 
 ## 目的
 
@@ -45,7 +46,7 @@ malformed payload では OBU 列が空になり、packet を生成しない。
 - 固定 packetizer が operating point の選択・除去を行わないため、Sequence Header が operating point を 1 個だけ持ち、その `operating_point_idc[0] == 0` である bitstream に限定する
 - sync sample の random access 条件に必要な先頭 Frame Header の `show_existing_frame`、`frame_type`、`show_frame` だけを検証し、それ以外の Frame Header、Tile Group、Metadata payload の完全な AV1 意味論検証は対象外とする
 - AV1ForwardKeyFrameSampleGroupEntry、AV1SwitchFrameSampleGroupEntry、AV1MultiFrameSampleGroupEntry の解釈は別 issue とし、本 issue では no-sync track を拒否する
-- MP4 presentation timestamp は issue 0096、sample offset と duration の一般的な算術検証は issue 0098 で扱う
+- MP4 presentation timestamp は issue 0096（pending）で扱う。sample offset と duration の一般的な算術検証は issue 0098（closed 済み）で対応済み
 
 ### OBU parser
 
@@ -122,11 +123,13 @@ AV1 ISOBMFF では Sequence Header より前の Metadata OBU も許容される�
 AV1 RTP Payload Format Section 7.2 では、`profile`、`level-idx`、`tier` の省略値はそれぞれ 0、5、0 である。
 現行の bare `AV1` capability はこの既定値を広告するため、AV1CodecConfigurationRecord の値が既定値を超える bitstream をそのまま送ると、受信側が宣言した能力を超える可能性がある。
 
-issue 0096 で導入する reader 固有の required `SdpVideoFormat` と stream identity を AV1 にも適用する。
+issue 0140 で導入した reader 由来の required `SdpVideoFormat` 経路（`Mp4SampleReader::required_sdp_format` から `Mp4SampleReader::passthrough_capability()` を通じて `Mp4PassthroughVideoCodecCapability` に伝える）を AV1 にも拡張する。
 AV1 required format には AV1CodecConfigurationRecord の `seq_profile`、`seq_level_idx_0`、`seq_tier_0` を 10 進文字列の `profile`、`level-idx`、`tier` parameter として必ず設定し、省略値へ fallback しない。
 
 `Mp4PassthroughVideoCodecCapability` は AV1 reader について required format だけを encoder format として返す。
-preference の codec type 利用可否は issue 0096 の `is_supported` 経路で判定し、bare `AV1` を実 negotiated format の代用にしない。
+preference の codec type 利用可否は issue 0140 の `is_supported` override 経路（Encoder かつ reader の codec type と一致する場合のみ true）で判定し、bare `AV1` を実 negotiated format の代用にしない。
+
+なお 0140 で当初提案されていた bitstream identity + `Arc::ptr_eq` による reader 照合は同 issue で実装見送りとなったため、本 issue でも identity 経路は使わない（`Mp4SampleReader::passthrough_capability()` 経由での required format 伝搬だけを利用する）。
 
 `resolve_sdp_format(Encoder, incoming)` は AV1 RTP Payload Format Section 7.2.3 に従い、次を検証する。
 
@@ -143,15 +146,14 @@ level と tier の上限は libwebrtc の profile matching に委ねず、SDK �
 
 ### sample description の一貫性
 
-issue 0096 で導入する全 `sample.sample_entry` の一貫性検証を利用し、AV1 では次を最初の configuration と比較する。
+issue 0142 で導入した全 `sample.sample_entry` の一貫性検証（`Mp4Error::InconsistentSampleDescription` + `collect_mismatched_track_info_fields`）を AV1 に拡張し、次を最初の configuration と比較する。
 
-- codec type、width、height
-- AV1CodecConfigurationRecord の全 field
-- `configOBUs` の全 byte
+- codec type、width、height（0142 で既に対象）
+- AV1CodecConfigurationRecord の全 field（本 issue で `Mp4VideoTrackInfo` に追加した AV1 固有 field を `collect_mismatched_track_info_fields` の比較対象へ含める）
+- `configOBUs` の全 byte（同じく本 issue で追加した field を比較対象へ含める）
 
 後続 sample entry が byte-for-byte 同一なら受理する。
-いずれかが変わる場合は、古い `configOBUs` を新しい sample に付与せず、sample index と相違 field を含む unsupported sample description error で reader 初期化を失敗させる。
-issue 0096 の実装より先に本 issue を実装する場合は、同等の全 sample entry 検証を本 issue に含める。
+いずれかが変わる場合は、古い `configOBUs` を新しい sample に付与せず、sample index と相違 field を含む `Mp4Error::InconsistentSampleDescription` で reader 初期化を失敗させる。
 
 ### Sequence Header の field 検証
 

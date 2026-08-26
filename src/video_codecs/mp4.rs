@@ -8,12 +8,16 @@
 //! 3. Mp4PassthroughVideoCodecCapability - パススルーエンコーダーを WebRTC のコーデックパイプラインに登録する
 //! 4. Mp4VideoCapturer - フレームペーシングを行い、MP4 のタイミングに従ってフレームを WebRTC に供給する
 //!
+//! Mp4PassthroughVideoCodecCapability は [`Mp4SampleReader::passthrough_capability`]
+//! で reader から直接生成する。
+//!
 //! データフロー:
 //!   Mp4SampleReader --[Mp4EncodedSample を内包した VideoFrame]--> Mp4PassthroughEncoder --> WebRTC RTP
 //!                                         (native VideoFrameBuffer)
 //!
 //! 対応コーデック: H.264, H.265, VP8, VP9, AV1
-use std::io;
+use std::io::{self, BufReader, Read, Seek};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -26,7 +30,7 @@ use shiguredo_webrtc::{
     VideoEncoderEncodedImageCallbackResultError, VideoEncoderEncoderInfo, VideoEncoderHandler,
     VideoEncoderRateControlParametersRef, VideoEncoderSettingsRef, VideoFrame, VideoFrameBuffer,
     VideoFrameBufferHandler, VideoFrameRef, VideoFrameType, VideoFrameTypeVectorRef,
-    VideoTrackSource, rtc_log_info, rtc_log_warning,
+    VideoTrackSource, rtc_log_error, rtc_log_info, rtc_log_verbose, rtc_log_warning,
 };
 
 use crate::video_codec_capability::{
@@ -54,7 +58,7 @@ pub enum Mp4Error {
         /// デマルチプレクサが要求したファイル内位置。
         position: u64,
         /// 実際のファイルサイズ (バイト単位)。
-        file_size: usize,
+        file_size: u64,
     },
     /// サンプルテーブル (stsz / stco / co64) に不整合があり、
     /// サンプルのオフセットがファイル範囲外になっている。
@@ -66,17 +70,26 @@ pub enum Mp4Error {
         /// サンプルのデータサイズ。
         size: usize,
         /// 実際のファイルサイズ (バイト単位)。
-        file_size: usize,
+        file_size: u64,
     },
     /// 非ゼロの composition time offset を含むビデオサンプルが存在する。
     ///
     /// B フレーム等のデコード順と表示順が異なる映像をデコード順のまま送信すると、
-    /// 受信側の表示順序が壊れるため、現在の送信経路では受理しない。
+    /// 受信側の表示順序が壊れるため、受理しない。
     UnsupportedCompositionTimeOffset {
         /// 問題のサンプルインデックス (0 始まり、ビデオサンプル内の連番)。
         index: usize,
         /// ビデオコーデック種別。
         codec_type: VideoCodecType,
+    },
+    /// 2 個目以降のサンプルエントリーが最初の設定と一致しない。
+    ///
+    /// コーデックや解像度などが途中で変わるサンプルエントリーは受理しない。
+    InconsistentSampleDescription {
+        /// 相違が検出されたビデオサンプルの 0 始まりインデックス。
+        index: usize,
+        /// 相違したフィールド名。
+        fields: Vec<&'static str>,
     },
 }
 
@@ -122,6 +135,12 @@ impl std::fmt::Display for Mp4Error {
                     "サンプルの composition time offset が非ゼロです: sample={index} codec={codec_type:?} (B フレームには未対応)"
                 )
             }
+            Self::InconsistentSampleDescription { index, fields } => {
+                write!(
+                    f,
+                    "サンプルエントリーが最初の設定と一致しません: sample={index} fields={fields:?}"
+                )
+            }
         }
     }
 }
@@ -137,7 +156,8 @@ impl std::error::Error for Mp4Error {
             | Self::InvalidNalLengthSize(_)
             | Self::InputPositionOutOfRange { .. }
             | Self::InconsistentSampleTable { .. }
-            | Self::UnsupportedCompositionTimeOffset { .. } => None,
+            | Self::UnsupportedCompositionTimeOffset { .. }
+            | Self::InconsistentSampleDescription { .. } => None,
         }
     }
 }
@@ -208,38 +228,72 @@ struct Mp4VideoTrackInfo {
     nal_length_size: u8,
 }
 
+/// MP4 のビデオサンプルのメタデータ。
+struct Mp4SampleMeta {
+    /// サンプルデータのファイル内オフセット。
+    data_offset: u64,
+    /// サンプルデータのサイズ。
+    data_size: usize,
+    /// キーフレームかどうか。
+    is_keyframe: bool,
+    /// サンプルの長さ (MP4 のタイムスケール単位)。
+    duration: u32,
+}
+
+/// MP4 のタイムスケールで表した再生時刻。
+///
+/// マイクロ秒へ事前変換せず、タイムスケール単位 (tick) のまま保持する。
+/// 必要な時点で [`Mp4Timestamp::to_duration`] により [`std::time::Duration`] へ変換する。
+struct Mp4Timestamp {
+    /// タイムスケール単位の再生時刻。
+    ticks: u64,
+    /// 1 秒あたりのタイムスタンプ単位数。
+    timescale: u32,
+}
+
+impl Mp4Timestamp {
+    /// [`std::time::Duration`] に変換する。
+    ///
+    /// 商と剰余に分けて変換するため overflow しない:
+    /// - 秒: `ticks / timescale` は `u64` に収まる
+    /// - ナノ秒: `(ticks % timescale) * 1_000_000_000 / timescale` は
+    ///   分子が `timescale` 未満 * 1_000_000_000 のため 1_000_000_000 未満になる
+    fn to_duration(&self) -> std::time::Duration {
+        let secs = self.ticks / self.timescale as u64;
+        let nanos = (self.ticks % self.timescale as u64) * 1_000_000_000 / self.timescale as u64;
+        std::time::Duration::new(secs, nanos as u32)
+    }
+}
+
 /// MP4 ファイルからビデオサンプルを読み出すリーダー。
 ///
-/// コンストラクタでファイル全体をメモリに読み込み、全サンプルのメタデータを事前解析する。
+/// コンストラクタでファイルを開き、全サンプルのメタデータを事前解析する。
 /// `get_sample()` でインデックス指定でサンプルを取得できる。
-/// ファイルデータを保持し続けるため、サンプル取得時にディスク I/O は発生しない。
+/// ファイルデータはメモリに保持せず、必要に応じてファイルから読み込む。
 pub struct Mp4SampleReader {
-    /// MP4 ファイル全体のバイトデータ。
-    file_data: Vec<u8>,
+    /// MP4 ファイルへの読み込みストリーム。
+    file: BufReader<std::fs::File>,
     track_info: Mp4VideoTrackInfo,
-    /// 各サンプルのメタデータ: (data_offset, data_size, keyframe, timestamp, duration)。
-    /// data_offset と data_size は file_data 内の位置を指す。
-    /// timestamp と duration は MP4 のタイムスケール単位。
-    samples: Vec<(u64, usize, bool, u64, u32)>,
-    /// 各フレームの累積再生時刻 (マイクロ秒)。
-    /// cumulative_us[0] = 0, cumulative_us[i] = フレーム 0..i の合計再生時間。
+    /// 各サンプルのメタデータ。
+    samples: Vec<Mp4SampleMeta>,
+    /// 各フレームの累積再生時刻。
+    /// cumulative[0] = 0, cumulative[i] = フレーム 0..i の合計再生時間。
     /// 長さは samples.len() + 1 で、末尾が動画全体の長さ。
     /// フレームペーシングで絶対時刻ベースの待機に使用する。
-    cumulative_us: Vec<u64>,
+    cumulative: Vec<Mp4Timestamp>,
 }
 
 impl Mp4SampleReader {
     /// MP4 ファイルを読み込み、ビデオトラックの全サンプルを事前解析する。
-    ///
-    /// ファイル全体をメモリに保持するため、大きなファイルではメモリ使用量に注意。
-    pub fn new(path: &str) -> crate::error::Result<Self> {
-        Self::new_inner(path).map_err(crate::error::Error::from)
+    pub fn new<P: AsRef<Path>>(path: P) -> crate::error::Result<Self> {
+        Self::new_inner(path.as_ref()).map_err(crate::error::Error::from)
     }
 
-    fn new_inner(path: &str) -> Result<Self> {
+    fn new_inner(path: &Path) -> Result<Self> {
         use shiguredo_mp4::demux::{Input, Mp4FileDemuxer};
 
-        let file_data = std::fs::read(path)?;
+        let mut file = BufReader::new(std::fs::File::open(path)?);
+        let file_size = file.get_ref().metadata()?.len();
 
         let mut demuxer = Mp4FileDemuxer::new();
 
@@ -247,26 +301,24 @@ impl Mp4SampleReader {
         // required_input() が要求する範囲のデータを順次渡すことで、
         // ボックス構造の解析が進む。
         while let Some(required) = demuxer.required_input() {
-            let start = required.position as usize;
-            if start > file_data.len() {
+            if required.position > file_size {
                 return Err(Mp4Error::InputPositionOutOfRange {
                     position: required.position,
-                    file_size: file_data.len(),
+                    file_size,
                 });
             }
-            let end = match required.size {
-                Some(size) => (start + size).min(file_data.len()),
-                None => file_data.len(),
-            };
-            let data = file_data
-                .get(start..end)
-                .ok_or(Mp4Error::InputPositionOutOfRange {
-                    position: required.position,
-                    file_size: file_data.len(),
-                })?;
+            // size が None ならファイル末尾までの範囲を要求する。
+            let remaining = file_size - required.position;
+            let size = usize::try_from(
+                required
+                    .size
+                    .map_or(remaining, |size| (size as u64).min(remaining)),
+            )
+            .map_err(|_| io::Error::other("required input size exceeds usize"))?;
+            let data = read_bytes_at(&mut file, required.position, size)?;
             demuxer.handle_input(Input {
                 position: required.position,
-                data,
+                data: &data,
             });
         }
 
@@ -282,7 +334,11 @@ impl Mp4SampleReader {
         let timescale = video_track.timescale.get();
 
         // 全サンプルを順次読み出す。
-        // 最初のサンプルの sample_entry からコーデック情報 (解像度、parameter sets 等) を取得する。
+        // 最初のサンプルの sample_entry からコーデック情報 (解像度、parameter sets 等) を取得し、
+        // 以後の Some(sample_entry) も extract_track_info に通して、
+        // codec_type / width / height / nal_length_size / parameter_sets の
+        // 値等値を検証する。サンプルエントリーが途中で切り替わる MP4 を
+        // 気付かれないまま最初の設定のまま送出しないためのゲート。
         let mut track_info: Option<Mp4VideoTrackInfo> = None;
         let mut samples = Vec::new();
 
@@ -292,11 +348,26 @@ impl Mp4SampleReader {
                 continue;
             }
 
-            // 最初のサンプルの sample_entry からコーデック情報を取得する。
-            if track_info.is_none()
-                && let Some(entry) = sample.sample_entry
-            {
-                track_info = Some(Self::extract_track_info(entry, timescale)?);
+            // sample_entry が付与されたサンプルではコーデック情報を確定または一貫性検証する。
+            //
+            // shiguredo_mp4 が前のサンプルと構造的に等値なサンプルエントリーを `None` に
+            // 正規化するため、後発の `Some(sample_entry)` は必ず何らかの相違を持つ。
+            // 本 SDK が抽出する 5 フィールドの一致で `mismatched` が空になる場合、その相違は
+            // 本 SDK の抽出範囲外（`avcC` header や補助 box）にある。codec 固有フィールドの
+            // 検証は、将来 `Mp4VideoTrackInfo` を拡張する形で加える。
+            if let Some(entry) = sample.sample_entry {
+                let info = Self::extract_track_info(entry, timescale)?;
+                if let Some(ref first) = track_info {
+                    let mismatched = Self::collect_mismatched_track_info_fields(first, &info);
+                    if !mismatched.is_empty() {
+                        return Err(Mp4Error::InconsistentSampleDescription {
+                            index: samples.len(),
+                            fields: mismatched,
+                        });
+                    }
+                } else {
+                    track_info = Some(info);
+                }
             }
 
             // 非ゼロの composition time offset はデコード順と表示時刻が一致しないため拒否する。
@@ -312,13 +383,12 @@ impl Mp4SampleReader {
                 });
             }
 
-            samples.push((
-                sample.data_offset,
-                sample.data_size,
-                sample.keyframe,
-                sample.timestamp,
-                sample.duration,
-            ));
+            samples.push(Mp4SampleMeta {
+                data_offset: sample.data_offset,
+                data_size: sample.data_size,
+                is_keyframe: sample.keyframe,
+                duration: sample.duration,
+            });
         }
 
         let track_info = track_info.ok_or(Mp4Error::NoVideoSamples)?;
@@ -327,17 +397,17 @@ impl Mp4SampleReader {
             return Err(Mp4Error::NoVideoSamples);
         }
 
-        let file_size = file_data.len();
-        for (index, &(data_offset, data_size, _, _, _)) in samples.iter().enumerate() {
-            let data_size_u64 = data_size as u64;
-            if data_offset
+        for (index, sample) in samples.iter().enumerate() {
+            let data_size_u64 = sample.data_size as u64;
+            if sample
+                .data_offset
                 .checked_add(data_size_u64)
-                .is_none_or(|end| end > file_size as u64)
+                .is_none_or(|end| end > file_size)
             {
                 return Err(Mp4Error::InconsistentSampleTable {
                     index,
-                    offset: data_offset,
-                    size: data_size,
+                    offset: sample.data_offset,
+                    size: sample.data_size,
                     file_size,
                 });
             }
@@ -347,20 +417,29 @@ impl Mp4SampleReader {
         // フレームペーシングで「次のフレームをいつ送るべきか」を O(1) で求めるため。
         // thread::sleep の相対待ちでは処理時間の累積ドリフトが発生するが、
         // このテーブルを使って Instant ベースの絶対時刻待ちを行うことで防止する。
-        let timescale = track_info.timescale as u64;
-        let mut cumulative_us = Vec::new();
+        // 時刻はマイクロ秒へ事前変換せず、タイムスケール単位 (tick) のまま保持する。
+        let timescale = track_info.timescale;
+        let mut cumulative = Vec::new();
         let mut acc: u64 = 0;
-        cumulative_us.push(0);
-        for &(_, _, _, _, duration) in &samples {
-            acc += duration as u64;
-            cumulative_us.push((acc * 1_000_000) / timescale);
+        cumulative.push(Mp4Timestamp {
+            ticks: 0,
+            timescale,
+        });
+        for sample in &samples {
+            // 加算は shiguredo_mp4 が検証する invariant
+            // (Σ sample count <= u32::MAX なら総 duration < u64::MAX) により overflow しない。
+            acc += sample.duration as u64;
+            cumulative.push(Mp4Timestamp {
+                ticks: acc,
+                timescale,
+            });
         }
 
         Ok(Self {
-            file_data,
+            file,
             track_info,
             samples,
-            cumulative_us,
+            cumulative,
         })
     }
 
@@ -492,6 +571,61 @@ impl Mp4SampleReader {
         }
     }
 
+    /// 2 個の `Mp4VideoTrackInfo` をフィールド単位で比較し、相違するフィールド名を返す。
+    ///
+    /// 検証対象は `codec_type` / `width` / `height` / `nal_length_size` /
+    /// `parameter_sets` の 5 フィールド。
+    /// `timescale` は `mdhd` の track 単位属性で `SampleEntry` からは抽出されず、
+    /// `extract_track_info` にはループ外の同一 scalar が毎回渡されるため、
+    /// サンプルエントリー間で変わり得ない値として比較対象に含めない。
+    ///
+    /// codec 固有フィールド（H.264 の profile-level-id、AV1 の av1C / configOBUs など）
+    /// の bit-identical 検証は、各 codec 固有の別対応で `Mp4VideoTrackInfo` を
+    /// 拡張する形で加える。
+    ///
+    /// `Mp4VideoTrackInfo` に新しいフィールドを追加した際にヘルパー未更新を
+    /// compile error として検出するため、両側を exhaustive に destructure して
+    /// 明示的に列挙する。比較対象外のフィールドは `_` に束縛する。
+    fn collect_mismatched_track_info_fields(
+        first: &Mp4VideoTrackInfo,
+        current: &Mp4VideoTrackInfo,
+    ) -> Vec<&'static str> {
+        let Mp4VideoTrackInfo {
+            codec_type: first_codec_type,
+            width: first_width,
+            height: first_height,
+            timescale: _,
+            parameter_sets: first_parameter_sets,
+            nal_length_size: first_nal_length_size,
+        } = first;
+        let Mp4VideoTrackInfo {
+            codec_type: current_codec_type,
+            width: current_width,
+            height: current_height,
+            timescale: _,
+            parameter_sets: current_parameter_sets,
+            nal_length_size: current_nal_length_size,
+        } = current;
+
+        let mut mismatched = Vec::new();
+        if first_codec_type != current_codec_type {
+            mismatched.push("codec_type");
+        }
+        if first_width != current_width {
+            mismatched.push("width");
+        }
+        if first_height != current_height {
+            mismatched.push("height");
+        }
+        if first_nal_length_size != current_nal_length_size {
+            mismatched.push("nal_length_size");
+        }
+        if first_parameter_sets != current_parameter_sets {
+            mismatched.push("parameter_sets");
+        }
+        mismatched
+    }
+
     /// サンプル数を返す。
     pub fn len(&self) -> usize {
         self.samples.len()
@@ -507,7 +641,51 @@ impl Mp4SampleReader {
         self.track_info.codec_type
     }
 
+    /// この reader から MP4 パススルー用の [`Mp4PassthroughVideoCodecCapability`] を生成する。
+    ///
+    /// ファイル I/O は行わず、reader 構築時に確定した値の cheap clone だけを渡す。
+    /// この経路が capability の唯一の構築ルート。
+    pub fn passthrough_capability(&self) -> Mp4PassthroughVideoCodecCapability {
+        Mp4PassthroughVideoCodecCapability {
+            codec_type: self.track_info.codec_type,
+            required_format: self.required_sdp_format(),
+        }
+    }
+
+    /// この MP4 のビットストリーム実態から、パススルー送信に必要な [`SdpVideoFormat`] を返す。
+    ///
+    /// reader 構築時に確定するため、呼び出しごとに同じ内容を返す。
+    /// 現在は各 codec について以下を返す:
+    /// - H.264: `H264`, `packetization-mode=1`
+    /// - H.265: `H265`
+    /// - VP8: `VP8`
+    /// - VP9: `VP9`
+    /// - AV1: `AV1`
+    ///
+    /// コーデック固有のパラメータ（H.264 の profile-level-id、AV1 の
+    /// profile / level / tier など）は、各コーデックの別対応で拡張する。
+    fn required_sdp_format(&self) -> SdpVideoFormat {
+        match self.track_info.codec_type {
+            VideoCodecType::H264 => {
+                let mut format = SdpVideoFormat::new("H264");
+                format.parameters_mut().set("packetization-mode", "1");
+                format
+            }
+            VideoCodecType::H265 => SdpVideoFormat::new("H265"),
+            VideoCodecType::Vp8 => SdpVideoFormat::new("VP8"),
+            VideoCodecType::Vp9 => SdpVideoFormat::new("VP9"),
+            VideoCodecType::Av1 => SdpVideoFormat::new("AV1"),
+            // 未対応 codec は `new_inner` の `extract_track_info` が
+            // `Mp4Error::UnsupportedVideoCodec` で拒否するためここには来ない。
+            VideoCodecType::Generic | VideoCodecType::Unknown(_) => {
+                unreachable!("unsupported codec is rejected in Mp4SampleReader::new_inner")
+            }
+        }
+    }
+
     /// 指定インデックスのサンプルデータを取得する。
+    ///
+    /// サンプルデータはファイルから読み込むため、I/O エラーを返し得る。
     ///
     /// H.264/H.265 の場合:
     /// - MP4 内の AVCC/HVCC 形式 (4 バイト長さプレフィックス) を
@@ -516,39 +694,57 @@ impl Mp4SampleReader {
     ///
     /// VP8/VP9/AV1 の場合:
     /// - MP4 から抽出したデータをそのまま使用する。
-    fn get_sample(&self, index: usize) -> Mp4EncodedSample {
-        let (data_offset, data_size, keyframe, _, _) = self.samples[index];
-        let raw_data = &self.file_data[data_offset as usize..data_offset as usize + data_size];
+    fn get_sample(&mut self, index: usize) -> Result<Mp4EncodedSample> {
+        let sample = &self.samples[index];
+        let raw_data = read_bytes_at(&mut self.file, sample.data_offset, sample.data_size)?;
 
         let data = match self.track_info.codec_type {
             VideoCodecType::H264 | VideoCodecType::H265 => {
                 let mut annex_b = Vec::new();
-                if keyframe && let Some(ref ps) = self.track_info.parameter_sets {
+                if sample.is_keyframe
+                    && let Some(ref ps) = self.track_info.parameter_sets
+                {
                     annex_b.extend_from_slice(ps);
                 }
                 annex_b.extend_from_slice(&length_prefixed_nalu_to_annex_b(
-                    raw_data,
+                    &raw_data,
                     self.track_info.nal_length_size,
                 ));
                 annex_b
             }
-            _ => raw_data.to_vec(),
+            _ => raw_data,
         };
 
-        Mp4EncodedSample {
+        Ok(Mp4EncodedSample {
             data,
-            is_keyframe: keyframe,
+            is_keyframe: sample.is_keyframe,
             width: self.track_info.width as u32,
             height: self.track_info.height as u32,
             codec_type: self.track_info.codec_type,
-        }
+        })
     }
 
-    /// 先頭からフレーム index までの累積再生時間をマイクロ秒で返す。
+    /// 先頭からフレーム index までの累積再生時間を返す。
     /// index=0 なら 0、index=len() なら動画全体の長さ。
-    fn cumulative_duration_us(&self, index: usize) -> u64 {
-        self.cumulative_us[index]
+    fn cumulative_duration(&self, index: usize) -> std::time::Duration {
+        self.cumulative[index].to_duration()
     }
+}
+
+/// ファイルの指定位置から指定サイズのデータを読み込む。
+///
+/// ファイルベースの読み込みで seek + read_exact の組み合わせが必要な箇所は
+/// すべてこの関数に集約する。read_exact は要求サイズの読み込みを保証するため、
+/// ファイルが途中で縮小されている場合は I/O エラーを返す。
+fn read_bytes_at(
+    file: &mut BufReader<std::fs::File>,
+    position: u64,
+    size: usize,
+) -> Result<Vec<u8>> {
+    let mut data = vec![0; size];
+    file.seek(std::io::SeekFrom::Start(position))?;
+    file.read_exact(&mut data)?;
+    Ok(data)
 }
 
 /// 長さプレフィックス付き NAL ユニットを Annex B 形式に変換する。
@@ -645,7 +841,7 @@ impl VideoEncoderHandler for Mp4PassthroughEncoder {
             }
         };
 
-        rtc_log_info!(
+        rtc_log_verbose!(
             "MP4Passthrough: encode() keyframe={} size={} bytes",
             sample.is_keyframe,
             sample.data.len()
@@ -726,16 +922,13 @@ impl VideoEncoderHandler for Mp4PassthroughEncoder {
 ///
 /// WebRTC のコーデックパイプラインにパススルーエンコーダーを登録するためのアダプター。
 /// MP4 から検出されたコーデック種別のみをサポートし、デコーダーは提供しない (送信専用)。
+///
+/// [`Mp4SampleReader::passthrough_capability`] から生成する。
+/// フィールドは private で、`codec_type` と `required_format` の内部一貫性
+/// （format 名が codec_type と一致する）を構造的に守る。
 pub struct Mp4PassthroughVideoCodecCapability {
-    /// MP4 から検出されたコーデック種別。
     codec_type: VideoCodecType,
-}
-
-impl Mp4PassthroughVideoCodecCapability {
-    /// 指定された [VideoCodecType] で `Mp4PassthroughVideoCodecCapability` を生成する。
-    pub fn new(codec_type: VideoCodecType) -> Self {
-        Self { codec_type }
-    }
+    required_format: SdpVideoFormat,
 }
 
 impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
@@ -747,18 +940,19 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
         if direction != CodecDirection::Encoder {
             return Vec::new();
         }
-        match self.codec_type {
-            VideoCodecType::H264 => {
-                let mut format = SdpVideoFormat::new("H264");
-                format.parameters_mut().set("packetization-mode", "1");
-                vec![format]
-            }
-            VideoCodecType::H265 => vec![SdpVideoFormat::new("H265")],
-            VideoCodecType::Vp8 => vec![SdpVideoFormat::new("VP8")],
-            VideoCodecType::Vp9 => vec![SdpVideoFormat::new("VP9")],
-            VideoCodecType::Av1 => vec![SdpVideoFormat::new("AV1")],
-            _ => Vec::new(),
-        }
+        // reader 由来の required format だけを広告する。コーデック固有の
+        // 必須パラメータ（例: H.264 の profile-level-id）を持つ format も
+        // ここから返せる。
+        vec![self.required_format.clone()]
+    }
+
+    // デフォルト実装は bare `SdpVideoFormat` を組み立てて `resolve_sdp_format`
+    // に通す形だが、reader 由来 required format がコーデック固有のパラメータを
+    // 要求する場合に bare 入力が拒否され、false になってしまう。それを避けるため
+    // override し、Encoder かつ reader の codec type と一致する場合のみ true を返す。
+    // preference の可否判定はこの結果を source of truth として扱われる。
+    fn is_supported(&self, direction: CodecDirection, codec_type: VideoCodecType) -> bool {
+        direction == CodecDirection::Encoder && codec_type == self.codec_type
     }
 
     fn create_video_encoder(
@@ -792,9 +986,34 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
 /// MP4 の末尾に到達すると先頭に戻りループ再生する。
 pub struct Mp4VideoCapturer {
     video_source: VideoTrackSource,
-    /// フィーダースレッドへの停止シグナル。
+    /// フィーダースレッドへの停止フラグ。
     stop: Arc<AtomicBool>,
     thread_handle: Option<thread::JoinHandle<()>>,
+}
+
+/// 停止フラグの確認間隔の上限。
+///
+/// フレーム間隔の待機をこの時間ずつに分割して `thread::sleep` し、
+/// 停止フラグの確認を挟むことで、停止までの最大遅延をこの値に制限する。
+/// 値自体に特別な意味はなく、停止までの最大遅延が実用上十分に小さく
+/// （100ms は体感できない程度）、かつ通常のフレーム間隔 (30 fps で約 33ms) の
+/// 待機を分割しない程度の値として選んだ。
+const MAX_SLEEP_DURATION: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// 停止フラグを確認しながら deadline まで待機する。
+///
+/// 停止フラグが設定されたら `true`、deadline に到達したら `false` を返す。
+fn wait_until_or_stop(stop: &AtomicBool, deadline: std::time::Instant) -> bool {
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return true;
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        thread::sleep(remaining.min(MAX_SLEEP_DURATION));
+    }
 }
 
 impl Mp4VideoCapturer {
@@ -802,7 +1021,7 @@ impl Mp4VideoCapturer {
     ///
     /// 生成と同時に専用スレッドを起動し、MP4 のフレームタイミングに従って
     /// 映像フレームを WebRTC に供給する。動画末尾に達すると先頭に戻りループ再生する。
-    pub fn new(reader: Mp4SampleReader) -> crate::error::Result<Self> {
+    pub fn new(mut reader: Mp4SampleReader) -> crate::error::Result<Self> {
         let width = reader.track_info.width as i32;
         let height = reader.track_info.height as i32;
 
@@ -832,7 +1051,14 @@ impl Mp4VideoCapturer {
                     let AdaptFrameResult { applied, .. } =
                         source.adapt_frame(width, height, timestamp_us);
                     if applied {
-                        let sample = reader.get_sample(i);
+                        // サンプルデータの読み込みに失敗したらフィーダースレッドを終了する。
+                        let sample = match reader.get_sample(i) {
+                            Ok(sample) => sample,
+                            Err(err) => {
+                                rtc_log_error!("MP4: failed to read sample: {err:?}");
+                                return;
+                            }
+                        };
                         let frame_buffer = VideoFrameBuffer::new_with_handler(Box::new(sample));
                         let ts =
                             aligner.translate(timestamp_us, shiguredo_webrtc::time_millis() * 1000);
@@ -844,13 +1070,18 @@ impl Mp4VideoCapturer {
                     }
 
                     // 次のフレームの絶対送信時刻まで待機する。
-                    // cumulative_duration_us(i+1) は「フレーム 0 から i までの合計再生時間」を返す。
+                    // cumulative_duration(i+1) は「フレーム 0 から i までの合計再生時間」を返す。
                     // loop_start からのオフセットとして使うことで、累積ドリフトを防止する。
-                    let next_frame_time_us = reader.cumulative_duration_us(i + 1);
-                    let target = loop_start + std::time::Duration::from_micros(next_frame_time_us);
-                    let now = std::time::Instant::now();
-                    if target > now {
-                        thread::sleep(target - now);
+                    let next_frame_time = reader.cumulative_duration(i + 1);
+                    let Some(target) = loop_start.checked_add(next_frame_time) else {
+                        // 累積再生時間が Instant の表現範囲を超えるのは、再生時間が極めて長い破損入力に限られる。
+                        // 実用上は発生しないが、発生した場合はログを残してフィーダースレッドを終了する。
+                        rtc_log_warning!("MP4: loop deadline overflow, stopping feeder thread");
+                        return;
+                    };
+                    // 停止フラグが設定されたらフィーダースレッドを終了する。
+                    if wait_until_or_stop(&stop_clone, target) {
+                        return;
                     }
                 }
 
@@ -875,6 +1106,8 @@ impl Drop for Mp4VideoCapturer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(handle) = self.thread_handle.take() {
+            // フィーダースレッドは最大 MAX_SLEEP_DURATION ごとに停止フラグを確認するため、
+            // join は停止フラグ設定後すぐに完了する。
             let _ = handle.join();
         }
     }
@@ -882,50 +1115,362 @@ impl Drop for Mp4VideoCapturer {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
+    use crate::video_codec_preference::VideoCodecPreference;
+
+    /// テスト実行中だけ存在する一時 fixture ファイル。Drop で自動的に削除する。
+    ///
+    /// 各テストが個別に tmp ファイルを作ることで、テスト実行順序に依存しない。
+    struct FixtureFile {
+        path: PathBuf,
+    }
+
+    impl Drop for FixtureFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    /// H.264 の fixture MP4 を一時ファイルに書き出して `Mp4SampleReader` を生成する。
+    /// 返される `FixtureFile` が drop されるまでファイルは残る。
+    fn h264_reader_from_fixture(tag: &str) -> (Mp4SampleReader, FixtureFile) {
+        let fixture = include_bytes!("../../testdata/red-320x320-h264.mp4");
+        let tmp_name = format!(
+            "sora-sdk-mp4-passthrough-{}-{}-{}.mp4",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("システム時刻は UNIX_EPOCH より後である必要があります")
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(tmp_name);
+        std::fs::write(&path, fixture).expect("一時 fixture の書き込みに失敗しました");
+        let reader = Mp4SampleReader::new(&path).expect("fixture MP4 のパースに失敗しました");
+        (reader, FixtureFile { path })
+    }
 
     #[test]
-    fn passthrough_capability_supports_only_selected_encoder_codec() {
-        let capability = Mp4PassthroughVideoCodecCapability::new(VideoCodecType::H264);
+    fn passthrough_capability_advertises_only_reader_required_format() {
+        let (reader, _fixture) = h264_reader_from_fixture("required-format");
+        let capability = reader.passthrough_capability();
+
         assert_eq!(capability.get_implementation().name(), "mp4-passthrough");
-        assert!(capability.is_supported(CodecDirection::Encoder, VideoCodecType::H264));
-        assert!(!capability.is_supported(CodecDirection::Encoder, VideoCodecType::Vp9));
-        assert!(!capability.is_supported(CodecDirection::Decoder, VideoCodecType::H264));
 
-        assert!(
-            capability
-                .create_video_encoder(
-                    shiguredo_webrtc::Environment::new().as_ref(),
-                    SdpVideoFormat::new("H264").as_ref(),
-                )
-                .is_some()
+        // Encoder 側の広告フォーマットは reader の required_sdp_format() と同じ 1 件だけ。
+        let encoder_formats = capability.get_supported_formats(CodecDirection::Encoder);
+        assert_eq!(
+            encoder_formats.len(),
+            1,
+            "Encoder 側は required_sdp_format() の 1 件だけを広告するはずです"
         );
-        assert!(
-            capability
-                .create_video_encoder(
-                    shiguredo_webrtc::Environment::new().as_ref(),
-                    SdpVideoFormat::new("VP9").as_ref(),
-                )
-                .is_none()
+        let required = reader.required_sdp_format();
+        assert_eq!(
+            encoder_formats[0]
+                .name()
+                .expect("format 名を取得できるはず"),
+            required.name().expect("required の name を取得できるはず")
         );
-        assert!(
-            capability
-                .create_video_decoder(
-                    shiguredo_webrtc::Environment::new().as_ref(),
-                    SdpVideoFormat::new("H264").as_ref(),
-                )
-                .is_none()
+        let mut owned = encoder_formats[0].clone();
+        let params: std::collections::HashMap<String, String> =
+            owned.parameters_mut().iter().collect();
+        assert_eq!(
+            params.get("packetization-mode").map(String::as_str),
+            Some("1"),
+            "H.264 required format は packetization-mode=1 を保持するはずです"
         );
 
-        let resolved = capability.resolve_sdp_format(
-            CodecDirection::Encoder,
-            SdpVideoFormat::new("H264").as_ref(),
+        // Decoder 側はパススルー送信のみなので空。
+        assert!(
+            capability
+                .get_supported_formats(CodecDirection::Decoder)
+                .is_empty(),
+            "Decoder 方向は空を返すはずです"
         );
-        assert!(resolved.is_some());
+    }
 
-        let unresolved = capability
-            .resolve_sdp_format(CodecDirection::Encoder, SdpVideoFormat::new("VP8").as_ref());
-        assert!(unresolved.is_none());
+    #[test]
+    fn passthrough_capability_is_supported_only_for_encoder_and_reader_codec_type() {
+        let (reader, _fixture) = h264_reader_from_fixture("is-supported");
+        let capability = reader.passthrough_capability();
+
+        // Encoder かつ reader の codec type (H.264) と一致する場合だけ true。
+        assert!(
+            capability.is_supported(CodecDirection::Encoder, VideoCodecType::H264),
+            "Encoder かつ H.264 は true を返すはずです"
+        );
+        assert!(
+            !capability.is_supported(CodecDirection::Encoder, VideoCodecType::Vp9),
+            "Encoder でも別 codec type は false を返すはずです"
+        );
+        assert!(
+            !capability.is_supported(CodecDirection::Decoder, VideoCodecType::H264),
+            "Decoder 方向は同じ codec type でも false を返すはずです"
+        );
+    }
+
+    #[test]
+    fn passthrough_capability_creates_encoder_only_for_reader_codec_type() {
+        let (reader, _fixture) = h264_reader_from_fixture("create-encoder");
+        let capability = reader.passthrough_capability();
+        let env = shiguredo_webrtc::Environment::new();
+
+        // reader の codec type と一致する H.264 では encoder が生成される。
+        assert!(
+            capability
+                .create_video_encoder(env.as_ref(), SdpVideoFormat::new("H264").as_ref())
+                .is_some(),
+            "reader の codec type と一致する H.264 は encoder を生成できるはずです"
+        );
+        // 別の codec type ではエンコーダーは生成されない。
+        assert!(
+            capability
+                .create_video_encoder(env.as_ref(), SdpVideoFormat::new("VP9").as_ref())
+                .is_none(),
+            "別の codec type の format は encoder を生成しないはずです"
+        );
+        // Decoder は常に生成しない (send only)。
+        assert!(
+            capability
+                .create_video_decoder(env.as_ref(), SdpVideoFormat::new("H264").as_ref())
+                .is_none(),
+            "Decoder は生成しないはずです (send only)"
+        );
+    }
+
+    #[test]
+    fn passthrough_capability_preference_registers_encoder_entry() {
+        let (reader, _fixture) = h264_reader_from_fixture("preference");
+        let capability = reader.passthrough_capability();
+
+        // is_supported override の結果が VideoCodecPreference::new_from_capability に
+        // そのまま反映されることを確認する。
+        let preference = VideoCodecPreference::new_from_capability(&capability);
+        let codecs = preference.codecs();
+
+        // is_supported override が Encoder + reader の codec_type にだけ true を返す
+        // ことを保証する目的で、preference のエントリ数までを直接検証する。
+        // 他 codec type や Decoder 方向で is_supported が誤って true を返すと、
+        // ここで余計なエントリが載って failure になる。
+        assert_eq!(
+            codecs.len(),
+            1,
+            "preference は Encoder + H.264 のエントリを 1 件だけ持つはずです"
+        );
+        let entry = &codecs[0];
+        assert_eq!(entry.direction(), CodecDirection::Encoder);
+        assert_eq!(entry.codec_type(), VideoCodecType::H264);
+        assert_eq!(
+            entry.implementation(),
+            &capability.get_implementation(),
+            "エントリの implementation は passthrough capability のものと一致するはずです"
+        );
+    }
+
+    /// テスト用の基準 `Mp4VideoTrackInfo` を返す。
+    ///
+    /// `parameter_sets` は非空の H.264 SPS 相当のバイト列にしてあり、
+    /// `Some` → `None` / `Some(bytes)` → `Some(別 bytes)` の遷移を検証しやすくしている。
+    fn base_track_info_for_consistency_test() -> Mp4VideoTrackInfo {
+        Mp4VideoTrackInfo {
+            codec_type: VideoCodecType::H264,
+            width: 640,
+            height: 360,
+            timescale: 1000,
+            parameter_sets: Some(vec![0x00, 0x00, 0x00, 0x01, 0x67]),
+            nal_length_size: 4,
+        }
+    }
+
+    #[test]
+    fn sample_description_consistency_check_reports_field_mismatches() {
+        // 実際に sample_entry の切り替わりが起きる合成 MP4 を用意するのが難しいため、
+        // 内部ヘルパー collect_mismatched_track_info_fields を単独で検証する。
+        let base = base_track_info_for_consistency_test();
+
+        // 完全一致は相違なし。
+        assert!(
+            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &base).is_empty(),
+            "完全一致では相違が報告されないはずです"
+        );
+
+        // codec_type だけ変えると codec_type が相違として報告される。
+        let mut modified = Mp4VideoTrackInfo {
+            codec_type: VideoCodecType::H265,
+            width: base.width,
+            height: base.height,
+            timescale: base.timescale,
+            parameter_sets: base.parameter_sets.clone(),
+            nal_length_size: base.nal_length_size,
+        };
+        assert_eq!(
+            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
+            vec!["codec_type"],
+            "codec_type だけの相違は codec_type のみを返すはずです"
+        );
+
+        // width だけ変えると width が相違として報告される。
+        modified = Mp4VideoTrackInfo {
+            codec_type: base.codec_type,
+            width: 1280,
+            height: base.height,
+            timescale: base.timescale,
+            parameter_sets: base.parameter_sets.clone(),
+            nal_length_size: base.nal_length_size,
+        };
+        assert_eq!(
+            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
+            vec!["width"],
+            "width だけの相違は width のみを返すはずです"
+        );
+
+        // height だけ変えると height が相違として報告される。
+        modified = Mp4VideoTrackInfo {
+            codec_type: base.codec_type,
+            width: base.width,
+            height: 720,
+            timescale: base.timescale,
+            parameter_sets: base.parameter_sets.clone(),
+            nal_length_size: base.nal_length_size,
+        };
+        assert_eq!(
+            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
+            vec!["height"],
+            "height だけの相違は height のみを返すはずです"
+        );
+
+        // nal_length_size だけ変えると nal_length_size が相違として報告される。
+        modified = Mp4VideoTrackInfo {
+            codec_type: base.codec_type,
+            width: base.width,
+            height: base.height,
+            timescale: base.timescale,
+            parameter_sets: base.parameter_sets.clone(),
+            nal_length_size: 2,
+        };
+        assert_eq!(
+            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
+            vec!["nal_length_size"],
+            "nal_length_size だけの相違は nal_length_size のみを返すはずです"
+        );
+
+        // parameter_sets だけを変えると parameter_sets が相違として報告される。
+        modified = Mp4VideoTrackInfo {
+            codec_type: base.codec_type,
+            width: base.width,
+            height: base.height,
+            timescale: base.timescale,
+            parameter_sets: Some(vec![0xff]),
+            nal_length_size: base.nal_length_size,
+        };
+        assert_eq!(
+            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
+            vec!["parameter_sets"],
+            "parameter_sets の byte 列の相違は parameter_sets のみを返すはずです"
+        );
+
+        // parameter_sets の Some → None 単独遷移も parameter_sets の相違として検出される。
+        modified = Mp4VideoTrackInfo {
+            codec_type: base.codec_type,
+            width: base.width,
+            height: base.height,
+            timescale: base.timescale,
+            parameter_sets: None,
+            nal_length_size: base.nal_length_size,
+        };
+        assert_eq!(
+            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
+            vec!["parameter_sets"],
+            "parameter_sets の Some から None への遷移は parameter_sets のみを返すはずです"
+        );
+
+        // 逆向きの None → Some 単独遷移も同じく検出される。
+        let base_without_params = Mp4VideoTrackInfo {
+            codec_type: base.codec_type,
+            width: base.width,
+            height: base.height,
+            timescale: base.timescale,
+            parameter_sets: None,
+            nal_length_size: base.nal_length_size,
+        };
+        let modified_with_params = Mp4VideoTrackInfo {
+            codec_type: base.codec_type,
+            width: base.width,
+            height: base.height,
+            timescale: base.timescale,
+            parameter_sets: Some(vec![0x00, 0x00, 0x00, 0x01, 0x67]),
+            nal_length_size: base.nal_length_size,
+        };
+        assert_eq!(
+            Mp4SampleReader::collect_mismatched_track_info_fields(
+                &base_without_params,
+                &modified_with_params
+            ),
+            vec!["parameter_sets"],
+            "parameter_sets の None から Some への遷移は parameter_sets のみを返すはずです"
+        );
+
+        // codec_type / height / nal_length_size / parameter_sets を同時に変えると
+        // 相違リストに全フィールドが設計方針の記載順で並ぶ。
+        modified = Mp4VideoTrackInfo {
+            codec_type: VideoCodecType::H265,
+            width: base.width,
+            height: 720,
+            timescale: base.timescale,
+            parameter_sets: None,
+            nal_length_size: 2,
+        };
+        assert_eq!(
+            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
+            vec!["codec_type", "height", "nal_length_size", "parameter_sets"],
+            "複数フィールドの相違は codec_type -> width -> height -> nal_length_size -> parameter_sets の順で並ぶはずです"
+        );
+
+        // timescale だけを変えても比較対象外なので相違なし。
+        modified = Mp4VideoTrackInfo {
+            codec_type: base.codec_type,
+            width: base.width,
+            height: base.height,
+            timescale: 90_000,
+            parameter_sets: base.parameter_sets.clone(),
+            nal_length_size: base.nal_length_size,
+        };
+        assert!(
+            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified).is_empty(),
+            "timescale は比較対象外なので相違として報告されないはずです"
+        );
+    }
+
+    #[test]
+    fn inconsistent_sample_description_display_and_source() {
+        // Display 出力に sample index と全ての相違フィールド名が含まれることを確認する。
+        // issue 側の完了条件で「Display 実装が sample index と相違フィールド名を含む」と
+        // 明示されているため、helper unit test とは別に error variant 側を直接検証する。
+        let err = Mp4Error::InconsistentSampleDescription {
+            index: 3,
+            fields: vec!["codec_type", "width", "parameter_sets"],
+        };
+        let message = format!("{err}");
+        assert!(
+            message.contains("sample=3"),
+            "sample index が Display 出力に含まれるはずです: {message}"
+        );
+        for expected_field in ["codec_type", "width", "parameter_sets"] {
+            assert!(
+                message.contains(expected_field),
+                "相違したフィールド名 {expected_field} が Display 出力に含まれるはずです: {message}"
+            );
+        }
+
+        // 本 variant は wrapping 元のエラーを持たないため source() は None を返す。
+        // 将来 refactor で誤って Some(...) を返す分岐に追加された場合の regression を捕捉する。
+        use std::error::Error as _;
+        assert!(
+            err.source().is_none(),
+            "InconsistentSampleDescription は source を持たないはずです"
+        );
     }
 
     #[test]
@@ -1001,6 +1546,13 @@ mod tests {
         assert!(output.is_empty());
     }
 
+    // ファイルベースのサンプル読み込みが、フィクスチャに記録された
+    // オフセット・サイズで正しいデータを読み出せることを確認する。
+    //
+    // サンプル 0 はキーフレーム (offset=48, size=702) で、変換後データは
+    // parameter sets (SPS/PPS) とサンプル NAL データの連結になる。
+    // 期待値はフィクスチャの stco / stsz / avcC ボックスから直接計算するため、
+    // フィクスチャ差し替え時にも自動的に追従する。
     #[test]
     fn sample_reader_reads_fixture_h264_mp4() {
         let fixture = include_bytes!("../../testdata/red-320x320-h264.mp4");
@@ -1020,25 +1572,270 @@ mod tests {
             tmp_path
                 .to_str()
                 .expect("パスは有効な UTF-8 である必要があります"),
+        )
+        .expect("フィクスチャ MP4 のパースに失敗しました");
+        let mut reader = reader;
+        assert_eq!(reader.codec_type(), VideoCodecType::H264);
+        assert!(!reader.is_empty());
+        let sample = reader
+            .get_sample(0)
+            .expect("サンプルデータの読み込みに失敗しました");
+
+        // サンプル 0 のファイル内オフセットは stco ボックスの先頭エントリから求める。
+        // ボックス構造: size(4) + type(4) + version/flags(4) + entry_count(4) + [offset(4) * entry_count]
+        let stco_offset = fixture
+            .windows(4)
+            .position(|w| w == b"stco")
+            .expect("フィクスチャに stco ボックスが必要です");
+        let stco_entry_count = u32::from_be_bytes(
+            fixture[stco_offset + 8..stco_offset + 12]
+                .try_into()
+                .expect("stco の entry_count は 4 バイトで読める必要があります"),
+        );
+        assert_eq!(
+            stco_entry_count, 1,
+            "フィクスチャの stco エントリ数が移動しています"
+        );
+        let sample_offset = u32::from_be_bytes(
+            fixture[stco_offset + 12..stco_offset + 16]
+                .try_into()
+                .expect("stco の先頭エントリは 4 バイトで読める必要があります"),
+        );
+        assert_eq!(
+            sample_offset, 48,
+            "フィクスチャのサンプル 0 のオフセットが移動しています"
+        );
+
+        // サンプル 0 のデータサイズは stsz ボックスの先頭エントリから求める。
+        // ボックス構造: size(4) + type(4) + version/flags(4) + sample_size(4)
+        //               + sample_count(4) + [entry_size(4) * sample_count]
+        let stsz_offset = fixture
+            .windows(4)
+            .position(|w| w == b"stsz")
+            .expect("フィクスチャに stsz ボックスが必要です");
+        let sample_size = u32::from_be_bytes(
+            fixture[stsz_offset + 16..stsz_offset + 20]
+                .try_into()
+                .expect("stsz の先頭エントリは 4 バイトで読める必要があります"),
+        );
+        assert_eq!(
+            sample_size, 702,
+            "フィクスチャのサンプル 0 のサイズが移動しています"
+        );
+
+        // parameter sets (SPS/PPS) は avcC ボックスから抽出する。
+        // ボックス構造: size(4) + type(4) + version(1) + profile(1) + compat(1) + level(1)
+        //               + length_size_minus_one(1) + num_of_sps(1) + [sps_length(2) + sps]
+        //               + num_of_pps(1) + [pps_length(2) + pps]
+        // num_of_sps の上位 3 ビットは reserved (111) なのでマスクする。
+        let avcc_offset = fixture
+            .windows(4)
+            .position(|w| w == b"avcC")
+            .expect("フィクスチャに avcC ボックスが必要です");
+        let num_of_sps = (fixture[avcc_offset + 9] & 0x1f) as usize;
+        let sps_length = u16::from_be_bytes(
+            fixture[avcc_offset + 10..avcc_offset + 12]
+                .try_into()
+                .expect("sps_length は 2 バイトで読める必要があります"),
+        ) as usize;
+        let sps = &fixture[avcc_offset + 12..avcc_offset + 12 + sps_length];
+        let num_of_pps = fixture[avcc_offset + 12 + sps_length] as usize;
+        let pps_length = u16::from_be_bytes(
+            fixture[avcc_offset + 13 + sps_length..avcc_offset + 15 + sps_length]
+                .try_into()
+                .expect("pps_length は 2 バイトで読める必要があります"),
+        ) as usize;
+        let pps =
+            &fixture[avcc_offset + 15 + sps_length..avcc_offset + 15 + sps_length + pps_length];
+        assert_eq!(num_of_sps, 1, "フィクスチャの SPS 数が移動しています");
+        assert_eq!(num_of_pps, 1, "フィクスチャの PPS 数が移動しています");
+        assert_eq!(
+            sps[0], 0x67,
+            "フィクスチャの SPS の先頭バイトが移動しています"
+        );
+        assert_eq!(
+            pps[0], 0x68,
+            "フィクスチャの PPS の先頭バイトが移動しています"
+        );
+
+        // 変換後データは [start code(4) + SPS][start code(4) + PPS][サンプル NAL データ] の形式になる。
+        // サンプル NAL データは、stco/stsz が示す範囲の AVCC 形式データを
+        // 長さプレフィックス変換したものと一致する必要がある (変換は長さ 1:1)。
+        let sample_start = sample_offset as usize;
+        let sample_end = sample_start + sample_size as usize;
+        let expected_annex_b =
+            length_prefixed_nalu_to_annex_b(&fixture[sample_start..sample_end], 4);
+        let expected_len = 4 + sps_length + 4 + pps_length + expected_annex_b.len();
+        assert_eq!(
+            sample.data.len(),
+            expected_len,
+            "サンプル 0 のデータ長が期待値と異なります"
+        );
+        assert_eq!(
+            &sample.data[0..4],
+            &[0x00, 0x00, 0x00, 0x01],
+            "SPS のスタートコードがありません"
+        );
+        assert_eq!(
+            &sample.data[4..4 + sps_length],
+            sps,
+            "SPS が変換後データの先頭に現れるべきです"
+        );
+        assert_eq!(
+            &sample.data[4 + sps_length..8 + sps_length],
+            &[0x00, 0x00, 0x00, 0x01],
+            "PPS のスタートコードがありません"
+        );
+        assert_eq!(
+            &sample.data[8 + sps_length..8 + sps_length + pps_length],
+            pps,
+            "PPS が SPS の後に現れるべきです"
+        );
+        assert_eq!(
+            &sample.data[8 + sps_length + pps_length..],
+            expected_annex_b,
+            "サンプル NAL データがファイルから正しく読み込まれていません"
+        );
+
+        // cumulative_duration の全値が従来どおり (i * 40000 µs) であることを確認する。
+        // フィクスチャは 25 サンプル、duration 512、timescale 12800 のため、
+        // 1 サンプルあたり 512 * 1_000_000 / 12800 = 40000 マイクロ秒になる。
+        for i in 0..=reader.len() {
+            assert_eq!(
+                reader.cumulative_duration(i),
+                std::time::Duration::from_micros(i as u64 * 40000),
+                "cumulative_duration[{i}] が期待値と異なります"
+            );
+        }
+
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+
+    // Mp4Timestamp::to_duration が overflow せず正しい Duration を返すことを確認する。
+    #[test]
+    fn mp4_timestamp_converts_to_duration() {
+        // ticks=0 は 0 秒。
+        assert_eq!(
+            Mp4Timestamp {
+                ticks: 0,
+                timescale: 12800
+            }
+            .to_duration(),
+            std::time::Duration::ZERO
+        );
+        // ticks == timescale はちょうど 1 秒。
+        assert_eq!(
+            Mp4Timestamp {
+                ticks: 12800,
+                timescale: 12800
+            }
+            .to_duration(),
+            std::time::Duration::from_secs(1)
+        );
+        // 割り切れない剰余: 1 tick = 1/12800 秒 = 78125 ナノ秒。
+        assert_eq!(
+            Mp4Timestamp {
+                ticks: 1,
+                timescale: 12800
+            }
+            .to_duration(),
+            std::time::Duration::from_nanos(78125)
+        );
+        // 巨大な ticks でも overflow しない (timescale=1 なら tick がそのまま秒になる)。
+        assert_eq!(
+            Mp4Timestamp {
+                ticks: u64::MAX,
+                timescale: 1
+            }
+            .to_duration(),
+            std::time::Duration::new(u64::MAX, 0)
+        );
+        // ナノ秒の乗算が最大になる境界 (timescale=u32::MAX、剰余=timescale-1) でも overflow しない。
+        let max_mul = (u32::MAX as u64 - 1) * 1_000_000_000 / u32::MAX as u64;
+        assert_eq!(
+            Mp4Timestamp {
+                ticks: u32::MAX as u64 - 1,
+                timescale: u32::MAX
+            }
+            .to_duration(),
+            std::time::Duration::from_nanos(max_mul)
+        );
+        // timescale ちょうど (剰余 0) は 1 秒。
+        assert_eq!(
+            Mp4Timestamp {
+                ticks: u32::MAX as u64,
+                timescale: u32::MAX
+            }
+            .to_duration(),
+            std::time::Duration::from_secs(1)
+        );
+    }
+
+    // リーダー構築後にファイルを 0 バイトへ縮小すると、
+    // get_sample のファイル読み込みが I/O エラーとして失敗することを確認する。
+    //
+    // read_exact は要求サイズの読み込みを保証するため、
+    // ファイルが縮小されていると UnexpectedEof が発生する。
+    // 縮小は別ハンドルから行う (std::fs::File::open は共有モードで開くため、
+    // Unix/Windows ともリーダーの保持するハンドルには影響しない)。
+    #[test]
+    fn sample_reader_get_sample_returns_io_error_after_file_truncation() {
+        let fixture = include_bytes!("../../testdata/red-320x320-h264.mp4");
+        let tmp_name = format!(
+            "sora-sdk-mp4-test-truncate-{}-{}.mp4",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("システム時刻は UNIX_EPOCH より後である必要があります")
+                .as_nanos()
+        );
+        let tmp_path = std::env::temp_dir().join(tmp_name);
+
+        std::fs::write(&tmp_path, fixture).expect("一時フィクスチャの書き込みに失敗しました");
+
+        let reader = Mp4SampleReader::new(
+            tmp_path
+                .to_str()
+                .expect("パスは有効な UTF-8 である必要があります"),
+        )
+        .expect("フィクスチャ MP4 のパースに失敗しました");
+        let mut reader = reader;
+
+        let file = std::fs::File::options()
+            .write(true)
+            .open(&tmp_path)
+            .expect("縮小用ハンドルのオープンに失敗しました");
+        file.set_len(0).expect("ファイルの縮小に失敗しました");
+        drop(file);
+
+        let result = reader.get_sample(0);
+        assert!(
+            matches!(result, Err(Mp4Error::Io(_))),
+            "縮小されたファイルからの読み込みは Io エラーになるべきです"
         );
 
         let _ = std::fs::remove_file(&tmp_path);
-
-        let reader = reader.expect("フィクスチャ MP4 のパースに失敗しました");
-        assert_eq!(reader.codec_type(), VideoCodecType::H264);
-        assert!(!reader.is_empty());
-        let sample = reader.get_sample(0);
-        assert!(sample.data.len() >= 4);
-        assert_eq!(&sample.data[0..4], &[0x00, 0x00, 0x00, 0x01]);
     }
 
     // validated_nal_length_size が有効な length_size_minus_one (0/1/3) を
     // それぞれ nal_length_size 1/2/4 に変換することを確認する。
     #[test]
     fn validated_nal_length_size_accepts_valid_values() {
-        assert_eq!(Mp4SampleReader::validated_nal_length_size(0).unwrap(), 1);
-        assert_eq!(Mp4SampleReader::validated_nal_length_size(1).unwrap(), 2);
-        assert_eq!(Mp4SampleReader::validated_nal_length_size(3).unwrap(), 4);
+        assert_eq!(
+            Mp4SampleReader::validated_nal_length_size(0)
+                .expect("length_size_minus_one=0 は受け入れられる必要があります"),
+            1
+        );
+        assert_eq!(
+            Mp4SampleReader::validated_nal_length_size(1)
+                .expect("length_size_minus_one=1 は受け入れられる必要があります"),
+            2
+        );
+        assert_eq!(
+            Mp4SampleReader::validated_nal_length_size(3)
+                .expect("length_size_minus_one=3 は受け入れられる必要があります"),
+            4
+        );
     }
 
     // validated_nal_length_size が reserved 値 (length_size_minus_one=2) を
@@ -1048,7 +1845,7 @@ mod tests {
         let result = Mp4SampleReader::validated_nal_length_size(2);
         assert!(result.is_err());
         assert!(matches!(
-            result.unwrap_err(),
+            result.expect_err("reserved 値はエラーになる必要があります"),
             Mp4Error::InvalidNalLengthSize(3)
         ));
     }
@@ -1298,5 +2095,64 @@ mod tests {
             }
             Err(e) => panic!("offset 0 の MP4 は Ok を期待しましたが、実際は: {e}"),
         }
+    }
+
+    // deadline を 60 秒先に設定し、停止フラグ設定済みなら
+    // sleep せずに即座に true を返すことを確認する。
+    #[test]
+    fn wait_until_or_stop_stops_immediately_when_stop_is_set() {
+        let stop = AtomicBool::new(true);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        assert!(
+            wait_until_or_stop(&stop, deadline),
+            "停止フラグ設定済みなら即座に true を返すべきです"
+        );
+    }
+
+    // deadline を 1 秒前に設定し、到達済みなら sleep せずに即座に false を返すことを確認する。
+    #[test]
+    fn wait_until_or_stop_returns_false_when_deadline_passed() {
+        let stop = AtomicBool::new(false);
+        let deadline = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        assert!(
+            !wait_until_or_stop(&stop, deadline),
+            "deadline 到達済みなら即座に false を返すべきです"
+        );
+    }
+
+    // 実 thread で、sleep 中に stop フラグが設定された場合に
+    // 最大 MAX_SLEEP_DURATION 以内で終了することを確認する。
+    //
+    // barrier でテストスレッドの wait_until_or_stop 呼び出し直前までを同期し、
+    // 最初の stop チェックを通過して sleep に入るのを待ってから stop を設定する。
+    // これにより、sleep 中に stop が設定される経路を確実に実行する。
+    #[test]
+    fn wait_until_or_stop_stops_within_sleep_limit() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        let stop_clone = stop.clone();
+        let barrier_clone = barrier.clone();
+        thread::spawn(move || {
+            barrier_clone.wait();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            let result = wait_until_or_stop(&stop_clone, deadline);
+            done_tx.send(result).expect("終了通知の送信に失敗しました");
+        });
+
+        barrier.wait();
+        // テストスレッドが最初の stop チェックを通過して sleep に入るのを待ってから
+        // stop を設定する (sleep 中の stop 検出経路を確実に実行するためのタイミング調整)。
+        thread::sleep(MAX_SLEEP_DURATION / 2);
+        stop.store(true, Ordering::Release);
+
+        let stopped = done_rx
+            .recv_timeout(MAX_SLEEP_DURATION + std::time::Duration::from_millis(100))
+            .expect("待機中のスレッドは停止フラグ設定から MAX_SLEEP_DURATION に余裕を加えた時間以内に終了するべきです");
+        assert!(
+            stopped,
+            "stop による停止 (true) を期待しましたが、実際は: {stopped:?}"
+        );
     }
 }

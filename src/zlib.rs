@@ -52,24 +52,25 @@ mod tests {
     #[test]
     fn decompress_zlib_within_limit() {
         let original = b"Hello, zlib!";
-        let compressed = compress_zlib(original).unwrap();
-        let decompressed = decompress_zlib(&compressed, 1024).unwrap();
+        let compressed = compress_zlib(original).expect("テストデータの圧縮に失敗しました");
+        let decompressed = decompress_zlib(&compressed, 1024).expect("展開に失敗しました");
         assert_eq!(decompressed, original);
     }
 
     #[test]
     fn decompress_zlib_at_limit() {
         let original = vec![b'a'; 1024];
-        let compressed = compress_zlib(&original).unwrap();
-        let decompressed = decompress_zlib(&compressed, 1024).unwrap();
+        let compressed = compress_zlib(&original).expect("テストデータの圧縮に失敗しました");
+        let decompressed = decompress_zlib(&compressed, 1024).expect("展開に失敗しました");
         assert_eq!(decompressed, original);
     }
 
     #[test]
     fn decompress_zlib_over_limit() {
         let original = vec![b'a'; 1025];
-        let compressed = compress_zlib(&original).unwrap();
-        let err = decompress_zlib(&compressed, 1024).unwrap_err();
+        let compressed = compress_zlib(&original).expect("テストデータの圧縮に失敗しました");
+        let err = decompress_zlib(&compressed, 1024)
+            .expect_err("上限超過の展開はエラーになる必要があります");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
@@ -77,9 +78,10 @@ mod tests {
     fn decompress_zlib_high_compression_ratio() {
         // 高圧縮率の反復データは小さい圧縮入力から大量の出力を生む
         let original = vec![b'a'; 1024 * 1024];
-        let compressed = compress_zlib(&original).unwrap();
+        let compressed = compress_zlib(&original).expect("テストデータの圧縮に失敗しました");
         assert!(compressed.len() < 1024 * 1024);
-        let err = decompress_zlib(&compressed, 1024).unwrap_err();
+        let err = decompress_zlib(&compressed, 1024)
+            .expect_err("上限超過の展開はエラーになる必要があります");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
@@ -87,27 +89,30 @@ mod tests {
     fn decompress_zlib_empty_payload_with_limit_zero() {
         // 空ペイロードを表す正常な zlib ストリームは出力 0 バイトのため、
         // 上限 0 でも展開できる
-        let compressed = compress_zlib(b"").unwrap();
-        let decompressed = decompress_zlib(&compressed, 0).unwrap();
+        let compressed = compress_zlib(b"").expect("空ペイロードの圧縮に失敗しました");
+        let decompressed =
+            decompress_zlib(&compressed, 0).expect("空ペイロードの展開に失敗しました");
         assert!(decompressed.is_empty());
     }
 
     #[test]
     fn decompress_zlib_truncated_stream() {
         let original = b"Hello, zlib!";
-        let compressed = compress_zlib(original).unwrap();
+        let compressed = compress_zlib(original).expect("テストデータの圧縮に失敗しました");
         let truncated = &compressed[..compressed.len() - 1];
-        let err = decompress_zlib(truncated, 1024).unwrap_err();
+        let err = decompress_zlib(truncated, 1024)
+            .expect_err("切り詰められたストリームの展開はエラーになる必要があります");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
     fn decompress_zlib_adler32_mismatch() {
         let original = b"Hello, zlib!";
-        let mut compressed = compress_zlib(original).unwrap();
+        let mut compressed = compress_zlib(original).expect("テストデータの圧縮に失敗しました");
         let last = compressed.len() - 1;
         compressed[last] ^= 0xFF;
-        let err = decompress_zlib(&compressed, 1024).unwrap_err();
+        let err = decompress_zlib(&compressed, 1024)
+            .expect_err("Adler-32 が一致しない展開はエラーになる必要があります");
         assert_eq!(err.kind(), io::ErrorKind::Other);
     }
 }

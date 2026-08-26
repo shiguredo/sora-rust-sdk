@@ -2,34 +2,16 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use e2e_tests::{
-    SoraTestConnection, SoraTestEvent, api_url, build_metadata_with_access_token,
-    disconnect_channel, generate_channel_id, load_env, secret_key, signaling_urls,
+    SoraTestConnection, SoraTestEvent, api_url, build_recvonly_data_channel_signaling_connection,
+    disconnect_channel, generate_channel_id, load_env, signaling_urls,
 };
 use nojson::RawJson;
-use sora_sdk::{Role, SignalingDirection, SignalingType, SoraConnectionContext};
+use sora_sdk::{SignalingDirection, SignalingType};
 
 // run task の終了待機はこの値 + websocket_close_timeout + 1 秒で判定する。
 // Sora 側から DataChannel が閉じられるのに十分な時間を確保する。
 const DISCONNECT_WAIT_TIMEOUT: Duration = Duration::from_secs(3);
 const WEBSOCKET_CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
-
-/// DisconnectChannel API E2E 用の recvonly 接続を構築する。
-///
-/// Sora 側で `data_channel_signaling_close_message=true` が設定されていることを前提とする。
-fn build_recvonly_connection(urls: Vec<String>, channel_id: String) -> SoraTestConnection {
-    let context = SoraConnectionContext::new().expect("コンテキスト作成失敗");
-    let mut builder = SoraTestConnection::builder(context, urls, channel_id, Role::RecvOnly)
-        .data_channel_signaling(true)
-        .ignore_disconnect_websocket(true)
-        .disconnect_wait_timeout(DISCONNECT_WAIT_TIMEOUT)
-        .websocket_close_timeout(WEBSOCKET_CLOSE_TIMEOUT);
-    if let Some(token) = secret_key() {
-        builder = builder.metadata(build_metadata_with_access_token(&token));
-    }
-    builder
-        .connect()
-        .expect("SoraTestConnection の作成に失敗しました")
-}
 
 /// 受信したテキストが DisconnectChannel API による Close メッセージかどうかを判定する。
 ///
@@ -130,8 +112,9 @@ async fn assert_websocket_close_not_duplicated(connection: &mut SoraTestConnecti
     );
 }
 
-/// Close 受信前に open を観測した各 DataChannel label について、on_data_channel_close が重複しないことを確認する。
-async fn assert_data_channel_close_not_duplicated(connection: &mut SoraTestConnection) {
+/// Close 受信前に open を観測した各 DataChannel label について、
+/// on_data_channel_close が重複・欠落なく 1 回だけ呼ばれることを確認する。
+async fn assert_data_channel_close_notified_exactly_once(connection: &mut SoraTestConnection) {
     let events = connection.events().await;
     let opened_labels: HashSet<String> = events
         .into_iter()
@@ -148,9 +131,9 @@ async fn assert_data_channel_close_not_duplicated(connection: &mut SoraTestConne
         let close_count = connection
             .count_data_channel_close(|actual| actual == label)
             .await;
-        assert!(
-            close_count <= 1,
-            "on_data_channel_close が label='{label}' で重複して呼ばれました: {close_count} 回"
+        assert_eq!(
+            close_count, 1,
+            "on_data_channel_close が label='{label}' で重複・欠落なく 1 回呼ばれる必要があります: {close_count} 回"
         );
     }
 }
@@ -169,7 +152,12 @@ async fn server_close_message_terminates_run_while_websocket_connected() {
     };
     let urls = signaling_urls().expect("TEST_SIGNALING_URLS が必要");
     let channel_id = generate_channel_id();
-    let mut connection = build_recvonly_connection(urls, channel_id.clone());
+    let mut connection = build_recvonly_data_channel_signaling_connection(
+        urls,
+        channel_id.clone(),
+        Some(DISCONNECT_WAIT_TIMEOUT),
+        Some(WEBSOCKET_CLOSE_TIMEOUT),
+    );
 
     connection
         .wait_for_switched(Duration::from_secs(15))
@@ -217,7 +205,7 @@ async fn server_close_message_terminates_run_while_websocket_connected() {
     // その時点で 1 回通知される。server Close メッセージの処理で追加通知されない。
     assert_websocket_close_not_duplicated(&mut connection).await;
 
-    assert_data_channel_close_not_duplicated(&mut connection).await;
+    assert_data_channel_close_notified_exactly_once(&mut connection).await;
 }
 
 /// WebSocket 切断後に DisconnectChannel API で Sora 側から切断し、
@@ -234,7 +222,12 @@ async fn server_close_message_terminates_run_after_websocket_closed() {
     };
     let urls = signaling_urls().expect("TEST_SIGNALING_URLS が必要");
     let channel_id = generate_channel_id();
-    let mut connection = build_recvonly_connection(urls, channel_id.clone());
+    let mut connection = build_recvonly_data_channel_signaling_connection(
+        urls,
+        channel_id.clone(),
+        Some(DISCONNECT_WAIT_TIMEOUT),
+        Some(WEBSOCKET_CLOSE_TIMEOUT),
+    );
 
     connection
         .wait_for_switched(Duration::from_secs(15))
@@ -242,11 +235,12 @@ async fn server_close_message_terminates_run_after_websocket_closed() {
         .expect("switched 通知の受信がタイムアウトしました");
 
     // SDK が WebSocket を自分から閉じるまで待つ。
-    // 全 DataChannel オープン + 10 秒 + 余裕を見て 60 秒。
+    // 全 DataChannel オープンから WS_DISCONNECT_DELAY (10 秒) 後に決定的に閉じるため、
+    // 余裕を見て 20 秒で待つ。
     connection
         .wait_for_event(
             |event| matches!(event, SoraTestEvent::WebsocketClose { .. }),
-            Duration::from_secs(60),
+            Duration::from_secs(20),
         )
         .await
         .expect("WebSocket Close コールバックが届きませんでした");
@@ -273,5 +267,5 @@ async fn server_close_message_terminates_run_after_websocket_closed() {
     // server Close メッセージの処理で追加通知されない。
     assert_websocket_close_not_duplicated(&mut connection).await;
 
-    assert_data_channel_close_not_duplicated(&mut connection).await;
+    assert_data_channel_close_notified_exactly_once(&mut connection).await;
 }

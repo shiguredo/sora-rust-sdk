@@ -1,6 +1,6 @@
 [package]
 name = "sora_sdk"
-version = "2026.1.0-canary.18"
+version = "2026.1.0"
 edition = "2024"
 rust-version = "1.93"
 description = "Sora Rust SDK"
@@ -30,20 +30,20 @@ shiguredo_mp4 = "~2026.4"
 # NVIDIA Video Codec によるハードウェアエンコード/デコード
 shiguredo_nvcodec = "~2026.2"
 # OpenH264 による H.264 ソフトウェアエンコード/デコード
-shiguredo_openh264 = "~2026.1"
+shiguredo_openh264 = "~2026.2"
 # V4L2 M2M によるハードウェアコーデックと画像変換 (Linux 向け)
-shiguredo_v4l2 = "~2026.1"
+shiguredo_v4l2 = "~2026.2"
 # Intel VPL によるハードウェアエンコード/デコード
-shiguredo_vpl = "~2026.3"
+shiguredo_vpl = "~2026.4"
 # WebRTC スタック本体 (PeerConnection、メディアエンジン等)
-shiguredo_webrtc = "~0.152"
+shiguredo_webrtc = "~0.152.1-canary.0"
 # Sora シグナリングへの接続で利用する WebSocket クライアント実装
 shiguredo_websocket = "~2026.3"
 
 # 外部クレート
 
 # rustls の暗号バックエンドおよび WebSocket の SecureRandom 実装に利用
-aws-lc-rs = "1.17"
+aws-lc-rs = "1.18"
 # libcamera のフレームバッファを mmap/munmap するための POSIX FFI
 libc = "0.2"
 # DataChannel メッセージの zlib 圧縮/解凍に利用
@@ -117,6 +117,12 @@ tokio = {
   ]
 }
 tokio-rustls.workspace = true
+
+[dev-dependencies]
+# テストでソケットの SO_LINGER を設定して RST を送るために利用
+socket2 = "0.6"
+# テストで仮想時刻 (start_paused) を使い、時間依存テストを決定論化するために利用
+tokio = { workspace = true, features = ["test-util"] }
 
 [features]
 default = ["openh264"]

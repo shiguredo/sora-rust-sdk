@@ -10,22 +10,31 @@ use shiguredo_audio_device::{
     AudioCapture, AudioCaptureConfig, AudioDeviceList, AudioFormat, AudioFrame,
 };
 
-/// テスト用: 最初のオーディオデバイスの ID を含むキャプチャ設定を取得する。
-/// デバイスがない場合は None を返す。
-fn first_audio_device_config() -> Option<AudioCaptureConfig> {
+/// テスト用: 実オーディオデバイスの ID を含むキャプチャ設定を取得する。
+///
+/// 入力デバイスとして利用できる（チャンネル数とサンプルレートが正の）デバイスを優先し、
+/// 利用できない仮想デバイス等はスキップする。デバイスがない場合は None を返す。
+fn audio_capture_config() -> Option<AudioCaptureConfig> {
     let device_list = AudioDeviceList::enumerate_input().ok()?;
     if device_list.is_empty() {
         return None;
     }
 
-    let device = &device_list.as_slice()[0];
-    let device_id = device.unique_id().ok();
+    for device in device_list.as_slice() {
+        // チャンネル数・サンプルレートが正でないデバイスはキャプチャに使えないためスキップする
+        if device.channels() == 0 || device.sample_rate() == 0 {
+            continue;
+        }
 
-    Some(AudioCaptureConfig {
-        device_id,
-        sample_rate: 48000,
-        channels: 1,
-    })
+        let device_id = device.unique_id().ok();
+        return Some(AudioCaptureConfig {
+            device_id,
+            sample_rate: 48000,
+            channels: 1,
+        });
+    }
+
+    None
 }
 
 #[test]
@@ -33,7 +42,7 @@ fn test_audio_device_enumerate() {
     let result = AudioDeviceList::enumerate_input();
     assert!(result.is_ok(), "デバイス列挙に失敗: {:?}", result.err());
 
-    let device_list = result.unwrap();
+    let device_list = result.expect("デバイス列挙に失敗しました");
     println!("検出されたオーディオデバイス数: {}", device_list.len());
 
     for device in &device_list {
@@ -66,11 +75,20 @@ fn test_audio_device_info() {
         return;
     }
 
-    let device = &device_list.as_slice()[0];
+    // 入力デバイスとして利用できる（チャンネル数とサンプルレートが正の）デバイスを探す。
+    // 利用できない仮想デバイス等はスキップする。
+    let Some(device) = device_list
+        .as_slice()
+        .iter()
+        .find(|device| device.channels() > 0 && device.sample_rate() > 0)
+    else {
+        println!("利用できるオーディオデバイスが見つかりません（スキップ）");
+        return;
+    };
 
     let name = device.name();
     assert!(name.is_ok(), "デバイス名の取得に失敗: {:?}", name.err());
-    let name = name.unwrap();
+    let name = name.expect("デバイス名の取得に失敗しました");
     assert!(!name.is_empty(), "デバイス名が空");
 
     let unique_id = device.unique_id();
@@ -79,7 +97,7 @@ fn test_audio_device_info() {
         "デバイス ID の取得に失敗: {:?}",
         unique_id.err()
     );
-    let unique_id = unique_id.unwrap();
+    let unique_id = unique_id.expect("デバイス ID の取得に失敗しました");
     assert!(!unique_id.is_empty(), "デバイス ID が空");
 
     let channels = device.channels();
@@ -109,7 +127,7 @@ fn test_audio_capture_session_create() {
         return;
     }
 
-    let config = match first_audio_device_config() {
+    let config = match audio_capture_config() {
         Some(c) => c,
         None => {
             println!("オーディオデバイスが見つかりません（スキップ）");
@@ -124,7 +142,7 @@ fn test_audio_capture_session_create() {
         capture.err()
     );
 
-    let capture = capture.unwrap();
+    let capture = capture.expect("キャプチャセッションの作成に失敗しました");
     assert!(capture.sample_rate() > 0);
     assert!(capture.channels() > 0);
 
@@ -142,7 +160,7 @@ fn test_audio_capture_start_stop() {
         return;
     }
 
-    let config = match first_audio_device_config() {
+    let config = match audio_capture_config() {
         Some(c) => c,
         None => {
             println!("オーディオデバイスが見つかりません（スキップ）");
@@ -179,7 +197,7 @@ fn test_audio_capture_frame_received() {
         return;
     }
 
-    let config = match first_audio_device_config() {
+    let config = match audio_capture_config() {
         Some(c) => c,
         None => {
             println!("オーディオデバイスが見つかりません（スキップ）");
@@ -230,7 +248,7 @@ fn test_audio_frame_format_conversion() {
         return;
     }
 
-    let config = match first_audio_device_config() {
+    let config = match audio_capture_config() {
         Some(c) => c,
         None => {
             println!("オーディオデバイスが見つかりません（スキップ）");

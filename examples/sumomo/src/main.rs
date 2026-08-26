@@ -90,7 +90,7 @@ fn add_video_codec_capability(
 
 fn build_context_config(
     adm_config: sora_sdk::AdmConfig,
-    mp4_codec_type: Option<VideoCodecType>,
+    mp4_capability: Option<Mp4PassthroughVideoCodecCapability>,
     openh264_path: Option<&str>,
     video_codec_implementation: VideoCodecImplementationSelections,
 ) -> Result<SoraConnectionContextConfig> {
@@ -218,9 +218,8 @@ fn build_context_config(
     // implementation を上書きする) のため、この順序が「MP4 の実 codec の Encoder が
     // passthrough になる」ことの不変条件になっている。順序が変わると下のフィルタで
     // Encoder エントリが 0 件になり、MP4 送信が静かに成立しなくなる。
-    if let Some(codec_type) = mp4_codec_type {
-        let passthrough_capability: Box<dyn VideoCodecCapability> =
-            Box::new(Mp4PassthroughVideoCodecCapability::new(codec_type));
+    if let Some(capability) = mp4_capability {
+        let passthrough_capability: Box<dyn VideoCodecCapability> = Box::new(capability);
         let passthrough_implementation = passthrough_capability.get_implementation();
         add_video_codec_capability(&mut context_config, passthrough_capability);
 
@@ -248,11 +247,9 @@ struct TrackEntry {
     video_track: VideoTrack,
 }
 
-fn prepare_mp4_state(args: &Args) -> Result<Option<(Mp4SampleReader, VideoCodecType)>> {
+fn prepare_mp4_state(args: &Args) -> Result<Option<Mp4SampleReader>> {
     if let Some(ref mp4_path) = args.input_mp4 {
-        let reader = Mp4SampleReader::new(mp4_path)?;
-        let codec_type = reader.codec_type();
-        Ok(Some((reader, codec_type)))
+        Ok(Some(Mp4SampleReader::new(mp4_path)?))
     } else {
         Ok(None)
     }
@@ -307,32 +304,35 @@ fn apply_video_options(
     Ok(builder)
 }
 
+// SoraConnectionEventHandler は同期トレイトであるため、
+// チャンネルがフルになった時に待つことが出来ない。
+// そのためイベントチャネルは unbounded にする。
 struct AppEventHandler {
-    event_tx: mpsc::Sender<AppEvent>,
+    event_tx: mpsc::UnboundedSender<AppEvent>,
 }
 
 impl SoraConnectionEventHandler for AppEventHandler {
     fn on_notify(&mut self, text: &str) {
-        let _ = self.event_tx.try_send(AppEvent::Notify(text.to_string()));
+        let _ = self.event_tx.send(AppEvent::Notify(text.to_string()));
     }
 
     fn on_push(&mut self, text: &str) {
-        let _ = self.event_tx.try_send(AppEvent::Push(text.to_string()));
+        let _ = self.event_tx.send(AppEvent::Push(text.to_string()));
     }
 
     fn on_track(&mut self, transceiver: shiguredo_webrtc::RtpTransceiver) {
-        let _ = self.event_tx.try_send(AppEvent::OnTrack(transceiver));
+        let _ = self.event_tx.send(AppEvent::OnTrack(transceiver));
     }
 
     fn on_remove_track(&mut self, receiver: shiguredo_webrtc::RtpReceiver) {
-        let _ = self.event_tx.try_send(AppEvent::OnRemoveTrack(receiver));
+        let _ = self.event_tx.send(AppEvent::OnRemoveTrack(receiver));
     }
 }
 
 fn build_connection_builder(
     context: Arc<SoraConnectionContext>,
     args: &Args,
-    event_tx: mpsc::Sender<AppEvent>,
+    event_tx: mpsc::UnboundedSender<AppEvent>,
     mp4_codec_type: Option<VideoCodecType>,
 ) -> Result<SoraConnectionBuilder> {
     let mut builder = SoraConnection::builder(
@@ -528,22 +528,23 @@ fn handle_on_remove_track_event(
 /// disconnect に使う [SoraConnectionHandle] と、run の完了を待つ `JoinHandle` を返す。
 fn build_and_run_connection(
     args: &Args,
-    event_tx: mpsc::Sender<AppEvent>,
+    event_tx: mpsc::UnboundedSender<AppEvent>,
 ) -> Result<(
     SoraConnectionHandle,
     tokio::task::JoinHandle<sora_sdk::Result<()>>,
 )> {
-    // 音声が有効で、--audio-input-device が指定された場合は SumomoAdm を使用する
+    // 送信ロールかつ音声が有効で、--audio-input-device が指定された場合は SumomoAdm を使用する。
     #[cfg(feature = "media-device")]
-    let external_adm = if args.audio_enabled() && args.audio_input_device.is_some() {
-        Some(SumomoAdm::new())
-    } else {
-        None
-    };
+    let external_adm =
+        if args.role.wants_send() && args.audio_enabled() && args.audio_input_device.is_some() {
+            Some(SumomoAdm::new())
+        } else {
+            None
+        };
 
     // --input-mp4 が指定されている場合は MP4 を読み込んでパススルーの準備をする
     let mp4_state = prepare_mp4_state(args)?;
-    let mp4_codec_type = mp4_state.as_ref().map(|(_, codec_type)| *codec_type);
+    let mp4_codec_type = mp4_state.as_ref().map(|reader| reader.codec_type());
 
     #[cfg(feature = "media-device")]
     let adm_config = if let Some(external_adm) = &external_adm {
@@ -556,15 +557,17 @@ fn build_and_run_connection(
 
     let context_config = build_context_config(
         adm_config,
-        mp4_codec_type,
+        mp4_state
+            .as_ref()
+            .map(|reader| reader.passthrough_capability()),
         args.openh264_path.as_deref(),
         args.video_codec_implementation.clone(),
     )?;
     let context = SoraConnectionContext::new_with_config(context_config)?;
 
-    // 音声が有効で、--audio-input-device が指定された場合は AudioDeviceCapturer を使用する
+    // 送信ロールかつ音声が有効で、--audio-input-device が指定された場合は AudioDeviceCapturer を使用する。
     #[cfg(feature = "media-device")]
-    let audio_capturer = if args.audio_enabled() {
+    let audio_capturer = if args.role.wants_send() && args.audio_enabled() {
         if let Some(ref device_id) = args.audio_input_device {
             let state = external_adm
                 .as_ref()
@@ -582,8 +585,7 @@ fn build_and_run_connection(
     };
 
     let builder = build_connection_builder(context.clone(), args, event_tx, mp4_codec_type)?;
-    let (builder, video_capturer) =
-        attach_sender_tracks(builder, &context, args, mp4_state.map(|(reader, _)| reader))?;
+    let (builder, video_capturer) = attach_sender_tracks(builder, &context, args, mp4_state)?;
 
     let (connection, handle) = builder.build()?;
     let run_handle = tokio::spawn(async move {
@@ -639,9 +641,12 @@ async fn main() -> Result<()> {
         return run_video_codec_list(&args);
     }
 
-    log::log_to_debug(log::Severity::Info);
-    log::enable_timestamps();
-    log::enable_threads();
+    // ログの設定は最初のログ出力前に行う必要がある。
+    let mut log_config = log::LoggingConfig::new();
+    log_config.set_debug_severity(log::Severity::Info);
+    log_config.set_log_timestamp(true);
+    log_config.set_log_thread(true);
+    log::initialize_logging(log_config);
 
     validate_args(&args)?;
 
@@ -660,7 +665,7 @@ async fn main() -> Result<()> {
     #[cfg(not(feature = "raw-player"))]
     let mut renderer = VideoRenderer::Ansi(AnsiRenderer::new());
 
-    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(32);
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AppEvent>();
     let (frame_tx, mut frame_rx) = mpsc::channel::<I420Frame>(2);
 
     let (handle, mut run_handle) = build_and_run_connection(&args, event_tx.clone())?;
@@ -680,7 +685,7 @@ async fn main() -> Result<()> {
                 // server 起因で run() が先に完了した場合も shutdown_connection が結果を返す。
                 break;
             }
-            _ = async { duration_sleep.as_mut().as_pin_mut().unwrap().await }, if duration_sleep.is_some() && renderer_error.is_none() => {
+            _ = async { duration_sleep.as_mut().as_pin_mut().expect("duration_sleep は Some である必要があります").await }, if duration_sleep.is_some() && renderer_error.is_none() => {
                 rtc_log_info!("Specified duration elapsed, disconnecting");
                 break;
             }
