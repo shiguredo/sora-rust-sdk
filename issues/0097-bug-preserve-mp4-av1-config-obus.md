@@ -58,6 +58,10 @@ OBU / LEB128 / Sequence Header / Frame Header の汎用解析は mp4-rs 側（mp
 
 ## 設計方針
 
+本 issue の AV1 track 検証で検出する不正・想定外の入力は、すべて `Mp4Error::InvalidAv1Track(String)` に一本化して拒否する。
+エラー variant による細分類は行わず、メッセージ文字列に文脈（問題の sample index、OBU 種別、相違 field 名、underlying の parse エラー理由）を含める。
+MP4 ファイル入力は SDK の補助機能であり、利用側は「入力が不正または想定外である」ことと詳細な理由が分かれば十分なため。
+
 ### 対象範囲
 
 - `src/video_codecs/mp4.rs` の AV1 track configuration、AV1 sample framing、passthrough encoder callback payload と、`src/video_codecs/av1.rs` の SDK 固有ポリシーを対象とする
@@ -95,13 +99,13 @@ OBU 列の解析は `shiguredo_mp4::bitstream::av1::parse_obus` を利用し、`
 - sample 内の Tile List OBU は `parse_obus` が Binding の根拠で拒否する
 - sample の byte 列は書き換えず、parser は検証と OBU 順序の確認にだけ使う
 
-全 AV1 sample を feeder thread の開始前に解析し、malformed OBU は sample index、sample 内 byte offset、理由を含む `Mp4Error` で reader 初期化を失敗させる。
+全 AV1 sample を feeder thread の開始前に解析し、reader 初期化を失敗させる。
 `get_sample` の hot path で初めて framing error を検出したり、固定 libwebrtc の packetizer log だけに失敗を委ねたりしない。
 
 ### sync sample と bitstream 再構成
 
 AV1 track に `sample.keyframe == true` の sync sample が 1 件以上あることを reader 初期化時に要求する。
-sync sample が 0 件なら、track の先頭および loop 境界からの random access を保証できないため、unsupported AV1 random access error とする。
+sync sample が 0 件なら、track の先頭および loop 境界からの random access を保証できないため、`Mp4Error::InvalidAv1Track` で拒否する。
 capturer は sample index 0 から再生と loop 再開を行うため、最初の AV1 sample が sync sample でない track も同じ error で拒否する。
 
 各 sync sample について、sample 自身の OBU 列に Sequence Header OBU があり、最初の Frame Header OBU または Frame OBU より前に現れることを検証する。
@@ -111,7 +115,7 @@ MP4 の sync flag だけで AV1 random access point を保証しない。
 各 sync sample の最初の Frame Header OBU または Frame OBU の payload を `shiguredo_mp4::bitstream::av1::parse_frame_header_prefix` に通し、`parse_sequence_header` が返す `reduced_still_picture_header` を context として RAP 判定する。
 `Av1FrameHeaderPrefix::is_rap()` が AV1 Codec ISO Media File Format Binding v1.3.0 Section 2.4 の条件（`show_existing_frame == 0`、`frame_type == KEY_FRAME`、`show_frame == 1`）を判定する。
 `reduced_still_picture_header == 1` のときは `parse_frame_header_prefix` が暗黙の Key / shown frame を返す。
-入力不足、条件不一致、最初の frame より前に解釈不能な frame header がある場合は、sample index と OBU offset を含む invalid AV1 sync sample error で reader 初期化を失敗させる。
+入力不足、条件不一致、最初の frame より前に解釈不能な frame header がある場合は、sample index と理由を含む `Mp4Error::InvalidAv1Track` で reader 初期化を失敗させる。
 Frame Header の残りは本 issue で意味解析しない。
 
 encoder callback へ渡す AV1 payload は次の byte 列とする。
@@ -128,7 +132,7 @@ sample data も全 byte を格納順のまま保持する。
 
 固定 libwebrtc の N bit 設定条件に合わせ、再構成後の各 sync sample について、`RtpPacketizerAv1::ParseObus` が RTP 送信対象に残す最初の OBU が Sequence Header OBU になることを reader 初期化時に要求する。
 固定 packetizer は Temporal Delimiter、Tile List、Padding OBU を除去する。
-Tile List は前段で拒否するため、`configOBUs || sample data` の先頭から Temporal Delimiter と Padding OBU を読み飛ばした最初の OBU が Sequence Header でなければ unsupported AV1 RTP packetizer order error とする。
+Tile List は前段で拒否するため、`configOBUs || sample data` の先頭から Temporal Delimiter と Padding OBU を読み飛ばした最初の OBU が Sequence Header でなければ `Mp4Error::InvalidAv1Track` で拒否する。
 Temporal Delimiter / Padding より後に Sequence Header がある入力は受理する。
 AV1 ISOBMFF では Sequence Header より前の Metadata OBU も許容されるが、Metadata は固定 packetizer が除去せず N bit を設定できないため、本 issue では明示的に拒否し、仕様外の並べ替えは行わない。
 
@@ -177,7 +181,7 @@ decoder を起動して検証の代用にしない。
 
 AV1 RTP の SDP `level-idx` / `tier` は RTP stream で使用され得る最大値を表すが、AV1CodecConfigurationRecord が直接保持するのは operating point 0 の値だけである。
 複数 operating point の能力を過小広告しないため、全 Sequence Header で `operating_points_cnt_minus_1 == 0` かつ `operating_point_idc[0] == 0` を要求する。
-`parse_sequence_header` は複数 operating point を汎用解析するが、その拒否は本 SDK のポリシーであり、`Av1SequenceHeader` が公開する `operating_points_cnt_minus_1` / `operating_point_idc_0` を使って SDK 側で判定し、unsupported AV1 operating points error で reader 初期化を失敗させる。
+`parse_sequence_header` は複数 operating point を汎用解析するが、その拒否は本 SDK のポリシーであり、`Av1SequenceHeader` が公開する `operating_points_cnt_minus_1` / `operating_point_idc_0` を使って SDK 側で判定し、`Mp4Error::InvalidAv1Track` で reader 初期化を失敗させる。
 予約値の `chroma_sample_position == 3`（CSP_RESERVED）は `parse_sequence_header` が検証する。
 single operating point では `seq_level_idx_0` / `seq_tier_0` が送信 stream の required SDP 値になる。
 
@@ -193,7 +197,7 @@ AV1 bitstream specification の Ordering of OBUs は、同一 coded video sequen
 - 次の sync sample は新しい coded video sequence を開始するため、異なる coded video sequence 間の Sequence Header payload 全体の一致は要求せず、AV1CodecConfigurationRecord field の一致だけを要求する
 - `operating_parameters_info` だけが異なる仕様上有効な入力も本 issue では unsupported とし、内容を normalize したり一方を削除したりしない
 
-不一致は sample index と各 OBU offset を含む inconsistent AV1 sequence header error で reader 初期化を失敗させる。
+不一致は sample index と理由（相違の種類）を含む `Mp4Error::InvalidAv1Track` で reader 初期化を失敗させる。
 
 ### 固定 libwebrtc との境界
 
@@ -238,20 +242,20 @@ CI で外部 command を起動したり、ネットワークから fixture を�
 - callback の frame type は sync sample で Key、non-sync sample で Delta のまま変わらない
 - OBU / LEB128 / Sequence Header / Frame Header の汎用 parser の table-driven test と property test は `shiguredo_mp4::bitstream::av1` 側（mp4-rs の issue 0064）で確認され、SDK ではそれらを利用した統合テストだけを持つ
 - `configOBUs` の複数 Sequence Header と先頭以外の Sequence Header を、`parse_obus` の返却 OBU 列から SDK 側で拒否する
-- single operating point かつ `operating_point_idc[0] == 0` を受理し、複数 operating point と非 0 の `operating_point_idc[0]` を unsupported AV1 operating points error で拒否する
+- single operating point かつ `operating_point_idc[0] == 0` を受理し、複数 operating point と非 0 の `operating_point_idc[0]` を `Mp4Error::InvalidAv1Track` で拒否する
 - sync sample の先頭 Frame Header OBU と Frame OBU の双方で `show_existing_frame == 0`、`frame_type == KEY_FRAME`、`show_frame == 1` を受理する
-- `show_existing_frame == 1`、KEY_FRAME 以外、`show_frame == 0`、truncated uncompressed header、必要な Sequence Header context の欠落を invalid AV1 sync sample error で拒否する
+- `show_existing_frame == 1`、KEY_FRAME 以外、`show_frame == 0`、truncated uncompressed header、必要な Sequence Header context の欠落を `Mp4Error::InvalidAv1Track` で拒否する
 - `reduced_still_picture_header == 1` で暗黙に成立する key / shown frame を受理する
 - sync sample の Sequence Header がない場合と、最初の Frame Header / Frame OBU より後にある場合を reader 初期化時に拒否する
 - sync / non-sync を問わず、各 Sequence Header の field が sample entry と不一致の場合を reader 初期化時に拒否する
-- config と任意の sample、または一つの sample 内で Sequence Header payload が異なる場合を OBU offset 付きで拒否する
+- config と任意の sample、または一つの sample 内で Sequence Header payload が異なる場合を `Mp4Error::InvalidAv1Track` で拒否する
 - non-sync sample 内の Sequence Header についても AV1CodecConfigurationRecord と config Sequence Header との不一致を拒否する
 - Sequence Header OBU の size field の LEB128 表現だけが異なり、payload が一致する場合は受理する
 - config Sequence Header がない fixture で、各 sync sample から次の sync sample の直前までを一つの coded video sequence とし、途中の non-sync sample にある異なる Sequence Header payload を拒否する
 - config Sequence Header がない fixture で、異なる coded video sequence 間の Sequence Header payload 差は AV1CodecConfigurationRecord field が一致すれば受理する
-- sync sample が 0 件の track と、sample index 0 が sync sample でない track を unsupported AV1 random access error で拒否する
+- sync sample が 0 件の track と、sample index 0 が sync sample でない track を `Mp4Error::InvalidAv1Track` で拒否する
 - 再構成 payload の先頭に Temporal Delimiter / Padding があり、その後の最初の送信対象 OBU が Sequence Header の場合は受理する
-- 最初の送信対象 OBU が Metadata または Frame Header / Frame OBU の場合は unsupported AV1 RTP packetizer order error で拒否する
+- 最初の送信対象 OBU が Metadata または Frame Header / Frame OBU の場合は `Mp4Error::InvalidAv1Track` で拒否する
 - AV1 format test で次を確認する
   - required encoder format が `av1C` 由来の `profile`、`level-idx`、`tier` を 10 進文字列で明示する
   - parameter 省略を 0、5、0 として解釈し、required profile が 0 以外の場合と required level / tier が既定値を超える場合に拒否する
