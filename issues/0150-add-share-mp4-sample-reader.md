@@ -158,3 +158,14 @@ sleep 中に次の 1 枚だけ依頼するパイプラインは必須にしな�
 - `Mp4VideoCapturer::video_source` / `Mp4SampleReader` の rustdoc
 - `testdata/` (必要に応じて共有動作確認用の fixture 追加)
 - `CHANGES.md`
+
+## 実装時の記録
+
+共有 reader の実装時点でのリソース状況。`testdata/red-320x320-h264.mp4` を使い、
+1 つの reader から 2 つの `Mp4VideoCapturer` を生成して同時に動かすテスト
+(`src/video_codecs/mp4.rs` の `multiple_capturers_share_single_reader`) で確認した。
+
+- demux 回数: 1 (`Mp4SampleReader::new` の 1 回だけ。`clone()` は `Arc` 共有のみで demux しない)
+- オープン FD 数: 共有 reader 1 つにつき 1 (`BufReader<File>` を I/O スレッド 1 本が保持する。clone では増えない)
+- I/O スレッド数: 共有 reader 1 つにつき 1 (最後の clone の drop でチャネルを閉じて停止・join する)
+- capturer feeder スレッド数: capturer 数に比例 (本 issue ではワーカーへの集約はしないため削減しない)

@@ -11,6 +11,9 @@
 
 ## develop
 
+- [ADD] Mp4SampleReader を複数の Mp4VideoCapturer で共有できるようにする
+  - @sile
+
 ### misc
 
 ## 2026.1.0
