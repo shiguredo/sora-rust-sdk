@@ -326,10 +326,14 @@ struct Mp4SampleIoRequest {
 
 /// ファイル I/O スレッドの制御ハンドル。
 ///
-/// 最後の `Mp4SampleReader` クローンがドロップされたときに、
-/// I/O スレッドを終了させて join する。
+/// 終了メカニズム: 最後の `Mp4SampleReader` クローンがドロップされると
+/// `Mp4SampleReaderInner` が drop され、この型の `Drop` が実行される。
+/// `Drop` は sender を `take()` してチャネルを閉じ、I/O スレッドの `recv()` を
+/// `Err` で終了させてから、thread を `take()` して join する。
+/// フィールドが `Option` なのは、`&mut self` から `take()` により
+/// 所有権ごと取り出すためである。
 struct Mp4SampleReaderIo {
-    /// 依頼を送るチャネルの送信側。ドロップ時に I/O スレッドの `recv()` を終了させる。
+    /// 依頼を送るチャネルの送信側。`Drop` で先に閉じて I/O スレッドの `recv()` を終了させる。
     sender: Option<Sender<Mp4SampleIoRequest>>,
     /// I/O スレッドの join ハンドル。
     thread: Option<thread::JoinHandle<()>>,
@@ -337,11 +341,10 @@ struct Mp4SampleReaderIo {
 
 impl Drop for Mp4SampleReaderIo {
     fn drop(&mut self) {
-        // sender を先に drop して I/O スレッドの recv() を Err で終了させてから join する。
-        // この Drop は最後の Mp4SampleReader クローンが drop されたときにのみ実行される。
+        // チャネルを閉じてから join する (仕組みは構造体の doc コメント参照)。
         self.sender.take();
         if let Some(handle) = self.thread.take() {
-            // I/O スレッドはチャネルが閉じられるとすぐに終了するため、join はすぐ完了する。
+            // チャネルが閉じられると I/O スレッドはすぐに終了するため、join はすぐ完了する。
             let _ = handle.join();
         }
     }
@@ -505,7 +508,8 @@ impl Mp4SampleReader {
         let (io_sender, io_receiver) = mpsc::channel::<Mp4SampleIoRequest>();
         // I/O スレッドは Mp4SampleReaderInner を Arc で共有しない。
         // 共有すると最後のクローンが drop されても refcount が 0 にならず、
-        // スレッドを終了・join できなくなるため、必要最小限のデータの clone を move する。
+        // Mp4SampleReaderIo の Drop (構造体 doc 参照) による終了・join が走らない。
+        // そのため必要最小限のデータの clone を move する。
         let io_track_info = track_info.clone();
         let io_samples = samples.clone();
         let io_thread = thread::spawn(move || {
@@ -783,23 +787,18 @@ impl Mp4SampleReader {
     /// - MP4 から抽出したデータをそのまま使用する。
     fn get_sample(&self, index: usize) -> Result<Mp4EncodedSample> {
         let (response_tx, response_rx) = mpsc::channel();
-        let sender = self
-            .inner
-            .io
-            .sender
-            .as_ref()
-            .expect("I/O スレッドは Mp4SampleReader が生きている間は利用可能であるはずです");
+        let sender = self.inner.io.sender.as_ref().expect(
+            "BUG: I/O thread sender must be available while an Mp4SampleReader clone is alive",
+        );
         sender
             .send(Mp4SampleIoRequest {
                 index,
                 response: response_tx,
             })
-            .expect(
-                "I/O スレッドの受信側が閉じていることは Mp4SampleReader が生きている間はありません",
-            );
+            .expect("BUG: I/O thread receiver must not be closed while an Mp4SampleReader clone is alive");
         response_rx
             .recv()
-            .expect("I/O スレッドは依頼ごとに必ず 1 回応答するはずです")
+            .expect("BUG: I/O thread must respond exactly once per request")
     }
 
     /// 先頭からフレーム index までの累積再生時間を返す。
