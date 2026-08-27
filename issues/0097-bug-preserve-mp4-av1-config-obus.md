@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-07-29
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-27
 - Model: GPT-5
 - Branch: feature/fix-mp4-av1-config-obus-v2
 - Polished: 2026-07-30
@@ -272,3 +272,28 @@ CI で外部 command を起動したり、ネットワークから fixture を�
 - `cargo clippy --workspace --all-targets -- -D warnings` が成功する
 - `CHANGES.md` の develop セクションに `[FIX]` を追記する
 - production log は英語、コメントとテストの assertion message は日本語にする
+
+## 解決方法
+
+### 実装
+
+- `shiguredo_mp4` を `2026.5.0-canary.1` に更新し、OBU / Sequence Header / Frame Header の汎用解析は `shiguredo_mp4::bitstream::av1` に寄せた
+- `src/video_codecs/av1.rs` を追加し、`Av1TrackConfig`、`validate_av1_track`、`assemble_av1_encoded_sample_data`、`av1_required_sdp_format`、`resolve_av1_incoming` を SDK 固有ポリシーとして実装した
+- `Mp4SampleReader::extract_track_info` が `av1C` の 9 field と `configOBUs` を `Av1TrackConfig` として保持するようにした
+- `Mp4SampleReader::get_sample` は Binding Section 2.3.4 に従い、sync sample かつ `configOBUs` が非空なら `configOBUs || sample data` を返す
+- `validate_av1_track` を reader 初期化時に走らせ、configOBUs の SH 配置、operating point、av1C 一致、sync 先頭、RAP、RTP 先頭 SH、per-CVS SH payload、Frame Header / Frame の存在を検証する。失敗は `Mp4Error::InvalidAv1Track` に一本化した
+- sample entry 一貫性は `Mp4VideoTrackInfo` の `PartialEq` による `!=` 比較に簡素化し、`av1_config` を比較対象へ含めた
+- `Mp4Error::InconsistentSampleDescription` から `fields` を削除し、相違は `index` のみ報告するようにした
+- AV1 required SDP に `av1C` 由来の `profile` / `level-idx` / `tier` を明示し、incoming は省略値 0 / 5 / 0、profile 完全一致、level / tier 上限で照合する。通過時は required を返す
+- `docs/INPUT_MP4.md` に AV1 の `configOBUs` 付与と初期化時拒否を追記した
+
+### テスト
+
+- `testdata/red-320x320-av1.mp4` を追加し、reader が av1C / configOBUs / sync index を読むこと、sync だけ prepend すること、実 encoder callback まで byte 一致することを確認した
+- `av1.rs` の単体テストで SH 配置、operating point、av1C 不一致、SH 欠如 / 逆順、Frame 欠如、Metadata 先行、SDP の省略値 / 範囲 / 不一致を確認した
+- RAP の Frame Header 全拒否パターンと fixture 各 sample の OBU type 列は、MP4 が SDK の本流でないため網羅していない
+
+### CHANGES.md
+
+- `[CHANGE] Mp4Error::InconsistentSampleDescription から fields を削除し、InvalidAv1Track を追加する` を追加した
+- `[FIX] MP4 AV1 の configOBUs を各 sync sample の先頭に付与するようにする` を追加した
