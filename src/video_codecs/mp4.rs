@@ -693,7 +693,7 @@ impl Mp4SampleReader {
     /// AV1 の場合:
     /// - sync sample かつ `configOBUs` が非空なら、`configOBUs || sample data` を出力する。
     /// - non-sync sample、または `configOBUs` が空なら、sample data をそのまま出力する。
-    /// - AV1 Codec ISO Media File Format Binding v1.3.0 Section 2.4 に従い、
+    /// - AV1 Codec ISO Media File Format Binding v1.3.0 Section 2.3.4 に従い、
     ///   `configOBUs` は格納順のまま byte 列を保持し、選別しない。
     ///
     /// VP8/VP9 の場合:

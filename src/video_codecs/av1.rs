@@ -76,7 +76,7 @@ pub(super) fn av1_obu_type_name(t: Av1ObuType) -> &'static str {
 
 /// Sequence Header と AV1CodecConfigurationRecord の対応 field が一致するか判定する。
 ///
-/// AV1 spec Section 5.5.1 / AV1 Codec ISO Media File Format Binding v1.3.0 Section 2.3 に基づき、
+/// AV1 spec Section 5.5.1 / AV1 Codec ISO Media File Format Binding v1.3.0 Section 2.3.4 に基づき、
 /// 対応関係が定義されている 9 field を比較する。
 fn sequence_header_matches_av1c(sh: &Av1SequenceHeader, av1c: &Av1TrackConfig) -> bool {
     sh.seq_profile == av1c.seq_profile
@@ -417,7 +417,7 @@ pub(super) fn validate_av1_track(
 
 /// AV1 sample の encoder callback payload を組み立てる。
 ///
-/// AV1 Codec ISO Media File Format Binding v1.3.0 Section 2.4 に従い、
+/// AV1 Codec ISO Media File Format Binding v1.3.0 Section 2.3.4 に従い、
 /// sync sample かつ `configOBUs` が非空なら `configOBUs || sample data` を返す。
 /// non-sync sample、または `configOBUs` が空、または `av1_config` が `None` なら
 /// sample data をそのまま返す。
