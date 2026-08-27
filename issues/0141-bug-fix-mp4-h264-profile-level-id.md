@@ -43,10 +43,11 @@ issue 0140 で reader 由来の required format に一本化され、`Mp4SampleR
 - issue 0142（sample entry 一貫性）: 全 `sample.sample_entry` の一貫性検証（`codec_type` / `width` / `height` / `nal_length_size` / `parameter_sets` / `timescale`）が動作している
 - issue 0143（preference validation + factory pass-through）: `SoraVideoEncoderFactory::create` の `resolve_sdp_format` pass-through が回帰テストで固定され、`validate_video_codec_preference` の bare `SdpVideoFormat` 検証が削除されて `is_supported` の結果が preference validation の source of truth になっている
 
-加えて、`shiguredo_mp4` を `2026.5.0-canary.2` に更新し、`bitstream::h264` モジュールを前提とする。
+加えて、`shiguredo_mp4` を `2026.5.0-canary.3` 以降（mp4-rs の issue 0085 が反映されたバージョン）に更新し、`bitstream::h264` モジュールを前提とする。
 
 - `parse_sps` / `H264Sps`: SPS を RBSP パースして `profile_level_id` / `width` / `height` を返すため、`avcC` との一致検証と寸法検証に利用する
-- `H264ProfileLevelId` / `parse_profile_level_id_hex` / `H264ProfileLevelId::normalize` / `H264ProfileLevel`: mp4-rs の issue 0082 で追加された RFC 6184 の profile-level-id パース・正規化 API。6 桁 hex デコードと Table 5 の sub-profile 正規化、level 正規化を担う
+- `H264ProfileLevelId`: SPS 先頭 3 byte（`profile_idc` / `profile_iop` / `level_idc`）を検証せず保持する。issue 0085 で `from_hex` / `to_hex`（ちょうど 6 桁 hex との可逆変換）だけが残り、RFC 6184 Table 5 の正規化 API（`normalize` / `H264Profile` / `H264Level` / `H264ProfileLevel` / `parse_profile_level_id_hex`）は削除された
+- sub-profile / level の判定は mp4-rs が提供しないため、本 issue で実装する libwebrtc 互換フィルタが唯一の実装となる
 - canary.2 で `H264Sps` の `profile_idc` / `constraint_set_flags` / `level_idc` の 3 field が `profile_level_id: H264ProfileLevelId` に統合された（canary.1 からの breaking change）
 
 ## 設計方針
@@ -95,20 +96,21 @@ required bitstream の `profile-level-id` を SDP へ正確に広告する処理
 
 ### profile-level-id parser
 
-profile-level-id の 6 桁 hex デコード（ASCII base16、大文字と小文字を同値に扱う）と RFC 6184 Section 8.1 Table 5 の sub-profile 正規化、level 正規化は mp4-rs の `parse_profile_level_id_hex` / `H264ProfileLevelId::normalize` に委ねる（mp4-rs の issue 0082、canary.2 で実装済み）。
+profile-level-id の 6 桁 hex デコード / エンコード（ASCII base16、大文字と小文字を同値に扱う、ちょうど 6 桁）は mp4-rs の `H264ProfileLevelId::from_hex` / `to_hex` に委ねる（mp4-rs の issue 0085 で正規化 API が削除され、可逆変換に限定された）。
 
-sora-rust-sdk は libwebrtc 互換フィルタだけを実装し、`normalize` の結果を部分集合選択する。
+sora-rust-sdk は libwebrtc 互換フィルタを実装し、`H264ProfileLevelId` の生 3 byte に対して固定 libwebrtc の `ParseH264ProfileLevelId` 相当の判定を行う。
 
-- Constrained High（`profile_idc == 0x64` かつ `profile_iop == 0x0C`）は `normalize` が Table 5 に行を持たず拒否するため、フィルタ側で先に判定して受理する（固定 libwebrtc の `kProfilePatterns` の行 `{0x64, "00001100"}` は `x` を含まず、`profile_iop` の完全一致を要求する）
-- sub-profile は `normalize` 結果のうち固定 libwebrtc が認識する集合（`H264Profile` の Constrained Baseline / Baseline / Main / High / High44）だけを選び、それ以外（Extended / High10 / High42 / High10 Intra / High42 Intra / High44 Intra / CAVLC 4:4:4 Intra）は unsupported とする。High44 は libwebrtc の `kProfilePredictiveHigh444` と同じ byte 表現（`0xF4` + `0x00`）であり、libwebrtc の sub-profile へ写像する
+- sub-profile は固定 libwebrtc の `kProfilePatterns`（9 row）を mask / value table として実装し、Constrained Baseline / Baseline / Main / High / Constrained High / High 4:4:4 Predictive へ正規化する
+  - Constrained High（`profile_idc == 0x64` かつ `profile_iop == 0x0C`）は `kProfilePatterns` の行 `{0x64, "00001100"}` が `x` を含まず、`profile_iop` の完全一致を要求する
+  - `kProfilePatterns` に一致しない profile / constraint combination（Extended / High10 / High42 / 各 Intra / CAVLC 4:4:4 Intra など）は unsupported とする
 - level は固定 libwebrtc の `ParseH264ProfileLevelId` どおりに `level_idc` から決める。`level_idc == 11` かつ `constraint_set3_flag == 1` の表現だけを Level 1b へ normalize し、RFC 6184 が定める `level_idc == 9` の Level 1b 表現は固定 parser が認識せず PeerConnection negotiation を成立させられないため unsupported とする
 - Level 6 / 6.1 / 6.2（`level_idc` 60 / 61 / 62）は固定 libwebrtc の `H264Level` enum に無く unsupported とする
 - Level 1b は通常の Level 1.1 と区別し、Level 1 と Level 1.1 の間に順序付ける（libwebrtc の enum 値 1b=0 < 1=10 < 1.1=11 < ... < 5.2=52 に対応させる）
 - 通常 level は固定 libwebrtc が受理する `level_idc`（10 / 11 / 12 / 13 / 20 / 21 / 22 / 30 / 31 / 32 / 40 / 41 / 42 / 50 / 51 / 52）だけを normalized enum へ変換し、未知の値を単純な整数比較で受理しない
 - 固定 libwebrtc の `H264IsSameProfile` は双方の parse 成功を要求するため、libwebrtc 互換フィルタに一致しない profile / constraint combination は required と incoming が byte-for-byte 一致しても unsupported とする
 
-RFC 6184 の sub-profile 正規化は mp4-rs（issue 0082）が担い、sora-rust-sdk は libwebrtc 互換のフィルタ（`normalize` 結果の部分集合選択、Constrained High の先判定、level の libwebrtc 判定）だけを実装する。
-`normalize` と固定 libwebrtc の判定差（Constrained High の拒否、`level_idc == 9` の Level 1b 受理、Level 6.x の受理、Extended / High10 系の受理）は固定 libwebrtc の source audit コメントに記録する。
+sub-profile / level の正規化は RFC 6184（RTP Payload Format for H.264 Video）の文脈であり、MP4 コンテナ処理を担う mp4-rs の責務外として sora-rust-sdk 側に実装する（mp4-rs は issue 0085 で正規化 API を削除し、可逆変換に限定した）。
+判定の根拠は固定 libwebrtc の `h264_profile_level_id.cc` の `ParseH264ProfileLevelId` / `kProfilePatterns` / `H264IsSameProfile` であり、source audit コメントに記録する。
 
 ### sample entry の一貫性 (H.264 拡張)
 
@@ -130,7 +132,7 @@ issue 0142 で `Mp4SampleReader::new_inner` は全 `sample.sample_entry` を `ex
 - `kProfilePatterns` の全 row の（mask, value, sub-profile）関係
 - Level 1b の表現規則（`level_idc == 11` + `constraint_set3_flag == 1`）
 - Constrained High などの WebRTC profile pattern
-- mp4-rs の `H264ProfileLevelId::normalize` との判定差（Constrained High を拒否、非 66 / 77 / 88 profile で `level_idc == 9` を Level 1b と解釈、Level 6.x を受理、Extended / High10 系を受理）と、本 SDK の libwebrtc 互換フィルタがそれらをどう補正するか
+- mp4-rs の `bitstream::h264` は issue 0085 で正規化 API を削除し、`H264ProfileLevelId` の可逆変換（`from_hex` / `to_hex`）だけを提供するため、sub-profile / level の判定は本 SDK の libwebrtc 互換フィルタが唯一の実装である
 
 ### test fixture
 
@@ -143,7 +145,7 @@ CI で ffmpeg を起動したり、ネットワークから fixture を取得し
 
 - `src/video_codecs/mp4.rs`
 - `src/video_codecs/h264.rs`（profile-level-id parser。libwebrtc 互換のフィルタを含む）
-- `Cargo.toml`（`shiguredo_mp4` を `2026.5.0-canary.2` へ更新）
+- `Cargo.toml`（`shiguredo_mp4` を `2026.5.0-canary.3` 以降、issue 0085 が反映されたバージョンへ更新）
 - `testdata/` の Main Profile fixture
 - `CHANGES.md`
 
@@ -151,16 +153,16 @@ CI で ffmpeg を起動したり、ネットワークから fixture を取得し
 
 - `Mp4SampleReader::required_sdp_format()` の H.264 分岐が `packetization-mode=1` と `avcC` 由来の `profile-level-id` を含む `SdpVideoFormat` を返す
 - H.264 format test で次を確認する
-  - 6 桁 hex パース、Table 5 の全 sub-profile 正規化、同一 sub-profile への複数表現の統合、Level 1b の 2 表現、level の正規化は mp4-rs 側（issue 0082 の決定的テスト）で担保済みであり、sora-rust-sdk では libwebrtc 互換フィルタ固有の挙動を確認する
+  - 6 桁 hex のデコード / エンコード（`H264ProfileLevelId::from_hex` / `to_hex`）は mp4-rs 側（issue 0085 の決定的テスト）で担保済みであり、sora-rust-sdk では libwebrtc 互換フィルタ固有の挙動を確認する
   - fixture の `avcC` と全 SPS から期待する Baseline / Constrained Baseline / Main / High 各 Profile の `profile-level-id` を取得する
   - passthrough capability の encoder format が `packetization-mode=1` と exact `profile-level-id` を広告する
   - `profile-level-id` を省略した format、互換でない profile / constraint、required より低い level の format では encoder を生成しない
   - 同じ H.264 sub-profile で required 以上の level は byte-for-byte 不一致でも受理する
-  - 6 桁未満 / 超過、非 base16 は `parse_profile_level_id_hex` 経由で拒否されることを回帰確認する
-  - Constrained High `640c..` を受理する（mp4-rs の `normalize` は Table 5 に行がなく拒否するが、libwebrtc 互換フィルタは先判定で受理する）
-  - 固定 libwebrtc の `kProfilePatterns` に相当する部分集合（`H264Profile` の Constrained Baseline / Baseline / Main / High / High44）を確認し、Extended / High10 / High42 / 各 Intra / CAVLC 4:4:4 Intra は拒否する
+  - 6 桁未満 / 超過、非 base16 は `H264ProfileLevelId::from_hex` 経由で拒否されることを回帰確認する
+  - Constrained High `640c..` を受理する（`kProfilePatterns` の行 `{0x64, "00001100"}` に一致する）
+  - 固定 libwebrtc の `kProfilePatterns` 全 row（Constrained Baseline / Baseline / Main / High / Constrained High / High 4:4:4 Predictive）を確認し、Extended / High10 / High42 / 各 Intra / CAVLC 4:4:4 Intra は拒否する
   - 固定 libwebrtc の既知 pattern にない profile / constraint combination は、required と incoming が exact match でも拒否する
-  - `level_idc == 11` + `constraint_set3_flag` を Level 1b へ normalize し、`level_idc == 9` の Level 1b 表現は拒否する（mp4-rs の `normalize` は非 66 / 77 / 88 profile で Level 1b を返すが、libwebrtc 互換フィルタは拒否する）
+  - `level_idc == 11` + `constraint_set3_flag` を Level 1b へ normalize し、`level_idc == 9` の Level 1b 表現は拒否する
   - Level 6 / 6.1 / 6.2（`level_idc` 60 / 61 / 62）を拒否する
   - Level 1、Level 1b、Level 1.1 の順序を確認する
   - `avcC` 由来の required format が libwebrtc 互換フィルタで未知の profile / level の場合は reader 初期化時に拒否する
@@ -173,7 +175,7 @@ CI で ffmpeg を起動したり、ネットワークから fixture を取得し
   - incompatible sub-profile と lower level の negotiated format では encoder を生成しない
 - Main Profile 実 fixture の reader test で、抽出された `profile-level-id` が期待値と一致する
 - 既存の High Profile Level 2.1 fixture について、抽出される `profile-level-id` が `640015` と一致する回帰テストがある
-- 固定 libwebrtc commit `6f37672d358475cd17544121a12494da454d85fb` の `api/video_codecs/h264_profile_level_id.cc` の `ParseSdpForH264ProfileLevelId`、`H264IsSameProfile`、`kProfilePatterns` と、mp4-rs `H264ProfileLevelId::normalize` との判定差（Constrained High、`level_idc == 9`、Level 6.x、Extended / High10 系）を source audit し、production コメントへ記録する
+- 固定 libwebrtc commit `6f37672d358475cd17544121a12494da454d85fb` の `api/video_codecs/h264_profile_level_id.cc` の `ParseSdpForH264ProfileLevelId`、`H264IsSameProfile`、`kProfilePatterns` を source audit し、production コメントへ記録する（mp4-rs の `bitstream::h264` は正規化 API を提供しないため、sub-profile / level 判定は本 SDK の libwebrtc 互換フィルタが唯一の実装である旨も併記する）
 - RFC 6184 Section 8.1 と Table 5 を参照し、profile-level-id 判定の根拠を production code の日本語コメントに記載する
 - reader / capability / encoder handler の unit test は mock / stub、sleep、`#[ignore]`、外部 command、ネットワークを使用しない
 - `cargo test --workspace` が成功する
