@@ -43,7 +43,7 @@ malformed payload では OBU 列が空になり、packet を生成しない。
 本 issue は以下の基盤を前提とする。いずれも develop へ merge 済みである。
 
 - issue 0140（reader-driven capability）: `Mp4SampleReader::required_sdp_format()` / `passthrough_capability()` が導入され、`Mp4PassthroughVideoCodecCapability` は reader 由来の required format を握る
-- issue 0142（sample entry 一貫性）: 全 `sample.sample_entry` の一貫性検証（`Mp4Error::InconsistentSampleDescription` + `collect_mismatched_track_info_fields`）が動作している
+- issue 0142（sample entry 一貫性）: 全 `sample.sample_entry` の一貫性検証（`Mp4Error::InconsistentSampleDescription`）が動作している
 - issue 0143（preference validation + factory pass-through）: `SoraVideoEncoderFactory::create` の `resolve_sdp_format` pass-through が回帰テストで固定され、`is_supported` の結果が preference validation の source of truth になっている
 
 加えて、`shiguredo_mp4` を `2026.5.0-canary.1` に更新し、`bitstream::av1` モジュールの汎用 parser を前提とする。
@@ -59,8 +59,8 @@ OBU / LEB128 / Sequence Header / Frame Header の汎用解析は mp4-rs 側（mp
 ## 設計方針
 
 本 issue の AV1 track 検証で検出する不正・想定外の入力は、すべて `Mp4Error::InvalidAv1Track(String)` に一本化して拒否する。
-エラー variant による細分類は行わず、メッセージ文字列に文脈（問題の sample index、OBU 種別、相違 field 名、underlying の parse エラー理由）を含める。
-MP4 ファイル入力は SDK の補助機能であり、利用側は「入力が不正または想定外である」ことと詳細な理由が分かれば十分なため。
+エラー variant による細分類は行わず、メッセージ文字列に文脈（問題の sample index、OBU 種別、underlying の parse エラー理由）を含める。
+MP4 ファイル入力は SDK の補助機能であり、利用側は「入力が不正または想定外である」ことと、どこで失敗したかが分かれば十分なため、フィールド単位の相違リストは出さない。
 
 ### 対象範囲
 
@@ -164,14 +164,14 @@ level と tier の上限は libwebrtc の profile matching に委ねず、SDK �
 
 ### sample description の一貫性
 
-issue 0142 で導入した全 `sample.sample_entry` の一貫性検証（`Mp4Error::InconsistentSampleDescription` + `collect_mismatched_track_info_fields`）を AV1 に拡張し、次を最初の configuration と比較する。
+issue 0142 で導入した全 `sample.sample_entry` の一貫性検証（`Mp4Error::InconsistentSampleDescription`）を AV1 に拡張し、抽出した `Mp4VideoTrackInfo` を最初の configuration と `!=` で比較する。比較対象には次が含まれる。
 
 - codec type、width、height（0142 で既に対象）
-- AV1CodecConfigurationRecord の全 field（本 issue で `Mp4VideoTrackInfo` に追加した AV1 固有 field を `collect_mismatched_track_info_fields` の比較対象へ含める）
-- `configOBUs` の全 byte（同じく本 issue で追加した field を比較対象へ含める）
+- AV1CodecConfigurationRecord の全 field（本 issue で `Mp4VideoTrackInfo` に追加した AV1 固有 field）
+- `configOBUs` の全 byte（同じく本 issue で追加した field）
 
-後続 sample entry が byte-for-byte 同一なら受理する。
-いずれかが変わる場合は、古い `configOBUs` を新しい sample に付与せず、sample index と相違 field を含む `Mp4Error::InconsistentSampleDescription` で reader 初期化を失敗させる。
+後続 sample entry が一致するなら受理する。
+いずれかが変わる場合は、古い `configOBUs` を新しい sample に付与せず、sample index を含む `Mp4Error::InconsistentSampleDescription` で reader 初期化を失敗させる。
 
 ### Sequence Header の field 検証
 
@@ -264,7 +264,7 @@ CI で外部 command を起動したり、ネットワークから fixture を�
   - required 以上の level / tier は受理し、required 未満は拒否する
   - 互換な incoming format の parameter が encoder handler まで保持される
   - bare `AV1` は preference の codec type 判定にだけ使用し、実 format 解決で required parameter を省略しない
-- 後続 sample entry の AV1CodecConfigurationRecord または `configOBUs` が変わる場合を、sample index と相違 field を含む error で拒否する
+- 後続 sample entry の AV1CodecConfigurationRecord または `configOBUs` が変わる場合を、sample index を含む error で拒否する
 - malformed fixture / synthetic byte table は reader 構築時に失敗し、feeder thread と encoder callback を開始しない
 - direct encoder test は実 `Mp4PassthroughEncoder` と実 `VideoEncoderEncodedImageCallback` を使い、mock / stub、sleep、`#[ignore]`、外部 command、ネットワークを使用しない
 - 固定 libwebrtc commit `6f37672d358475cd17544121a12494da454d85fb` の `RtpPacketizerAv1::ParseObus`、aggregation header の N bit、marker 設定、`ParseSdpForAV1Profile`、`AV1IsSameProfile` を source audit し、production code の日本語コメントへ記録する

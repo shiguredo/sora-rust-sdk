@@ -74,127 +74,20 @@ pub(super) fn av1_obu_type_name(t: Av1ObuType) -> &'static str {
     }
 }
 
-/// `Av1SequenceHeader` と [`Av1TrackConfig`] の対応 field を byte-for-byte 比較する。
+/// Sequence Header と AV1CodecConfigurationRecord の対応 field が一致するか判定する。
 ///
-/// AV1CodecConfigurationRecord と bitstream の SH の相違を検出する用途。
 /// AV1 spec Section 5.5.1 / AV1 Codec ISO Media File Format Binding v1.3.0 Section 2.3 に基づき、
-/// 対応関係が定義されている 9 field を順に比較する。相違が検出された field 名を宣言順で返す。
-pub(super) fn collect_mismatched_sh_vs_av1c(
-    sh: &Av1SequenceHeader,
-    av1c: &Av1TrackConfig,
-) -> Vec<&'static str> {
-    let mut mismatches = Vec::new();
-    if sh.seq_profile != av1c.seq_profile {
-        mismatches.push("seq_profile");
-    }
-    if sh.seq_level_idx_0 != av1c.seq_level_idx_0 {
-        mismatches.push("seq_level_idx_0");
-    }
-    if sh.seq_tier_0 != av1c.seq_tier_0 {
-        mismatches.push("seq_tier_0");
-    }
-    if sh.high_bitdepth != av1c.high_bitdepth {
-        mismatches.push("high_bitdepth");
-    }
-    if sh.twelve_bit != av1c.twelve_bit {
-        mismatches.push("twelve_bit");
-    }
-    if sh.monochrome != av1c.monochrome {
-        mismatches.push("monochrome");
-    }
-    if sh.chroma_subsampling_x != av1c.chroma_subsampling_x {
-        mismatches.push("chroma_subsampling_x");
-    }
-    if sh.chroma_subsampling_y != av1c.chroma_subsampling_y {
-        mismatches.push("chroma_subsampling_y");
-    }
-    if sh.chroma_sample_position != av1c.chroma_sample_position {
-        mismatches.push("chroma_sample_position");
-    }
-    mismatches
-}
-
-/// 2 個の `Option<&Av1TrackConfig>` を field 単位で比較する。
-///
-/// - 両方 `None`（非 AV1 track）: 相違なし
-/// - 一方だけ `Some`: 通常は codec_type 差で捕捉されるため呼び出し側で除外済み。
-///   万一到達したら `av1_config` を top-level 相違として報告する
-/// - 両方 `Some`: [`Av1TrackConfig`] の各 field を順に比較し、相違した field を
-///   `av1_*` プレフィックス付きの静的名で返す
-///
-/// destructure による exhaustive check で [`Av1TrackConfig`] の field 追加時に
-/// compile error になる。
-pub(super) fn collect_mismatched_av1_config_fields(
-    first: Option<&Av1TrackConfig>,
-    current: Option<&Av1TrackConfig>,
-) -> Vec<&'static str> {
-    let (first, current) = match (first, current) {
-        (Some(a), Some(b)) => (a, b),
-        (None, None) => return Vec::new(),
-        _ => return vec!["av1_config"],
-    };
-    let Av1TrackConfig {
-        seq_profile: first_seq_profile,
-        seq_level_idx_0: first_seq_level_idx_0,
-        seq_tier_0: first_seq_tier_0,
-        high_bitdepth: first_high_bitdepth,
-        twelve_bit: first_twelve_bit,
-        monochrome: first_monochrome,
-        chroma_subsampling_x: first_chroma_subsampling_x,
-        chroma_subsampling_y: first_chroma_subsampling_y,
-        chroma_sample_position: first_chroma_sample_position,
-        initial_presentation_delay_minus_one: first_initial_presentation_delay_minus_one,
-        config_obus: first_config_obus,
-    } = first;
-    let Av1TrackConfig {
-        seq_profile: current_seq_profile,
-        seq_level_idx_0: current_seq_level_idx_0,
-        seq_tier_0: current_seq_tier_0,
-        high_bitdepth: current_high_bitdepth,
-        twelve_bit: current_twelve_bit,
-        monochrome: current_monochrome,
-        chroma_subsampling_x: current_chroma_subsampling_x,
-        chroma_subsampling_y: current_chroma_subsampling_y,
-        chroma_sample_position: current_chroma_sample_position,
-        initial_presentation_delay_minus_one: current_initial_presentation_delay_minus_one,
-        config_obus: current_config_obus,
-    } = current;
-
-    let mut mismatched = Vec::new();
-    if first_seq_profile != current_seq_profile {
-        mismatched.push("av1_seq_profile");
-    }
-    if first_seq_level_idx_0 != current_seq_level_idx_0 {
-        mismatched.push("av1_seq_level_idx_0");
-    }
-    if first_seq_tier_0 != current_seq_tier_0 {
-        mismatched.push("av1_seq_tier_0");
-    }
-    if first_high_bitdepth != current_high_bitdepth {
-        mismatched.push("av1_high_bitdepth");
-    }
-    if first_twelve_bit != current_twelve_bit {
-        mismatched.push("av1_twelve_bit");
-    }
-    if first_monochrome != current_monochrome {
-        mismatched.push("av1_monochrome");
-    }
-    if first_chroma_subsampling_x != current_chroma_subsampling_x {
-        mismatched.push("av1_chroma_subsampling_x");
-    }
-    if first_chroma_subsampling_y != current_chroma_subsampling_y {
-        mismatched.push("av1_chroma_subsampling_y");
-    }
-    if first_chroma_sample_position != current_chroma_sample_position {
-        mismatched.push("av1_chroma_sample_position");
-    }
-    if first_initial_presentation_delay_minus_one != current_initial_presentation_delay_minus_one {
-        mismatched.push("av1_initial_presentation_delay_minus_one");
-    }
-    if first_config_obus != current_config_obus {
-        mismatched.push("av1_config_obus");
-    }
-    mismatched
+/// 対応関係が定義されている 9 field を比較する。
+fn sequence_header_matches_av1c(sh: &Av1SequenceHeader, av1c: &Av1TrackConfig) -> bool {
+    sh.seq_profile == av1c.seq_profile
+        && sh.seq_level_idx_0 == av1c.seq_level_idx_0
+        && sh.seq_tier_0 == av1c.seq_tier_0
+        && sh.high_bitdepth == av1c.high_bitdepth
+        && sh.twelve_bit == av1c.twelve_bit
+        && sh.monochrome == av1c.monochrome
+        && sh.chroma_subsampling_x == av1c.chroma_subsampling_x
+        && sh.chroma_subsampling_y == av1c.chroma_subsampling_y
+        && sh.chroma_sample_position == av1c.chroma_sample_position
 }
 
 /// Sequence Header が本 SDK のポリシー（単一 operating point かつ `operating_point_idc[0] == 0`）
@@ -292,11 +185,10 @@ pub(super) fn validate_av1_track(
                     fields.operating_points_cnt_minus_1, fields.operating_point_idc_0
                 )));
             }
-            let mismatched = collect_mismatched_sh_vs_av1c(&fields, av1_config);
-            if !mismatched.is_empty() {
-                return Err(Mp4Error::InvalidAv1Track(format!(
-                    "configOBUs 内 Sequence Header と av1C の field が一致しません: fields={mismatched:?}"
-                )));
+            if !sequence_header_matches_av1c(&fields, av1_config) {
+                return Err(Mp4Error::InvalidAv1Track(
+                    "configOBUs 内 Sequence Header と av1C が一致しません".to_string(),
+                ));
             }
             Some((obu.payload.to_vec(), fields))
         }
@@ -368,10 +260,9 @@ pub(super) fn validate_av1_track(
                             fields.operating_points_cnt_minus_1, fields.operating_point_idc_0
                         )));
                     }
-                    let mismatched = collect_mismatched_sh_vs_av1c(&fields, av1_config);
-                    if !mismatched.is_empty() {
+                    if !sequence_header_matches_av1c(&fields, av1_config) {
                         return Err(Mp4Error::InvalidAv1Track(format!(
-                            "sample={sample_index} 内 Sequence Header と av1C の field が一致しません: fields={mismatched:?}"
+                            "sample={sample_index} 内 Sequence Header と av1C が一致しません"
                         )));
                     }
                     // payload 一貫性: config permanent 優先、なければ per-CVS。
@@ -897,66 +788,19 @@ mod tests {
     const OBU_TYPE_FRAME: u8 = 6;
 
     #[test]
-    fn collect_mismatched_sh_vs_av1c_reports_no_mismatch_for_matching_fields() {
+    fn sequence_header_matches_av1c_compares_corresponding_fields() {
         let sh = parse_sh(&make_reduced_still_sh_payload(0, 0));
         let av1c = base_config();
         assert!(
-            collect_mismatched_sh_vs_av1c(&sh, &av1c).is_empty(),
-            "SH と av1C が一致する場合は相違が報告されないはずです"
+            sequence_header_matches_av1c(&sh, &av1c),
+            "SH と av1C が一致する場合は true を返すはずです"
         );
-    }
 
-    #[test]
-    fn collect_mismatched_sh_vs_av1c_reports_each_differing_field() {
-        // seq_profile 0 の SH を使う。seq_profile 1 では monochrome が暗黙値になり
-        // color config の bit 列が変わるため、テスト payload の構築が複雑になるのを避ける。
-        let sh = parse_sh(&make_reduced_still_sh_payload(0, 5));
-        let mut av1c = base_config();
-        av1c.seq_level_idx_0 = 5;
+        let mut mismatched = av1c;
+        mismatched.seq_profile = 1;
         assert!(
-            collect_mismatched_sh_vs_av1c(&sh, &av1c).is_empty(),
-            "SH に合わせた av1C では相違が報告されないはずです"
-        );
-
-        av1c.seq_profile = 1;
-        av1c.chroma_subsampling_x = 0;
-        av1c.chroma_sample_position = 1;
-        let mismatched = collect_mismatched_sh_vs_av1c(&sh, &av1c);
-        assert_eq!(
-            mismatched,
-            vec![
-                "seq_profile",
-                "chroma_subsampling_x",
-                "chroma_sample_position"
-            ],
-            "相違 field が SH の宣言順で報告されるはずです"
-        );
-    }
-
-    #[test]
-    fn collect_mismatched_av1_config_fields_reports_av1_prefixed_field_names() {
-        let base = base_config();
-        assert!(
-            collect_mismatched_av1_config_fields(Some(&base), Some(&base)).is_empty(),
-            "完全一致では相違が報告されないはずです"
-        );
-        assert!(
-            collect_mismatched_av1_config_fields(None, None).is_empty(),
-            "両方 None では相違が報告されないはずです"
-        );
-        assert_eq!(
-            collect_mismatched_av1_config_fields(Some(&base), None),
-            vec!["av1_config"],
-            "片方だけ Some の場合は av1_config を報告するはずです"
-        );
-
-        let mut modified = base.clone();
-        modified.config_obus = vec![0x0C];
-        modified.chroma_sample_position = 2;
-        assert_eq!(
-            collect_mismatched_av1_config_fields(Some(&base), Some(&modified)),
-            vec!["av1_chroma_sample_position", "av1_config_obus"],
-            "相違 field が av1_ プレフィックス付きで宣言順に報告されるはずです"
+            !sequence_header_matches_av1c(&sh, &mismatched),
+            "対応 field が食い違う場合は false を返すはずです"
         );
     }
 
@@ -1065,8 +909,7 @@ mod tests {
         config.seq_profile = 1; // 意図的に不一致にする
 
         let result = validate_av1_samples(vec![(sample_bytes, true)], &config);
-        assert_invalid_av1_track(&result, "Sequence Header と av1C の field が一致しません");
-        assert_invalid_av1_track(&result, "seq_profile");
+        assert_invalid_av1_track(&result, "Sequence Header と av1C が一致しません");
     }
 
     /// configOBUs の Sequence Header が複数存在する場合と、先頭 OBU でない場合を拒否する。

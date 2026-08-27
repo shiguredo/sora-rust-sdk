@@ -39,7 +39,7 @@ use crate::video_codec_capability::{
 };
 use crate::video_codecs::av1::{
     Av1TrackConfig, assemble_av1_encoded_sample_data, av1_required_sdp_format,
-    collect_mismatched_av1_config_fields, resolve_av1_incoming, validate_av1_track,
+    resolve_av1_incoming, validate_av1_track,
 };
 
 /// MP4 ファイル処理中に発生するエラー。
@@ -93,15 +93,13 @@ pub enum Mp4Error {
     InconsistentSampleDescription {
         /// 相違が検出されたビデオサンプルの 0 始まりインデックス。
         index: usize,
-        /// 相違したフィールド名。
-        fields: Vec<&'static str>,
     },
     /// AV1 track の bitstream / sample entry の検証に失敗した。
     ///
     /// `configOBUs` の parse、sync sample 条件、Sequence Header の一貫性、
     /// RTP packetizer 順序などを Mp4SampleReader 初期化時に検証する。
     /// エラー variant による細分類は行わず、文脈（sample index、OBU 種別、
-    /// 相違 field 名、underlying の parse エラー理由）を含むメッセージで報告する。
+    /// underlying の parse エラー理由）を含むメッセージで報告する。
     InvalidAv1Track(String),
 }
 
@@ -147,10 +145,10 @@ impl std::fmt::Display for Mp4Error {
                     "サンプルの composition time offset が非ゼロです: sample={index} codec={codec_type:?} (B フレームには未対応)"
                 )
             }
-            Self::InconsistentSampleDescription { index, fields } => {
+            Self::InconsistentSampleDescription { index } => {
                 write!(
                     f,
-                    "サンプルエントリーが最初の設定と一致しません: sample={index} fields={fields:?}"
+                    "サンプルエントリーが最初の設定と一致しません: sample={index}"
                 )
             }
             Self::InvalidAv1Track(err) => {
@@ -371,17 +369,14 @@ impl Mp4SampleReader {
             //
             // shiguredo_mp4 が前のサンプルと構造的に等値なサンプルエントリーを `None` に
             // 正規化するため、後発の `Some(sample_entry)` は必ず何らかの相違を持つ。
-            // 本 SDK が抽出する 5 フィールドの一致で `mismatched` が空になる場合、その相違は
-            // 本 SDK の抽出範囲外（`avcC` header や補助 box）にある。codec 固有フィールドの
-            // 検証は、将来 `Mp4VideoTrackInfo` を拡張する形で加える。
+            // 抽出した `Mp4VideoTrackInfo` が一致する場合、その相違は本 SDK の抽出範囲外
+            // （`avcC` header や補助 box）にある。
             if let Some(entry) = sample.sample_entry {
                 let info = Self::extract_track_info(entry, timescale)?;
                 if let Some(ref first) = track_info {
-                    let mismatched = Self::collect_mismatched_track_info_fields(first, &info);
-                    if !mismatched.is_empty() {
+                    if first != &info {
                         return Err(Mp4Error::InconsistentSampleDescription {
                             index: samples.len(),
-                            fields: mismatched,
                         });
                     }
                 } else {
@@ -624,72 +619,6 @@ impl Mp4SampleReader {
                 length_size_minus_one.saturating_add(1),
             )),
         }
-    }
-
-    /// 2 個の `Mp4VideoTrackInfo` をフィールド単位で比較し、相違するフィールド名を返す。
-    ///
-    /// 汎用検証対象は `codec_type` / `width` / `height` / `nal_length_size` /
-    /// `parameter_sets`。
-    /// `timescale` は `mdhd` の track 単位属性で `SampleEntry` からは抽出されず、
-    /// `extract_track_info` にはループ外の同一 scalar が毎回渡されるため、
-    /// サンプルエントリー間で変わり得ない値として比較対象に含めない。
-    ///
-    /// AV1 では追加で `av1_config` の全 field（AV1CodecConfigurationRecord の各 field と
-    /// configOBUs 全 byte）を byte-for-byte で比較する。相違した AV1 field は
-    /// `av1_*` のプレフィックス付きで報告する。
-    ///
-    /// `Mp4VideoTrackInfo` / `Av1TrackConfig` に新しいフィールドを追加した際に
-    /// ヘルパー未更新を compile error として検出するため、両側を exhaustive に
-    /// destructure して明示的に列挙する。比較対象外のフィールドは `_` に束縛する。
-    fn collect_mismatched_track_info_fields(
-        first: &Mp4VideoTrackInfo,
-        current: &Mp4VideoTrackInfo,
-    ) -> Vec<&'static str> {
-        let Mp4VideoTrackInfo {
-            codec_type: first_codec_type,
-            width: first_width,
-            height: first_height,
-            timescale: _,
-            parameter_sets: first_parameter_sets,
-            nal_length_size: first_nal_length_size,
-            av1_config: first_av1_config,
-        } = first;
-        let Mp4VideoTrackInfo {
-            codec_type: current_codec_type,
-            width: current_width,
-            height: current_height,
-            timescale: _,
-            parameter_sets: current_parameter_sets,
-            nal_length_size: current_nal_length_size,
-            av1_config: current_av1_config,
-        } = current;
-
-        let mut mismatched = Vec::new();
-        if first_codec_type != current_codec_type {
-            mismatched.push("codec_type");
-        }
-        if first_width != current_width {
-            mismatched.push("width");
-        }
-        if first_height != current_height {
-            mismatched.push("height");
-        }
-        if first_nal_length_size != current_nal_length_size {
-            mismatched.push("nal_length_size");
-        }
-        if first_parameter_sets != current_parameter_sets {
-            mismatched.push("parameter_sets");
-        }
-        // codec_type が一致するときのみ AV1 固有 field を詳細比較する。
-        // codec_type 相違時は既に "codec_type" を報告済みで、av1_config の Some/None 差は
-        // codec 差に付随する副次的な情報になるため列挙しない。
-        if first_codec_type == current_codec_type {
-            mismatched.extend(collect_mismatched_av1_config_fields(
-                first_av1_config.as_ref(),
-                current_av1_config.as_ref(),
-            ));
-        }
-        mismatched
     }
 
     /// サンプル数を返す。
@@ -1371,231 +1300,17 @@ mod tests {
         );
     }
 
-    /// テスト用の基準 `Mp4VideoTrackInfo` を返す。
-    ///
-    /// `parameter_sets` は非空の H.264 SPS 相当のバイト列にしてあり、
-    /// `Some` → `None` / `Some(bytes)` → `Some(別 bytes)` の遷移を検証しやすくしている。
-    fn base_track_info_for_consistency_test() -> Mp4VideoTrackInfo {
-        Mp4VideoTrackInfo {
-            codec_type: VideoCodecType::H264,
-            width: 640,
-            height: 360,
-            timescale: 1000,
-            parameter_sets: Some(vec![0x00, 0x00, 0x00, 0x01, 0x67]),
-            nal_length_size: 4,
-            av1_config: None,
-        }
-    }
-
-    /// テスト用の AV1 設定 (reduced_still 経路の SH に対応する av1C field)。
-    fn av1_config_for_consistency_test(config_obus: Vec<u8>) -> Av1TrackConfig {
-        Av1TrackConfig {
-            seq_profile: 0,
-            seq_level_idx_0: 0,
-            seq_tier_0: 0,
-            high_bitdepth: false,
-            twelve_bit: false,
-            monochrome: false,
-            chroma_subsampling_x: 1,
-            chroma_subsampling_y: 1,
-            chroma_sample_position: 0,
-            initial_presentation_delay_minus_one: None,
-            config_obus,
-        }
-    }
-
-    #[test]
-    fn sample_description_consistency_check_reports_field_mismatches() {
-        // 実際に sample_entry の切り替わりが起きる合成 MP4 を用意するのが難しいため、
-        // 内部ヘルパー collect_mismatched_track_info_fields を単独で検証する。
-        let base = base_track_info_for_consistency_test();
-
-        // 完全一致は相違なし。
-        assert!(
-            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &base).is_empty(),
-            "完全一致では相違が報告されないはずです"
-        );
-
-        // codec_type だけ変えると codec_type が相違として報告される。
-        let mut modified = Mp4VideoTrackInfo {
-            codec_type: VideoCodecType::H265,
-            width: base.width,
-            height: base.height,
-            timescale: base.timescale,
-            parameter_sets: base.parameter_sets.clone(),
-            nal_length_size: base.nal_length_size,
-            av1_config: None,
-        };
-        assert_eq!(
-            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
-            vec!["codec_type"],
-            "codec_type だけの相違は codec_type のみを返すはずです"
-        );
-
-        // width だけ変えると width が相違として報告される。
-        modified = Mp4VideoTrackInfo {
-            codec_type: base.codec_type,
-            width: 1280,
-            height: base.height,
-            timescale: base.timescale,
-            parameter_sets: base.parameter_sets.clone(),
-            nal_length_size: base.nal_length_size,
-            av1_config: None,
-        };
-        assert_eq!(
-            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
-            vec!["width"],
-            "width だけの相違は width のみを返すはずです"
-        );
-
-        // height だけ変えると height が相違として報告される。
-        modified = Mp4VideoTrackInfo {
-            codec_type: base.codec_type,
-            width: base.width,
-            height: 720,
-            timescale: base.timescale,
-            parameter_sets: base.parameter_sets.clone(),
-            nal_length_size: base.nal_length_size,
-            av1_config: None,
-        };
-        assert_eq!(
-            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
-            vec!["height"],
-            "height だけの相違は height のみを返すはずです"
-        );
-
-        // nal_length_size だけ変えると nal_length_size が相違として報告される。
-        modified = Mp4VideoTrackInfo {
-            codec_type: base.codec_type,
-            width: base.width,
-            height: base.height,
-            timescale: base.timescale,
-            parameter_sets: base.parameter_sets.clone(),
-            nal_length_size: 2,
-            av1_config: None,
-        };
-        assert_eq!(
-            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
-            vec!["nal_length_size"],
-            "nal_length_size だけの相違は nal_length_size のみを返すはずです"
-        );
-
-        // parameter_sets だけを変えると parameter_sets が相違として報告される。
-        modified = Mp4VideoTrackInfo {
-            codec_type: base.codec_type,
-            width: base.width,
-            height: base.height,
-            timescale: base.timescale,
-            parameter_sets: Some(vec![0xff]),
-            nal_length_size: base.nal_length_size,
-            av1_config: None,
-        };
-        assert_eq!(
-            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
-            vec!["parameter_sets"],
-            "parameter_sets の byte 列の相違は parameter_sets のみを返すはずです"
-        );
-
-        // parameter_sets の Some → None 単独遷移も parameter_sets の相違として検出される。
-        modified = Mp4VideoTrackInfo {
-            codec_type: base.codec_type,
-            width: base.width,
-            height: base.height,
-            timescale: base.timescale,
-            parameter_sets: None,
-            nal_length_size: base.nal_length_size,
-            av1_config: None,
-        };
-        assert_eq!(
-            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
-            vec!["parameter_sets"],
-            "parameter_sets の Some から None への遷移は parameter_sets のみを返すはずです"
-        );
-
-        // 逆向きの None → Some 単独遷移も同じく検出される。
-        let base_without_params = Mp4VideoTrackInfo {
-            codec_type: base.codec_type,
-            width: base.width,
-            height: base.height,
-            timescale: base.timescale,
-            parameter_sets: None,
-            nal_length_size: base.nal_length_size,
-            av1_config: None,
-        };
-        let modified_with_params = Mp4VideoTrackInfo {
-            codec_type: base.codec_type,
-            width: base.width,
-            height: base.height,
-            timescale: base.timescale,
-            parameter_sets: Some(vec![0x00, 0x00, 0x00, 0x01, 0x67]),
-            nal_length_size: base.nal_length_size,
-            av1_config: None,
-        };
-        assert_eq!(
-            Mp4SampleReader::collect_mismatched_track_info_fields(
-                &base_without_params,
-                &modified_with_params
-            ),
-            vec!["parameter_sets"],
-            "parameter_sets の None から Some への遷移は parameter_sets のみを返すはずです"
-        );
-
-        // codec_type / height / nal_length_size / parameter_sets を同時に変えると
-        // 相違リストに全フィールドが設計方針の記載順で並ぶ。
-        modified = Mp4VideoTrackInfo {
-            codec_type: VideoCodecType::H265,
-            width: base.width,
-            height: 720,
-            timescale: base.timescale,
-            parameter_sets: None,
-            nal_length_size: 2,
-            av1_config: None,
-        };
-        assert_eq!(
-            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
-            vec!["codec_type", "height", "nal_length_size", "parameter_sets"],
-            "複数フィールドの相違は codec_type -> width -> height -> nal_length_size -> parameter_sets の順で並ぶはずです"
-        );
-
-        // timescale だけを変えても比較対象外なので相違なし。
-        modified = Mp4VideoTrackInfo {
-            codec_type: base.codec_type,
-            width: base.width,
-            height: base.height,
-            timescale: 90_000,
-            parameter_sets: base.parameter_sets.clone(),
-            nal_length_size: base.nal_length_size,
-            av1_config: None,
-        };
-        assert!(
-            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified).is_empty(),
-            "timescale は比較対象外なので相違として報告されないはずです"
-        );
-    }
-
     #[test]
     fn inconsistent_sample_description_display_and_source() {
-        // Display 出力に sample index と全ての相違フィールド名が含まれることを確認する。
-        // issue 側の完了条件で「Display 実装が sample index と相違フィールド名を含む」と
-        // 明示されているため、helper unit test とは別に error variant 側を直接検証する。
-        let err = Mp4Error::InconsistentSampleDescription {
-            index: 3,
-            fields: vec!["codec_type", "width", "parameter_sets"],
-        };
+        // Display 出力に sample index が含まれることを確認する。
+        let err = Mp4Error::InconsistentSampleDescription { index: 3 };
         let message = format!("{err}");
         assert!(
             message.contains("sample=3"),
             "sample index が Display 出力に含まれるはずです: {message}"
         );
-        for expected_field in ["codec_type", "width", "parameter_sets"] {
-            assert!(
-                message.contains(expected_field),
-                "相違したフィールド名 {expected_field} が Display 出力に含まれるはずです: {message}"
-            );
-        }
 
         // 本 variant は wrapping 元のエラーを持たないため source() は None を返す。
-        // 将来 refactor で誤って Some(...) を返す分岐に追加された場合の regression を捕捉する。
         use std::error::Error as _;
         assert!(
             err.source().is_none(),
@@ -2283,53 +1998,6 @@ mod tests {
         assert!(
             stopped,
             "stop による停止 (true) を期待しましたが、実際は: {stopped:?}"
-        );
-    }
-
-    /// `collect_mismatched_track_info_fields` が AV1 固有 field の相違を
-    /// `av1_*` プレフィックス付きで報告することを確認する。
-    #[test]
-    fn sample_description_consistency_reports_av1_config_field_mismatches() {
-        let mut base = base_track_info_for_consistency_test();
-        base.codec_type = VideoCodecType::Av1;
-        base.parameter_sets = None;
-        base.av1_config = Some(av1_config_for_consistency_test(vec![0x0A, 0x0B]));
-
-        assert!(
-            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &base).is_empty(),
-            "完全一致では相違が報告されないはずです"
-        );
-
-        // config_obus だけ変えると av1_config_obus が報告される。
-        let mut modified = base.clone();
-        modified.av1_config = Some(av1_config_for_consistency_test(vec![0x0A, 0x0C]));
-        assert_eq!(
-            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
-            vec!["av1_config_obus"],
-            "configOBUs の相違は av1_config_obus として報告されるはずです"
-        );
-
-        // seq_profile だけ変えると av1_seq_profile が報告される。
-        let mut modified = base.clone();
-        modified
-            .av1_config
-            .as_mut()
-            .expect("av1_config は Some")
-            .seq_profile = 2;
-        assert_eq!(
-            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
-            vec!["av1_seq_profile"],
-            "seq_profile の相違は av1_seq_profile として報告されるはずです"
-        );
-
-        // AV1 と H.264 の組み合わせでは codec_type だけを報告し、av1_config の差は列挙しない。
-        // parameter_sets の差が混ざらないよう、H.264 側も parameter_sets を None にする。
-        let mut h264 = base_track_info_for_consistency_test();
-        h264.parameter_sets = None;
-        assert_eq!(
-            Mp4SampleReader::collect_mismatched_track_info_fields(&h264, &base),
-            vec!["codec_type"],
-            "codec_type 相違時は AV1 固有 field を列挙しないはずです"
         );
     }
 
