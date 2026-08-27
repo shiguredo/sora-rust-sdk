@@ -30,11 +30,16 @@ use shiguredo_webrtc::{
     VideoEncoderEncodedImageCallbackResultError, VideoEncoderEncoderInfo, VideoEncoderHandler,
     VideoEncoderRateControlParametersRef, VideoEncoderSettingsRef, VideoFrame, VideoFrameBuffer,
     VideoFrameBufferHandler, VideoFrameRef, VideoFrameType, VideoFrameTypeVectorRef,
-    VideoTrackSource, rtc_log_error, rtc_log_info, rtc_log_verbose, rtc_log_warning,
+    VideoTrackSource, fuzzy_match_sdp_video_format, rtc_log_error, rtc_log_info, rtc_log_verbose,
+    rtc_log_warning,
 };
 
 use crate::video_codec_capability::{
     CodecDirection, VideoCodecCapability, VideoCodecImplementation,
+};
+use crate::video_codecs::av1::{
+    Av1TrackConfig, assemble_av1_encoded_sample_data, av1_required_sdp_format,
+    collect_mismatched_av1_config_fields, resolve_av1_incoming, validate_av1_track,
 };
 
 /// MP4 ファイル処理中に発生するエラー。
@@ -91,6 +96,13 @@ pub enum Mp4Error {
         /// 相違したフィールド名。
         fields: Vec<&'static str>,
     },
+    /// AV1 track の bitstream / sample entry の検証に失敗した。
+    ///
+    /// `configOBUs` の parse、sync sample 条件、Sequence Header の一貫性、
+    /// RTP packetizer 順序などを Mp4SampleReader 初期化時に検証する。
+    /// エラー variant による細分類は行わず、文脈（sample index、OBU 種別、
+    /// 相違 field 名、underlying の parse エラー理由）を含むメッセージで報告する。
+    InvalidAv1Track(String),
 }
 
 impl std::fmt::Display for Mp4Error {
@@ -141,6 +153,9 @@ impl std::fmt::Display for Mp4Error {
                     "サンプルエントリーが最初の設定と一致しません: sample={index} fields={fields:?}"
                 )
             }
+            Self::InvalidAv1Track(err) => {
+                write!(f, "AV1 トラックの検証に失敗しました: {err}")
+            }
         }
     }
 }
@@ -157,7 +172,8 @@ impl std::error::Error for Mp4Error {
             | Self::InputPositionOutOfRange { .. }
             | Self::InconsistentSampleTable { .. }
             | Self::UnsupportedCompositionTimeOffset { .. }
-            | Self::InconsistentSampleDescription { .. } => None,
+            | Self::InconsistentSampleDescription { .. }
+            | Self::InvalidAv1Track(_) => None,
         }
     }
 }
@@ -212,6 +228,7 @@ impl VideoFrameBufferHandler for Mp4EncodedSample {
 /// MP4 のビデオトラックから抽出したコーデック情報。
 ///
 /// SampleEntry (stsd ボックス) から取得する。
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Mp4VideoTrackInfo {
     codec_type: VideoCodecType,
     width: u16,
@@ -226,6 +243,8 @@ struct Mp4VideoTrackInfo {
     /// NAL 長プレフィックスのバイト数 (length_size_minus_one + 1)。
     /// H.264/H.265 では 1/2/4 のいずれか。VP8/VP9/AV1 ではデフォルト値 4。
     nal_length_size: u8,
+    /// AV1 の AV1CodecConfigurationRecord 抽出情報。AV1 以外では `None`。
+    av1_config: Option<Av1TrackConfig>,
 }
 
 /// MP4 のビデオサンプルのメタデータ。
@@ -413,6 +432,19 @@ impl Mp4SampleReader {
             }
         }
 
+        // AV1 track の場合、bitstream / configOBUs 一貫性を検証する。
+        // ここまでで sample table の妥当性を確認済みなので、sample data の read が安全に行える。
+        if track_info.codec_type == VideoCodecType::Av1
+            && let Some(av1_config) = track_info.av1_config.as_ref()
+        {
+            let av1_config_owned = av1_config.clone();
+            let is_keyframes: Vec<bool> = samples.iter().map(|s| s.is_keyframe).collect();
+            validate_av1_track(&is_keyframes, &av1_config_owned, |index| {
+                let sample = &samples[index];
+                read_bytes_at(&mut file, sample.data_offset, sample.data_size)
+            })?;
+        }
+
         // 累積再生時刻テーブルを事前計算する。
         // フレームペーシングで「次のフレームをいつ送るべきか」を O(1) で求めるため。
         // thread::sleep の相対待ちでは処理時間の累積ドリフトが発生するが、
@@ -478,6 +510,7 @@ impl Mp4SampleReader {
                     timescale,
                     parameter_sets: Some(parameter_sets),
                     nal_length_size,
+                    av1_config: None,
                 })
             }
             // H.265 には hev1 と hvc1 の 2 種類の SampleEntry がある。
@@ -496,6 +529,7 @@ impl Mp4SampleReader {
                     timescale,
                     parameter_sets: Some(parameter_sets),
                     nal_length_size,
+                    av1_config: None,
                 })
             }
             SampleEntry::Hvc1(hvc1) => {
@@ -510,6 +544,7 @@ impl Mp4SampleReader {
                     timescale,
                     parameter_sets: Some(parameter_sets),
                     nal_length_size,
+                    av1_config: None,
                 })
             }
             SampleEntry::Vp08(vp08) => Ok(Mp4VideoTrackInfo {
@@ -519,6 +554,7 @@ impl Mp4SampleReader {
                 timescale,
                 parameter_sets: None,
                 nal_length_size: 4,
+                av1_config: None,
             }),
             SampleEntry::Vp09(vp09) => Ok(Mp4VideoTrackInfo {
                 codec_type: VideoCodecType::Vp9,
@@ -527,15 +563,34 @@ impl Mp4SampleReader {
                 timescale,
                 parameter_sets: None,
                 nal_length_size: 4,
+                av1_config: None,
             }),
-            SampleEntry::Av01(av01) => Ok(Mp4VideoTrackInfo {
-                codec_type: VideoCodecType::Av1,
-                width: av01.visual.width,
-                height: av01.visual.height,
-                timescale,
-                parameter_sets: None,
-                nal_length_size: 4,
-            }),
+            SampleEntry::Av01(av01) => {
+                let av1c = &av01.av1c_box;
+                Ok(Mp4VideoTrackInfo {
+                    codec_type: VideoCodecType::Av1,
+                    width: av01.visual.width,
+                    height: av01.visual.height,
+                    timescale,
+                    parameter_sets: None,
+                    nal_length_size: 4,
+                    av1_config: Some(Av1TrackConfig {
+                        seq_profile: av1c.seq_profile.get(),
+                        seq_level_idx_0: av1c.seq_level_idx_0.get(),
+                        seq_tier_0: av1c.seq_tier_0.get(),
+                        high_bitdepth: av1c.high_bitdepth.get() != 0,
+                        twelve_bit: av1c.twelve_bit.get() != 0,
+                        monochrome: av1c.monochrome.get() != 0,
+                        chroma_subsampling_x: av1c.chroma_subsampling_x.get(),
+                        chroma_subsampling_y: av1c.chroma_subsampling_y.get(),
+                        chroma_sample_position: av1c.chroma_sample_position.get(),
+                        initial_presentation_delay_minus_one: av1c
+                            .initial_presentation_delay_minus_one
+                            .map(|v| v.get()),
+                        config_obus: av1c.config_obus.clone(),
+                    }),
+                })
+            }
             _ => Err(Mp4Error::UnsupportedVideoCodec),
         }
     }
@@ -573,19 +628,19 @@ impl Mp4SampleReader {
 
     /// 2 個の `Mp4VideoTrackInfo` をフィールド単位で比較し、相違するフィールド名を返す。
     ///
-    /// 検証対象は `codec_type` / `width` / `height` / `nal_length_size` /
-    /// `parameter_sets` の 5 フィールド。
+    /// 汎用検証対象は `codec_type` / `width` / `height` / `nal_length_size` /
+    /// `parameter_sets`。
     /// `timescale` は `mdhd` の track 単位属性で `SampleEntry` からは抽出されず、
     /// `extract_track_info` にはループ外の同一 scalar が毎回渡されるため、
     /// サンプルエントリー間で変わり得ない値として比較対象に含めない。
     ///
-    /// codec 固有フィールド（H.264 の profile-level-id、AV1 の av1C / configOBUs など）
-    /// の bit-identical 検証は、各 codec 固有の別対応で `Mp4VideoTrackInfo` を
-    /// 拡張する形で加える。
+    /// AV1 では追加で `av1_config` の全 field（AV1CodecConfigurationRecord の各 field と
+    /// configOBUs 全 byte）を byte-for-byte で比較する。相違した AV1 field は
+    /// `av1_*` のプレフィックス付きで報告する。
     ///
-    /// `Mp4VideoTrackInfo` に新しいフィールドを追加した際にヘルパー未更新を
-    /// compile error として検出するため、両側を exhaustive に destructure して
-    /// 明示的に列挙する。比較対象外のフィールドは `_` に束縛する。
+    /// `Mp4VideoTrackInfo` / `Av1TrackConfig` に新しいフィールドを追加した際に
+    /// ヘルパー未更新を compile error として検出するため、両側を exhaustive に
+    /// destructure して明示的に列挙する。比較対象外のフィールドは `_` に束縛する。
     fn collect_mismatched_track_info_fields(
         first: &Mp4VideoTrackInfo,
         current: &Mp4VideoTrackInfo,
@@ -597,6 +652,7 @@ impl Mp4SampleReader {
             timescale: _,
             parameter_sets: first_parameter_sets,
             nal_length_size: first_nal_length_size,
+            av1_config: first_av1_config,
         } = first;
         let Mp4VideoTrackInfo {
             codec_type: current_codec_type,
@@ -605,6 +661,7 @@ impl Mp4SampleReader {
             timescale: _,
             parameter_sets: current_parameter_sets,
             nal_length_size: current_nal_length_size,
+            av1_config: current_av1_config,
         } = current;
 
         let mut mismatched = Vec::new();
@@ -622,6 +679,15 @@ impl Mp4SampleReader {
         }
         if first_parameter_sets != current_parameter_sets {
             mismatched.push("parameter_sets");
+        }
+        // codec_type が一致するときのみ AV1 固有 field を詳細比較する。
+        // codec_type 相違時は既に "codec_type" を報告済みで、av1_config の Some/None 差は
+        // codec 差に付随する副次的な情報になるため列挙しない。
+        if first_codec_type == current_codec_type {
+            mismatched.extend(collect_mismatched_av1_config_fields(
+                first_av1_config.as_ref(),
+                current_av1_config.as_ref(),
+            ));
         }
         mismatched
     }
@@ -660,10 +726,10 @@ impl Mp4SampleReader {
     /// - H.265: `H265`
     /// - VP8: `VP8`
     /// - VP9: `VP9`
-    /// - AV1: `AV1`
+    /// - AV1: `AV1` に加え、AV1CodecConfigurationRecord 由来の `profile` / `level-idx` /
+    ///   `tier` を 10 進文字列で設定する（[`av1_required_sdp_format`] 参照）
     ///
-    /// コーデック固有のパラメータ（H.264 の profile-level-id、AV1 の
-    /// profile / level / tier など）は、各コーデックの別対応で拡張する。
+    /// コーデック固有のパラメータのうち H.264 の profile-level-id 拡張は別対応で加える。
     fn required_sdp_format(&self) -> SdpVideoFormat {
         match self.track_info.codec_type {
             VideoCodecType::H264 => {
@@ -674,7 +740,7 @@ impl Mp4SampleReader {
             VideoCodecType::H265 => SdpVideoFormat::new("H265"),
             VideoCodecType::Vp8 => SdpVideoFormat::new("VP8"),
             VideoCodecType::Vp9 => SdpVideoFormat::new("VP9"),
-            VideoCodecType::Av1 => SdpVideoFormat::new("AV1"),
+            VideoCodecType::Av1 => av1_required_sdp_format(self.track_info.av1_config.as_ref()),
             // 未対応 codec は `new_inner` の `extract_track_info` が
             // `Mp4Error::UnsupportedVideoCodec` で拒否するためここには来ない。
             VideoCodecType::Generic | VideoCodecType::Unknown(_) => {
@@ -692,7 +758,13 @@ impl Mp4SampleReader {
     ///   Annex B 形式 (0x00000001 スタートコード) に変換する。
     /// - キーフレームの場合は先頭に parameter sets (SPS/PPS 等) を付与する。
     ///
-    /// VP8/VP9/AV1 の場合:
+    /// AV1 の場合:
+    /// - sync sample かつ `configOBUs` が非空なら、`configOBUs || sample data` を出力する。
+    /// - non-sync sample、または `configOBUs` が空なら、sample data をそのまま出力する。
+    /// - AV1 Codec ISO Media File Format Binding v1.3.0 Section 2.4 に従い、
+    ///   `configOBUs` は格納順のまま byte 列を保持し、選別しない。
+    ///
+    /// VP8/VP9 の場合:
     /// - MP4 から抽出したデータをそのまま使用する。
     fn get_sample(&mut self, index: usize) -> Result<Mp4EncodedSample> {
         let sample = &self.samples[index];
@@ -712,6 +784,11 @@ impl Mp4SampleReader {
                 ));
                 annex_b
             }
+            VideoCodecType::Av1 => assemble_av1_encoded_sample_data(
+                raw_data,
+                sample.is_keyframe,
+                self.track_info.av1_config.as_ref(),
+            ),
             _ => raw_data,
         };
 
@@ -955,6 +1032,26 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
         direction == CodecDirection::Encoder && codec_type == self.codec_type
     }
 
+    /// 要求 format に対して encoder が実際に使う format を解決する。
+    ///
+    /// AV1 は AV1 RTP Payload Format の `profile` / `level-idx` / `tier` を独自に検証する:
+    /// - profile は required と incoming の完全一致 (固定 libwebrtc の `AV1IsSameProfile`)
+    /// - level と tier は required (bitstream 実値) が incoming (receiver capability) 以下
+    /// - parameter parse / 範囲判定は [`resolve_av1_incoming`] に集約
+    ///
+    /// AV1 以外の codec は既定の [`fuzzy_match_sdp_video_format`] で解決する
+    /// (H.264 の profile-level-id 一致など、shiguredo_webrtc の既定挙動を維持)。
+    fn resolve_sdp_format(
+        &self,
+        direction: CodecDirection,
+        format: SdpVideoFormatRef<'_>,
+    ) -> Option<SdpVideoFormat> {
+        if self.codec_type == VideoCodecType::Av1 && direction == CodecDirection::Encoder {
+            return resolve_av1_incoming(&self.required_format, format);
+        }
+        fuzzy_match_sdp_video_format(&self.get_supported_formats(direction), format)
+    }
+
     fn create_video_encoder(
         &self,
         _env: shiguredo_webrtc::EnvironmentRef<'_>,
@@ -1119,6 +1216,11 @@ mod tests {
 
     use super::*;
     use crate::video_codec_preference::VideoCodecPreference;
+    use shiguredo_mp4::bitstream::av1::{Av1ObuParseContext, parse_obus, parse_sequence_header};
+    use shiguredo_webrtc::{
+        CodecSpecificInfoRef, EncodedImageRef, VideoEncoderEncodedImageCallback,
+        VideoEncoderEncodedImageCallbackHandler, VideoEncoderEncodedImageCallbackResult,
+    };
 
     /// テスト実行中だけ存在する一時 fixture ファイル。Drop で自動的に削除する。
     ///
@@ -1281,6 +1383,24 @@ mod tests {
             timescale: 1000,
             parameter_sets: Some(vec![0x00, 0x00, 0x00, 0x01, 0x67]),
             nal_length_size: 4,
+            av1_config: None,
+        }
+    }
+
+    /// テスト用の AV1 設定 (reduced_still 経路の SH に対応する av1C field)。
+    fn av1_config_for_consistency_test(config_obus: Vec<u8>) -> Av1TrackConfig {
+        Av1TrackConfig {
+            seq_profile: 0,
+            seq_level_idx_0: 0,
+            seq_tier_0: 0,
+            high_bitdepth: false,
+            twelve_bit: false,
+            monochrome: false,
+            chroma_subsampling_x: 1,
+            chroma_subsampling_y: 1,
+            chroma_sample_position: 0,
+            initial_presentation_delay_minus_one: None,
+            config_obus,
         }
     }
 
@@ -1304,6 +1424,7 @@ mod tests {
             timescale: base.timescale,
             parameter_sets: base.parameter_sets.clone(),
             nal_length_size: base.nal_length_size,
+            av1_config: None,
         };
         assert_eq!(
             Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
@@ -1319,6 +1440,7 @@ mod tests {
             timescale: base.timescale,
             parameter_sets: base.parameter_sets.clone(),
             nal_length_size: base.nal_length_size,
+            av1_config: None,
         };
         assert_eq!(
             Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
@@ -1334,6 +1456,7 @@ mod tests {
             timescale: base.timescale,
             parameter_sets: base.parameter_sets.clone(),
             nal_length_size: base.nal_length_size,
+            av1_config: None,
         };
         assert_eq!(
             Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
@@ -1349,6 +1472,7 @@ mod tests {
             timescale: base.timescale,
             parameter_sets: base.parameter_sets.clone(),
             nal_length_size: 2,
+            av1_config: None,
         };
         assert_eq!(
             Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
@@ -1364,6 +1488,7 @@ mod tests {
             timescale: base.timescale,
             parameter_sets: Some(vec![0xff]),
             nal_length_size: base.nal_length_size,
+            av1_config: None,
         };
         assert_eq!(
             Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
@@ -1379,6 +1504,7 @@ mod tests {
             timescale: base.timescale,
             parameter_sets: None,
             nal_length_size: base.nal_length_size,
+            av1_config: None,
         };
         assert_eq!(
             Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
@@ -1394,6 +1520,7 @@ mod tests {
             timescale: base.timescale,
             parameter_sets: None,
             nal_length_size: base.nal_length_size,
+            av1_config: None,
         };
         let modified_with_params = Mp4VideoTrackInfo {
             codec_type: base.codec_type,
@@ -1402,6 +1529,7 @@ mod tests {
             timescale: base.timescale,
             parameter_sets: Some(vec![0x00, 0x00, 0x00, 0x01, 0x67]),
             nal_length_size: base.nal_length_size,
+            av1_config: None,
         };
         assert_eq!(
             Mp4SampleReader::collect_mismatched_track_info_fields(
@@ -1421,6 +1549,7 @@ mod tests {
             timescale: base.timescale,
             parameter_sets: None,
             nal_length_size: 2,
+            av1_config: None,
         };
         assert_eq!(
             Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
@@ -1436,6 +1565,7 @@ mod tests {
             timescale: 90_000,
             parameter_sets: base.parameter_sets.clone(),
             nal_length_size: base.nal_length_size,
+            av1_config: None,
         };
         assert!(
             Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified).is_empty(),
@@ -2154,5 +2284,346 @@ mod tests {
             stopped,
             "stop による停止 (true) を期待しましたが、実際は: {stopped:?}"
         );
+    }
+
+    /// `collect_mismatched_track_info_fields` が AV1 固有 field の相違を
+    /// `av1_*` プレフィックス付きで報告することを確認する。
+    #[test]
+    fn sample_description_consistency_reports_av1_config_field_mismatches() {
+        let mut base = base_track_info_for_consistency_test();
+        base.codec_type = VideoCodecType::Av1;
+        base.parameter_sets = None;
+        base.av1_config = Some(av1_config_for_consistency_test(vec![0x0A, 0x0B]));
+
+        assert!(
+            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &base).is_empty(),
+            "完全一致では相違が報告されないはずです"
+        );
+
+        // config_obus だけ変えると av1_config_obus が報告される。
+        let mut modified = base.clone();
+        modified.av1_config = Some(av1_config_for_consistency_test(vec![0x0A, 0x0C]));
+        assert_eq!(
+            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
+            vec!["av1_config_obus"],
+            "configOBUs の相違は av1_config_obus として報告されるはずです"
+        );
+
+        // seq_profile だけ変えると av1_seq_profile が報告される。
+        let mut modified = base.clone();
+        modified
+            .av1_config
+            .as_mut()
+            .expect("av1_config は Some")
+            .seq_profile = 2;
+        assert_eq!(
+            Mp4SampleReader::collect_mismatched_track_info_fields(&base, &modified),
+            vec!["av1_seq_profile"],
+            "seq_profile の相違は av1_seq_profile として報告されるはずです"
+        );
+
+        // AV1 と H.264 の組み合わせでは codec_type だけを報告し、av1_config の差は列挙しない。
+        // parameter_sets の差が混ざらないよう、H.264 側も parameter_sets を None にする。
+        let mut h264 = base_track_info_for_consistency_test();
+        h264.parameter_sets = None;
+        assert_eq!(
+            Mp4SampleReader::collect_mismatched_track_info_fields(&h264, &base),
+            vec!["codec_type"],
+            "codec_type 相違時は AV1 固有 field を列挙しないはずです"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // 実 AV1 fixture のテスト
+    //
+    // `testdata/red-320x320-av1.mp4` は次のコマンドで生成した (ffmpeg 7.1.1 / libaom-av1):
+    //   ffmpeg -y -v error -f lavfi -i "color=red:size=320x320:rate=25:duration=2" \
+    //     -pix_fmt yuv420p -c:v libaom-av1 -crf 32 -b:v 0 -g 8 -keyint_min 8 \
+    //     -sc_threshold 0 -an testdata/red-320x320-av1.mp4
+    //
+    // 生成物の実測値:
+    // - 50 サンプル / 2 秒、timescale 12800、320x320
+    // - av1C: seq_profile=0 / seq_level_idx_0=0 / seq_tier_0=0 / high_bitdepth=0 /
+    //   twelve_bit=0 / monochrome=0 / chroma_subsampling_x=1 / chroma_subsampling_y=1 /
+    //   chroma_sample_position=0 / initial_presentation_delay なし
+    // - configOBUs: 13 byte の [0x0a, 0x0b, 00, 00, 00, 04, 44, fe, 7e, 7f, fc, c0, 20]
+    //   (SH OBU 1 個: header 0x0a、size 0x0b=11、payload 11 byte、単一 operating point /
+    //   operating_point_idc[0]=0、max 320x320、reduced_still_picture_header=0)
+    // - sync sample は index 0, 8, 16, 24, 32, 40, 48 の 7 個
+    // - 各 sync sample の OBU 列は [SH, Frame] で、SH payload は config と byte 一致
+    // - non-sync sample の OBU 列は [Frame]
+    // - 各 sync sample の先頭 Frame は KEY_FRAME かつ show_frame=1 (RAP)
+    // -----------------------------------------------------------------
+
+    /// fixture を独立に demux して (configOBUs, (sample data, key flag) 列) を返す。
+    ///
+    /// reader の実装とは別経路で raw byte を得るための ground truth。
+    fn demux_av1_fixture() -> (Vec<u8>, Vec<(Vec<u8>, bool)>) {
+        use shiguredo_mp4::TrackKind;
+        use shiguredo_mp4::demux::{Input, Mp4FileDemuxer};
+
+        let fixture = include_bytes!("../../testdata/red-320x320-av1.mp4");
+        let mut demuxer = Mp4FileDemuxer::new();
+        while let Some(required) = demuxer.required_input() {
+            let size = required.size.unwrap_or(fixture.len());
+            let end = (required.position as usize + size).min(fixture.len());
+            demuxer.handle_input(Input {
+                position: required.position,
+                data: &fixture[required.position as usize..end],
+            });
+        }
+        let tracks = demuxer
+            .tracks()
+            .expect("fixture の track 解析に失敗しました");
+        let video_track = tracks
+            .iter()
+            .find(|t| t.kind == TrackKind::Video)
+            .expect("fixture に video track が存在するはずです");
+        let video_track_id = video_track.track_id;
+
+        let mut config_obus = Vec::new();
+        let mut samples = Vec::new();
+        while let Some(sample) = demuxer
+            .next_sample()
+            .expect("fixture の sample 解析に失敗しました")
+        {
+            if sample.track.track_id != video_track_id {
+                continue;
+            }
+            if let Some(shiguredo_mp4::boxes::SampleEntry::Av01(av01)) = &sample.sample_entry {
+                config_obus = av01.av1c_box.config_obus.clone();
+            }
+            let start = sample.data_offset as usize;
+            let end = start + sample.data_size;
+            samples.push((fixture[start..end].to_vec(), sample.keyframe));
+        }
+        (config_obus, samples)
+    }
+
+    /// 実 AV1 fixture を reader で読み、av1C field / configOBUs / サンプル構成を確認する。
+    #[test]
+    fn sample_reader_reads_fixture_av1_mp4() {
+        let fixture = include_bytes!("../../testdata/red-320x320-av1.mp4");
+        let tmp_name = format!(
+            "sora-sdk-mp4-test-av1-{}-{}.mp4",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("システム時刻は UNIX_EPOCH より後である必要があります")
+                .as_nanos()
+        );
+        let tmp_path = std::env::temp_dir().join(tmp_name);
+        std::fs::write(&tmp_path, fixture).expect("一時フィクスチャの書き込みに失敗しました");
+
+        let reader = Mp4SampleReader::new(&tmp_path).expect("AV1 fixture のパースに失敗しました");
+        let _ = std::fs::remove_file(&tmp_path);
+
+        assert_eq!(reader.codec_type(), VideoCodecType::Av1);
+        assert_eq!(reader.len(), 50, "fixture は 50 サンプルを持つはずです");
+        assert_eq!(reader.track_info.width, 320);
+        assert_eq!(reader.track_info.height, 320);
+
+        let av1_config = reader
+            .track_info
+            .av1_config
+            .as_ref()
+            .expect("AV1 track は av1_config を持つはずです");
+        assert_eq!(av1_config.seq_profile, 0);
+        assert_eq!(av1_config.seq_level_idx_0, 0);
+        assert_eq!(av1_config.seq_tier_0, 0);
+        assert!(!av1_config.high_bitdepth);
+        assert!(!av1_config.twelve_bit);
+        assert!(!av1_config.monochrome);
+        assert_eq!(av1_config.chroma_subsampling_x, 1);
+        assert_eq!(av1_config.chroma_subsampling_y, 1);
+        assert_eq!(av1_config.chroma_sample_position, 0);
+        assert_eq!(av1_config.initial_presentation_delay_minus_one, None);
+        assert_eq!(
+            av1_config.config_obus,
+            vec![
+                0x0A, 0x0B, 0x00, 0x00, 0x00, 0x04, 0x44, 0xFE, 0x7E, 0x7F, 0xFC, 0xC0, 0x20
+            ],
+            "configOBUs は実測値と byte 一致するはずです"
+        );
+
+        // configOBUs は SH OBU 1 個で、payload が av1C と一致し単一 operating point。
+        let config_obus = parse_obus(&av1_config.config_obus, Av1ObuParseContext::ConfigObus)
+            .expect("configOBUs は parse できるはずです");
+        assert_eq!(config_obus.len(), 1, "configOBUs は SH OBU 1 個のはずです");
+        let sh = parse_sequence_header(config_obus[0].payload)
+            .expect("config SH は parse できるはずです");
+        assert_eq!(sh.seq_profile, 0);
+        assert_eq!(sh.operating_points_cnt_minus_1, 0);
+        assert_eq!(sh.operating_point_idc_0, 0);
+
+        // sync flag: index 0, 8, 16, 24, 32, 40, 48 が sync。
+        let sync_indices: Vec<usize> = reader
+            .samples
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.is_keyframe)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            sync_indices,
+            vec![0, 8, 16, 24, 32, 40, 48],
+            "sync sample の index は実測値と一致するはずです"
+        );
+    }
+
+    /// 実 AV1 fixture の各 sample について、callback payload が
+    /// sync なら `configOBUs || sample data`、non-sync なら sample data と byte 一致する。
+    #[test]
+    fn sample_reader_get_sample_prepends_config_obus_only_for_sync_samples() {
+        let fixture = include_bytes!("../../testdata/red-320x320-av1.mp4");
+        let tmp_name = format!(
+            "sora-sdk-mp4-test-av1-sample-{}-{}.mp4",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("システム時刻は UNIX_EPOCH より後である必要があります")
+                .as_nanos()
+        );
+        let tmp_path = std::env::temp_dir().join(tmp_name);
+        std::fs::write(&tmp_path, fixture).expect("一時フィクスチャの書き込みに失敗しました");
+
+        let mut reader =
+            Mp4SampleReader::new(&tmp_path).expect("AV1 fixture のパースに失敗しました");
+        let _ = std::fs::remove_file(&tmp_path);
+
+        let (config_obus, raw_samples) = demux_av1_fixture();
+        assert!(
+            !config_obus.is_empty(),
+            "fixture の configOBUs は非空のはずです"
+        );
+
+        for (i, (raw, is_keyframe)) in raw_samples.iter().enumerate() {
+            let sample = reader
+                .get_sample(i)
+                .expect("fixture の sample を読み出せるはずです");
+            let expected = if *is_keyframe {
+                let mut combined = Vec::new();
+                combined.extend_from_slice(&config_obus);
+                combined.extend_from_slice(raw);
+                combined
+            } else {
+                raw.clone()
+            };
+            assert_eq!(
+                sample.data, expected,
+                "sample[{i}] の payload は configOBUs || sample data の規則に従うはずです"
+            );
+            assert_eq!(sample.is_keyframe, *is_keyframe);
+        }
+    }
+
+    /// 実 AV1 fixture の sync sample を `Mp4PassthroughEncoder` と実 callback に通し、
+    /// EncodedImage が byte-for-byte で `configOBUs || sample data` になり、
+    /// frame type が sync で Key / non-sync で Delta になることを確認する。
+    #[test]
+    fn passthrough_encoder_forwards_av1_reconstructed_payload() {
+        use shiguredo_webrtc::VideoFrameType;
+
+        let fixture = include_bytes!("../../testdata/red-320x320-av1.mp4");
+        let tmp_name = format!(
+            "sora-sdk-mp4-test-av1-encode-{}-{}.mp4",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("システム時刻は UNIX_EPOCH より後である必要があります")
+                .as_nanos()
+        );
+        let tmp_path = std::env::temp_dir().join(tmp_name);
+        std::fs::write(&tmp_path, fixture).expect("一時フィクスチャの書き込みに失敗しました");
+
+        let mut reader =
+            Mp4SampleReader::new(&tmp_path).expect("AV1 fixture のパースに失敗しました");
+        let _ = std::fs::remove_file(&tmp_path);
+
+        let (config_obus, raw_samples) = demux_av1_fixture();
+
+        // 実 encoder と実 callback を使う。mock / stub は使わない。
+        let (tx, rx) = std::sync::mpsc::channel();
+        let callback =
+            VideoEncoderEncodedImageCallback::new_with_handler(Box::new(RecordingHandler { tx }));
+        let mut encoder = Mp4PassthroughEncoder { callback: None };
+        assert_eq!(
+            encoder.register_encode_complete_callback(Some(callback.as_ref())),
+            VideoCodecStatus::Ok
+        );
+
+        for i in 0..reader.len() {
+            let sample = reader
+                .get_sample(i)
+                .expect("fixture の sample を読み出せるはずです");
+            let frame_buffer = VideoFrameBuffer::new_with_handler(Box::new(sample));
+            let video_frame = VideoFrame::builder(&frame_buffer)
+                .set_timestamp_us(0)
+                .set_rtp_timestamp(i as u32)
+                .build();
+            assert_eq!(
+                encoder.encode(video_frame.as_ref(), None),
+                VideoCodecStatus::Ok,
+                "encode() は Ok を返すはずです"
+            );
+        }
+
+        // callback (と内部の Sender) を drop してから受信する。
+        // rx.iter() は全 Sender の drop を待つため、callback が生きていると永久ブロックする。
+        // encoder は Sender を所有しない (callback への raw pointer を持つだけ) ため drop 不要。
+        drop(callback);
+
+        let images: Vec<(VideoFrameType, Vec<u8>)> = rx.iter().collect();
+        assert_eq!(images.len(), 50, "全 sample が callback に渡されるはずです");
+
+        for (i, ((raw, is_keyframe), (frame_type, data))) in
+            raw_samples.iter().zip(images).enumerate()
+        {
+            let expected = if *is_keyframe {
+                let mut combined = Vec::new();
+                combined.extend_from_slice(&config_obus);
+                combined.extend_from_slice(raw);
+                combined
+            } else {
+                raw.clone()
+            };
+            assert_eq!(
+                data, expected,
+                "sample[{i}] の EncodedImage は configOBUs || sample data の規則に従うはずです"
+            );
+            assert_eq!(
+                frame_type,
+                if *is_keyframe {
+                    VideoFrameType::Key
+                } else {
+                    VideoFrameType::Delta
+                },
+                "sample[{i}] の frame type は sync で Key / non-sync で Delta のはずです"
+            );
+        }
+    }
+
+    /// EncodedImage を channel で記録する実 callback handler。
+    struct RecordingHandler {
+        tx: std::sync::mpsc::Sender<(VideoFrameType, Vec<u8>)>,
+    }
+
+    impl VideoEncoderEncodedImageCallbackHandler for RecordingHandler {
+        fn on_encoded_image(
+            &mut self,
+            encoded_image: EncodedImageRef<'_>,
+            _codec_specific_info: Option<CodecSpecificInfoRef<'_>>,
+        ) -> VideoEncoderEncodedImageCallbackResult {
+            let data = encoded_image
+                .encoded_data()
+                .map(|buf| buf.data().to_vec())
+                .unwrap_or_default();
+            self.tx
+                .send((encoded_image.frame_type(), data))
+                .expect("callback 結果の送信に失敗しました");
+            VideoEncoderEncodedImageCallbackResult::new(
+                VideoEncoderEncodedImageCallbackResultError::Ok,
+            )
+        }
     }
 }
