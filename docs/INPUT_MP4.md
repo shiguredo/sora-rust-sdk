@@ -2,7 +2,8 @@
 
 ## 概要
 
-sumomo の `--input-mp4` オプションを使用すると、MP4 ファイルからエンコード済みビデオフレームを抽出し、再エンコードなしに WebRTC で送信できる。
+MP4 パススルーは、MP4 ファイルからエンコード済みビデオフレームを抽出し、再エンコードせずに WebRTC で送信する機能である。
+sumomo の `--input-mp4` オプションと Sora Rust SDK の API から利用できる。
 
 ## 対応コーデック
 
@@ -19,9 +20,13 @@ sumomo の `--input-mp4` オプションを使用すると、MP4 ファイルか
 - 不正な AV1 トラックを含む MP4 は初期化時に拒否する
 - 再送やキーフレーム要求は無視する
 - MP4 の末尾に到達すると先頭に戻りループ再生する
-- `--video-input-device` との同時指定はできない
 
-## 実行方法
+## sumomo での利用
+
+`--input-mp4` に MP4 ファイルのパスを指定する。
+MP4 の実コーデックはファイルから自動で検出されるため、`--video-codec-type` を指定する必要はない。
+`--input-mp4` と `--video-codec-type` は同時に指定できない。
+`--video-input-device` も指定した場合は、`--input-mp4` が優先される。
 
 ```bash
 cargo run -p sumomo -- \
@@ -33,7 +38,42 @@ cargo run -p sumomo -- \
   --audio false
 ```
 
-MP4 の実コーデックはファイルから自動で検出され、`--video-codec-type` で指定する必要はない。`--video-codec-type` は `--input-mp4` と併用できない。
+## SDK での利用
+
+SDK から MP4 パススルーを利用する場合は、`Mp4SampleReader` で MP4 ファイルを読み込み、同じ `Mp4SampleReader` からパススルーエンコーダーの capability と `Mp4VideoCapturer` を生成する。
+capability は `SoraConnectionContextConfig` に登録し、`Mp4VideoCapturer::video_source()` が返す `VideoTrackSource` は映像トラックの作成に使用する。
+
+```rust
+let reader = Mp4SampleReader::new(path)?;
+let capability = reader.passthrough_capability();
+let capturer = Mp4VideoCapturer::new(reader)?;
+let video_source = capturer.video_source();
+```
+
+### 複数の PeerConnection への送信
+
+同じ MP4 ファイルを複数の PeerConnection に送信する場合は、`Mp4SampleReader` を共有し、PeerConnection ごとに `Mp4VideoCapturer` を生成する。
+`Mp4SampleReader` のクローンは demux の結果とファイル I/O を共有するが、再生位置と再生タイミングは `Mp4VideoCapturer` ごとに独立している。
+接続ごとに異なる MP4 ファイルを送信する場合は、ファイルごとに `Mp4SampleReader::new` を呼び出す。
+
+```rust
+let reader = Mp4SampleReader::new(path)?;
+let capturer1 = Mp4VideoCapturer::new(reader.clone())?;
+let video_source1 = capturer1.video_source();
+let capturer2 = Mp4VideoCapturer::new(reader.clone())?;
+let video_source2 = capturer2.video_source();
+```
+
+各 `video_source()` は、それぞれ対応する PeerConnection の映像トラックでのみ利用する。
+同じ `Mp4VideoCapturer` の `video_source()` を複数の PeerConnection で共有すると、1 つの `VideoTrackSource` が運ぶ native `VideoFrameBuffer` を複数の encoder スレッドが処理することになるため、この使い方には対応していない。
+
+`debug_assertions` が有効なビルドでは、次のメッセージを出力して abort する。
+
+```text
+assertion `left == right` failed: video_frame_buffer callback called from multiple threads
+```
+
+`debug_assertions` が無効なビルドではこの assertion は発生しないが、同じ使い方は非対応である。
 
 ## 仕組み
 
@@ -43,39 +83,3 @@ MP4 の実コーデックはファイルから自動で検出され、`--video-c
 4. H.264 の場合は AVCC フォーマットから Annex B フォーマットへの変換と、IDR フレーム前への SPS/PPS 付与を行う
 5. H.265 の場合は HVCC フォーマットから Annex B フォーマットへの変換と、IDR フレーム前への VPS/SPS/PPS 付与を行う
 6. AV1 の場合は sync sample の先頭に configOBUs (Sequence Header 等) を付与する
-
-## SDK での利用
-
-SDK を直接利用する場合、MP4 パススルーは次の手順で使います。
-
-```rust
-let reader = Mp4SampleReader::new(path)?;
-let capability = reader.passthrough_capability();
-let capturer = Mp4VideoCapturer::new(reader)?;
-```
-
-### 1 つの video_source を複数 encoder に渡せない
-
-同じ `Mp4VideoCapturer` の `video_source()` を、複数の PeerConnection の映像 encoder に渡してはなりません。1 つの `VideoTrackSource` が運ぶ native `VideoFrameBuffer` を複数の encoder スレッドが処理することになります。debug ビルド (`debug_assertions` 有効時) では次のメッセージで abort します。
-
-```
-assertion `left == right` failed: video_frame_buffer callback called from multiple threads
-```
-
-release ビルドではこの assertion はありませんが、同じ使い方は非対応のままです。
-
-### capturer を分ける
-
-複数の PeerConnection に送る場合は、PeerConnection ごとに `Mp4VideoCapturer` を分けます。各 capturer の `video_source()` だけを、その接続の encoder に渡してください。1 つの `video_source()` を使い回さないでください。
-
-### reader は共有できる
-
-capturer を分けても、同じファイルなら `Mp4SampleReader` は `clone()` して共有できます。
-
-```rust
-let reader = Mp4SampleReader::new(path)?;
-let capturer1 = Mp4VideoCapturer::new(reader.clone())?;
-let capturer2 = Mp4VideoCapturer::new(reader.clone())?;
-```
-
-demux とファイル読み出しは 1 つの reader にまとまり、再生位置と再生タイミングは capturer ごとに独立します。ファイルが接続ごとに違う場合は、ファイルごとに `Mp4SampleReader::new` してください。
