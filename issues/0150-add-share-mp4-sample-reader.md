@@ -1,7 +1,7 @@
 # Mp4SampleReader を複数の Mp4VideoCapturer で共有できる仕組みを追加する
 
 - Created: 2026-08-24
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-27
 - Branch: feature/add-share-mp4-sample-reader
 - Polished: 2026-08-26
 - Reporter: @voluntas
@@ -170,3 +170,24 @@ sleep 中に次の 1 枚だけ依頼するパイプラインは必須にしな�
 - オープン FD 数: 共有 reader 1 つにつき 1 (`BufReader<File>` を I/O スレッド 1 本が保持する。clone では増えない)
 - I/O スレッド数: 共有 reader 1 つにつき 1 (最後の clone の drop でチャネルを閉じて停止・join する)
 - capturer feeder スレッド数: capturer 数に比例 (各 `Mp4VideoCapturer::new` が 1 本ずつ spawn する。本 issue ではワーカーへの集約はしないため削減しない)
+
+## 解決方法
+
+`Mp4SampleReader` の内部状態を `Arc` で共有し、ファイルとサンプルメタデータを 1 本の I/O スレッドが所有する構成に変更した。
+各クローンからの読み出し要求はチャネルで直列化し、最後のリーダーがドロップされた時点で I/O スレッドを終了する。
+
+`Mp4VideoCapturer` は、クローンしたリーダーを受け取り、フレーム供給スレッド、再生時計、`VideoTrackSource` を個別に保持する。
+実際の `VideoTrack` と `VideoSink` を使用する `multiple_capturers_share_single_reader` テストを追加し、同じリーダーから生成した 2 個のキャプチャラーが独立してフレームを供給することを確認した。
+
+`docs/INPUT_MP4.md` と公開 API の rustdoc には、PeerConnection ごとにキャプチャラーを生成する利用方法と、リーダーだけを共有できることを記載した。
+`CHANGES.md` と SDK 利用スキルにも共有 API の追加を反映した。
+
+次の検証に成功した。
+
+- `cargo test --workspace --exclude e2e-tests --exclude sumomo`
+- `cargo test -p sumomo --bin sumomo`
+- `cargo test -p sora_sdk video_codecs::mp4::tests`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+
+`cargo test --workspace` は、接続テストに必要な `TEST_SIGNALING_URLS` が未設定のため完走しなかった。
+環境変数を必要としないテストでは失敗していない。
