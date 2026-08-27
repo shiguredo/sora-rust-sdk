@@ -15,9 +15,9 @@
 //!   Mp4SampleReader --[Mp4EncodedSample を内包した VideoFrame]--> Mp4PassthroughEncoder --> WebRTC RTP
 //!                                         (native VideoFrameBuffer)
 //!
-//! `Mp4SampleReader` は `clone()` で共有でき、demux とファイル I/O を reader 1 つに集約する。
-//! ファイル読み出しは reader 内部の I/O スレッド 1 本に直列化され、
-//! 複数の `Mp4VideoCapturer` が同一ファイルを同時に読める。
+//! `Mp4SampleReader` をクローンすると、デマルチプレクス結果と 1 本のファイル I/O スレッドが
+//! 共有される。
+//! 複数の `Mp4VideoCapturer` からの読み出し要求は、このスレッドが順番に処理する。
 //!
 //! 対応コーデック: H.264, H.265, VP8, VP9, AV1
 use std::io::{self, BufReader, Read, Seek};
@@ -291,38 +291,40 @@ impl Mp4Timestamp {
 
 /// MP4 ファイルからビデオサンプルを読み出すリーダー。
 ///
-/// コンストラクタでファイルを開き、全サンプルのメタデータを事前解析する。
-/// `clone()` で安価に共有でき、複数の [`Mp4VideoCapturer`] から同時にサンプルを読み出せる。
-/// demux とファイル I/O は reader 1 つにつき 1 回・1 スレッドに集約される。
-/// 再生位置や再生時計はクローン側に持たないため、各 [`Mp4VideoCapturer`] が独立して再生できる。
+/// 構築時にファイルを開き、すべてのサンプルのメタデータを解析する。
+/// リーダーをクローンすると、デマルチプレクス結果と 1 本のファイル I/O スレッドが共有される。
+/// そのため、複数の [`Mp4VideoCapturer`] から同じ MP4 ファイルを読み出せる。
+/// 再生位置と再生時計は各 [`Mp4VideoCapturer`] が個別に管理する。
 ///
-/// ファイルデータはメモリに保持せず、必要に応じて内部の I/O スレッドがファイルから読み込む。
-/// 最後のクローンがドロップされると I/O スレッドを停止する。
+/// ファイル本体はメモリに保持せず、必要に応じて内部の I/O スレッドが読み込む。
+/// 最後のリーダーがドロップされると、I/O スレッドも終了する。
 ///
-/// [`Mp4VideoCapturer::video_source`] を複数の encoder に渡せない制約と回避策は、
+/// [`Mp4VideoCapturer::video_source`] の共有に関する制約は、
 /// `docs/INPUT_MP4.md` の「SDK での利用」を参照すること。
 #[derive(Clone)]
 pub struct Mp4SampleReader {
-    /// 全クローンで共有する内部状態。
+    /// すべてのクローンで共有する状態。
     inner: Arc<Mp4SampleReaderInner>,
 }
 
 /// `Mp4SampleReader` のクローン間で共有される内部状態。
 struct Mp4SampleReaderInner {
     track_info: Mp4VideoTrackInfo,
-    /// サンプル数。サンプルメタデータ自体は I/O スレッド側が保持する
-    /// (二重保持を避けるため、`len()` / `is_empty()` に必要な数だけを残す)。
+    /// サンプル数。
+    ///
+    /// サンプルメタデータは I/O スレッドが所有するため、`len()` と `is_empty()` に必要な
+    /// 件数だけを保持する。
     sample_count: usize,
     /// 各フレームの累積再生時刻。
     /// cumulative[0] = 0, cumulative[i] = フレーム 0..i の合計再生時間。
     /// 長さは samples.len() + 1 で、末尾が動画全体の長さ。
     /// フレームペーシングで絶対時刻ベースの待機に使用する。
     cumulative: Vec<Mp4Timestamp>,
-    /// ファイル I/O を担う内部スレッドの制御ハンドル。
+    /// ファイル I/O スレッドと読み出し要求チャネルの管理ハンドル。
     io: Mp4SampleReaderIo,
 }
 
-/// ファイル I/O スレッドへのサンプル読み出し依頼。
+/// ファイル I/O スレッドへのサンプル読み出し要求。
 struct Mp4SampleIoRequest {
     /// 読み出すサンプルのインデックス。
     index: usize,
@@ -330,30 +332,24 @@ struct Mp4SampleIoRequest {
     response: Sender<Result<Mp4EncodedSample>>,
 }
 
-/// ファイル I/O スレッドの制御ハンドル。
+/// ファイル I/O スレッドと読み出し要求チャネルのライフサイクルを管理する。
 ///
-/// 終了メカニズム: 最後の `Mp4SampleReader` クローンがドロップされると
-/// `Mp4SampleReaderInner` が drop され、この型の `Drop` が実行される。
-/// `Drop` は sender を `take()` してチャネルを閉じ、I/O スレッドの `recv()` を
-/// `Err` で終了させてから、thread を `take()` して join する。
-/// フィールドが `Option` なのは、`&mut self` から `take()` により
-/// 所有権ごと取り出すためである。
+/// 最後の `Mp4SampleReader` がドロップされるとチャネルを閉じ、I/O スレッドの終了を待つ。
 struct Mp4SampleReaderIo {
-    /// 依頼を送るチャネルの送信側。`Drop` で先に閉じて I/O スレッドの `recv()` を終了させる。
+    /// 読み出し要求を送るチャネルの送信側。
     sender: Option<Sender<Mp4SampleIoRequest>>,
-    /// I/O スレッドの join ハンドル。
+    /// I/O スレッドの終了を待つためのハンドル。
     thread: Option<thread::JoinHandle<()>>,
 }
 
 impl Drop for Mp4SampleReaderIo {
     fn drop(&mut self) {
-        // チャネルを閉じてから join する (仕組みは構造体の doc コメント参照)。
+        // 先にチャネルの送信側を破棄し、I/O スレッドの受信ループを終了させる。
         self.sender.take();
         if let Some(handle) = self.thread.take() {
-            // チャネルが閉じられると I/O スレッドは進行中の読み出し (最大 1 回) の
-            // 完了後に終了するため、join はすぐ完了する。
+            // I/O スレッドは、処理中およびチャネルに残っている要求を処理してから終了する。
             if let Err(payload) = handle.join() {
-                // I/O スレッドが panic した場合 (実装バグ) は、ここでもログに残す。
+                // I/O スレッドの `panic` は実装バグなので、ログに記録する。
                 rtc_log_error!(
                     "MP4: I/O thread panicked: {:?}",
                     payload.downcast_ref::<&str>()
@@ -525,16 +521,13 @@ impl Mp4SampleReader {
             });
         }
 
-        // ファイル I/O を内部スレッド 1 本に集約する。
-        // 複数の Mp4VideoCapturer が同一 reader の clone から同時に get_sample を呼んでも、
-        // スレッドが要求を直列化して処理するため BufReader + seek を奪い合わない。
-        // サンプル数は Inner 側の len() / is_empty() でも使うため、move の前に控えておく。
+        // ファイルとサンプルメタデータは、1 本の I/O スレッドが所有する。
+        // クローン間で `BufReader` を共有してロックする代わりに、読み出し要求を直列化する。
+        // `samples` は I/O スレッドへ移すため、`len()` と `is_empty()` に必要な件数だけを残す。
         let sample_count = samples.len();
         let (io_sender, io_receiver) = mpsc::channel::<Mp4SampleIoRequest>();
-        // I/O スレッドは Mp4SampleReaderInner を Arc で共有しない。
-        // 共有すると最後のクローンが drop されても refcount が 0 にならず、
-        // Mp4SampleReaderIo の Drop (構造体 doc 参照) による終了・ join が走らない。
-        // samples は全体をスレッドへ move し、Inner にはサンプル数だけを残す。
+        // I/O スレッドから `Mp4SampleReaderInner` を参照すると `Arc` の循環参照になるため、
+        // 読み出しに必要な値だけをスレッドへ移す。
         let io_track_info = track_info.clone();
         let io_thread = thread::spawn(move || {
             while let Ok(request) = io_receiver.recv() {
@@ -723,11 +716,11 @@ impl Mp4SampleReader {
         self.inner.track_info.codec_type
     }
 
-    /// この reader から MP4 パススルー用の [`Mp4PassthroughVideoCodecCapability`] を生成する。
+    /// このリーダーから MP4 パススルー用の [`Mp4PassthroughVideoCodecCapability`] を生成する。
     ///
-    /// ファイル I/O は行わず、reader 構築時に確定した値の cheap clone だけを渡す。
-    /// 共有されたどのクローンからでも同じ capability を生成できる。
-    /// この経路が capability の唯一の構築ルート。
+    /// リーダーの構築時に確定した値だけを使うため、ファイル I/O は発生しない。
+    /// どのクローンから呼び出しても、同じ設定を持つインスタンスを生成する。
+    /// [`Mp4PassthroughVideoCodecCapability`] は、このメソッドからのみ生成できる。
     pub fn passthrough_capability(&self) -> Mp4PassthroughVideoCodecCapability {
         Mp4PassthroughVideoCodecCapability {
             codec_type: self.inner.track_info.codec_type,
@@ -771,10 +764,11 @@ impl Mp4SampleReader {
     /// 指定インデックスのサンプルデータを取得する。
     ///
     /// サンプルデータは内部の I/O スレッドがファイルから読み込むため、I/O エラーを返し得る。
-    /// 複数のクローンから同時に呼び出してよい (読み出しは I/O スレッドに直列化される)。
+    /// 複数のクローンから同時に呼び出せる。
+    /// 読み出し要求は I/O スレッドが順番に処理する。
     ///
-    /// 応答待ちの間も `stop` をポーリングし、設定されていたら `Ok(None)` を返す
-    /// (共有 I/O スレッドが他 capturer の要求で塞がっていても、停止・ join を妨げない)。
+    /// 応答待ちの間に `stop` が設定された場合は、応答を待たずに `Ok(None)` を返す。
+    /// これにより、先行する読み出し処理の完了を待たずにキャプチャラーを停止できる。
     ///
     /// H.264/H.265 の場合:
     /// - MP4 内の AVCC/HVCC 形式 (4 バイト長さプレフィックス) を
@@ -790,8 +784,8 @@ impl Mp4SampleReader {
     /// VP8/VP9 の場合:
     /// - MP4 から抽出したデータをそのまま使用する。
     fn get_sample(&self, index: usize, stop: &AtomicBool) -> Result<Option<Mp4EncodedSample>> {
-        // 範囲外の index は内部の利用バグ。共有 I/O スレッド側の panic だと全 capturer の
-        // 呼び出しが BUG panic 連鎖になるため、送信前に呼び出し側で明確に panic させる。
+        // 範囲外のインデックスは呼び出し側の実装バグである。
+        // I/O スレッドの `panic` はすべてのクローンに影響するため、要求の送信前に検出する。
         assert!(
             index < self.inner.sample_count,
             "BUG: sample index {index} is out of range (sample_count={})",
@@ -814,8 +808,8 @@ impl Mp4SampleReader {
             match response_rx.recv_timeout(std::time::Duration::from_millis(1)) {
                 Ok(result) => return result.map(Some),
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                // 依頼を送信できているのに応答チャネルが閉じるのは、
-                // I/O スレッドが応答前に panic した場合のみ (実装バグ)。
+                // 送信済みの要求に応答がないのは、I/O スレッドが処理中に
+                // `panic` した場合だけである。
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     panic!("BUG: I/O thread must respond exactly once per request")
                 }
@@ -832,10 +826,7 @@ impl Mp4SampleReader {
 
 /// 指定インデックスのサンプルデータをファイルから読み出し、送信用に変換して返す。
 ///
-/// I/O スレッド上で実行され、複数のキャプチャラーの要求を直列化する。
-/// H.264/H.265 は AVCC/HVCC を Annex B に変換し、キーフレームには parameter sets を付与する。
-/// AV1 は sync sample の先頭に configOBUs を付与する。
-/// VP8/VP9 は抽出したデータをそのまま返す。
+/// [`Mp4SampleReader::get_sample`] が検証済みの `index` を受け取る。
 fn read_sample(
     file: &mut BufReader<std::fs::File>,
     track_info: &Mp4VideoTrackInfo,
@@ -1100,15 +1091,15 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
         direction == CodecDirection::Encoder && codec_type == self.codec_type
     }
 
-    /// 要求 format に対して encoder が実際に使う format を解決する。
+    /// 要求された SDP フォーマットに対して、エンコーダーが使用するフォーマットを解決する。
     ///
-    /// AV1 は AV1 RTP Payload Format の `profile` / `level-idx` / `tier` を独自に検証する:
-    /// - profile は required と incoming の完全一致 (固定 libwebrtc の `AV1IsSameProfile`)
-    /// - level と tier は required (bitstream 実値) が incoming (receiver capability) 以下
-    /// - parameter parse / 範囲判定は [`resolve_av1_incoming`] に集約
+    /// AV1 では、AV1 RTP Payload Format の `profile`、`level-idx`、`tier` を個別に検証する。
+    /// - `profile` は `required_format` と要求フォーマットの完全一致を求める。
+    /// - `level-idx` と `tier` は、MP4 のビットストリームが要求する値が受信側の能力以下かを調べる。
+    /// - パラメーターの解析と範囲検証は `resolve_av1_incoming()` が行う。
     ///
-    /// AV1 以外の codec は既定の [`fuzzy_match_sdp_video_format`] で解決する
-    /// (H.264 の profile-level-id 一致など、shiguredo_webrtc の既定挙動を維持)。
+    /// AV1 以外のコーデックには [`fuzzy_match_sdp_video_format`] を使用し、H.264 の
+    /// `profile-level-id` の照合など、shiguredo_webrtc の既定の挙動を維持する。
     fn resolve_sdp_format(
         &self,
         direction: CodecDirection,
@@ -1187,8 +1178,9 @@ impl Mp4VideoCapturer {
     /// 生成と同時に専用スレッドを起動し、MP4 のフレームタイミングに従って
     /// 映像フレームを WebRTC に供給する。動画末尾に達すると先頭に戻りループ再生する。
     ///
-    /// 1 つの reader を複数の capturer で共有するには `reader.clone()` を渡す。
-    /// 各 capturer は独立した feeder スレッド・再生時計を持つ。
+    /// 同じ [`Mp4SampleReader`] から複数のキャプチャラーを生成する場合は、リーダーをクローンし、
+    /// 各 `Mp4VideoCapturer::new()` に 1 つずつ渡す。
+    /// 各キャプチャラーは、フレーム供給スレッドと再生時計を個別に持つ。
     pub fn new(reader: Mp4SampleReader) -> crate::error::Result<Self> {
         let width = reader.inner.track_info.width as i32;
         let height = reader.inner.track_info.height as i32;
@@ -1219,8 +1211,7 @@ impl Mp4VideoCapturer {
                     let AdaptFrameResult { applied, .. } =
                         source.adapt_frame(width, height, timestamp_us);
                     if applied {
-                        // サンプルデータの読み込みに失敗したらフィーダースレッドを終了する。
-                        // 停止フラグが設定されて中断された場合 (Ok(None)) も終了する。
+                        // サンプルを取得できない場合は、フレーム供給スレッドを終了する。
                         let sample = match reader.get_sample(i, &stop_clone) {
                             Ok(Some(sample)) => sample,
                             Ok(None) => return,
@@ -1268,14 +1259,15 @@ impl Mp4VideoCapturer {
 
     /// WebRTC の [VideoTrackSource] を返す。
     ///
-    /// 返された `VideoTrackSource` を複数の PeerConnection の映像 encoder に渡してはならない。
-    /// 1 つの `VideoTrackSource` が運ぶ native `VideoFrameBuffer` を複数の encoder スレッドが
-    /// 処理することになり、debug ビルドでは `video_frame_buffer callback called from
-    /// multiple threads` で abort する。release ビルドでも同じ使い方は非対応である。
+    /// 同じ `VideoTrackSource` を複数の PeerConnection で共有する使い方には対応していない。
+    /// この使い方では、同じネイティブ `VideoFrameBuffer` へのコールバックが、複数の
+    /// エンコーダースレッドから呼び出される。`debug_assertions` が有効なビルドでは、
+    /// `video_frame_buffer callback called from multiple threads` というエラーで異常終了する。
+    /// `debug_assertions` が無効なビルドでも、この使い方はサポート対象外である。
     ///
-    /// 複数の PeerConnection に送る場合は、PeerConnection ごとに [`Mp4VideoCapturer`] を作り、
-    /// 各 capturer の `video_source()` をその接続の encoder に渡すこと。
-    /// 1 つの [`Mp4SampleReader`] は `clone()` して複数の [`Mp4VideoCapturer`] で共有できる。
+    /// 複数の PeerConnection に送信する場合は、PeerConnection ごとに
+    /// [`Mp4VideoCapturer`] を生成し、それぞれの `video_source()` を対応する接続に渡すこと。
+    /// 各キャプチャラーへ渡す [`Mp4SampleReader`] は、同じリーダーをクローンして用意できる。
     ///
     /// 詳細は `docs/INPUT_MP4.md` の「SDK での利用」を参照すること。
     pub fn video_source(&self) -> VideoTrackSource {
@@ -1287,11 +1279,10 @@ impl Drop for Mp4VideoCapturer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(handle) = self.thread_handle.take() {
-            // フィーダースレッドは待機中 (最大 MAX_SLEEP_DURATION ごと) と
-            // I/O 応答待ち中 (最大 1ms ごと) のどちらも停止フラグを確認するため、
-            // join は停止フラグ設定後すぐに完了する。
+            // フレーム供給スレッドは、フレーム待機中は `MAX_SLEEP_DURATION` ごとに、
+            // I/O 応答待ち中は 1 ms ごとに停止フラグを確認する。
             if let Err(payload) = handle.join() {
-                // フィーダースレッドが panic した場合 (実装バグ) は、ここでもログに残す。
+                // フレーム供給スレッドの `panic` は実装バグなので、ログに記録する。
                 rtc_log_error!(
                     "MP4: feeder thread panicked: {:?}",
                     payload.downcast_ref::<&str>()
@@ -1585,7 +1576,6 @@ mod tests {
         .expect("フィクスチャ MP4 のパースに失敗しました");
         assert_eq!(reader.codec_type(), VideoCodecType::H264);
         assert!(!reader.is_empty());
-        // 中断テストではないため、停止フラグは常に false のまま渡す。
         let stop = AtomicBool::new(false);
         let sample = reader
             .get_sample(0, &stop)
@@ -1818,7 +1808,6 @@ mod tests {
         file.set_len(0).expect("ファイルの縮小に失敗しました");
         drop(file);
 
-        // 中断テストではないため、停止フラグは常に false のまま渡す。
         let stop = AtomicBool::new(false);
         let result = reader.get_sample(0, &stop);
         assert!(
@@ -2168,24 +2157,19 @@ mod tests {
         );
     }
 
-    // 1 つの reader をクローンして複数スレッドから同時に get_sample を呼んでも、
-    // 各スレッドが同じファイルから正しいサンプルを独立に読み出せることを確認する。
-    //
-    // I/O スレッドへの直列化と request / response の正しさの回帰テスト。
-    // 全スレッドの同一 index サンプルがバイト列まで一致することを、
-    // スレッド数 × サンプル数の組み合わせで検証する。
+    // 同じリーダーのクローンから並行してサンプルを読み出し、要求と応答が混線しないことを
+    // 確認する。
+    // 同じインデックスのサンプルは、すべてのスレッドで同じ内容になる必要がある。
     #[test]
     fn shared_reader_clones_read_samples_concurrently() {
         let (reader, _fixture) = h264_reader_from_fixture("shared-reader");
         let sample_count = reader.len();
         let thread_count = 4;
 
-        // 各スレッドが全サンプルを読み出す。reader は clone で共有される。
         let handles: Vec<_> = (0..thread_count)
             .map(|_| {
                 let reader = reader.clone();
                 thread::spawn(move || {
-                    // 中断テストではないため、停止フラグは常に false のまま渡す。
                     let stop = AtomicBool::new(false);
                     let mut samples = Vec::new();
                     for i in 0..sample_count {
@@ -2208,7 +2192,6 @@ mod tests {
                     .expect("共有 reader の読み出しスレッドが panic しました")
             })
             .collect();
-        // 同一 index のサンプルは全スレッドで同一バイト列・同一フラグになるはず。
         for (i, reference) in results[0].iter().enumerate() {
             for other_results in results.iter().skip(1) {
                 assert_eq!(
@@ -2221,7 +2204,7 @@ mod tests {
                 );
             }
         }
-        // 先頭サンプルはキーフレームで、H.264 の parameter sets (SPS/PPS) 付きであること。
+        // 並行読み出しでも、H.264 のキーフレーム変換結果が維持されることを確認する。
         let first = &results[0][0];
         assert!(first.is_keyframe, "先頭サンプルはキーフレームのはずです");
         assert!(
@@ -2237,12 +2220,7 @@ mod tests {
         );
     }
 
-    // 停止フラグが設定された状態で get_sample を呼ぶと、I/O 応答を待たずに
-    // Ok(None) を返すことを確認する。
-    //
-    // 共有 I/O スレッドが他 capturer の要求で塞がっていても停止・ join を妨げない
-    // という契約の回帰テスト。依頼は送信済みだが、応答を待つ前に stop を観測して
-    // 中断する (中断された依頼は I/O スレッドが後で処理し、送信先が無いため破棄される)。
+    // 停止済みの場合は、読み出し結果より停止要求を優先し、`Ok(None)` を返すことを確認する。
     #[test]
     fn get_sample_returns_none_when_stopped() {
         let (reader, _fixture) = h264_reader_from_fixture("get-sample-stopped");
@@ -2258,7 +2236,7 @@ mod tests {
 
     /// テスト用の `VideoSinkHandler`。
     ///
-    /// 受信したフレームの情報を mpsc チャネルへ送り、テスト本体から観測できるようにする。
+    /// 受信したフレームの情報をチャネルへ送り、テスト本体から観測できるようにする。
     struct TestVideoSink {
         tx: std::sync::mpsc::Sender<TestFrameInfo>,
     }
@@ -2273,8 +2251,8 @@ mod tests {
     impl VideoSinkHandler for TestVideoSink {
         fn on_frame(&mut self, frame: VideoFrameRef<'_>) {
             let buffer = frame.buffer();
-            // 安全性: on_frame 内でのみ参照を取得する。各 capturer は専用の
-            // VideoFrameBuffer を作るため、同一実体への同時アクセスは発生しない。
+            // 安全性: 参照の利用を `on_frame()` の実行中に限定する。
+            // 各キャプチャラーが個別の `VideoFrameBuffer` を生成するため、同時アクセスは発生しない。
             let codec_type = unsafe { buffer.as_native_ref::<Mp4EncodedSample>() }
                 .expect("パススルーサンプルは VideoFrameBuffer に内包されているはずです")
                 .codec_type;
@@ -2286,17 +2264,15 @@ mod tests {
         }
     }
 
-    // 1 つの reader を clone して複数の Mp4VideoCapturer を同時に動かし、
-    // 各 video_source() がそれぞれ正常なフレームを供給し続けられることを確認する。
+    // 同じリーダーから複数の `Mp4VideoCapturer` を生成し、それぞれの `video_source()` が
+    // 独立してフレームを供給できることを確認する。
     #[test]
     fn multiple_capturers_share_single_reader() {
-        // 実フレームを観測するため、実際の VideoTrack を生成できるコンテキストを使う。
         let context = crate::connection_context::SoraConnectionContext::new()
             .expect("SoraConnectionContext の生成に失敗しました");
         let (reader, _fixture) = h264_reader_from_fixture("shared-capturer");
         let capturer_count = 2;
 
-        // reader.clone() を渡して capturer を複数作る。
         let mut capturers = Vec::new();
         let mut tracks = Vec::new();
         let mut sinks = Vec::new();
@@ -2314,11 +2290,10 @@ mod tests {
             sinks.push((sink, rx));
         }
 
-        // 各 capturer が 10 フレームを連続受信できることを、タイムアウト付きで待って確認する。
-        // フィクスチャは 25fps のため 10 フレームは約 400ms 分に相当し、供給が継続している
-        // ことを表す。固定 sleep は負荷時にフレークし得るため、recv_timeout で必要数を受信する。
+        // 各映像ソースから 10 フレームを受信するまで、タイムアウト付きで待機する。
+        // 一定時間待つ方式ではなく受信数で判定し、実行環境の負荷による失敗を避ける。
         for (index, (_sink, rx)) in sinks.iter().enumerate() {
-            // sink と track は保持し続ける必要がある (drop すると登録が解除される)。
+            // 受信が終わるまで `VideoSink` と `VideoTrack` を保持し、登録を維持する。
             for _ in 0..10 {
                 let frame = rx
                     .recv_timeout(std::time::Duration::from_secs(5))
@@ -2341,17 +2316,16 @@ mod tests {
             }
         }
 
-        // feeder スレッドを先に停止してから sink の登録を解除する。
-        // 登録されたまま sink を drop すると、feeder スレッドが解放済みの
-        // sink へフレームを送り続け、解放済みメモリ参照 (SIGSEGV) の原因になる。
+        // フレーム供給スレッドを停止してから、各 `VideoTrack` に登録した `VideoSink` を解除する。
+        // 登録解除前に `VideoSink` をドロップすると、libwebrtc が解放済みのポインターを参照する。
         drop(capturers);
         for (index, (sink, _rx)) in sinks.iter().enumerate() {
             tracks[index].remove_sink(sink);
         }
     }
 
-    /// AV1 の fixture MP4 を一時ファイルに書き出して `Mp4SampleReader` を生成する。
-    /// 返される `FixtureFile` が drop されるまでファイルは残る。
+    /// AV1 の MP4 フィクスチャを一時ファイルに書き出し、`Mp4SampleReader` を生成する。
+    /// 返した `FixtureFile` がドロップされるまで、一時ファイルを保持する。
     fn av1_reader_from_fixture(tag: &str) -> (Mp4SampleReader, FixtureFile) {
         let fixture = include_bytes!("../../testdata/red-320x320-av1.mp4");
         let tmp_name = format!(
