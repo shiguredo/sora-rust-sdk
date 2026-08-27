@@ -4,6 +4,7 @@
 //! [VideoCodecCapability] 実装を提供する。
 #[cfg(feature = "amf")]
 pub mod amf;
+pub(crate) mod av1;
 #[cfg(any(
     feature = "v4l2",
     feature = "vpl",

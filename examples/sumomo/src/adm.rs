@@ -26,7 +26,7 @@ impl SumomoAdmState {
             let stored = self
                 .audio_transport
                 .lock()
-                .expect("audio_transport のロックを取得できませんでした");
+                .expect("BUG: audio_transport mutex poisoned (another thread panicked while holding the lock)");
             *stored
         };
         let transport = match transport {
@@ -65,10 +65,9 @@ struct SumomoAdmHandler {
 
 impl AudioDeviceModuleHandler for SumomoAdmHandler {
     fn register_audio_callback(&self, transport: Option<AudioTransportRef>) -> i32 {
-        let mut stored = self
-            .audio_transport
-            .lock()
-            .expect("audio_transport のロックを取得できませんでした");
+        let mut stored = self.audio_transport.lock().expect(
+            "BUG: audio_transport mutex poisoned (another thread panicked while holding the lock)",
+        );
         *stored = transport;
         0
     }
