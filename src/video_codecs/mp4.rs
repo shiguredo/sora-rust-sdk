@@ -168,7 +168,7 @@ impl std::fmt::Display for Mp4Error {
                 write!(f, "AV1 トラックの検証に失敗しました: {err}")
             }
             Self::InvalidH264Track(err) => {
-                write!(f, "H.264 トラックの検証に失敗しました: {err}")
+                write!(f, "H.264 track validation failed: {err}")
             }
         }
     }
@@ -608,12 +608,12 @@ impl Mp4SampleReader {
                     let sps_info =
                         shiguredo_mp4::bitstream::h264::parse_sps(sps).map_err(|err| {
                             Mp4Error::InvalidH264Track(format!(
-                                "SPS #{sps_index} のパースに失敗しました: {err}"
+                                "failed to parse SPS #{sps_index}: {err}"
                             ))
                         })?;
                     if sps_info.profile_level_id != avc_profile_level_id {
                         return Err(Mp4Error::InvalidH264Track(format!(
-                            "SPS #{sps_index} の profile-level-id が avcC と一致しません: \
+                            "SPS #{sps_index} profile-level-id does not match avcC: \
                              sps={} avcC={}",
                             sps_info.profile_level_id.to_hex(),
                             avc_profile_level_id.to_hex(),
@@ -622,7 +622,7 @@ impl Mp4SampleReader {
                     // クロップ適用後の寸法が avc1 の寸法と一致することを確認する。
                     if sps_info.width != width || sps_info.height != height {
                         return Err(Mp4Error::InvalidH264Track(format!(
-                            "SPS #{sps_index} の寸法が avc1 と一致しません: \
+                            "SPS #{sps_index} dimensions do not match avc1: \
                              sps={}x{} avc1={width}x{height}",
                             sps_info.width, sps_info.height,
                         )));
@@ -633,7 +633,7 @@ impl Mp4SampleReader {
                 // 互換フィルタに通し、認識されない profile / level は拒否する。
                 if parse_profile_level_id(avc_profile_level_id).is_none() {
                     return Err(Mp4Error::InvalidH264Track(format!(
-                        "固定 libwebrtc が認識しない H.264 profile / level です: {}",
+                        "H.264 profile / level not recognized by the fixed libwebrtc: {}",
                         avc_profile_level_id.to_hex(),
                     )));
                 }
@@ -643,9 +643,7 @@ impl Mp4SampleReader {
                 // ようにする。
                 let avcc_box =
                     shiguredo_mp4::Encode::encode_to_vec(&avc1.avcc_box).map_err(|err| {
-                        Mp4Error::InvalidH264Track(format!(
-                            "avcC の再エンコードに失敗しました: {err}"
-                        ))
+                        Mp4Error::InvalidH264Track(format!("failed to re-encode avcC: {err}"))
                     })?;
 
                 Ok(Mp4VideoTrackInfo {
@@ -3092,7 +3090,7 @@ mod tests {
         let entry = build_avc1_sample_entry(&[sps], &[pps], (0x64, 0x00, 0x15), Some(1), 320, 320);
 
         let result = new_reader_for_h264_mp4(&[entry]);
-        assert_invalid_h264_track(result, "profile-level-id が avcC と一致しません");
+        assert_invalid_h264_track(result, "profile-level-id does not match avcC");
     }
 
     /// 複数 SPS のいずれかが avcC と一致しない合成 MP4 を reader 初期化時に拒否する。
@@ -3116,7 +3114,7 @@ mod tests {
         );
 
         let result = new_reader_for_h264_mp4(&[entry]);
-        assert_invalid_h264_track(result, "profile-level-id が avcC と一致しません");
+        assert_invalid_h264_track(result, "profile-level-id does not match avcC");
     }
 
     /// SPS の寸法と avc1 の寸法が一致しない合成 MP4 を reader 初期化時に拒否する。
@@ -3131,7 +3129,7 @@ mod tests {
         let entry = build_avc1_sample_entry(&[sps], &[pps], (0x4d, 0x40, 0x15), None, 640, 640);
 
         let result = new_reader_for_h264_mp4(&[entry]);
-        assert_invalid_h264_track(result, "寸法が avc1 と一致しません");
+        assert_invalid_h264_track(result, "dimensions do not match avc1");
     }
 
     /// avcC 由来の required format が libwebrtc 互換フィルタで未知の level の場合、
@@ -3149,7 +3147,7 @@ mod tests {
         let entry = build_avc1_sample_entry(&[sps], &[pps], (0x4d, 0x40, 0x3c), None, 320, 320);
 
         let result = new_reader_for_h264_mp4(&[entry]);
-        assert_invalid_h264_track(result, "固定 libwebrtc が認識しない");
+        assert_invalid_h264_track(result, "not recognized by the fixed libwebrtc");
     }
 
     /// `Mp4SampleReader` の生成結果が `InvalidH264Track` で、メッセージに
