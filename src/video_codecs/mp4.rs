@@ -197,7 +197,9 @@ type Result<T> = std::result::Result<T, Mp4Error>;
 pub(crate) struct Mp4EncodedSample {
     /// エンコード済みフレームデータ。
     /// H.264/H.265 の場合は Annex B 形式に変換済み。
-    /// VP8/VP9/AV1 の場合は MP4 から抽出したそのまま。
+    /// VP8/VP9 の場合は MP4 から抽出したそのまま。
+    /// AV1 の場合は sync sample かつ `configOBUs` が非空なら `configOBUs || sample data`、
+    /// それ以外は MP4 から抽出したそのまま。
     pub data: Vec<u8>,
     /// キーフレームかどうか。
     pub is_keyframe: bool,
@@ -353,8 +355,8 @@ impl Mp4SampleReader {
         // 全サンプルを順次読み出す。
         // 最初のサンプルの sample_entry からコーデック情報 (解像度、parameter sets 等) を取得し、
         // 以後の Some(sample_entry) も extract_track_info に通して、
-        // codec_type / width / height / nal_length_size / parameter_sets の
-        // 値等値を検証する。サンプルエントリーが途中で切り替わる MP4 を
+        // `Mp4VideoTrackInfo` 全体 (`av1_config` を含む) の値等値を検証する。
+        // サンプルエントリーが途中で切り替わる MP4 を
         // 気付かれないまま最初の設定のまま送出しないためのゲート。
         let mut track_info: Option<Mp4VideoTrackInfo> = None;
         let mut samples = Vec::new();
@@ -474,7 +476,8 @@ impl Mp4SampleReader {
     ///
     /// H.264: AvccBox から SPS/PPS を Annex B 形式で取得。
     /// H.265: HvccBox から VPS/SPS/PPS を Annex B 形式で取得。
-    /// VP8/VP9/AV1: parameter sets は不要 (フレームデータに内包されている)。
+    /// AV1: `av1C` の AV1CodecConfigurationRecord と `configOBUs` を保持する。
+    /// VP8/VP9: parameter sets は不要 (フレームデータに内包されている)。
     fn extract_track_info(
         entry: &shiguredo_mp4::boxes::SampleEntry,
         timescale: u32,

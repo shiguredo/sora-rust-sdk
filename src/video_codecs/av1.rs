@@ -114,7 +114,7 @@ pub(super) fn has_supported_operating_points(seq: &Av1SequenceHeader) -> bool {
 /// - configOBUs の Sequence Header が最大 1 個で、存在する場合は先頭 OBU である
 /// - configOBUs の Sequence Header field が AV1CodecConfigurationRecord と一致
 /// - sync sample が 1 件以上存在し、先頭 sample が sync sample である
-/// - 各 sync sample の最初の Frame Header / Frame OBU が
+/// - 各 sync sample が Frame Header / Frame OBU を含み、その最初のものが
 ///   `show_existing_frame == 0` かつ `frame_type == KEY_FRAME` かつ `show_frame == 1`
 /// - 各 sync sample が Sequence Header OBU を含み、最初の Frame Header/Frame より前に現れる
 /// - 全 sample 内の Sequence Header field が AV1CodecConfigurationRecord と一致
@@ -293,7 +293,8 @@ pub(super) fn validate_av1_track(
                         // sync sample の最初の Frame Header/Frame OBU について
                         // uncompressed_header 冒頭を parse し、KEY_FRAME 条件を検証する。
                         // context がまだ None (= config にも先行 sample にも SH がない) なら、
-                        // 以下の sync sample post-checks で「SH がない」条件として弾かれる。
+                        // 以下の sync sample post-checks で「SH がない」として弾く。
+                        // Frame 系 OBU 自体が無い sync sample も post-checks で拒否する。
                         let prefix = parse_frame_header_prefix(obu.payload, &sh).map_err(|e| {
                             Mp4Error::InvalidAv1Track(format!(
                                 "sample={sample_index} 内 Frame Header の解析に失敗しました: {e:?}"
@@ -334,9 +335,14 @@ pub(super) fn validate_av1_track(
                     "sync sample が Sequence Header OBU を含みません: sample={sample_index}"
                 ))
             })?;
-            if let Some(fr_index) = first_frame_index
-                && sh_index > fr_index
-            {
+            // Binding v1.3.0 Section 2.4: sync sample は RAP であり、最初の frame が
+            // Key Frame かつ show_frame=1。Frame Header / Frame が無いと RAP を検証できない。
+            let fr_index = first_frame_index.ok_or_else(|| {
+                Mp4Error::InvalidAv1Track(format!(
+                    "sync sample に Frame Header / Frame OBU がありません: sample={sample_index}"
+                ))
+            })?;
+            if sh_index > fr_index {
                 return Err(Mp4Error::InvalidAv1Track(format!(
                     "sync sample で Sequence Header が最初の Frame より後に現れます: sample={sample_index}"
                 )));
@@ -403,7 +409,7 @@ pub(super) fn validate_av1_track(
 // 本 SDK は上記挙動に合わせて `Mp4SampleReader::new_inner` で以下を要求する:
 // - `configOBUs || sample data` の先頭から Temporal Delimiter / Padding を飛ばした最初の OBU が
 //   Sequence Header であること (packetizer が RTP N bit を必ず設定できる保証)
-// - Tile List OBU は config / sample どちらでも拒否 (packetizer が除外し得るため保守的に弾く)
+// - Tile List OBU は `parse_obus` が AV1 Codec ISO Media File Format Binding に従い拒否する
 // - Metadata OBU が Sequence Header より前にあると拒否 (packetizer が除外せず、順序仕様外)
 // - encoder callback は再構成済み `configOBUs || sample data` を byte-for-byte で渡し、
 //   RTP aggregation header や OBU element length の生成は packetizer 側に一任する
@@ -870,6 +876,16 @@ mod tests {
         assert_invalid_av1_track(&result, "Sequence Header が最初の Frame より後に現れます");
     }
 
+    /// sync sample に Frame Header / Frame OBU が無いと RAP を検証できないので拒否する。
+    #[test]
+    fn validate_av1_track_rejects_sync_sample_without_frame() {
+        let sh_payload = make_reduced_still_sh_payload(0, 0);
+        let sample_bytes = make_obu(OBU_TYPE_SEQUENCE_HEADER, &sh_payload);
+        let config = av1_track_config_for_reduced_still(Vec::new());
+        let result = validate_av1_samples(vec![(sample_bytes, true)], &config);
+        assert_invalid_av1_track(&result, "Frame Header / Frame OBU がありません");
+    }
+
     /// configOBUs || sample の連結で Temporal Delimiter / Padding を飛ばした先頭が
     /// Sequence Header 以外だと拒否する。
     ///
@@ -1212,8 +1228,13 @@ mod tests {
     /// AV1 RTP Payload Format Section 7.2 に従い 0 / 5 / 0 として解釈する。
     #[test]
     fn resolve_av1_incoming_uses_default_values_for_omitted_parameters() {
-        // required も省略値 (profile=0, level-idx=5, tier=0)。
-        let config = av1_track_config_for_reduced_still(Vec::new());
+        // required は省略値と同じ (profile=0, level-idx=5, tier=0)。
+        // level-idx を 5 にすることで、incoming 省略を 0 と誤解釈すると
+        // required > incoming で拒否される。
+        let config = Av1TrackConfig {
+            seq_level_idx_0: 5,
+            ..av1_track_config_for_reduced_still(Vec::new())
+        };
         let required = av1_required_sdp_format(Some(&config));
 
         // incoming は AV1 だけで parameter は完全省略。
@@ -1221,7 +1242,7 @@ mod tests {
         let resolved = resolve_av1_incoming(&required, incoming.as_ref());
         assert!(
             resolved.is_some(),
-            "省略値どうしなら受理されるはずですが、Some でした"
+            "省略値どうしなら受理されるはずですが、None でした"
         );
     }
 
