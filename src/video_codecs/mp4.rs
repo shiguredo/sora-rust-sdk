@@ -46,6 +46,7 @@ use crate::video_codecs::av1::{
     Av1TrackConfig, assemble_av1_encoded_sample_data, av1_required_sdp_format,
     resolve_av1_incoming, validate_av1_track,
 };
+use crate::video_codecs::h264::{H264TrackConfig, parse_profile_level_id, resolve_h264_incoming};
 
 /// MP4 ファイル処理中に発生するエラー。
 #[derive(Debug)]
@@ -106,6 +107,13 @@ pub enum Mp4Error {
     /// エラー variant による細分類は行わず、文脈（sample index、OBU 種別、
     /// underlying の parse エラー理由）を含むメッセージで報告する。
     InvalidAv1Track(String),
+    /// H.264 track の bitstream / sample entry の検証に失敗した。
+    ///
+    /// SPS のパース失敗、SPS と `avcC` の profile-level-id / 寸法の不一致、
+    /// 固定 libwebrtc が認識しない profile / level などを Mp4SampleReader 初期化時に
+    /// 検証する。エラー variant による細分類は行わず、文脈（SPS index、相違内容、
+    /// underlying の parse エラー理由）を含むメッセージで報告する。
+    InvalidH264Track(String),
 }
 
 impl std::fmt::Display for Mp4Error {
@@ -159,6 +167,9 @@ impl std::fmt::Display for Mp4Error {
             Self::InvalidAv1Track(err) => {
                 write!(f, "AV1 トラックの検証に失敗しました: {err}")
             }
+            Self::InvalidH264Track(err) => {
+                write!(f, "H.264 トラックの検証に失敗しました: {err}")
+            }
         }
     }
 }
@@ -176,7 +187,8 @@ impl std::error::Error for Mp4Error {
             | Self::InconsistentSampleTable { .. }
             | Self::UnsupportedCompositionTimeOffset { .. }
             | Self::InconsistentSampleDescription { .. }
-            | Self::InvalidAv1Track(_) => None,
+            | Self::InvalidAv1Track(_)
+            | Self::InvalidH264Track(_) => None,
         }
     }
 }
@@ -250,6 +262,8 @@ struct Mp4VideoTrackInfo {
     nal_length_size: u8,
     /// AV1 の AV1CodecConfigurationRecord 抽出情報。AV1 以外では `None`。
     av1_config: Option<Av1TrackConfig>,
+    /// H.264 の avcC 由来の抽出情報。H.264 以外では `None`。
+    h264_config: Option<H264TrackConfig>,
 }
 
 /// MP4 のビデオサンプルのメタデータ。
@@ -429,7 +443,7 @@ impl Mp4SampleReader {
             // shiguredo_mp4 が前のサンプルと構造的に等値なサンプルエントリーを `None` に
             // 正規化するため、後発の `Some(sample_entry)` は必ず何らかの相違を持つ。
             // 抽出した `Mp4VideoTrackInfo` が一致する場合、その相違は本 SDK の抽出範囲外
-            // （`avcC` header や補助 box）にある。
+            // （補助 box）にある。
             if let Some(entry) = sample.sample_entry {
                 let info = Self::extract_track_info(entry, timescale)?;
                 if let Some(ref first) = track_info {
@@ -578,6 +592,62 @@ impl Mp4SampleReader {
                 }
                 let nal_length_size =
                     Self::validated_nal_length_size(avc1.avcc_box.length_size_minus_one.get())?;
+
+                // avcC header の 3 byte (profile_idc / profile_compatibility / level_idc) を
+                // RFC 6184 Section 8.1 の profile-level-id として取り出す。
+                let avc_profile_level_id = shiguredo_mp4::bitstream::h264::H264ProfileLevelId {
+                    profile_idc: avc1.avcc_box.avc_profile_indication,
+                    profile_iop: avc1.avcc_box.profile_compatibility,
+                    level_idc: avc1.avcc_box.avc_level_indication,
+                };
+
+                // 全 SPS を parse_sps で検証し、avcC の 3 byte と一致することを確認する。
+                // parse_sps は truncated SPS を error にするため、短い SPS はここで拒否される。
+                // 複数 SPS のいずれかが avcC と一致しない場合も invalid configuration にする。
+                for (sps_index, sps) in avc1.avcc_box.sps_list.iter().enumerate() {
+                    let sps_info =
+                        shiguredo_mp4::bitstream::h264::parse_sps(sps).map_err(|err| {
+                            Mp4Error::InvalidH264Track(format!(
+                                "SPS #{sps_index} のパースに失敗しました: {err}"
+                            ))
+                        })?;
+                    if sps_info.profile_level_id != avc_profile_level_id {
+                        return Err(Mp4Error::InvalidH264Track(format!(
+                            "SPS #{sps_index} の profile-level-id が avcC と一致しません: \
+                             sps={} avcC={}",
+                            sps_info.profile_level_id.to_hex(),
+                            avc_profile_level_id.to_hex(),
+                        )));
+                    }
+                    // クロップ適用後の寸法が avc1 の寸法と一致することを確認する。
+                    if sps_info.width != width || sps_info.height != height {
+                        return Err(Mp4Error::InvalidH264Track(format!(
+                            "SPS #{sps_index} の寸法が avc1 と一致しません: \
+                             sps={}x{} avc1={width}x{height}",
+                            sps_info.width, sps_info.height,
+                        )));
+                    }
+                }
+
+                // 広告する前に、抽出した profile-level-id を固定 libwebrtc の
+                // 互換フィルタに通し、認識されない profile / level は拒否する。
+                if parse_profile_level_id(avc_profile_level_id).is_none() {
+                    return Err(Mp4Error::InvalidH264Track(format!(
+                        "固定 libwebrtc が認識しない H.264 profile / level です: {}",
+                        avc_profile_level_id.to_hex(),
+                    )));
+                }
+
+                // avcC box 全体の byte 列を保持し、sample entry 一貫性検証で
+                // `parameter_sets` では担保できない header / 補助 field の一致も確認できる
+                // ようにする。
+                let avcc_box =
+                    shiguredo_mp4::Encode::encode_to_vec(&avc1.avcc_box).map_err(|err| {
+                        Mp4Error::InvalidH264Track(format!(
+                            "avcC の再エンコードに失敗しました: {err}"
+                        ))
+                    })?;
+
                 Ok(Mp4VideoTrackInfo {
                     codec_type: VideoCodecType::H264,
                     width,
@@ -586,6 +656,10 @@ impl Mp4SampleReader {
                     parameter_sets: Some(parameter_sets),
                     nal_length_size,
                     av1_config: None,
+                    h264_config: Some(H264TrackConfig {
+                        profile_level_id: avc_profile_level_id,
+                        avcc_box,
+                    }),
                 })
             }
             // H.265 には hev1 と hvc1 の 2 種類の SampleEntry がある。
@@ -605,6 +679,7 @@ impl Mp4SampleReader {
                     parameter_sets: Some(parameter_sets),
                     nal_length_size,
                     av1_config: None,
+                    h264_config: None,
                 })
             }
             SampleEntry::Hvc1(hvc1) => {
@@ -620,6 +695,7 @@ impl Mp4SampleReader {
                     parameter_sets: Some(parameter_sets),
                     nal_length_size,
                     av1_config: None,
+                    h264_config: None,
                 })
             }
             SampleEntry::Vp08(vp08) => Ok(Mp4VideoTrackInfo {
@@ -630,6 +706,7 @@ impl Mp4SampleReader {
                 parameter_sets: None,
                 nal_length_size: 4,
                 av1_config: None,
+                h264_config: None,
             }),
             SampleEntry::Vp09(vp09) => Ok(Mp4VideoTrackInfo {
                 codec_type: VideoCodecType::Vp9,
@@ -639,6 +716,7 @@ impl Mp4SampleReader {
                 parameter_sets: None,
                 nal_length_size: 4,
                 av1_config: None,
+                h264_config: None,
             }),
             SampleEntry::Av01(av01) => {
                 let av1c = &av01.av1c_box;
@@ -664,6 +742,7 @@ impl Mp4SampleReader {
                             .map(|v| v.get()),
                         config_obus: av1c.config_obus.clone(),
                     }),
+                    h264_config: None,
                 })
             }
             _ => Err(Mp4Error::UnsupportedVideoCodec),
@@ -732,19 +811,26 @@ impl Mp4SampleReader {
     ///
     /// reader 構築時に確定するため、呼び出しごとに同じ内容を返す。
     /// 現在は各 codec について以下を返す:
-    /// - H.264: `H264`, `packetization-mode=1`
+    /// - H.264: `H264`, `packetization-mode=1` に加え、`avcC` 由来の検証済み
+    ///   `profile-level-id` を設定する
     /// - H.265: `H265`
     /// - VP8: `VP8`
     /// - VP9: `VP9`
     /// - AV1: `AV1` に加え、AV1CodecConfigurationRecord 由来の `profile` / `level-idx` /
     ///   `tier` を 10 進文字列で設定する（[`av1_required_sdp_format`] 参照）
-    ///
-    /// コーデック固有のパラメータのうち H.264 の profile-level-id 拡張は別対応で加える。
     fn required_sdp_format(&self) -> SdpVideoFormat {
         match self.inner.track_info.codec_type {
             VideoCodecType::H264 => {
                 let mut format = SdpVideoFormat::new("H264");
                 format.parameters_mut().set("packetization-mode", "1");
+                // reader 初期化時に検証済みの avcC 由来 profile-level-id を広告する。
+                // RFC 6184 Section 8.1 の implicit 既定 (Baseline Profile Level 1) へ
+                // fallback しない。
+                if let Some(config) = self.inner.track_info.h264_config.as_ref() {
+                    format
+                        .parameters_mut()
+                        .set("profile-level-id", &config.profile_level_id.to_hex());
+                }
                 format
             }
             VideoCodecType::H265 => SdpVideoFormat::new("H265"),
@@ -1098,13 +1184,21 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
     /// - `level-idx` と `tier` は、MP4 のビットストリームが要求する値が受信側の能力以下かを調べる。
     /// - パラメーターの解析と範囲検証は `resolve_av1_incoming()` が行う。
     ///
-    /// AV1 以外のコーデックには [`fuzzy_match_sdp_video_format`] を使用し、H.264 の
-    /// `profile-level-id` の照合など、shiguredo_webrtc の既定の挙動を維持する。
+    /// H.264 では、RFC 6184 Section 8.1 の profile-level-id negotiation を検証する。
+    /// - `packetization-mode` は 1 のみ受理し、`profile-level-id` の無い format は拒否する。
+    /// - sub-profile は required (bitstream 実値) と完全一致を要求し、
+    ///   受信側の level が required 以上の場合だけ受理する。
+    /// - パラメーターの解析と検証は `resolve_h264_incoming()` が行う。
+    ///
+    /// AV1 / H.264 以外のコーデックには [`fuzzy_match_sdp_video_format`] を使用する。
     fn resolve_sdp_format(
         &self,
         direction: CodecDirection,
         format: SdpVideoFormatRef<'_>,
     ) -> Option<SdpVideoFormat> {
+        if self.codec_type == VideoCodecType::H264 && direction == CodecDirection::Encoder {
+            return resolve_h264_incoming(&self.required_format, format);
+        }
         if self.codec_type == VideoCodecType::Av1 && direction == CodecDirection::Encoder {
             return resolve_av1_incoming(&self.required_format, format);
         }
@@ -2602,5 +2696,545 @@ mod tests {
                 VideoEncoderEncodedImageCallbackResultError::Ok,
             )
         }
+    }
+
+    // -----------------------------------------------------------------
+    // H.264 profile-level-id のテスト
+    // -----------------------------------------------------------------
+
+    /// Main Profile fixture を一時ファイルに書き出して `Mp4SampleReader` を生成する。
+    ///
+    /// `testdata/red-320x320-h264-main.mp4` は次のコマンドで生成した
+    /// (ffmpeg 7.1.1 / libx264):
+    ///   ffmpeg -y -v error -f lavfi -i "color=red:size=320x320:rate=25:duration=2" \
+    ///     -pix_fmt yuv420p -c:v libx264 -profile:v main -bf 0 -g 8 -keyint_min 8 \
+    ///     -sc_threshold 0 -an testdata/red-320x320-h264-main.mp4
+    ///
+    /// 生成物の実測値:
+    /// - 50 サンプル / 2 秒、320x320、Main Profile Level 2.1
+    /// - avcC: AVCProfileIndication=0x4d / profile_compatibility=0x40 /
+    ///   AVCLevelIndication=0x15 (期待する profile-level-id は `4d4015`)
+    /// - SPS 先頭 3 byte: profile_idc=0x4d / constraint_set_flags=0x40 /
+    ///   level_idc=0x15 (avcC と一致する)
+    /// - B frame を含まない (`-bf 0` の I / P のみ)
+    fn h264_main_reader_from_fixture(tag: &str) -> (Mp4SampleReader, FixtureFile) {
+        let fixture = include_bytes!("../../testdata/red-320x320-h264-main.mp4");
+        let tmp_name = format!(
+            "sora-sdk-mp4-passthrough-{}-{}-{}.mp4",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("システム時刻は UNIX_EPOCH より後である必要があります")
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(tmp_name);
+        std::fs::write(&path, fixture).expect("一時 fixture の書き込みに失敗しました");
+        let reader = Mp4SampleReader::new(&path).expect("fixture MP4 のパースに失敗しました");
+        (reader, FixtureFile { path })
+    }
+
+    /// 抽出された H.264 profile-level-id を 6 桁 hex で返す。
+    fn h264_profile_level_id_hex(reader: &Mp4SampleReader) -> String {
+        reader
+            .inner
+            .track_info
+            .h264_config
+            .as_ref()
+            .expect("H.264 track は h264_config を持つはずです")
+            .profile_level_id
+            .to_hex()
+    }
+
+    /// Main Profile 実 fixture の reader test。
+    ///
+    /// fixture の実測値 (avcC / SPS の値) は [`h264_main_reader_from_fixture`] の
+    /// コメントに記録したとおりである。
+    #[test]
+    fn sample_reader_reads_fixture_h264_main_mp4() {
+        let (reader, _fixture) = h264_main_reader_from_fixture("main-read");
+
+        assert_eq!(reader.codec_type(), VideoCodecType::H264);
+        assert_eq!(reader.len(), 50, "fixture は 50 サンプルを持つはずです");
+        assert_eq!(reader.inner.track_info.width, 320);
+        assert_eq!(reader.inner.track_info.height, 320);
+        assert_eq!(
+            h264_profile_level_id_hex(&reader),
+            "4d4015",
+            "Main Profile fixture の profile-level-id は 4d4015 のはずです"
+        );
+    }
+
+    /// 既存の High Profile fixture の profile-level-id 回帰テスト。
+    ///
+    /// `red-320x320-h264.mp4` は avcC の AVCProfileIndication=0x64 /
+    /// profile_compatibility=0x00 / AVCLevelIndication=0x15 で、
+    /// 期待する profile-level-id は `640015` である。
+    #[test]
+    fn h264_profile_level_id_matches_high_profile_fixture() {
+        let (reader, _fixture) = h264_reader_from_fixture("high-plid");
+        assert_eq!(
+            h264_profile_level_id_hex(&reader),
+            "640015",
+            "High Profile fixture の profile-level-id は 640015 のはずです"
+        );
+    }
+
+    /// required SDP format が `packetization-mode=1` と `profile-level-id` を広告する。
+    #[test]
+    fn required_format_advertises_h264_profile_level_id() {
+        // Main Profile fixture
+        let (main_reader, _mf) = h264_main_reader_from_fixture("req-main");
+        let mut main_format = main_reader.required_sdp_format();
+        let main_params: std::collections::HashMap<String, String> =
+            main_format.parameters_mut().iter().collect();
+        assert_eq!(
+            main_params.get("packetization-mode").map(String::as_str),
+            Some("1"),
+            "packetization-mode=1 を広告するはずです"
+        );
+        assert_eq!(
+            main_params.get("profile-level-id").map(String::as_str),
+            Some("4d4015"),
+            "Main Profile fixture の profile-level-id を広告するはずです"
+        );
+
+        // High Profile fixture
+        let (high_reader, _hf) = h264_reader_from_fixture("req-high");
+        let mut high_format = high_reader.required_sdp_format();
+        let high_params: std::collections::HashMap<String, String> =
+            high_format.parameters_mut().iter().collect();
+        assert_eq!(
+            high_params.get("profile-level-id").map(String::as_str),
+            Some("640015"),
+            "High Profile fixture の profile-level-id を広告するはずです"
+        );
+    }
+
+    /// 実 capability の `resolve_sdp_format` が H.264 の profile-level-id negotiation を行う。
+    #[test]
+    fn capability_resolve_sdp_format_validates_h264_profile_level_id() {
+        let (reader, _fixture) = h264_main_reader_from_fixture("resolve");
+        let capability = reader.passthrough_capability();
+        let env = shiguredo_webrtc::Environment::new();
+
+        // profile-level-id のない incoming format は拒否される。
+        let mut no_plid = SdpVideoFormat::new("H264");
+        no_plid.parameters_mut().set("packetization-mode", "1");
+        assert!(
+            capability
+                .resolve_sdp_format(CodecDirection::Encoder, no_plid.as_ref())
+                .is_none(),
+            "profile-level-id のない format は拒否されるはずです"
+        );
+
+        // 同じ Main sub-profile で required 以上の level は受理され、
+        // negotiated format の parameter を保持して encoder handler へ渡される。
+        let mut higher = SdpVideoFormat::new("H264");
+        higher.parameters_mut().set("packetization-mode", "1");
+        higher.parameters_mut().set("profile-level-id", "4d0032"); // Main Level 5.0
+        let resolved = capability
+            .resolve_sdp_format(CodecDirection::Encoder, higher.as_ref())
+            .expect("互換な higher level は受理されるはずです");
+        assert!(
+            capability
+                .create_video_encoder(env.as_ref(), resolved.as_ref())
+                .is_some(),
+            "解決された format で encoder を生成できるはずです"
+        );
+
+        // incompatible sub-profile (High) は拒否される。
+        let mut incompatible = SdpVideoFormat::new("H264");
+        incompatible.parameters_mut().set("packetization-mode", "1");
+        incompatible
+            .parameters_mut()
+            .set("profile-level-id", "640015");
+        assert!(
+            capability
+                .resolve_sdp_format(CodecDirection::Encoder, incompatible.as_ref())
+                .is_none(),
+            "sub-profile が異なる format は拒否されるはずです"
+        );
+
+        // required より低い level は拒否される。
+        let mut lower = SdpVideoFormat::new("H264");
+        lower.parameters_mut().set("packetization-mode", "1");
+        lower.parameters_mut().set("profile-level-id", "4d000a"); // Main Level 1
+        assert!(
+            capability
+                .resolve_sdp_format(CodecDirection::Encoder, lower.as_ref())
+                .is_none(),
+            "required より低い level は拒否されるはずです"
+        );
+    }
+
+    /// SPS / PPS / avcC header から H.264 の SampleEntry を構築する。
+    ///
+    /// `chroma_format` が `Some` のときは、ISO/IEC 14496-15 の非 66 / 77 / 88
+    /// profile 用の chroma_format / bit_depth 各 field を avcC へ含める。
+    fn build_avc1_sample_entry(
+        sps_list: &[Vec<u8>],
+        pps_list: &[Vec<u8>],
+        avcc_header: (u8, u8, u8),
+        chroma_format: Option<u8>,
+        width: u16,
+        height: u16,
+    ) -> shiguredo_mp4::boxes::SampleEntry {
+        use shiguredo_mp4::Uint;
+        use shiguredo_mp4::boxes::{Avc1Box, AvccBox, SampleEntry, VisualSampleEntryFields};
+        SampleEntry::Avc1(Avc1Box {
+            visual: VisualSampleEntryFields {
+                data_reference_index: VisualSampleEntryFields::DEFAULT_DATA_REFERENCE_INDEX,
+                width,
+                height,
+                horizresolution: VisualSampleEntryFields::DEFAULT_HORIZRESOLUTION,
+                vertresolution: VisualSampleEntryFields::DEFAULT_VERTRESOLUTION,
+                frame_count: VisualSampleEntryFields::DEFAULT_FRAME_COUNT,
+                compressorname: VisualSampleEntryFields::NULL_COMPRESSORNAME,
+                depth: VisualSampleEntryFields::DEFAULT_DEPTH,
+            },
+            avcc_box: AvccBox {
+                avc_profile_indication: avcc_header.0,
+                profile_compatibility: avcc_header.1,
+                avc_level_indication: avcc_header.2,
+                length_size_minus_one: Uint::new(3),
+                sps_list: sps_list.to_vec(),
+                pps_list: pps_list.to_vec(),
+                chroma_format: chroma_format.map(Uint::new),
+                bit_depth_luma_minus8: chroma_format.map(|_| Uint::new(0)),
+                bit_depth_chroma_minus8: chroma_format.map(|_| Uint::new(0)),
+                sps_ext_list: vec![],
+            },
+            unknown_boxes: vec![],
+        })
+    }
+
+    /// 指定した H.264 sample entry 列 (1 sample につき 1 entry) を持つ合成 MP4 を
+    /// 一時ファイルへ書き出し、`Mp4SampleReader` の生成結果を返す。
+    ///
+    /// サンプルデータはダミー (NAL ヘッダーのみ) で、一貫性検証は sample data を
+    /// 読まないため内容は問わない。
+    fn new_reader_for_h264_mp4(
+        entries: &[shiguredo_mp4::boxes::SampleEntry],
+    ) -> crate::error::Result<Mp4SampleReader> {
+        use std::num::NonZeroU32;
+
+        use shiguredo_mp4::TrackKind;
+        use shiguredo_mp4::mux::{Mp4FileMuxer, Sample};
+
+        let mut muxer = Mp4FileMuxer::new().expect("muxer の作成に失敗しました");
+        let data_offset_first = muxer.initial_boxes_bytes().len() as u64;
+        let data_size = 4;
+
+        for (index, entry) in entries.iter().enumerate() {
+            let sample = Sample {
+                track_kind: TrackKind::Video,
+                sample_entry: Some(entry.clone()),
+                keyframe: true,
+                timescale: NonZeroU32::new(12800).expect("12800 は非ゼロ"),
+                duration: 12800 / 25,
+                composition_time_offset: None,
+                // サンプルデータは前のサンプルの直後に連続して配置する (muxer の位置検証)。
+                data_offset: data_offset_first + index as u64 * data_size as u64,
+                data_size,
+            };
+            muxer
+                .append_sample(&sample)
+                .expect("sample の追加に失敗しました");
+        }
+
+        let initial_bytes = muxer.initial_boxes_bytes().to_vec();
+        let finalized = muxer.finalize().expect("finalize に失敗しました");
+
+        // ファイル本体を組み立てる。サンプルデータ領域はゼロ埋めでよい
+        // (Mp4SampleReader::new_inner は sample data を読まない)。
+        let sample_data_size = data_size * entries.len();
+        let total_size = initial_bytes.len() + sample_data_size + finalized.moov_box_size() + 1024;
+        let mut file_data = vec![0u8; total_size];
+        file_data[..initial_bytes.len()].copy_from_slice(&initial_bytes);
+        for (offset, bytes) in finalized.offset_and_bytes_pairs() {
+            let offset = offset as usize;
+            file_data[offset..offset + bytes.len()].copy_from_slice(bytes);
+        }
+        let mut max_end = initial_bytes.len() + sample_data_size;
+        for (offset, bytes) in finalized.offset_and_bytes_pairs() {
+            let end = offset as usize + bytes.len();
+            if end > max_end {
+                max_end = end;
+            }
+        }
+        file_data.truncate(max_end);
+
+        let tmp_name = format!(
+            "sora-sdk-mp4-h264-synth-{}-{}.mp4",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("システム時刻は UNIX_EPOCH より後である必要があります")
+                .as_nanos()
+        );
+        let tmp_path = std::env::temp_dir().join(tmp_name);
+        std::fs::write(&tmp_path, &file_data).expect("一時 MP4 の書き込みに失敗しました");
+
+        let result = Mp4SampleReader::new(&tmp_path);
+        let _ = std::fs::remove_file(&tmp_path);
+        result
+    }
+
+    /// 2 個目以降の sample entry で avcC box 全体が変わる合成 MP4 を、
+    /// `InconsistentSampleDescription` で拒否する。
+    ///
+    /// 同じ High Profile SPS / PPS に対して avcC の chroma_format / bit_depth だけを
+    /// 変える。`parameter_sets` (Annex B 化) や profile-level-id は一致するため、
+    /// `Mp4VideoTrackInfo::h264_config::avcc_box` の比較が相違を検出する。
+    #[test]
+    fn sample_reader_rejects_h264_sample_description_with_different_avcc_box() {
+        // red-320x320-h264.mp4 (High Profile Level 2.1) の SPS / PPS。
+        let sps: Vec<u8> = vec![
+            0x67, 0x64, 0x00, 0x15, 0xac, 0xb2, 0x02, 0x81, 0x4d, 0x80, 0x88, 0x00, 0x00, 0x03,
+            0x00, 0x08, 0x00, 0x00, 0x03, 0x01, 0x90, 0x78, 0xb1, 0x72, 0x40,
+        ];
+        let pps: Vec<u8> = vec![0x68, 0xeb, 0xc3, 0xcb, 0x22, 0xc0];
+
+        let entry1 = build_avc1_sample_entry(
+            std::slice::from_ref(&sps),
+            std::slice::from_ref(&pps),
+            (0x64, 0x00, 0x15),
+            Some(1),
+            320,
+            320,
+        );
+        let entry2 = build_avc1_sample_entry(
+            std::slice::from_ref(&sps),
+            std::slice::from_ref(&pps),
+            (0x64, 0x00, 0x15),
+            Some(2),
+            320,
+            320,
+        );
+
+        let result = new_reader_for_h264_mp4(&[entry1, entry2]);
+        match result {
+            Err(crate::error::Error::Mp4 { source }) => {
+                assert!(
+                    matches!(source, Mp4Error::InconsistentSampleDescription { index: 1 }),
+                    "avcC box の相違は InconsistentSampleDescription で拒否されるはずです: {source:?}"
+                );
+            }
+            Err(e) => panic!("Mp4 エラーを期待しましたが、実際は: {e}"),
+            Ok(_) => panic!("Err を期待しましたが、Ok でした"),
+        }
+    }
+
+    /// 2 個目以降の sample entry で抽出後の profile-level-id が変わる合成 MP4 を、
+    /// `InconsistentSampleDescription` で拒否する。
+    #[test]
+    fn sample_reader_rejects_h264_sample_description_with_different_profile_level_id() {
+        // Main Profile (red-320x320-h264-main.mp4) の SPS / PPS。
+        let main_sps: Vec<u8> = vec![
+            0x67, 0x4d, 0x40, 0x15, 0xd9, 0x01, 0x40, 0xa6, 0xc0, 0x44, 0x00, 0x00, 0x03, 0x00,
+            0x04, 0x00, 0x00, 0x03, 0x00, 0xc8, 0x3c, 0x58, 0xb9, 0x20,
+        ];
+        let main_pps: Vec<u8> = vec![0x68, 0xeb, 0xc3, 0xcb, 0x20];
+        // High Profile (red-320x320-h264.mp4) の SPS / PPS。
+        let high_sps: Vec<u8> = vec![
+            0x67, 0x64, 0x00, 0x15, 0xac, 0xb2, 0x02, 0x81, 0x4d, 0x80, 0x88, 0x00, 0x00, 0x03,
+            0x00, 0x08, 0x00, 0x00, 0x03, 0x01, 0x90, 0x78, 0xb1, 0x72, 0x40,
+        ];
+        let high_pps: Vec<u8> = vec![0x68, 0xeb, 0xc3, 0xcb, 0x22, 0xc0];
+
+        let entry1 =
+            build_avc1_sample_entry(&[main_sps], &[main_pps], (0x4d, 0x40, 0x15), None, 320, 320);
+        let entry2 = build_avc1_sample_entry(
+            &[high_sps],
+            &[high_pps],
+            (0x64, 0x00, 0x15),
+            Some(1),
+            320,
+            320,
+        );
+
+        let result = new_reader_for_h264_mp4(&[entry1, entry2]);
+        match result {
+            Err(crate::error::Error::Mp4 { source }) => {
+                assert!(
+                    matches!(source, Mp4Error::InconsistentSampleDescription { index: 1 }),
+                    "profile-level-id の相違は InconsistentSampleDescription で拒否されるはずです: {source:?}"
+                );
+            }
+            Err(e) => panic!("Mp4 エラーを期待しましたが、実際は: {e}"),
+            Ok(_) => panic!("Err を期待しましたが、Ok でした"),
+        }
+    }
+
+    /// 短い SPS (parse_sps の truncated error) を reader 初期化時に拒否する。
+    #[test]
+    fn sample_reader_rejects_h264_truncated_sps() {
+        // 1 バイト目 (NAL ヘッダー) だけで profile_idc 以降が欠けた SPS。
+        let truncated_sps: Vec<u8> = vec![0x67];
+        let pps: Vec<u8> = vec![0x68, 0xeb, 0xc3, 0xcb, 0x20];
+        let entry =
+            build_avc1_sample_entry(&[truncated_sps], &[pps], (0x4d, 0x40, 0x15), None, 320, 320);
+
+        let result = new_reader_for_h264_mp4(&[entry]);
+        assert_invalid_h264_track(result, "SPS");
+    }
+
+    /// avcC と SPS の profile-level-id が一致しない合成 MP4 を reader 初期化時に拒否する。
+    #[test]
+    fn sample_reader_rejects_h264_avcc_sps_profile_level_id_mismatch() {
+        let sps: Vec<u8> = vec![
+            0x67, 0x4d, 0x40, 0x15, 0xd9, 0x01, 0x40, 0xa6, 0xc0, 0x44, 0x00, 0x00, 0x03, 0x00,
+            0x04, 0x00, 0x00, 0x03, 0x00, 0xc8, 0x3c, 0x58, 0xb9, 0x20,
+        ];
+        let pps: Vec<u8> = vec![0x68, 0xeb, 0xc3, 0xcb, 0x20];
+        // SPS は Main (0x4d / 0x40 / 0x15) だが、avcC header は High (0x64 / 0x00 / 0x15)。
+        let entry = build_avc1_sample_entry(&[sps], &[pps], (0x64, 0x00, 0x15), Some(1), 320, 320);
+
+        let result = new_reader_for_h264_mp4(&[entry]);
+        assert_invalid_h264_track(result, "profile-level-id が avcC と一致しません");
+    }
+
+    /// 複数 SPS のいずれかが avcC と一致しない合成 MP4 を reader 初期化時に拒否する。
+    #[test]
+    fn sample_reader_rejects_h264_multiple_sps_inconsistency() {
+        let sps: Vec<u8> = vec![
+            0x67, 0x4d, 0x40, 0x15, 0xd9, 0x01, 0x40, 0xa6, 0xc0, 0x44, 0x00, 0x00, 0x03, 0x00,
+            0x04, 0x00, 0x00, 0x03, 0x00, 0xc8, 0x3c, 0x58, 0xb9, 0x20,
+        ];
+        // 2 個目の SPS は level_idc を 0x3c (Level 6.0) に変えたもの。avcC と一致しない。
+        let mut sps_level6 = sps.clone();
+        sps_level6[3] = 0x3c;
+        let pps: Vec<u8> = vec![0x68, 0xeb, 0xc3, 0xcb, 0x20];
+        let entry = build_avc1_sample_entry(
+            &[sps, sps_level6],
+            &[pps],
+            (0x4d, 0x40, 0x15),
+            None,
+            320,
+            320,
+        );
+
+        let result = new_reader_for_h264_mp4(&[entry]);
+        assert_invalid_h264_track(result, "profile-level-id が avcC と一致しません");
+    }
+
+    /// SPS の寸法と avc1 の寸法が一致しない合成 MP4 を reader 初期化時に拒否する。
+    #[test]
+    fn sample_reader_rejects_h264_sps_visual_dimension_mismatch() {
+        let sps: Vec<u8> = vec![
+            0x67, 0x4d, 0x40, 0x15, 0xd9, 0x01, 0x40, 0xa6, 0xc0, 0x44, 0x00, 0x00, 0x03, 0x00,
+            0x04, 0x00, 0x00, 0x03, 0x00, 0xc8, 0x3c, 0x58, 0xb9, 0x20,
+        ];
+        let pps: Vec<u8> = vec![0x68, 0xeb, 0xc3, 0xcb, 0x20];
+        // SPS は 320x320 だが、avc1 の寸法は 640x640。
+        let entry = build_avc1_sample_entry(&[sps], &[pps], (0x4d, 0x40, 0x15), None, 640, 640);
+
+        let result = new_reader_for_h264_mp4(&[entry]);
+        assert_invalid_h264_track(result, "寸法が avc1 と一致しません");
+    }
+
+    /// avcC 由来の required format が libwebrtc 互換フィルタで未知の level の場合、
+    /// reader 初期化時に拒否する。
+    #[test]
+    fn sample_reader_rejects_h264_unrecognized_level() {
+        let mut sps: Vec<u8> = vec![
+            0x67, 0x4d, 0x40, 0x15, 0xd9, 0x01, 0x40, 0xa6, 0xc0, 0x44, 0x00, 0x00, 0x03, 0x00,
+            0x04, 0x00, 0x00, 0x03, 0x00, 0xc8, 0x3c, 0x58, 0xb9, 0x20,
+        ];
+        // level_idc を 0x3c (Level 6.0) に変え、avcC / SPS を一致させる。
+        // Level 6 系は固定 libwebrtc の H264Level enum に無い。
+        sps[3] = 0x3c;
+        let pps: Vec<u8> = vec![0x68, 0xeb, 0xc3, 0xcb, 0x20];
+        let entry = build_avc1_sample_entry(&[sps], &[pps], (0x4d, 0x40, 0x3c), None, 320, 320);
+
+        let result = new_reader_for_h264_mp4(&[entry]);
+        assert_invalid_h264_track(result, "固定 libwebrtc が認識しない");
+    }
+
+    /// `Mp4SampleReader` の生成結果が `InvalidH264Track` で、メッセージに
+    /// `expected` が含まれることを確認する。
+    fn assert_invalid_h264_track(result: crate::error::Result<Mp4SampleReader>, expected: &str) {
+        match result {
+            Err(crate::error::Error::Mp4 { source }) => {
+                let message = format!("{source}");
+                assert!(
+                    matches!(source, Mp4Error::InvalidH264Track(_)),
+                    "InvalidH264Track エラーを期待しましたが、実際は: {source:?}"
+                );
+                assert!(
+                    message.contains(expected),
+                    "エラーメッセージに {expected:?} が含まれるはずです: {message}"
+                );
+            }
+            Err(e) => panic!("Mp4 エラーを期待しましたが、実際は: {e}"),
+            Ok(_) => panic!("Err を期待しましたが、Ok でした"),
+        }
+    }
+
+    /// 実 `Mp4PassthroughVideoCodecCapability` を `VideoCodecPreference` /
+    /// `validate_video_codec_preference` / `SoraVideoEncoderFactory` に通し、
+    /// profile-level-id negotiation の結果が encoder 生成に反映されることを確認する。
+    #[test]
+    fn factory_creates_encoder_based_on_h264_profile_level_id_negotiation() {
+        use shiguredo_webrtc::VideoEncoderFactoryHandler;
+
+        use crate::video_codec::SoraVideoEncoderFactory;
+        use crate::video_codec_preference::{
+            VideoCodecPreference, validate_video_codec_preference,
+        };
+
+        let (reader, _fixture) = h264_main_reader_from_fixture("factory");
+        let capability = reader.passthrough_capability();
+        let preference = VideoCodecPreference::new_from_capability(&capability);
+
+        let capabilities: Vec<Box<dyn VideoCodecCapability>> = vec![Box::new(capability)];
+        validate_video_codec_preference(&preference, &capabilities)
+            .expect("preference の検証は成功するはずです");
+        let shared = Arc::new(std::sync::Mutex::new(capabilities));
+        let mut factory = SoraVideoEncoderFactory::new(preference, shared);
+        let env = shiguredo_webrtc::Environment::new();
+
+        // 互換な higher level の format では encoder を生成する。
+        let mut compatible = SdpVideoFormat::new("H264");
+        compatible.parameters_mut().set("packetization-mode", "1");
+        compatible
+            .parameters_mut()
+            .set("profile-level-id", "4d0032"); // Main Level 5.0
+        assert!(
+            VideoEncoderFactoryHandler::create(&mut factory, env.as_ref(), compatible.as_ref())
+                .is_some(),
+            "互換な higher level では encoder を生成するはずです"
+        );
+
+        // profile-level-id のない format では encoder を生成しない。
+        let no_plid = SdpVideoFormat::new("H264");
+        assert!(
+            VideoEncoderFactoryHandler::create(&mut factory, env.as_ref(), no_plid.as_ref())
+                .is_none(),
+            "profile-level-id のない format では encoder を生成しないはずです"
+        );
+
+        // incompatible sub-profile の format では encoder を生成しない。
+        let mut incompatible = SdpVideoFormat::new("H264");
+        incompatible.parameters_mut().set("packetization-mode", "1");
+        incompatible
+            .parameters_mut()
+            .set("profile-level-id", "640015"); // High
+        assert!(
+            VideoEncoderFactoryHandler::create(&mut factory, env.as_ref(), incompatible.as_ref())
+                .is_none(),
+            "sub-profile が異なる format では encoder を生成しないはずです"
+        );
+
+        // required より低い level の format では encoder を生成しない。
+        let mut lower = SdpVideoFormat::new("H264");
+        lower.parameters_mut().set("packetization-mode", "1");
+        lower.parameters_mut().set("profile-level-id", "4d000a"); // Main Level 1
+        assert!(
+            VideoEncoderFactoryHandler::create(&mut factory, env.as_ref(), lower.as_ref())
+                .is_none(),
+            "required より低い level の format では encoder を生成しないはずです"
+        );
     }
 }
