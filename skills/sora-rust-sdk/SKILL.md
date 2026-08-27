@@ -251,7 +251,7 @@ H.264 / H.265 の `b_frame: true` は Sora 側の `sora.conf` で対応する設
 
 | 型 | feature / 条件 | 説明 |
 |----|---------------|------|
-| `Mp4SampleReader` | 常時 | MP4 ファイルからサンプルを取得。`new<P: AsRef<Path>>(path)` で構築 (ファイルベース読み込みで全体をメモリに保持しない)。`len()` / `is_empty()` / `codec_type()` / `passthrough_capability()` を提供 |
+| `Mp4SampleReader` | 常時 | MP4 ファイルからサンプルを取得。`new<P: AsRef<Path>>(path)` で構築 (ファイルベース読み込みで全体をメモリに保持しない)。`len()` / `is_empty()` / `codec_type()` / `passthrough_capability()` を提供。`clone()` で安価に共有でき、複数の `Mp4VideoCapturer` 間で同じファイルを同時に読み出せる (demux とファイル I/O は reader 1 つにつき 1 回・1 スレッドに集約) |
 | `Mp4PassthroughVideoCodecCapability` | 常時 | パススルー用 capability。`Mp4SampleReader::passthrough_capability()` からのみ生成できる |
 | `Mp4VideoCapturer` | 常時 | `Mp4VideoCapturer::new(Mp4SampleReader)` で構築し `video_source()` で `VideoTrackSource` を取得。末尾に達すると先頭に戻ってループ再生する |
 | `Mp4Error` | 常時 | MP4 関連のエラー enum (`Io`, `Demux`, `NoVideoTrack`, `NoVideoSamples`, `UnsupportedVideoCodec`, `InvalidNalLengthSize`, `InputPositionOutOfRange`, `InconsistentSampleTable`, `UnsupportedCompositionTimeOffset`, `InconsistentSampleDescription`)。`Error::Mp4 { source }` に包まれて返る |
@@ -267,6 +267,10 @@ MP4 パススルーの入力制約 (いずれも `Mp4SampleReader::new` がエ�
 - 非ゼロの composition time offset (B フレーム) を含む MP4 は拒否 (`Mp4Error::UnsupportedCompositionTimeOffset`)
 - 途中でサンプルエントリー (コーデック・解像度など) が切り替わる MP4 は拒否 (`Mp4Error::InconsistentSampleDescription`)
 
+同じ `Mp4VideoCapturer` の `video_source()` を複数の PeerConnection の映像 encoder に渡してはならない
+(debug ビルドでは abort する)。PeerConnection ごとに capturer を分け、各 capturer の `video_source()` を
+その接続の encoder に渡すこと。capturer を分けても、1 つの `Mp4SampleReader` は `clone()` して共有できる。
+
 ```rust
 use sora_sdk::{Mp4SampleReader, Mp4VideoCapturer};
 
@@ -277,9 +281,15 @@ let capability = reader.passthrough_capability();
 // (VideoCodecPreference への merge と video_codec_capabilities への push は
 //  「コーデックバックエンドを明示的に組み立てる」と同じ手順)
 
-let capturer = Mp4VideoCapturer::new(reader)?;
-let video_source = capturer.video_source();
-let video_track = context.create_video_track(&video_source)?;
+// 複数の PeerConnection に送る場合は capturer を分け、各 capturer の
+// video_source() をその接続の encoder に渡す。reader は clone して共有する。
+let capturer1 = Mp4VideoCapturer::new(reader.clone())?;
+let video_source1 = capturer1.video_source();
+let video_track1 = context.create_video_track(&video_source1)?;
+
+let capturer2 = Mp4VideoCapturer::new(reader.clone())?;
+let video_source2 = capturer2.video_source();
+let video_track2 = context.create_video_track(&video_source2)?;
 ```
 
 `LibcameraVideoCapturer::builder()` は `camera_index()` / `width()` / `height()` / `native_frame_output()` / `control()` / `controls()` / `build()` を提供する。生成したキャプチャラーは `start()` / `stop()` / `video_source()` で制御する。

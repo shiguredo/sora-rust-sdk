@@ -11,6 +11,8 @@
 
 ## develop
 
+- [ADD] Mp4SampleReader を複数の Mp4VideoCapturer で共有できるようにする
+  - @sile
 - [CHANGE] `Mp4Error::InconsistentSampleDescription` から `fields` を削除し、 `InvalidAv1Track` を追加する
   - サンプルエントリーの相違は `index` のみを報告する
   - AV1 track 検証の失敗は文脈入りのメッセージで報告する

@@ -15,11 +15,16 @@
 //!   Mp4SampleReader --[Mp4EncodedSample を内包した VideoFrame]--> Mp4PassthroughEncoder --> WebRTC RTP
 //!                                         (native VideoFrameBuffer)
 //!
+//! `Mp4SampleReader` をクローンすると、デマルチプレクス結果と 1 本のファイル I/O スレッドが
+//! 共有される。
+//! 複数の `Mp4VideoCapturer` からの読み出し要求は、このスレッドが順番に処理する。
+//!
 //! 対応コーデック: H.264, H.265, VP8, VP9, AV1
 use std::io::{self, BufReader, Read, Seek};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Sender};
 use std::thread;
 
 use shiguredo_webrtc::{
@@ -286,20 +291,72 @@ impl Mp4Timestamp {
 
 /// MP4 ファイルからビデオサンプルを読み出すリーダー。
 ///
-/// コンストラクタでファイルを開き、全サンプルのメタデータを事前解析する。
-/// `get_sample()` でインデックス指定でサンプルを取得できる。
-/// ファイルデータはメモリに保持せず、必要に応じてファイルから読み込む。
+/// 構築時にファイルを開き、すべてのサンプルのメタデータを解析する。
+/// リーダーをクローンすると、デマルチプレクス結果と 1 本のファイル I/O スレッドが共有される。
+/// そのため、複数の [`Mp4VideoCapturer`] から同じ MP4 ファイルを読み出せる。
+/// 再生位置と再生時計は各 [`Mp4VideoCapturer`] が個別に管理する。
+///
+/// ファイル本体はメモリに保持せず、必要に応じて内部の I/O スレッドが読み込む。
+/// 最後のリーダーがドロップされると、I/O スレッドも終了する。
+///
+/// [`Mp4VideoCapturer::video_source`] の共有に関する制約は、
+/// `docs/INPUT_MP4.md` の「SDK での利用」を参照すること。
+#[derive(Clone)]
 pub struct Mp4SampleReader {
-    /// MP4 ファイルへの読み込みストリーム。
-    file: BufReader<std::fs::File>,
+    /// すべてのクローンで共有する状態。
+    inner: Arc<Mp4SampleReaderInner>,
+}
+
+/// `Mp4SampleReader` のクローン間で共有される内部状態。
+struct Mp4SampleReaderInner {
     track_info: Mp4VideoTrackInfo,
-    /// 各サンプルのメタデータ。
-    samples: Vec<Mp4SampleMeta>,
+    /// サンプル数。
+    ///
+    /// サンプルメタデータは I/O スレッドが所有するため、`len()` と `is_empty()` に必要な
+    /// 件数だけを保持する。
+    sample_count: usize,
     /// 各フレームの累積再生時刻。
     /// cumulative[0] = 0, cumulative[i] = フレーム 0..i の合計再生時間。
     /// 長さは samples.len() + 1 で、末尾が動画全体の長さ。
     /// フレームペーシングで絶対時刻ベースの待機に使用する。
     cumulative: Vec<Mp4Timestamp>,
+    /// ファイル I/O スレッドと読み出し要求チャネルの管理ハンドル。
+    io: Mp4SampleReaderIo,
+}
+
+/// ファイル I/O スレッドへのサンプル読み出し要求。
+struct Mp4SampleIoRequest {
+    /// 読み出すサンプルのインデックス。
+    index: usize,
+    /// 読み出し結果を受け取るチャネルの送信側。
+    response: Sender<Result<Mp4EncodedSample>>,
+}
+
+/// ファイル I/O スレッドと読み出し要求チャネルのライフサイクルを管理する。
+///
+/// 最後の `Mp4SampleReader` がドロップされるとチャネルを閉じ、I/O スレッドの終了を待つ。
+struct Mp4SampleReaderIo {
+    /// 読み出し要求を送るチャネルの送信側。
+    sender: Option<Sender<Mp4SampleIoRequest>>,
+    /// I/O スレッドの終了を待つためのハンドル。
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for Mp4SampleReaderIo {
+    fn drop(&mut self) {
+        // 先にチャネルの送信側を破棄し、I/O スレッドの受信ループを終了させる。
+        self.sender.take();
+        if let Some(handle) = self.thread.take() {
+            // I/O スレッドは、処理中およびチャネルに残っている要求を処理してから終了する。
+            if let Err(payload) = handle.join() {
+                // I/O スレッドの `panic` は実装バグなので、ログに記録する。
+                rtc_log_error!(
+                    "MP4: I/O thread panicked: {:?}",
+                    payload.downcast_ref::<&str>()
+                );
+            }
+        }
+    }
 }
 
 impl Mp4SampleReader {
@@ -464,11 +521,31 @@ impl Mp4SampleReader {
             });
         }
 
+        // ファイルとサンプルメタデータは、1 本の I/O スレッドが所有する。
+        // クローン間で `BufReader` を共有してロックする代わりに、読み出し要求を直列化する。
+        // `samples` は I/O スレッドへ移すため、`len()` と `is_empty()` に必要な件数だけを残す。
+        let sample_count = samples.len();
+        let (io_sender, io_receiver) = mpsc::channel::<Mp4SampleIoRequest>();
+        // I/O スレッドから `Mp4SampleReaderInner` を参照すると `Arc` の循環参照になるため、
+        // 読み出しに必要な値だけをスレッドへ移す。
+        let io_track_info = track_info.clone();
+        let io_thread = thread::spawn(move || {
+            while let Ok(request) = io_receiver.recv() {
+                let result = read_sample(&mut file, &io_track_info, &samples, request.index);
+                let _ = request.response.send(result);
+            }
+        });
+
         Ok(Self {
-            file,
-            track_info,
-            samples,
-            cumulative,
+            inner: Arc::new(Mp4SampleReaderInner {
+                track_info,
+                sample_count,
+                cumulative,
+                io: Mp4SampleReaderIo {
+                    sender: Some(io_sender),
+                    thread: Some(io_thread),
+                },
+            }),
         })
     }
 
@@ -626,26 +703,27 @@ impl Mp4SampleReader {
 
     /// サンプル数を返す。
     pub fn len(&self) -> usize {
-        self.samples.len()
+        self.inner.sample_count
     }
 
     /// サンプルが 0 件かどうかを返す。
     pub fn is_empty(&self) -> bool {
-        self.samples.is_empty()
+        self.inner.sample_count == 0
     }
 
     /// この MP4 のビデオコーデック種別を返す。
     pub fn codec_type(&self) -> VideoCodecType {
-        self.track_info.codec_type
+        self.inner.track_info.codec_type
     }
 
-    /// この reader から MP4 パススルー用の [`Mp4PassthroughVideoCodecCapability`] を生成する。
+    /// このリーダーから MP4 パススルー用の [`Mp4PassthroughVideoCodecCapability`] を生成する。
     ///
-    /// ファイル I/O は行わず、reader 構築時に確定した値の cheap clone だけを渡す。
-    /// この経路が capability の唯一の構築ルート。
+    /// リーダーの構築時に確定した値だけを使うため、ファイル I/O は発生しない。
+    /// どのクローンから呼び出しても、同じ設定を持つインスタンスを生成する。
+    /// [`Mp4PassthroughVideoCodecCapability`] は、このメソッドからのみ生成できる。
     pub fn passthrough_capability(&self) -> Mp4PassthroughVideoCodecCapability {
         Mp4PassthroughVideoCodecCapability {
-            codec_type: self.track_info.codec_type,
+            codec_type: self.inner.track_info.codec_type,
             required_format: self.required_sdp_format(),
         }
     }
@@ -663,7 +741,7 @@ impl Mp4SampleReader {
     ///
     /// コーデック固有のパラメータのうち H.264 の profile-level-id 拡張は別対応で加える。
     fn required_sdp_format(&self) -> SdpVideoFormat {
-        match self.track_info.codec_type {
+        match self.inner.track_info.codec_type {
             VideoCodecType::H264 => {
                 let mut format = SdpVideoFormat::new("H264");
                 format.parameters_mut().set("packetization-mode", "1");
@@ -672,7 +750,9 @@ impl Mp4SampleReader {
             VideoCodecType::H265 => SdpVideoFormat::new("H265"),
             VideoCodecType::Vp8 => SdpVideoFormat::new("VP8"),
             VideoCodecType::Vp9 => SdpVideoFormat::new("VP9"),
-            VideoCodecType::Av1 => av1_required_sdp_format(self.track_info.av1_config.as_ref()),
+            VideoCodecType::Av1 => {
+                av1_required_sdp_format(self.inner.track_info.av1_config.as_ref())
+            }
             // 未対応 codec は `new_inner` の `extract_track_info` が
             // `Mp4Error::UnsupportedVideoCodec` で拒否するためここには来ない。
             VideoCodecType::Generic | VideoCodecType::Unknown(_) => {
@@ -683,7 +763,12 @@ impl Mp4SampleReader {
 
     /// 指定インデックスのサンプルデータを取得する。
     ///
-    /// サンプルデータはファイルから読み込むため、I/O エラーを返し得る。
+    /// サンプルデータは内部の I/O スレッドがファイルから読み込むため、I/O エラーを返し得る。
+    /// 複数のクローンから同時に呼び出せる。
+    /// 読み出し要求は I/O スレッドが順番に処理する。
+    ///
+    /// 応答待ちの間に `stop` が設定された場合は、応答を待たずに `Ok(None)` を返す。
+    /// これにより、先行する読み出し処理の完了を待たずにキャプチャラーを停止できる。
     ///
     /// H.264/H.265 の場合:
     /// - MP4 内の AVCC/HVCC 形式 (4 バイト長さプレフィックス) を
@@ -698,46 +783,88 @@ impl Mp4SampleReader {
     ///
     /// VP8/VP9 の場合:
     /// - MP4 から抽出したデータをそのまま使用する。
-    fn get_sample(&mut self, index: usize) -> Result<Mp4EncodedSample> {
-        let sample = &self.samples[index];
-        let raw_data = read_bytes_at(&mut self.file, sample.data_offset, sample.data_size)?;
-
-        let data = match self.track_info.codec_type {
-            VideoCodecType::H264 | VideoCodecType::H265 => {
-                let mut annex_b = Vec::new();
-                if sample.is_keyframe
-                    && let Some(ref ps) = self.track_info.parameter_sets
-                {
-                    annex_b.extend_from_slice(ps);
-                }
-                annex_b.extend_from_slice(&length_prefixed_nalu_to_annex_b(
-                    &raw_data,
-                    self.track_info.nal_length_size,
-                ));
-                annex_b
+    fn get_sample(&self, index: usize, stop: &AtomicBool) -> Result<Option<Mp4EncodedSample>> {
+        // 範囲外のインデックスは呼び出し側の実装バグである。
+        // I/O スレッドの `panic` はすべてのクローンに影響するため、要求の送信前に検出する。
+        assert!(
+            index < self.inner.sample_count,
+            "BUG: sample index {index} is out of range (sample_count={})",
+            self.inner.sample_count
+        );
+        let (response_tx, response_rx) = mpsc::channel();
+        let sender = self.inner.io.sender.as_ref().expect(
+            "BUG: I/O thread sender must be available while an Mp4SampleReader clone is alive",
+        );
+        sender
+            .send(Mp4SampleIoRequest {
+                index,
+                response: response_tx,
+            })
+            .expect("BUG: I/O thread receiver must not be closed while an Mp4SampleReader clone is alive");
+        loop {
+            if stop.load(Ordering::Acquire) {
+                return Ok(None);
             }
-            VideoCodecType::Av1 => assemble_av1_encoded_sample_data(
-                raw_data,
-                sample.is_keyframe,
-                self.track_info.av1_config.as_ref(),
-            ),
-            _ => raw_data,
-        };
-
-        Ok(Mp4EncodedSample {
-            data,
-            is_keyframe: sample.is_keyframe,
-            width: self.track_info.width as u32,
-            height: self.track_info.height as u32,
-            codec_type: self.track_info.codec_type,
-        })
+            match response_rx.recv_timeout(std::time::Duration::from_millis(1)) {
+                Ok(result) => return result.map(Some),
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                // 送信済みの要求に応答がないのは、I/O スレッドが処理中に
+                // `panic` した場合だけである。
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("BUG: I/O thread must respond exactly once per request")
+                }
+            }
+        }
     }
 
     /// 先頭からフレーム index までの累積再生時間を返す。
     /// index=0 なら 0、index=len() なら動画全体の長さ。
     fn cumulative_duration(&self, index: usize) -> std::time::Duration {
-        self.cumulative[index].to_duration()
+        self.inner.cumulative[index].to_duration()
     }
+}
+
+/// 指定インデックスのサンプルデータをファイルから読み出し、送信用に変換して返す。
+///
+/// [`Mp4SampleReader::get_sample`] が検証済みの `index` を受け取る。
+fn read_sample(
+    file: &mut BufReader<std::fs::File>,
+    track_info: &Mp4VideoTrackInfo,
+    samples: &[Mp4SampleMeta],
+    index: usize,
+) -> Result<Mp4EncodedSample> {
+    let sample = &samples[index];
+    let raw_data = read_bytes_at(file, sample.data_offset, sample.data_size)?;
+
+    let data = match track_info.codec_type {
+        VideoCodecType::H264 | VideoCodecType::H265 => {
+            let mut annex_b = Vec::new();
+            if sample.is_keyframe
+                && let Some(ref ps) = track_info.parameter_sets
+            {
+                annex_b.extend_from_slice(ps);
+            }
+            annex_b.extend_from_slice(&length_prefixed_nalu_to_annex_b(
+                &raw_data,
+                track_info.nal_length_size,
+            ));
+            annex_b
+        }
+        VideoCodecType::Av1 => assemble_av1_encoded_sample_data(
+            raw_data,
+            sample.is_keyframe,
+            track_info.av1_config.as_ref(),
+        ),
+        _ => raw_data,
+    };
+
+    Ok(Mp4EncodedSample {
+        data,
+        is_keyframe: sample.is_keyframe,
+        width: track_info.width as u32,
+        height: track_info.height as u32,
+        codec_type: track_info.codec_type,
+    })
 }
 
 /// ファイルの指定位置から指定サイズのデータを読み込む。
@@ -964,15 +1091,15 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
         direction == CodecDirection::Encoder && codec_type == self.codec_type
     }
 
-    /// 要求 format に対して encoder が実際に使う format を解決する。
+    /// 要求された SDP フォーマットに対して、エンコーダーが使用するフォーマットを解決する。
     ///
-    /// AV1 は AV1 RTP Payload Format の `profile` / `level-idx` / `tier` を独自に検証する:
-    /// - profile は required と incoming の完全一致 (固定 libwebrtc の `AV1IsSameProfile`)
-    /// - level と tier は required (bitstream 実値) が incoming (receiver capability) 以下
-    /// - parameter parse / 範囲判定は [`resolve_av1_incoming`] に集約
+    /// AV1 では、AV1 RTP Payload Format の `profile`、`level-idx`、`tier` を個別に検証する。
+    /// - `profile` は `required_format` と要求フォーマットの完全一致を求める。
+    /// - `level-idx` と `tier` は、MP4 のビットストリームが要求する値が受信側の能力以下かを調べる。
+    /// - パラメーターの解析と範囲検証は `resolve_av1_incoming()` が行う。
     ///
-    /// AV1 以外の codec は既定の [`fuzzy_match_sdp_video_format`] で解決する
-    /// (H.264 の profile-level-id 一致など、shiguredo_webrtc の既定挙動を維持)。
+    /// AV1 以外のコーデックには [`fuzzy_match_sdp_video_format`] を使用し、H.264 の
+    /// `profile-level-id` の照合など、shiguredo_webrtc の既定の挙動を維持する。
     fn resolve_sdp_format(
         &self,
         direction: CodecDirection,
@@ -1050,9 +1177,13 @@ impl Mp4VideoCapturer {
     ///
     /// 生成と同時に専用スレッドを起動し、MP4 のフレームタイミングに従って
     /// 映像フレームを WebRTC に供給する。動画末尾に達すると先頭に戻りループ再生する。
-    pub fn new(mut reader: Mp4SampleReader) -> crate::error::Result<Self> {
-        let width = reader.track_info.width as i32;
-        let height = reader.track_info.height as i32;
+    ///
+    /// 同じ [`Mp4SampleReader`] から複数のキャプチャラーを生成する場合は、リーダーをクローンし、
+    /// 各 `Mp4VideoCapturer::new()` に 1 つずつ渡す。
+    /// 各キャプチャラーは、フレーム供給スレッドと再生時計を個別に持つ。
+    pub fn new(reader: Mp4SampleReader) -> crate::error::Result<Self> {
+        let width = reader.inner.track_info.width as i32;
+        let height = reader.inner.track_info.height as i32;
 
         let source = AdaptedVideoTrackSource::new();
         let video_source = source.cast_to_video_track_source();
@@ -1080,9 +1211,10 @@ impl Mp4VideoCapturer {
                     let AdaptFrameResult { applied, .. } =
                         source.adapt_frame(width, height, timestamp_us);
                     if applied {
-                        // サンプルデータの読み込みに失敗したらフィーダースレッドを終了する。
-                        let sample = match reader.get_sample(i) {
-                            Ok(sample) => sample,
+                        // サンプルを取得できない場合は、フレーム供給スレッドを終了する。
+                        let sample = match reader.get_sample(i, &stop_clone) {
+                            Ok(Some(sample)) => sample,
+                            Ok(None) => return,
                             Err(err) => {
                                 rtc_log_error!("MP4: failed to read sample: {err:?}");
                                 return;
@@ -1126,6 +1258,18 @@ impl Mp4VideoCapturer {
     }
 
     /// WebRTC の [VideoTrackSource] を返す。
+    ///
+    /// 同じ `VideoTrackSource` を複数の PeerConnection で共有する使い方には対応していない。
+    /// この使い方では、同じネイティブ `VideoFrameBuffer` へのコールバックが、複数の
+    /// エンコーダースレッドから呼び出される。`debug_assertions` が有効なビルドでは、
+    /// `video_frame_buffer callback called from multiple threads` というエラーで異常終了する。
+    /// `debug_assertions` が無効なビルドでも、この使い方はサポート対象外である。
+    ///
+    /// 複数の PeerConnection に送信する場合は、PeerConnection ごとに
+    /// [`Mp4VideoCapturer`] を生成し、それぞれの `video_source()` を対応する接続に渡すこと。
+    /// 各キャプチャラーへ渡す [`Mp4SampleReader`] は、同じリーダーをクローンして用意できる。
+    ///
+    /// 詳細は `docs/INPUT_MP4.md` の「SDK での利用」を参照すること。
     pub fn video_source(&self) -> VideoTrackSource {
         self.video_source.clone()
     }
@@ -1135,9 +1279,15 @@ impl Drop for Mp4VideoCapturer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(handle) = self.thread_handle.take() {
-            // フィーダースレッドは最大 MAX_SLEEP_DURATION ごとに停止フラグを確認するため、
-            // join は停止フラグ設定後すぐに完了する。
-            let _ = handle.join();
+            // フレーム供給スレッドは、フレーム待機中は `MAX_SLEEP_DURATION` ごとに、
+            // I/O 応答待ち中は 1 ms ごとに停止フラグを確認する。
+            if let Err(payload) = handle.join() {
+                // フレーム供給スレッドの `panic` は実装バグなので、ログに記録する。
+                rtc_log_error!(
+                    "MP4: feeder thread panicked: {:?}",
+                    payload.downcast_ref::<&str>()
+                );
+            }
         }
     }
 }
@@ -1145,6 +1295,8 @@ impl Drop for Mp4VideoCapturer {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+
+    use shiguredo_webrtc::{VideoFrameRef, VideoSink, VideoSinkHandler, VideoSinkWants};
 
     use super::*;
     use crate::video_codec_preference::VideoCodecPreference;
@@ -1422,12 +1574,13 @@ mod tests {
                 .expect("パスは有効な UTF-8 である必要があります"),
         )
         .expect("フィクスチャ MP4 のパースに失敗しました");
-        let mut reader = reader;
         assert_eq!(reader.codec_type(), VideoCodecType::H264);
         assert!(!reader.is_empty());
+        let stop = AtomicBool::new(false);
         let sample = reader
-            .get_sample(0)
-            .expect("サンプルデータの読み込みに失敗しました");
+            .get_sample(0, &stop)
+            .expect("サンプルデータの読み込みに失敗しました")
+            .expect("停止フラグは未設定のため中断されないはずです");
 
         // サンプル 0 のファイル内オフセットは stco ボックスの先頭エントリから求める。
         // ボックス構造: size(4) + type(4) + version/flags(4) + entry_count(4) + [offset(4) * entry_count]
@@ -1647,7 +1800,6 @@ mod tests {
                 .expect("パスは有効な UTF-8 である必要があります"),
         )
         .expect("フィクスチャ MP4 のパースに失敗しました");
-        let mut reader = reader;
 
         let file = std::fs::File::options()
             .write(true)
@@ -1656,7 +1808,8 @@ mod tests {
         file.set_len(0).expect("ファイルの縮小に失敗しました");
         drop(file);
 
-        let result = reader.get_sample(0);
+        let stop = AtomicBool::new(false);
+        let result = reader.get_sample(0, &stop);
         assert!(
             matches!(result, Err(Mp4Error::Io(_))),
             "縮小されたファイルからの読み込みは Io エラーになるべきです"
@@ -2004,6 +2157,192 @@ mod tests {
         );
     }
 
+    // 同じリーダーのクローンから並行してサンプルを読み出し、要求と応答が混線しないことを
+    // 確認する。
+    // 同じインデックスのサンプルは、すべてのスレッドで同じ内容になる必要がある。
+    #[test]
+    fn shared_reader_clones_read_samples_concurrently() {
+        let (reader, _fixture) = h264_reader_from_fixture("shared-reader");
+        let sample_count = reader.len();
+        let thread_count = 4;
+
+        let handles: Vec<_> = (0..thread_count)
+            .map(|_| {
+                let reader = reader.clone();
+                thread::spawn(move || {
+                    let stop = AtomicBool::new(false);
+                    let mut samples = Vec::new();
+                    for i in 0..sample_count {
+                        let sample = reader
+                            .get_sample(i, &stop)
+                            .expect("共有 reader からのサンプル読み出しに失敗しました")
+                            .expect("停止フラグは未設定のため中断されないはずです");
+                        samples.push(sample);
+                    }
+                    samples
+                })
+            })
+            .collect();
+
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .expect("共有 reader の読み出しスレッドが panic しました")
+            })
+            .collect();
+        for (i, reference) in results[0].iter().enumerate() {
+            for other_results in results.iter().skip(1) {
+                assert_eq!(
+                    other_results[i].data, reference.data,
+                    "index {i} のサンプルデータは全スレッドで一致するはずです"
+                );
+                assert_eq!(
+                    other_results[i].is_keyframe, reference.is_keyframe,
+                    "index {i} のキーフレーム判定は全スレッドで一致するはずです"
+                );
+            }
+        }
+        // 並行読み出しでも、H.264 のキーフレーム変換結果が維持されることを確認する。
+        let first = &results[0][0];
+        assert!(first.is_keyframe, "先頭サンプルはキーフレームのはずです");
+        assert!(
+            first.data.starts_with(&[0x00, 0x00, 0x00, 0x01]),
+            "先頭サンプルは SPS/PPS のスタートコードで始まるはずです"
+        );
+        assert_eq!(first.width, 320, "先頭サンプルの幅は 320 のはずです");
+        assert_eq!(first.height, 320, "先頭サンプルの高さは 320 のはずです");
+        assert_eq!(
+            first.codec_type,
+            VideoCodecType::H264,
+            "先頭サンプルのコーデックは H.264 のはずです"
+        );
+    }
+
+    // 停止済みの場合は、読み出し結果より停止要求を優先し、`Ok(None)` を返すことを確認する。
+    #[test]
+    fn get_sample_returns_none_when_stopped() {
+        let (reader, _fixture) = h264_reader_from_fixture("get-sample-stopped");
+        let stop = AtomicBool::new(true);
+        let result = reader
+            .get_sample(0, &stop)
+            .expect("停止時の読み出しは I/O エラーにはならないはずです");
+        assert!(
+            result.is_none(),
+            "停止フラグ設定時は応答を待たずに None を返すはずです"
+        );
+    }
+
+    /// テスト用の `VideoSinkHandler`。
+    ///
+    /// 受信したフレームの情報をチャネルへ送り、テスト本体から観測できるようにする。
+    struct TestVideoSink {
+        tx: std::sync::mpsc::Sender<TestFrameInfo>,
+    }
+
+    /// テスト用に観測するフレーム情報。
+    struct TestFrameInfo {
+        width: i32,
+        height: i32,
+        codec_type: VideoCodecType,
+    }
+
+    impl VideoSinkHandler for TestVideoSink {
+        fn on_frame(&mut self, frame: VideoFrameRef<'_>) {
+            let buffer = frame.buffer();
+            // 安全性: 参照の利用を `on_frame()` の実行中に限定する。
+            // 各キャプチャラーが個別の `VideoFrameBuffer` を生成するため、同時アクセスは発生しない。
+            let codec_type = unsafe { buffer.as_native_ref::<Mp4EncodedSample>() }
+                .expect("パススルーサンプルは VideoFrameBuffer に内包されているはずです")
+                .codec_type;
+            let _ = self.tx.send(TestFrameInfo {
+                width: buffer.width(),
+                height: buffer.height(),
+                codec_type,
+            });
+        }
+    }
+
+    // 同じリーダーから複数の `Mp4VideoCapturer` を生成し、それぞれの `video_source()` が
+    // 独立してフレームを供給できることを確認する。
+    #[test]
+    fn multiple_capturers_share_single_reader() {
+        let context = crate::connection_context::SoraConnectionContext::new()
+            .expect("SoraConnectionContext の生成に失敗しました");
+        let (reader, _fixture) = h264_reader_from_fixture("shared-capturer");
+        let capturer_count = 2;
+
+        let mut capturers = Vec::new();
+        let mut tracks = Vec::new();
+        let mut sinks = Vec::new();
+        for _ in 0..capturer_count {
+            let capturer = Mp4VideoCapturer::new(reader.clone())
+                .expect("共有 reader からの Mp4VideoCapturer 生成に失敗しました");
+            let (tx, rx) = std::sync::mpsc::channel();
+            let sink = VideoSink::new_with_handler(Box::new(TestVideoSink { tx }));
+            let mut track = context
+                .create_video_track(&capturer.video_source())
+                .expect("VideoTrack の生成に失敗しました");
+            track.add_or_update_sink(&sink, &VideoSinkWants::new());
+            capturers.push(capturer);
+            tracks.push(track);
+            sinks.push((sink, rx));
+        }
+
+        // 各映像ソースから 10 フレームを受信するまで、タイムアウト付きで待機する。
+        // 一定時間待つ方式ではなく受信数で判定し、実行環境の負荷による失敗を避ける。
+        for (index, (_sink, rx)) in sinks.iter().enumerate() {
+            // 受信が終わるまで `VideoSink` と `VideoTrack` を保持し、登録を維持する。
+            for _ in 0..10 {
+                let frame = rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap_or_else(|_| {
+                        panic!("capturer {index} は 5 秒以内に 10 フレーム供給できるはずです")
+                    });
+                assert_eq!(
+                    frame.width, 320,
+                    "capturer {index} のフレーム幅は 320 のはずです"
+                );
+                assert_eq!(
+                    frame.height, 320,
+                    "capturer {index} のフレーム高さは 320 のはずです"
+                );
+                assert_eq!(
+                    frame.codec_type,
+                    VideoCodecType::H264,
+                    "capturer {index} のフレームコーデックは H.264 のはずです"
+                );
+            }
+        }
+
+        // フレーム供給スレッドを停止してから、各 `VideoTrack` に登録した `VideoSink` を解除する。
+        // 登録解除前に `VideoSink` をドロップすると、libwebrtc が解放済みのポインターを参照する。
+        drop(capturers);
+        for (index, (sink, _rx)) in sinks.iter().enumerate() {
+            tracks[index].remove_sink(sink);
+        }
+    }
+
+    /// AV1 の MP4 フィクスチャを一時ファイルに書き出し、`Mp4SampleReader` を生成する。
+    /// 返した `FixtureFile` がドロップされるまで、一時ファイルを保持する。
+    fn av1_reader_from_fixture(tag: &str) -> (Mp4SampleReader, FixtureFile) {
+        let fixture = include_bytes!("../../testdata/red-320x320-av1.mp4");
+        let tmp_name = format!(
+            "sora-sdk-mp4-passthrough-{}-{}-{}.mp4",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("システム時刻は UNIX_EPOCH より後である必要があります")
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(tmp_name);
+        std::fs::write(&path, fixture).expect("一時 fixture の書き込みに失敗しました");
+        let reader = Mp4SampleReader::new(&path).expect("fixture MP4 のパースに失敗しました");
+        (reader, FixtureFile { path })
+    }
+
     // -----------------------------------------------------------------
     // 実 AV1 fixture のテスト
     //
@@ -2074,27 +2413,15 @@ mod tests {
     /// 実 AV1 fixture を reader で読み、av1C field / configOBUs / サンプル構成を確認する。
     #[test]
     fn sample_reader_reads_fixture_av1_mp4() {
-        let fixture = include_bytes!("../../testdata/red-320x320-av1.mp4");
-        let tmp_name = format!(
-            "sora-sdk-mp4-test-av1-{}-{}.mp4",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("システム時刻は UNIX_EPOCH より後である必要があります")
-                .as_nanos()
-        );
-        let tmp_path = std::env::temp_dir().join(tmp_name);
-        std::fs::write(&tmp_path, fixture).expect("一時フィクスチャの書き込みに失敗しました");
-
-        let reader = Mp4SampleReader::new(&tmp_path).expect("AV1 fixture のパースに失敗しました");
-        let _ = std::fs::remove_file(&tmp_path);
+        let (reader, _fixture) = av1_reader_from_fixture("av1-read");
 
         assert_eq!(reader.codec_type(), VideoCodecType::Av1);
         assert_eq!(reader.len(), 50, "fixture は 50 サンプルを持つはずです");
-        assert_eq!(reader.track_info.width, 320);
-        assert_eq!(reader.track_info.height, 320);
+        assert_eq!(reader.inner.track_info.width, 320);
+        assert_eq!(reader.inner.track_info.height, 320);
 
         let av1_config = reader
+            .inner
             .track_info
             .av1_config
             .as_ref()
@@ -2128,12 +2455,15 @@ mod tests {
         assert_eq!(sh.operating_point_idc_0, 0);
 
         // sync flag: index 0, 8, 16, 24, 32, 40, 48 が sync。
-        let sync_indices: Vec<usize> = reader
-            .samples
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.is_keyframe)
-            .map(|(i, _)| i)
+        let stop = AtomicBool::new(false);
+        let sync_indices: Vec<usize> = (0..reader.len())
+            .filter(|&i| {
+                reader
+                    .get_sample(i, &stop)
+                    .expect("fixture の sample を読み出せるはずです")
+                    .expect("停止フラグは未設定のため中断されないはずです")
+                    .is_keyframe
+            })
             .collect();
         assert_eq!(
             sync_indices,
@@ -2146,21 +2476,8 @@ mod tests {
     /// sync なら `configOBUs || sample data`、non-sync なら sample data と byte 一致する。
     #[test]
     fn sample_reader_get_sample_prepends_config_obus_only_for_sync_samples() {
-        let fixture = include_bytes!("../../testdata/red-320x320-av1.mp4");
-        let tmp_name = format!(
-            "sora-sdk-mp4-test-av1-sample-{}-{}.mp4",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("システム時刻は UNIX_EPOCH より後である必要があります")
-                .as_nanos()
-        );
-        let tmp_path = std::env::temp_dir().join(tmp_name);
-        std::fs::write(&tmp_path, fixture).expect("一時フィクスチャの書き込みに失敗しました");
-
-        let mut reader =
-            Mp4SampleReader::new(&tmp_path).expect("AV1 fixture のパースに失敗しました");
-        let _ = std::fs::remove_file(&tmp_path);
+        let (reader, _fixture) = av1_reader_from_fixture("av1-sample");
+        let stop = AtomicBool::new(false);
 
         let (config_obus, raw_samples) = demux_av1_fixture();
         assert!(
@@ -2170,8 +2487,9 @@ mod tests {
 
         for (i, (raw, is_keyframe)) in raw_samples.iter().enumerate() {
             let sample = reader
-                .get_sample(i)
-                .expect("fixture の sample を読み出せるはずです");
+                .get_sample(i, &stop)
+                .expect("fixture の sample を読み出せるはずです")
+                .expect("停止フラグは未設定のため中断されないはずです");
             let expected = if *is_keyframe {
                 let mut combined = Vec::new();
                 combined.extend_from_slice(&config_obus);
@@ -2195,21 +2513,8 @@ mod tests {
     fn passthrough_encoder_forwards_av1_reconstructed_payload() {
         use shiguredo_webrtc::VideoFrameType;
 
-        let fixture = include_bytes!("../../testdata/red-320x320-av1.mp4");
-        let tmp_name = format!(
-            "sora-sdk-mp4-test-av1-encode-{}-{}.mp4",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("システム時刻は UNIX_EPOCH より後である必要があります")
-                .as_nanos()
-        );
-        let tmp_path = std::env::temp_dir().join(tmp_name);
-        std::fs::write(&tmp_path, fixture).expect("一時フィクスチャの書き込みに失敗しました");
-
-        let mut reader =
-            Mp4SampleReader::new(&tmp_path).expect("AV1 fixture のパースに失敗しました");
-        let _ = std::fs::remove_file(&tmp_path);
+        let (reader, _fixture) = av1_reader_from_fixture("av1-encode");
+        let stop = AtomicBool::new(false);
 
         let (config_obus, raw_samples) = demux_av1_fixture();
 
@@ -2225,8 +2530,9 @@ mod tests {
 
         for i in 0..reader.len() {
             let sample = reader
-                .get_sample(i)
-                .expect("fixture の sample を読み出せるはずです");
+                .get_sample(i, &stop)
+                .expect("fixture の sample を読み出せるはずです")
+                .expect("停止フラグは未設定のため中断されないはずです");
             let frame_buffer = VideoFrameBuffer::new_with_handler(Box::new(sample));
             let video_frame = VideoFrame::builder(&frame_buffer)
                 .set_timestamp_us(0)
