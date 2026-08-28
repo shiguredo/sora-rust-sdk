@@ -105,7 +105,7 @@ sora-rust-sdk は libwebrtc 互換フィルタを実装し、`H264ProfileLevelId
   - `kProfilePatterns` に一致しない profile / constraint combination（Extended / High10 / High42 / 各 Intra / CAVLC 4:4:4 Intra など）は unsupported とする
 - level は固定 libwebrtc の `ParseH264ProfileLevelId` どおりに `level_idc` から決める。`level_idc == 11` かつ `constraint_set3_flag == 1` の表現だけを Level 1b へ normalize し、RFC 6184 が定める `level_idc == 9` の Level 1b 表現は固定 parser が認識せず PeerConnection negotiation を成立させられないため unsupported とする
 - Level 6 / 6.1 / 6.2（`level_idc` 60 / 61 / 62）は固定 libwebrtc の `H264Level` enum に無く unsupported とする
-- Level 1b は通常の Level 1.1 と区別し、Level 1 と Level 1.1 の間に順序付ける（libwebrtc の enum 値 1b=0 < 1=10 < 1.1=11 < ... < 5.2=52 に対応させる）
+- Level 1b は通常の Level 1.1 と区別し、能力順で Level 1 と Level 1.1 の間に順序付ける（ITU-T H.264 Table A-1 の Level 1b は Level 1 と同 FS / MBPS のまま MaxBR が 2 倍であり、libwebrtc の `kLevelConstraints` も Level 1 → Level 1b → Level 1.1 の順に並ぶ。libwebrtc の `H264Level` enum 値 kLevel1_b=0 < kLevel1=10 は level_idc 由来の定数であり能力順ではない）
 - 通常 level は固定 libwebrtc が受理する `level_idc`（10 / 11 / 12 / 13 / 20 / 21 / 22 / 30 / 31 / 32 / 40 / 41 / 42 / 50 / 51 / 52）だけを normalized enum へ変換し、未知の値を単純な整数比較で受理しない
 - 固定 libwebrtc の `H264IsSameProfile` は双方の parse 成功を要求するため、libwebrtc 互換フィルタに一致しない profile / constraint combination は required と incoming が byte-for-byte 一致しても unsupported とする
 
