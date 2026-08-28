@@ -11,11 +11,14 @@
 
 ## develop
 
-- [ADD] Mp4SampleReader を複数の Mp4VideoCapturer で共有できるようにする
-  - @sile
 - [CHANGE] `Mp4Error::InconsistentSampleDescription` から `fields` を削除し、 `InvalidAv1Track` を追加する
   - サンプルエントリーの相違は `index` のみを報告する
   - AV1 track 検証の失敗は文脈入りのメッセージで報告する
+  - @sile
+- [CHANGE] `Mp4Error::InvalidH264Track` を追加する
+  - H.264 track 検証の失敗は文脈入りのメッセージで報告する
+  - @sile
+- [ADD] Mp4SampleReader を複数の Mp4VideoCapturer で共有できるようにする
   - @sile
 - [FIX] MP4 AV1 の `configOBUs` を各 sync sample の先頭に付与するようにする
   - 今までは `configOBUs` を破棄しており、Sequence Header OBU や静的 Metadata OBU が sync sample に含まれない入力では受信側が decode できない payload になっていた
@@ -26,9 +29,11 @@
 - [FIX] MP4 の H.264 トラックで `avcC` 由来の `profile-level-id` を SDP capability に反映する
   - 今までは `packetization-mode=1` だけを付けた bare `H264` を広告しており、Main / High Profile の MP4 では実 bitstream と capability の profile / level が食い違っていた
   - `Mp4SampleReader` 初期化時に全 SPS を解析し、`avcC` の profile / constraint / level と SPS の一致、SPS と `avc1` の寸法の一致を検証し、不一致は `Mp4Error::InvalidH264Track` で拒否する
+  - 空の SPS / PPS リストと NAL type 不正の PPS は `Mp4Error::InvalidH264Track` で拒否する
   - `avcC` 由来の profile-level-id を固定 libwebrtc の `kProfilePatterns` と同じ規則で判定し、認識されない profile / level の入力を `Mp4Error::InvalidH264Track` で拒否する
   - H.264 required SDP format に `packetization-mode=1` に加えて `profile-level-id` を明示し、incoming との照合で sub-profile 完全一致と level 下限を検証する
   - sample entry 一貫性検証の比較対象に `avcC` box 全体と抽出後の profile-level-id を含める
+  - ISO/IEC 14496-15 に違反するが実在する chroma 拡張欠落の `avcC` は mp4-rs と同様に受理し、再エンコード不能のため `avcc_box` は `None` として扱う
   - @sile
 
 ### misc

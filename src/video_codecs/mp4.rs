@@ -109,10 +109,10 @@ pub enum Mp4Error {
     InvalidAv1Track(String),
     /// H.264 track の bitstream / sample entry の検証に失敗した。
     ///
-    /// SPS のパース失敗、SPS と `avcC` の profile-level-id / 寸法の不一致、
-    /// 固定 libwebrtc が認識しない profile / level などを Mp4SampleReader 初期化時に
-    /// 検証する。エラー variant による細分類は行わず、文脈（SPS index、相違内容、
-    /// underlying の parse エラー理由）を含むメッセージで報告する。
+    /// 空の SPS / PPS リスト、SPS のパース失敗、SPS と `avcC` の profile-level-id / 寸法の
+    /// 不一致、PPS の NAL type 不正、固定 libwebrtc が認識しない profile / level などを
+    /// Mp4SampleReader 初期化時に検証する。エラー variant による細分類は行わず、
+    /// 文脈（SPS index、相違内容、underlying の parse エラー理由）を含むメッセージで報告する。
     InvalidH264Track(String),
 }
 
@@ -577,6 +577,20 @@ impl Mp4SampleReader {
 
         match entry {
             SampleEntry::Avc1(avc1) => {
+                // H.264 の bitstream は SPS / PPS なしでは decode 不能なため、
+                // 空の sps_list / pps_list は mux 側 `build_avc1_box` と同じ基準で拒否する
+                // （demux 経路では mp4-rs が空リストを許容するため、ここで塞ぐ）。
+                if avc1.avcc_box.sps_list.is_empty() {
+                    return Err(Mp4Error::InvalidH264Track(
+                        "SPS list must not be empty".to_string(),
+                    ));
+                }
+                if avc1.avcc_box.pps_list.is_empty() {
+                    return Err(Mp4Error::InvalidH264Track(
+                        "PPS list must not be empty".to_string(),
+                    ));
+                }
+
                 let (width, height) = (avc1.visual.width, avc1.visual.height);
                 // H.264 の SPS (Sequence Parameter Set) と PPS (Picture Parameter Set) を
                 // Annex B 形式 (0x00000001 プレフィックス付き) で結合する。
@@ -629,6 +643,28 @@ impl Mp4SampleReader {
                     }
                 }
 
+                // 各 PPS は非空・forbidden_zero_bit=0・NAL type 8 だけを検証する
+                // （mux 側 `build_avc1_box` と同じ基準。mp4-rs は PPS 構文の
+                // parse 関数を提供しないため、header の検証に留める。
+                // SPS 側は上の `parse_sps` が同等の header 検証を行う）。
+                for (pps_index, pps) in avc1.avcc_box.pps_list.iter().enumerate() {
+                    let Some(&header) = pps.first() else {
+                        return Err(Mp4Error::InvalidH264Track(format!(
+                            "PPS #{pps_index} is empty"
+                        )));
+                    };
+                    if header & 0b1000_0000 != 0 {
+                        return Err(Mp4Error::InvalidH264Track(format!(
+                            "PPS #{pps_index} forbidden_zero_bit must be 0"
+                        )));
+                    }
+                    if header & 0b0001_1111 != 8 {
+                        return Err(Mp4Error::InvalidH264Track(format!(
+                            "PPS #{pps_index} NAL unit type must be 8"
+                        )));
+                    }
+                }
+
                 // 広告する前に、抽出した profile-level-id を固定 libwebrtc の
                 // 互換フィルタに通し、認識されない profile / level は拒否する。
                 if parse_profile_level_id(avc_profile_level_id).is_none() {
@@ -641,10 +677,21 @@ impl Mp4SampleReader {
                 // avcC box 全体の byte 列を保持し、sample entry 一貫性検証で
                 // `parameter_sets` では担保できない header / 補助 field の一致も確認できる
                 // ようにする。
-                let avcc_box =
-                    shiguredo_mp4::Encode::encode_to_vec(&avc1.avcc_box).map_err(|err| {
-                        Mp4Error::InvalidH264Track(format!("failed to re-encode avcC: {err}"))
-                    })?;
+                // ISO/IEC 14496-15 に違反するが実在する「chroma 拡張欠落の avcC」は
+                // mp4-rs が decode で許容する一方 re-encode できないため、`None` として
+                // 受理する（profile-level-id / parameter_sets / nal_length_size は
+                // 他の field で一致検証されるため、一貫性検証の実質は失われない）。
+                let avcc_box = if avc1.avcc_box.chroma_format.is_some()
+                    || matches!(avc1.avcc_box.avc_profile_indication, 66 | 77 | 88)
+                {
+                    Some(
+                        shiguredo_mp4::Encode::encode_to_vec(&avc1.avcc_box).map_err(|err| {
+                            Mp4Error::InvalidH264Track(format!("failed to re-encode avcC: {err}"))
+                        })?,
+                    )
+                } else {
+                    None
+                };
 
                 Ok(Mp4VideoTrackInfo {
                     codec_type: VideoCodecType::H264,
@@ -3148,6 +3195,80 @@ mod tests {
 
         let result = new_reader_for_h264_mp4(&[entry]);
         assert_invalid_h264_track(result, "not recognized by the fixed libwebrtc");
+    }
+
+    /// SPS が 0 個の avcC を持つ合成 MP4 を reader 初期化時に拒否する。
+    ///
+    /// H.264 の bitstream は SPS なしでは decode 不能なため、空の sps_list は
+    /// mux 側 `build_avc1_box` と同じ基準で拒否する。
+    #[test]
+    fn sample_reader_rejects_h264_empty_sps_list() {
+        let pps: Vec<u8> = vec![0x68, 0xeb, 0xc3, 0xcb, 0x20];
+        let entry = build_avc1_sample_entry(&[], &[pps], (0x4d, 0x40, 0x15), None, 320, 320);
+
+        let result = new_reader_for_h264_mp4(&[entry]);
+        assert_invalid_h264_track(result, "SPS list must not be empty");
+    }
+
+    /// PPS が 0 個の avcC を持つ合成 MP4 を reader 初期化時に拒否する。
+    ///
+    /// SPS と同様、PPS なしでは decode 不能なため mux 側 `build_avc1_box` と同じ基準で
+    /// 拒否する。
+    #[test]
+    fn sample_reader_rejects_h264_empty_pps_list() {
+        let sps: Vec<u8> = vec![
+            0x67, 0x4d, 0x40, 0x15, 0xd9, 0x01, 0x40, 0xa6, 0xc0, 0x44, 0x00, 0x00, 0x03, 0x00,
+            0x04, 0x00, 0x00, 0x03, 0x00, 0xc8, 0x3c, 0x58, 0xb9, 0x20,
+        ];
+        let entry = build_avc1_sample_entry(&[sps], &[], (0x4d, 0x40, 0x15), None, 320, 320);
+
+        let result = new_reader_for_h264_mp4(&[entry]);
+        assert_invalid_h264_track(result, "PPS list must not be empty");
+    }
+
+    /// 不正な PPS（空 NAL・forbidden_zero_bit=1・NAL type 8 以外）を含む合成 MP4 を
+    /// reader 初期化時に拒否する。
+    ///
+    /// mp4-rs の demux は PPS の NAL header を検証しない一方、mux 側 `build_avc1_box` は
+    /// 非空・fzb=0・NAL type 8 を要求するため、SDK は demux 経路の穴を塞ぐ。
+    #[test]
+    fn sample_reader_rejects_h264_invalid_pps() {
+        let sps: Vec<u8> = vec![
+            0x67, 0x4d, 0x40, 0x15, 0xd9, 0x01, 0x40, 0xa6, 0xc0, 0x44, 0x00, 0x00, 0x03, 0x00,
+            0x04, 0x00, 0x00, 0x03, 0x00, 0xc8, 0x3c, 0x58, 0xb9, 0x20,
+        ];
+        // 空 NAL。
+        let empty_pps: Vec<u8> = vec![];
+        let entry = build_avc1_sample_entry(
+            std::slice::from_ref(&sps),
+            &[empty_pps],
+            (0x4d, 0x40, 0x15),
+            None,
+            320,
+            320,
+        );
+        let result = new_reader_for_h264_mp4(&[entry]);
+        assert_invalid_h264_track(result, "PPS #0 is empty");
+
+        // forbidden_zero_bit (bit 7) が 1。
+        let fzb_pps: Vec<u8> = vec![0xe8, 0xeb, 0xc3, 0xcb, 0x20];
+        let entry = build_avc1_sample_entry(
+            std::slice::from_ref(&sps),
+            &[fzb_pps],
+            (0x4d, 0x40, 0x15),
+            None,
+            320,
+            320,
+        );
+        let result = new_reader_for_h264_mp4(&[entry]);
+        assert_invalid_h264_track(result, "PPS #0 forbidden_zero_bit must be 0");
+
+        // NAL type が 8 (PPS) 以外（ここでは 7 = SPS）。
+        let sps_as_pps: Vec<u8> = vec![0x67, 0xeb, 0xc3, 0xcb, 0x20];
+        let entry =
+            build_avc1_sample_entry(&[sps], &[sps_as_pps], (0x4d, 0x40, 0x15), None, 320, 320);
+        let result = new_reader_for_h264_mp4(&[entry]);
+        assert_invalid_h264_track(result, "PPS #0 NAL unit type must be 8");
     }
 
     /// `Mp4SampleReader` の生成結果が `InvalidH264Track` で、メッセージに

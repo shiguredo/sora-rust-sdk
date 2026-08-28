@@ -17,12 +17,15 @@ use shiguredo_webrtc::{SdpVideoFormat, SdpVideoFormatRef, VideoCodecType};
 /// `avcc_box` は `Mp4VideoTrackInfo::parameter_sets`（SPS / PPS の Annex B 化）では
 /// 担保できない `avcC` header や `length_size_minus_one` を含む box 全体の一致を
 /// 確認するためのものである。
+/// ISO/IEC 14496-15 に違反するが実在する chroma 拡張欠落の avcC は mp4-rs が
+/// decode で許容し、re-encode できないため `avcc_box` は `None` になる。
+/// この場合も header / SPS / PPS / `length_size_minus_one` は他の field で一致検証される。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct H264TrackConfig {
     /// 検証済みの profile-level-id。
     pub(super) profile_level_id: H264ProfileLevelId,
-    /// avcC box 全体の byte 列（再エンコード結果）。
-    pub(super) avcc_box: Vec<u8>,
+    /// avcC box 全体の byte 列（再エンコード結果）。再エンコード不能な場合は `None`。
+    pub(super) avcc_box: Option<Vec<u8>>,
 }
 
 /// 固定 libwebrtc が認識する H.264 sub-profile。
