@@ -4,8 +4,11 @@
 //! 寄せ、本モジュールでは固定 libwebrtc の `h264_profile_level_id.cc` に相当する
 //! sub-profile / level の判定、avcC 由来の抽出情報、passthrough 用の SDP format 解決を
 //! 提供する。
-//! 検証の失敗は `crate::video_codecs::mp4::Mp4Error::InvalidH264Track(String)` に
-//! メッセージで報告する。
+//! 本モジュールの判定（[`parse_profile_level_id`] / [`resolve_h264_incoming`]）は
+//! 失敗を `Option` で表し、エラー variant は作らない。
+//! reader 初期化時の track 検証は `crate::video_codecs::mp4` の `extract_track_info` が
+//! `Mp4Error::InvalidH264Track(String)` で報告する（av1.rs が自モジュールで track 検証を
+//! 行うのと役割分担が異なる）。
 
 use shiguredo_mp4::bitstream::h264::H264ProfileLevelId;
 use shiguredo_webrtc::{SdpVideoFormat, SdpVideoFormatRef, VideoCodecType};
@@ -335,6 +338,23 @@ pub(super) fn resolve_h264_incoming(
         return None;
     }
     Some(incoming.to_owned())
+}
+
+/// H.264 の required SDP format を組み立てる。
+///
+/// H.264 track は reader 初期化時に `h264_config` が必ず設定されるため、
+/// 欠落は実装バグとして panic する。AV1 の [`crate::video_codecs::av1::av1_required_sdp_format`]
+/// が config 欠落を parameter 省略で扱うのと対称のシグネチャだが、H.264 は
+/// `packetization-mode=1` に加えて `profile-level-id` を常に広告する
+/// （RFC 6184 Section 8.1 の implicit 既定 (Baseline Profile Level 1) へ fallback しない）。
+pub(super) fn h264_required_sdp_format(h264_config: Option<&H264TrackConfig>) -> SdpVideoFormat {
+    let mut format = SdpVideoFormat::new("H264");
+    format.parameters_mut().set("packetization-mode", "1");
+    let config = h264_config.expect("BUG: H.264 track must have h264_config");
+    format
+        .parameters_mut()
+        .set("profile-level-id", &config.profile_level_id.to_hex());
+    format
 }
 
 #[cfg(test)]
@@ -766,6 +786,39 @@ mod tests {
         assert!(
             resolve_h264_incoming(&required, incoming.as_ref()).is_none(),
             "codec 名が H.264 以外の format は拒否されるはずです"
+        );
+    }
+
+    #[test]
+    fn h264_required_sdp_format_sets_packetization_mode_and_profile_level_id() {
+        let config = H264TrackConfig {
+            profile_level_id: H264ProfileLevelId {
+                profile_idc: 0x4d,
+                profile_iop: 0x40,
+                level_idc: 0x15,
+            },
+            avcc_box: None,
+        };
+
+        let format = h264_required_sdp_format(Some(&config));
+        assert_eq!(
+            format
+                .name()
+                .expect("H264 format の name を取得できるはずです"),
+            "H264"
+        );
+        let mut format_owned = format.clone();
+        let params: std::collections::HashMap<String, String> =
+            format_owned.parameters_mut().iter().collect();
+        assert_eq!(
+            params.get("packetization-mode").map(String::as_str),
+            Some("1"),
+            "packetization-mode=1 を広告するはずです"
+        );
+        assert_eq!(
+            params.get("profile-level-id").map(String::as_str),
+            Some("4d4015"),
+            "検証済みの profile-level-id を広告するはずです"
         );
     }
 }

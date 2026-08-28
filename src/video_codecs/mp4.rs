@@ -46,7 +46,9 @@ use crate::video_codecs::av1::{
     Av1TrackConfig, assemble_av1_encoded_sample_data, av1_required_sdp_format,
     resolve_av1_incoming, validate_av1_track,
 };
-use crate::video_codecs::h264::{H264TrackConfig, parse_profile_level_id, resolve_h264_incoming};
+use crate::video_codecs::h264::{
+    H264TrackConfig, h264_required_sdp_format, parse_profile_level_id, resolve_h264_incoming,
+};
 
 /// MP4 ファイル処理中に発生するエラー。
 #[derive(Debug)]
@@ -857,7 +859,7 @@ impl Mp4SampleReader {
     /// reader 構築時に確定するため、呼び出しごとに同じ内容を返す。
     /// 現在は各 codec について以下を返す:
     /// - H.264: `H264`, `packetization-mode=1` に加え、`avcC` 由来の検証済み
-    ///   `profile-level-id` を設定する
+    ///   `profile-level-id` を設定する（[`h264_required_sdp_format`] 参照）
     /// - H.265: `H265`
     /// - VP8: `VP8`
     /// - VP9: `VP9`
@@ -865,18 +867,11 @@ impl Mp4SampleReader {
     ///   `tier` を 10 進文字列で設定する（[`av1_required_sdp_format`] 参照）
     fn required_sdp_format(&self) -> SdpVideoFormat {
         match self.inner.track_info.codec_type {
+            // H.264 track は reader 初期化時に h264_config が必ず設定される
+            // （`extract_track_info` の不変条件。欠落は `h264_required_sdp_format` が
+            // panic するため、plid 無しの bare H264 を広告することはない）。
             VideoCodecType::H264 => {
-                let mut format = SdpVideoFormat::new("H264");
-                format.parameters_mut().set("packetization-mode", "1");
-                // reader 初期化時に検証済みの avcC 由来 profile-level-id を広告する。
-                // RFC 6184 Section 8.1 の implicit 既定 (Baseline Profile Level 1) へ
-                // fallback しない。
-                if let Some(config) = self.inner.track_info.h264_config.as_ref() {
-                    format
-                        .parameters_mut()
-                        .set("profile-level-id", &config.profile_level_id.to_hex());
-                }
-                format
+                h264_required_sdp_format(self.inner.track_info.h264_config.as_ref())
             }
             VideoCodecType::H265 => SdpVideoFormat::new("H265"),
             VideoCodecType::Vp8 => SdpVideoFormat::new("VP8"),
@@ -2959,7 +2954,10 @@ mod tests {
     ///
     /// サンプルデータはダミー (NAL ヘッダーのみ) で、一貫性検証は sample data を
     /// 読まないため内容は問わない。
+    /// `tag` は一時ファイル名に含めてテスト毎に一意にする
+    /// （複数テストが並列実行されても衝突しないようにするため）。
     fn new_reader_for_h264_mp4(
+        tag: &str,
         entries: &[shiguredo_mp4::boxes::SampleEntry],
     ) -> crate::error::Result<Mp4SampleReader> {
         use std::num::NonZeroU32;
@@ -3011,7 +3009,7 @@ mod tests {
         file_data.truncate(max_end);
 
         let tmp_name = format!(
-            "sora-sdk-mp4-h264-synth-{}-{}.mp4",
+            "sora-sdk-mp4-h264-synth-{tag}-{}-{}.mp4",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -3058,7 +3056,7 @@ mod tests {
             320,
         );
 
-        let result = new_reader_for_h264_mp4(&[entry1, entry2]);
+        let result = new_reader_for_h264_mp4("different-avcc-box", &[entry1, entry2]);
         match result {
             Err(crate::error::Error::Mp4 { source }) => {
                 assert!(
@@ -3099,7 +3097,7 @@ mod tests {
             320,
         );
 
-        let result = new_reader_for_h264_mp4(&[entry1, entry2]);
+        let result = new_reader_for_h264_mp4("different-plid", &[entry1, entry2]);
         match result {
             Err(crate::error::Error::Mp4 { source }) => {
                 assert!(
@@ -3121,7 +3119,7 @@ mod tests {
         let entry =
             build_avc1_sample_entry(&[truncated_sps], &[pps], (0x4d, 0x40, 0x15), None, 320, 320);
 
-        let result = new_reader_for_h264_mp4(&[entry]);
+        let result = new_reader_for_h264_mp4("truncated-sps", &[entry]);
         assert_invalid_h264_track(result, "SPS");
     }
 
@@ -3136,7 +3134,7 @@ mod tests {
         // SPS は Main (0x4d / 0x40 / 0x15) だが、avcC header は High (0x64 / 0x00 / 0x15)。
         let entry = build_avc1_sample_entry(&[sps], &[pps], (0x64, 0x00, 0x15), Some(1), 320, 320);
 
-        let result = new_reader_for_h264_mp4(&[entry]);
+        let result = new_reader_for_h264_mp4("avcc-sps-mismatch", &[entry]);
         assert_invalid_h264_track(result, "profile-level-id does not match avcC");
     }
 
@@ -3160,7 +3158,7 @@ mod tests {
             320,
         );
 
-        let result = new_reader_for_h264_mp4(&[entry]);
+        let result = new_reader_for_h264_mp4("multiple-sps", &[entry]);
         assert_invalid_h264_track(result, "profile-level-id does not match avcC");
     }
 
@@ -3175,7 +3173,7 @@ mod tests {
         // SPS は 320x320 だが、avc1 の寸法は 640x640。
         let entry = build_avc1_sample_entry(&[sps], &[pps], (0x4d, 0x40, 0x15), None, 640, 640);
 
-        let result = new_reader_for_h264_mp4(&[entry]);
+        let result = new_reader_for_h264_mp4("dimension-mismatch", &[entry]);
         assert_invalid_h264_track(result, "dimensions do not match avc1");
     }
 
@@ -3193,7 +3191,7 @@ mod tests {
         let pps: Vec<u8> = vec![0x68, 0xeb, 0xc3, 0xcb, 0x20];
         let entry = build_avc1_sample_entry(&[sps], &[pps], (0x4d, 0x40, 0x3c), None, 320, 320);
 
-        let result = new_reader_for_h264_mp4(&[entry]);
+        let result = new_reader_for_h264_mp4("unrecognized-level", &[entry]);
         assert_invalid_h264_track(result, "not recognized by the fixed libwebrtc");
     }
 
@@ -3206,7 +3204,7 @@ mod tests {
         let pps: Vec<u8> = vec![0x68, 0xeb, 0xc3, 0xcb, 0x20];
         let entry = build_avc1_sample_entry(&[], &[pps], (0x4d, 0x40, 0x15), None, 320, 320);
 
-        let result = new_reader_for_h264_mp4(&[entry]);
+        let result = new_reader_for_h264_mp4("empty-sps", &[entry]);
         assert_invalid_h264_track(result, "SPS list must not be empty");
     }
 
@@ -3222,7 +3220,7 @@ mod tests {
         ];
         let entry = build_avc1_sample_entry(&[sps], &[], (0x4d, 0x40, 0x15), None, 320, 320);
 
-        let result = new_reader_for_h264_mp4(&[entry]);
+        let result = new_reader_for_h264_mp4("empty-pps", &[entry]);
         assert_invalid_h264_track(result, "PPS list must not be empty");
     }
 
@@ -3247,7 +3245,7 @@ mod tests {
             320,
             320,
         );
-        let result = new_reader_for_h264_mp4(&[entry]);
+        let result = new_reader_for_h264_mp4("invalid-pps-empty", &[entry]);
         assert_invalid_h264_track(result, "PPS #0 is empty");
 
         // forbidden_zero_bit (bit 7) が 1。
@@ -3260,14 +3258,14 @@ mod tests {
             320,
             320,
         );
-        let result = new_reader_for_h264_mp4(&[entry]);
+        let result = new_reader_for_h264_mp4("invalid-pps-fzb", &[entry]);
         assert_invalid_h264_track(result, "PPS #0 forbidden_zero_bit must be 0");
 
         // NAL type が 8 (PPS) 以外（ここでは 7 = SPS）。
         let sps_as_pps: Vec<u8> = vec![0x67, 0xeb, 0xc3, 0xcb, 0x20];
         let entry =
             build_avc1_sample_entry(&[sps], &[sps_as_pps], (0x4d, 0x40, 0x15), None, 320, 320);
-        let result = new_reader_for_h264_mp4(&[entry]);
+        let result = new_reader_for_h264_mp4("invalid-pps-naltype", &[entry]);
         assert_invalid_h264_track(result, "PPS #0 NAL unit type must be 8");
     }
 
