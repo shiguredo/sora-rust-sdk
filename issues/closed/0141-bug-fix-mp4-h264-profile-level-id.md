@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-08-13
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-28
 - Branch: feature/fix-mp4-h264-profile-level-id-v2
 - Polished: {YYYY-MM-DD}
 
@@ -43,7 +43,7 @@ issue 0140 で reader 由来の required format に一本化され、`Mp4SampleR
 - issue 0142（sample entry 一貫性）: 全 `sample.sample_entry` の一貫性検証（`codec_type` / `width` / `height` / `nal_length_size` / `parameter_sets` / `timescale`）が動作している
 - issue 0143（preference validation + factory pass-through）: `SoraVideoEncoderFactory::create` の `resolve_sdp_format` pass-through が回帰テストで固定され、`validate_video_codec_preference` の bare `SdpVideoFormat` 検証が削除されて `is_supported` の結果が preference validation の source of truth になっている
 
-加えて、`shiguredo_mp4` を `2026.5.0-canary.3` 以降（mp4-rs の issue 0085 が反映されたバージョン）に更新し、`bitstream::h264` モジュールを前提とする。
+加えて、`shiguredo_mp4` を `2026.5.0`（mp4-rs の issue 0085 が反映されたバージョン）に更新し、`bitstream::h264` モジュールを前提とする。
 
 - `parse_sps` / `H264Sps`: SPS を RBSP パースして `profile_level_id` / `width` / `height` を返すため、`avcC` との一致検証と寸法検証に利用する
 - `H264ProfileLevelId`: SPS 先頭 3 byte（`profile_idc` / `profile_iop` / `level_idc`）を検証せず保持する。issue 0085 で `from_hex` / `to_hex`（ちょうど 6 桁 hex との可逆変換）だけが残り、RFC 6184 Table 5 の正規化 API（`normalize` / `H264Profile` / `H264Level` / `H264ProfileLevel` / `parse_profile_level_id_hex`）は削除された
@@ -105,7 +105,7 @@ sora-rust-sdk は libwebrtc 互換フィルタを実装し、`H264ProfileLevelId
   - `kProfilePatterns` に一致しない profile / constraint combination（Extended / High10 / High42 / 各 Intra / CAVLC 4:4:4 Intra など）は unsupported とする
 - level は固定 libwebrtc の `ParseH264ProfileLevelId` どおりに `level_idc` から決める。`level_idc == 11` かつ `constraint_set3_flag == 1` の表現だけを Level 1b へ normalize し、RFC 6184 が定める `level_idc == 9` の Level 1b 表現は固定 parser が認識せず PeerConnection negotiation を成立させられないため unsupported とする
 - Level 6 / 6.1 / 6.2（`level_idc` 60 / 61 / 62）は固定 libwebrtc の `H264Level` enum に無く unsupported とする
-- Level 1b は通常の Level 1.1 と区別し、Level 1 と Level 1.1 の間に順序付ける（libwebrtc の enum 値 1b=0 < 1=10 < 1.1=11 < ... < 5.2=52 に対応させる）
+- Level 1b は通常の Level 1.1 と区別し、能力順で Level 1 と Level 1.1 の間に順序付ける（ITU-T H.264 Table A-1 の Level 1b は Level 1 と同 FS / MBPS のまま MaxBR が 2 倍であり、libwebrtc の `kLevelConstraints` も Level 1 → Level 1b → Level 1.1 の順に並ぶ。libwebrtc の `H264Level` enum 値 kLevel1_b=0 < kLevel1=10 は level_idc 由来の定数であり能力順ではない）
 - 通常 level は固定 libwebrtc が受理する `level_idc`（10 / 11 / 12 / 13 / 20 / 21 / 22 / 30 / 31 / 32 / 40 / 41 / 42 / 50 / 51 / 52）だけを normalized enum へ変換し、未知の値を単純な整数比較で受理しない
 - 固定 libwebrtc の `H264IsSameProfile` は双方の parse 成功を要求するため、libwebrtc 互換フィルタに一致しない profile / constraint combination は required と incoming が byte-for-byte 一致しても unsupported とする
 
@@ -145,7 +145,7 @@ CI で ffmpeg を起動したり、ネットワークから fixture を取得し
 
 - `src/video_codecs/mp4.rs`
 - `src/video_codecs/h264.rs`（profile-level-id parser。libwebrtc 互換のフィルタを含む）
-- `Cargo.toml`（`shiguredo_mp4` を `2026.5.0-canary.3` 以降、issue 0085 が反映されたバージョンへ更新）
+- `Cargo.toml`（`shiguredo_mp4` を `2026.5.0`、issue 0085 が反映されたバージョンへ更新）
 - `testdata/` の Main Profile fixture
 - `CHANGES.md`
 
@@ -182,3 +182,29 @@ CI で ffmpeg を起動したり、ネットワークから fixture を取得し
 - `cargo clippy --workspace --all-targets -- -D warnings` が成功する
 - `CHANGES.md` の develop セクションに `[FIX]` を追記する
 - production log は英語、コメントとテストの assertion message は日本語にする
+
+## 解決方法
+
+### 実装
+
+- `shiguredo_mp4` を `2026.5.0` に更新し、SPS 解析と `H264ProfileLevelId` の可逆変換は `shiguredo_mp4::bitstream::h264` に寄せた
+- `src/video_codecs/h264.rs` を追加し、固定 libwebrtc 互換の sub-profile / level 判定、`H264TrackConfig`、`h264_required_sdp_format`、`resolve_h264_incoming` を SDK 固有ポリシーとして実装した
+- `Mp4SampleReader::extract_track_info` の H.264 分岐で `avcC` 由来の profile-level-id を抽出し、全 SPS の parse / avcC 一致 / avc1 寸法一致 / PPS header 検証 / libwebrtc 互換フィルタを reader 初期化時に行う。失敗は `Mp4Error::InvalidH264Track` に一本化した
+- `Mp4VideoTrackInfo` に `h264_config` を追加し、sample entry 一貫性検証は `PartialEq` 比較で `avcc_box` 全体と profile-level-id を含めた
+- `Mp4SampleReader::required_sdp_format` の H.264 分岐が `packetization-mode=1` と検証済み `profile-level-id` を返すようにした
+- `Mp4PassthroughVideoCodecCapability::resolve_sdp_format` を H.264 に override し、RFC 6184 Section 8.2.2 に沿って incoming format を検証する。通過時は incoming をそのまま返す
+- ISO/IEC 14496-15 に違反する chroma 拡張欠落の `avcC` は mp4-rs と同様に受理し、再エンコード不能な場合は `avcc_box` を `None` として扱う
+- `Mp4Error` の Display メッセージを英語に統一し、`InvalidAv1Track` / `InvalidH264Track` の公開 rustdoc は Display メッセージ参照に簡潔化した
+- `docs/INPUT_MP4.md` に不正な H.264 トラックの初期化時拒否を追記した
+
+### テスト
+
+- `testdata/red-320x320-h264-main.mp4`（Main Profile Level 2.1）を追加し、reader / required format / negotiation の回帰を確認した
+- 既存 High Profile fixture（`640015`）の profile-level-id 回帰、`h264.rs` の parser / negotiation 単体、合成 MP4 による track 検証と sample entry 一貫性、実 `Mp4PassthroughVideoCodecCapability` 経由の encoder 生成を確認した
+
+### CHANGES.md
+
+- `[CHANGE] Mp4Error::InvalidH264Track を追加する` を追加した
+- `[CHANGE] Mp4Error の Display メッセージを英語に統一する` を追加した
+- `[UPDATE] shiguredo_mp4 を 2026.4.0 から 2026.5.0 に更新する` を追加した
+- `[FIX] MP4 の H.264 トラックで avcC 由来の profile-level-id を SDP capability に反映する` を追加した

@@ -254,7 +254,7 @@ H.264 / H.265 の `b_frame: true` は Sora 側の `sora.conf` で対応する設
 | `Mp4SampleReader` | 常時 | MP4 ファイルからサンプルを取得。`new<P: AsRef<Path>>(path)` で構築 (ファイルベース読み込みで全体をメモリに保持しない)。`len()` / `is_empty()` / `codec_type()` / `passthrough_capability()` を提供。`clone()` で安価に共有でき、複数の `Mp4VideoCapturer` 間で同じファイルを同時に読み出せる (demux とファイル I/O は reader 1 つにつき 1 回・1 スレッドに集約) |
 | `Mp4PassthroughVideoCodecCapability` | 常時 | パススルー用 capability。`Mp4SampleReader::passthrough_capability()` からのみ生成できる |
 | `Mp4VideoCapturer` | 常時 | `Mp4VideoCapturer::new(Mp4SampleReader)` で構築し `video_source()` で `VideoTrackSource` を取得。末尾に達すると先頭に戻ってループ再生する |
-| `Mp4Error` | 常時 | MP4 関連のエラー enum (`Io`, `Demux`, `NoVideoTrack`, `NoVideoSamples`, `UnsupportedVideoCodec`, `InvalidNalLengthSize`, `InputPositionOutOfRange`, `InconsistentSampleTable`, `UnsupportedCompositionTimeOffset`, `InconsistentSampleDescription`)。`Error::Mp4 { source }` に包まれて返る |
+| `Mp4Error` | 常時 | MP4 関連のエラー enum (`Io`, `Demux`, `NoVideoTrack`, `NoVideoSamples`, `UnsupportedVideoCodec`, `InvalidNalLengthSize`, `InputPositionOutOfRange`, `InconsistentSampleTable`, `UnsupportedCompositionTimeOffset`, `InconsistentSampleDescription`, `InvalidAv1Track`, `InvalidH264Track`)。track 検証失敗の詳細は Display メッセージに含まれる。`Error::Mp4 { source }` に包まれて返る |
 | `Error::Mp4 { source: Mp4Error }` | 常時 | `Mp4Error` を source として保持する SDK 共通エラー |
 | `LibcameraVideoCapturer` | `libcamera` | libcamera 経由の映像入力 |
 | `LibcameraVideoCapturerBuilder` | `libcamera` | 上記のビルダー |
@@ -266,6 +266,8 @@ MP4 パススルーの入力制約 (いずれも `Mp4SampleReader::new` がエ�
 - 対応映像コーデックは H.264 / H.265 / VP8 / VP9 / AV1
 - 非ゼロの composition time offset (B フレーム) を含む MP4 は拒否 (`Mp4Error::UnsupportedCompositionTimeOffset`)
 - 途中でサンプルエントリー (コーデック・解像度など) が切り替わる MP4 は拒否 (`Mp4Error::InconsistentSampleDescription`)
+- 不正な H.264 トラックを含む MP4 は拒否 (`Mp4Error::InvalidH264Track`)
+- 不正な AV1 トラックを含む MP4 は拒否 (`Mp4Error::InvalidAv1Track`)
 
 同じ `Mp4VideoCapturer` の `video_source()` を複数の PeerConnection の映像 encoder に渡してはならない
 (debug ビルドでは abort する)。PeerConnection ごとに capturer を分け、各 capturer の `video_source()` を
@@ -583,7 +585,7 @@ if let Some(url) = handle.selected_signaling_url().await? {
 - **ハードウェアコーデックは feature + runtime 両方の条件**: feature 有効化だけでなく GPU / ドライバが揃わないと `*Capability::new()` がエラーを返す。
 - **VPL は Linux 専用**: `vpl` feature は Linux 以外の OS ではコンパイルされず、`VplVideoCodecCapability` と `Error::Vpl` 系のバリアントも Linux 限定。
 - **`VideoTrackSource` は本クレートでは作らない**: `shiguredo_webrtc` 側の capturer / source、もしくは本クレートの `Mp4VideoCapturer` / `LibcameraVideoCapturer` から生成する。
-- **MP4 パススルーの入力制約**: B フレーム (非ゼロ composition time offset) を含む MP4 と、途中でサンプルエントリー (コーデック・解像度など) が切り替わる MP4 は `Mp4SampleReader::new()` が拒否する。
+- **MP4 パススルーの入力制約**: B フレーム (非ゼロ composition time offset) を含む MP4、途中でサンプルエントリー (コーデック・解像度など) が切り替わる MP4、不正な H.264 / AV1 トラックを含む MP4 は `Mp4SampleReader::new()` が拒否する。
 - **`send_message` のラベル制約**: SDK 内部用ラベル（`signaling`、`stats`、`push`、`notify`、`rpc`）および `#` プレフィックスのないラベル、Offer 応答の `data_channels` に含まれていないラベルを渡すと `Error::InvalidDataChannelLabel` を返す。`on_message` は `#` プレフィックスのユーザー定義 DataChannel 専用。
 - **JSON-RPC の id は SDK が管理する**: 利用側が `id` を組み立てる必要はない。`params` の中身だけ渡す。
 - **DataChannel の展開後サイズ上限**: `compress: true` の DataChannel メッセージは zlib 展開後 16 MiB まで。
