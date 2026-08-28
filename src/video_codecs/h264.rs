@@ -88,29 +88,33 @@ enum H264Level {
 }
 
 impl H264Level {
-    /// level の大小比較用の順序値。
+    /// level の能力順での大小比較用の順序値。
     ///
-    /// 固定 libwebrtc の `H264Level` enum 値（kLevel1_b=0, kLevel1=10, kLevel1_1=11, ...）に
-    /// 対応し、Level 1b が Level 1 と Level 1.1 の間に位置する。
-    fn ordinal(self) -> u8 {
+    /// 能力順は ITU-T H.264 Table A-1 の Level 1b が Level 1 と同 FS / MBPS のまま
+    /// MaxBR を 2 倍（128 kbit/s）に引き上げていることに基づき、
+    /// Level 1 < Level 1b < Level 1.1 < ... < Level 5.2 とする。
+    /// 固定 libwebrtc の `kLevelConstraints` 配列も Level 1 → Level 1b → Level 1.1 の順に並ぶ。
+    /// 固定 libwebrtc の `H264Level` enum 値（kLevel1_b=0, kLevel1=10, kLevel1_1=11, ...）は
+    /// level_idc 由来の定数であり、能力順ではない（kLevel1_b=0 は Level 1 より小さい）。
+    fn capability_order(self) -> u8 {
         match self {
-            Self::Level1b => 0,
-            Self::Level1 => 10,
-            Self::Level1_1 => 11,
-            Self::Level1_2 => 12,
-            Self::Level1_3 => 13,
-            Self::Level2 => 20,
-            Self::Level2_1 => 21,
-            Self::Level2_2 => 22,
-            Self::Level3 => 30,
-            Self::Level3_1 => 31,
-            Self::Level3_2 => 32,
-            Self::Level4 => 40,
-            Self::Level4_1 => 41,
-            Self::Level4_2 => 42,
-            Self::Level5 => 50,
-            Self::Level5_1 => 51,
-            Self::Level5_2 => 52,
+            Self::Level1 => 1,
+            Self::Level1b => 2,
+            Self::Level1_1 => 3,
+            Self::Level1_2 => 4,
+            Self::Level1_3 => 5,
+            Self::Level2 => 6,
+            Self::Level2_1 => 7,
+            Self::Level2_2 => 8,
+            Self::Level3 => 9,
+            Self::Level3_1 => 10,
+            Self::Level3_2 => 11,
+            Self::Level4 => 12,
+            Self::Level4_1 => 13,
+            Self::Level4_2 => 14,
+            Self::Level5 => 15,
+            Self::Level5_1 => 16,
+            Self::Level5_2 => 17,
         }
     }
 }
@@ -324,7 +328,7 @@ pub(super) fn resolve_h264_incoming(
     if incoming_parsed.profile != required_parsed.profile {
         return None;
     }
-    if incoming_parsed.level.ordinal() < required_parsed.level.ordinal() {
+    if incoming_parsed.level.capability_order() < required_parsed.level.capability_order() {
         return None;
     }
     Some(incoming.to_owned())
@@ -555,19 +559,20 @@ mod tests {
 
     #[test]
     fn orders_level_1b_between_level_1_and_level_1_1() {
-        // Level 1b は Level 1 と Level 1.1 の間に順序付ける。
+        // Level 1b は能力順で Level 1 と Level 1.1 の間に位置する
+        // （ITU-T H.264 Table A-1 の MaxBR: Level 1 < Level 1b < Level 1.1）。
         assert!(
-            H264Level::Level1b.ordinal() < H264Level::Level1.ordinal(),
-            "Level 1b は Level 1 より小さいはずです"
+            H264Level::Level1.capability_order() < H264Level::Level1b.capability_order(),
+            "Level 1 は Level 1b より小さいはずです"
         );
         assert!(
-            H264Level::Level1.ordinal() < H264Level::Level1_1.ordinal(),
-            "Level 1 は Level 1.1 より小さいはずです"
+            H264Level::Level1b.capability_order() < H264Level::Level1_1.capability_order(),
+            "Level 1b は Level 1.1 より小さいはずです"
         );
-        // 通常 level は libwebrtc の enum 値どおり昇順になる。
+        // 通常 level は能力順で昇順になる。
         let ordered = [
-            H264Level::Level1b,
             H264Level::Level1,
+            H264Level::Level1b,
             H264Level::Level1_1,
             H264Level::Level1_2,
             H264Level::Level1_3,
@@ -586,10 +591,10 @@ mod tests {
         ];
         for pair in ordered.windows(2) {
             assert!(
-                pair[0].ordinal() < pair[1].ordinal(),
+                pair[0].capability_order() < pair[1].capability_order(),
                 "level の順序が崩れています: {:?} < {:?}",
-                pair[0].ordinal(),
-                pair[1].ordinal()
+                pair[0].capability_order(),
+                pair[1].capability_order()
             );
         }
     }
@@ -663,6 +668,44 @@ mod tests {
         assert!(
             resolve_h264_incoming(&required, incoming.as_ref()).is_none(),
             "required より低い level は拒否されるはずです"
+        );
+    }
+
+    #[test]
+    fn resolve_level_1b_negotiation_bidirectional() {
+        // Level 1b は能力順で Level 1 と Level 1.1 の間に位置するため、
+        // required と incoming の Level 1 / 1b / 1.1 の組み合わせで双方向を確認する。
+        // required=1b / incoming=1 は拒否（Level 1 decoder は 1b の MaxBR を満たせない）。
+        let required_1b = h264_format("4d100b"); // Main Level 1b
+        let incoming_1 = h264_format("4d000a"); // Main Level 1
+        assert!(
+            resolve_h264_incoming(&required_1b, incoming_1.as_ref()).is_none(),
+            "required が Level 1b のとき Level 1 は拒否されるはずです"
+        );
+        // required=1 / incoming=1b は受理（1b decoder は Level 1 を decode できる）。
+        let required_1 = h264_format("4d000a"); // Main Level 1
+        let incoming_1b = h264_format("4d100b"); // Main Level 1b
+        let resolved = resolve_h264_incoming(&required_1, incoming_1b.as_ref())
+            .expect("required が Level 1 のとき Level 1b は受理されるはずです");
+        let mut resolved_owned = resolved.clone();
+        let params: std::collections::HashMap<String, String> =
+            resolved_owned.parameters_mut().iter().collect();
+        assert_eq!(
+            params.get("profile-level-id").map(String::as_str),
+            Some("4d100b"),
+            "negotiated format は incoming の profile-level-id を保持するはずです"
+        );
+        // required=1.1 / incoming=1b は拒否（1b decoder は 1.1 を decode できない）。
+        let required_1_1 = h264_format("4d000b"); // Main Level 1.1
+        assert!(
+            resolve_h264_incoming(&required_1_1, incoming_1b.as_ref()).is_none(),
+            "required が Level 1.1 のとき Level 1b は拒否されるはずです"
+        );
+        // required=1b / incoming=1.1 は受理（1.1 decoder は 1b を decode できる）。
+        let incoming_1_1 = h264_format("4d000b"); // Main Level 1.1
+        assert!(
+            resolve_h264_incoming(&required_1b, incoming_1_1.as_ref()).is_some(),
+            "required が Level 1b のとき Level 1.1 は受理されるはずです"
         );
     }
 
