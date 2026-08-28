@@ -43,7 +43,7 @@ issue 0140 で reader 由来の required format に一本化され、`Mp4SampleR
 - issue 0142（sample entry 一貫性）: 全 `sample.sample_entry` の一貫性検証（`codec_type` / `width` / `height` / `nal_length_size` / `parameter_sets` / `timescale`）が動作している
 - issue 0143（preference validation + factory pass-through）: `SoraVideoEncoderFactory::create` の `resolve_sdp_format` pass-through が回帰テストで固定され、`validate_video_codec_preference` の bare `SdpVideoFormat` 検証が削除されて `is_supported` の結果が preference validation の source of truth になっている
 
-加えて、`shiguredo_mp4` を `2026.5.0-canary.3` 以降（mp4-rs の issue 0085 が反映されたバージョン）に更新し、`bitstream::h264` モジュールを前提とする。
+加えて、`shiguredo_mp4` を `2026.5.0`（mp4-rs の issue 0085 が反映されたバージョン）に更新し、`bitstream::h264` モジュールを前提とする。
 
 - `parse_sps` / `H264Sps`: SPS を RBSP パースして `profile_level_id` / `width` / `height` を返すため、`avcC` との一致検証と寸法検証に利用する
 - `H264ProfileLevelId`: SPS 先頭 3 byte（`profile_idc` / `profile_iop` / `level_idc`）を検証せず保持する。issue 0085 で `from_hex` / `to_hex`（ちょうど 6 桁 hex との可逆変換）だけが残り、RFC 6184 Table 5 の正規化 API（`normalize` / `H264Profile` / `H264Level` / `H264ProfileLevel` / `parse_profile_level_id_hex`）は削除された
@@ -145,7 +145,7 @@ CI で ffmpeg を起動したり、ネットワークから fixture を取得し
 
 - `src/video_codecs/mp4.rs`
 - `src/video_codecs/h264.rs`（profile-level-id parser。libwebrtc 互換のフィルタを含む）
-- `Cargo.toml`（`shiguredo_mp4` を `2026.5.0-canary.3` 以降、issue 0085 が反映されたバージョンへ更新）
+- `Cargo.toml`（`shiguredo_mp4` を `2026.5.0`、issue 0085 が反映されたバージョンへ更新）
 - `testdata/` の Main Profile fixture
 - `CHANGES.md`
 
