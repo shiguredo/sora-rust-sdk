@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-08-13
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-28
 - Branch: feature/fix-mp4-h264-profile-level-id-v2
 - Polished: {YYYY-MM-DD}
 
@@ -182,3 +182,29 @@ CI で ffmpeg を起動したり、ネットワークから fixture を取得し
 - `cargo clippy --workspace --all-targets -- -D warnings` が成功する
 - `CHANGES.md` の develop セクションに `[FIX]` を追記する
 - production log は英語、コメントとテストの assertion message は日本語にする
+
+## 解決方法
+
+### 実装
+
+- `shiguredo_mp4` を `2026.5.0` に更新し、SPS 解析と `H264ProfileLevelId` の可逆変換は `shiguredo_mp4::bitstream::h264` に寄せた
+- `src/video_codecs/h264.rs` を追加し、固定 libwebrtc 互換の sub-profile / level 判定、`H264TrackConfig`、`h264_required_sdp_format`、`resolve_h264_incoming` を SDK 固有ポリシーとして実装した
+- `Mp4SampleReader::extract_track_info` の H.264 分岐で `avcC` 由来の profile-level-id を抽出し、全 SPS の parse / avcC 一致 / avc1 寸法一致 / PPS header 検証 / libwebrtc 互換フィルタを reader 初期化時に行う。失敗は `Mp4Error::InvalidH264Track` に一本化した
+- `Mp4VideoTrackInfo` に `h264_config` を追加し、sample entry 一貫性検証は `PartialEq` 比較で `avcc_box` 全体と profile-level-id を含めた
+- `Mp4SampleReader::required_sdp_format` の H.264 分岐が `packetization-mode=1` と検証済み `profile-level-id` を返すようにした
+- `Mp4PassthroughVideoCodecCapability::resolve_sdp_format` を H.264 に override し、RFC 6184 Section 8.2.2 に沿って incoming format を検証する。通過時は incoming をそのまま返す
+- ISO/IEC 14496-15 に違反する chroma 拡張欠落の `avcC` は mp4-rs と同様に受理し、再エンコード不能な場合は `avcc_box` を `None` として扱う
+- `Mp4Error` の Display メッセージを英語に統一し、`InvalidAv1Track` / `InvalidH264Track` の公開 rustdoc は Display メッセージ参照に簡潔化した
+- `docs/INPUT_MP4.md` に不正な H.264 トラックの初期化時拒否を追記した
+
+### テスト
+
+- `testdata/red-320x320-h264-main.mp4`（Main Profile Level 2.1）を追加し、reader / required format / negotiation の回帰を確認した
+- 既存 High Profile fixture（`640015`）の profile-level-id 回帰、`h264.rs` の parser / negotiation 単体、合成 MP4 による track 検証と sample entry 一貫性、実 `Mp4PassthroughVideoCodecCapability` 経由の encoder 生成を確認した
+
+### CHANGES.md
+
+- `[CHANGE] Mp4Error::InvalidH264Track を追加する` を追加した
+- `[CHANGE] Mp4Error の Display メッセージを英語に統一する` を追加した
+- `[UPDATE] shiguredo_mp4 を 2026.4.0 から 2026.5.0 に更新する` を追加した
+- `[FIX] MP4 の H.264 トラックで avcC 由来の profile-level-id を SDP capability に反映する` を追加した
