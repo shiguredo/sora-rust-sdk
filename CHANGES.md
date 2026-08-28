@@ -20,6 +20,8 @@
   - @sile
 - [ADD] Mp4SampleReader を複数の Mp4VideoCapturer で共有できるようにする
   - @sile
+- [UPDATE] shiguredo_mp4 を 2026.4.0 から 2026.5.0 に更新する
+  - @sile
 - [FIX] MP4 AV1 の `configOBUs` を各 sync sample の先頭に付与するようにする
   - 今までは `configOBUs` を破棄しており、Sequence Header OBU や静的 Metadata OBU が sync sample に含まれない入力では受信側が decode できない payload になっていた
   - `Mp4SampleReader` 初期化時に AV1 track の OBU 列と Sequence Header 一貫性 / RTP packetizer 順序 / random access 条件を検証し、不正な入力は `Mp4Error::InvalidAv1Track` で拒否する
