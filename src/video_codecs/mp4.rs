@@ -102,19 +102,15 @@ pub enum Mp4Error {
         /// 相違が検出されたビデオサンプルの 0 始まりインデックス。
         index: usize,
     },
-    /// AV1 track の bitstream / sample entry の検証に失敗した。
+    // InvalidAv1Track / InvalidH264Track は track 検証失敗を variant 細分類せず
+    // String メッセージ 1 本で報告する。詳細は Display メッセージを参照する。
+    /// AV1 トラックが MP4 パススルー送信の要件を満たさない。
     ///
-    /// `configOBUs` の parse、sync sample 条件、Sequence Header の一貫性、
-    /// RTP packetizer 順序などを Mp4SampleReader 初期化時に検証する。
-    /// エラー variant による細分類は行わず、文脈（sample index、OBU 種別、
-    /// underlying の parse エラー理由）を含むメッセージで報告する。
+    /// [`Mp4SampleReader::new`] の初期化時に返る。拒否理由の詳細は Display メッセージに含まれる。
     InvalidAv1Track(String),
-    /// H.264 track の bitstream / sample entry の検証に失敗した。
+    /// H.264 トラックが MP4 パススルー送信の要件を満たさない。
     ///
-    /// 空の SPS / PPS リスト、SPS のパース失敗、SPS と `avcC` の profile-level-id / 寸法の
-    /// 不一致、PPS の NAL type 不正、固定 libwebrtc が認識しない profile / level などを
-    /// Mp4SampleReader 初期化時に検証する。エラー variant による細分類は行わず、
-    /// 文脈（SPS index、相違内容、underlying の parse エラー理由）を含むメッセージで報告する。
+    /// [`Mp4SampleReader::new`] の初期化時に返る。拒否理由の詳細は Display メッセージに含まれる。
     InvalidH264Track(String),
 }
 
@@ -567,9 +563,7 @@ impl Mp4SampleReader {
 
     /// SampleEntry からコーデック種別、解像度、parameter sets を抽出する。
     ///
-    /// H.264: AvccBox から SPS / PPS を Annex B 形式で取得し、SPS と avcC の
-    /// profile-level-id / 寸法の一致と、固定 libwebrtc が認識する profile / level
-    /// であることを検証する。
+    /// H.264: AvccBox から SPS / PPS を Annex B 形式で取得し、track 検証を行う。
     /// H.265: HvccBox から VPS/SPS/PPS を Annex B 形式で取得。
     /// AV1: `av1C` の AV1CodecConfigurationRecord と `configOBUs` を保持する。
     /// VP8/VP9: parameter sets は不要 (フレームデータに内包されている)。
