@@ -18,6 +18,10 @@
 - [CHANGE] `Mp4Error::InvalidH264Track` を追加する
   - H.264 track 検証の失敗は文脈入りのメッセージで報告する
   - @sile
+- [CHANGE] `Mp4Error` の Display メッセージを英語に統一する
+  - 既存 variant の日本語メッセージを英語に置き換える
+  - `InvalidAv1Track` の内部メッセージも英語にする
+  - @sile
 - [ADD] Mp4SampleReader を複数の Mp4VideoCapturer で共有できるようにする
   - @sile
 - [UPDATE] shiguredo_mp4 を 2026.4.0 から 2026.5.0 に更新する

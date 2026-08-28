@@ -132,10 +132,8 @@ pub(super) fn validate_av1_track(
     mut read_sample: impl FnMut(usize) -> Result<Vec<u8>>,
 ) -> Result<()> {
     // 1. configOBUs を parse し、Sequence Header (存在時) の payload / fields を確定する。
-    let config_obus =
-        parse_obus(&av1_config.config_obus, Av1ObuParseContext::ConfigObus).map_err(|e| {
-            Mp4Error::InvalidAv1Track(format!("configOBUs の OBU 解析に失敗しました: {e:?}"))
-        })?;
+    let config_obus = parse_obus(&av1_config.config_obus, Av1ObuParseContext::ConfigObus)
+        .map_err(|e| Mp4Error::InvalidAv1Track(format!("failed to parse configOBUs: {e:?}")))?;
 
     // configOBUs の Sequence Header は最大 1 個で、存在する場合は先頭 OBU でなければならない。
     // mp4-rs の parse_obus はこの制約を検証しないため、返却された OBU 列から SDK 側で確認する。
@@ -151,18 +149,18 @@ pub(super) fn validate_av1_track(
         [first] => {
             if *first != 0 {
                 return Err(Mp4Error::InvalidAv1Track(format!(
-                    "configOBUs の Sequence Header OBU が先頭ではありません: sh_index={first}"
+                    "configOBUs Sequence Header OBU is not first: sh_index={first}"
                 )));
             }
         }
         [first, ..] => {
             if *first != 0 {
                 return Err(Mp4Error::InvalidAv1Track(format!(
-                    "configOBUs の Sequence Header OBU が先頭ではありません: sh_index={first}"
+                    "configOBUs Sequence Header OBU is not first: sh_index={first}"
                 )));
             }
             return Err(Mp4Error::InvalidAv1Track(
-                "configOBUs に Sequence Header OBU が複数存在します".to_string(),
+                "configOBUs contain multiple Sequence Header OBUs".to_string(),
             ));
         }
     }
@@ -176,18 +174,18 @@ pub(super) fn validate_av1_track(
         Some(obu) => {
             let fields = parse_sequence_header(obu.payload).map_err(|e| {
                 Mp4Error::InvalidAv1Track(format!(
-                    "configOBUs 内 Sequence Header の解析に失敗しました: {e:?}"
+                    "failed to parse Sequence Header in configOBUs: {e:?}"
                 ))
             })?;
             if !has_supported_operating_points(&fields) {
                 return Err(Mp4Error::InvalidAv1Track(format!(
-                    "configOBUs 内 Sequence Header が単一 operating point ではありません: operating_points_cnt_minus_1={} operating_point_idc_0={}",
+                    "configOBUs Sequence Header is not a single operating point: operating_points_cnt_minus_1={} operating_point_idc_0={}",
                     fields.operating_points_cnt_minus_1, fields.operating_point_idc_0
                 )));
             }
             if !sequence_header_matches_av1c(&fields, av1_config) {
                 return Err(Mp4Error::InvalidAv1Track(
-                    "configOBUs 内 Sequence Header と av1C が一致しません".to_string(),
+                    "configOBUs Sequence Header does not match av1C".to_string(),
                 ));
             }
             Some((obu.payload.to_vec(), fields))
@@ -198,13 +196,13 @@ pub(super) fn validate_av1_track(
     // 2. sync sample 要件を確認する。sample data を読む前に安価に判定できるチェックを先に。
     if !is_keyframes.iter().any(|k| *k) {
         return Err(Mp4Error::InvalidAv1Track(
-            "AV1 トラックに sync sample がありません".to_string(),
+            "AV1 track has no sync sample".to_string(),
         ));
     }
     // samples が空なら呼び出し側 (NoVideoSamples) で既に弾かれている前提。
     if !is_keyframes[0] {
         return Err(Mp4Error::InvalidAv1Track(
-            "AV1 トラックの先頭 sample が sync sample ではありません".to_string(),
+            "first sample of AV1 track is not a sync sample".to_string(),
         ));
     }
 
@@ -230,7 +228,7 @@ pub(super) fn validate_av1_track(
         let bytes = read_sample(sample_index)?;
         let sample_obus = parse_obus(&bytes, Av1ObuParseContext::Sample).map_err(|e| {
             Mp4Error::InvalidAv1Track(format!(
-                "sample={sample_index} の OBU 解析に失敗しました: {e:?}"
+                "failed to parse OBUs in sample={sample_index}: {e:?}"
             ))
         })?;
 
@@ -251,18 +249,18 @@ pub(super) fn validate_av1_track(
                     }
                     let fields = parse_sequence_header(obu.payload).map_err(|e| {
                         Mp4Error::InvalidAv1Track(format!(
-                            "sample={sample_index} 内 Sequence Header の解析に失敗しました: {e:?}"
+                            "failed to parse Sequence Header in sample={sample_index}: {e:?}"
                         ))
                     })?;
                     if !has_supported_operating_points(&fields) {
                         return Err(Mp4Error::InvalidAv1Track(format!(
-                            "sample={sample_index} 内 Sequence Header が単一 operating point ではありません: operating_points_cnt_minus_1={} operating_point_idc_0={}",
+                            "Sequence Header in sample={sample_index} is not a single operating point: operating_points_cnt_minus_1={} operating_point_idc_0={}",
                             fields.operating_points_cnt_minus_1, fields.operating_point_idc_0
                         )));
                     }
                     if !sequence_header_matches_av1c(&fields, av1_config) {
                         return Err(Mp4Error::InvalidAv1Track(format!(
-                            "sample={sample_index} 内 Sequence Header と av1C が一致しません"
+                            "Sequence Header in sample={sample_index} does not match av1C"
                         )));
                     }
                     // payload 一貫性: config permanent 優先、なければ per-CVS。
@@ -275,7 +273,7 @@ pub(super) fn validate_av1_track(
                         Some(b) => {
                             if obu.payload != b {
                                 return Err(Mp4Error::InvalidAv1Track(format!(
-                                    "sample={sample_index} 内 Sequence Header payload が同一 coded video sequence 内の基準と一致しません"
+                                    "Sequence Header payload in sample={sample_index} does not match the baseline in the same coded video sequence"
                                 )));
                             }
                         }
@@ -297,13 +295,13 @@ pub(super) fn validate_av1_track(
                         // Frame 系 OBU 自体が無い sync sample も post-checks で拒否する。
                         let prefix = parse_frame_header_prefix(obu.payload, &sh).map_err(|e| {
                             Mp4Error::InvalidAv1Track(format!(
-                                "sample={sample_index} 内 Frame Header の解析に失敗しました: {e:?}"
+                                "failed to parse Frame Header in sample={sample_index}: {e:?}"
                             ))
                         })?;
                         match prefix {
                             Av1FrameHeaderPrefix::ShowExistingFrame => {
                                 return Err(Mp4Error::InvalidAv1Track(format!(
-                                    "sync sample の show_existing_frame が 1 です: sample={sample_index}"
+                                    "sync sample has show_existing_frame=1: sample={sample_index}"
                                 )));
                             }
                             Av1FrameHeaderPrefix::NewFrame {
@@ -312,13 +310,13 @@ pub(super) fn validate_av1_track(
                             } => {
                                 if frame_type != Av1FrameType::Key {
                                     return Err(Mp4Error::InvalidAv1Track(format!(
-                                        "sync sample の frame_type が KEY_FRAME ではありません: sample={sample_index} frame_type={}",
+                                        "sync sample frame_type is not KEY_FRAME: sample={sample_index} frame_type={}",
                                         av1_frame_type_name(frame_type)
                                     )));
                                 }
                                 if !show_frame {
                                     return Err(Mp4Error::InvalidAv1Track(format!(
-                                        "sync sample の show_frame が 0 です: sample={sample_index}"
+                                        "sync sample has show_frame=0: sample={sample_index}"
                                     )));
                                 }
                             }
@@ -332,19 +330,19 @@ pub(super) fn validate_av1_track(
         if *is_keyframe {
             let sh_index = first_sh_index.ok_or_else(|| {
                 Mp4Error::InvalidAv1Track(format!(
-                    "sync sample が Sequence Header OBU を含みません: sample={sample_index}"
+                    "sync sample does not contain a Sequence Header OBU: sample={sample_index}"
                 ))
             })?;
             // Binding v1.3.0 Section 2.4: sync sample は RAP であり、最初の frame が
             // Key Frame かつ show_frame=1。Frame Header / Frame が無いと RAP を検証できない。
             let fr_index = first_frame_index.ok_or_else(|| {
                 Mp4Error::InvalidAv1Track(format!(
-                    "sync sample に Frame Header / Frame OBU がありません: sample={sample_index}"
+                    "sync sample has no Frame Header / Frame OBU: sample={sample_index}"
                 ))
             })?;
             if sh_index > fr_index {
                 return Err(Mp4Error::InvalidAv1Track(format!(
-                    "sync sample で Sequence Header が最初の Frame より後に現れます: sample={sample_index}"
+                    "Sequence Header appears after the first Frame in sync sample: sample={sample_index}"
                 )));
             }
 
@@ -360,7 +358,7 @@ pub(super) fn validate_av1_track(
                 Some(Av1ObuType::SequenceHeader) => {}
                 Some(t) => {
                     return Err(Mp4Error::InvalidAv1Track(format!(
-                        "RTP 送信対象の最初の OBU が Sequence Header ではありません: sample={sample_index} first_obu_type={}",
+                        "first RTP payload OBU is not a Sequence Header: sample={sample_index} first_obu_type={}",
                         av1_obu_type_name(t)
                     )));
                 }
@@ -369,7 +367,7 @@ pub(super) fn validate_av1_track(
                     // 直前の SH 欠如で既に「SH がない」条件に落ちる。
                     // ここには到達しない想定だが、defensive に扱う。
                     return Err(Mp4Error::InvalidAv1Track(format!(
-                        "sync sample が Sequence Header OBU を含みません: sample={sample_index}"
+                        "sync sample does not contain a Sequence Header OBU: sample={sample_index}"
                     )));
                 }
             }
@@ -847,13 +845,13 @@ mod tests {
         // sync sample が 1 件もない track。
         let config = av1_track_config_for_reduced_still(Vec::new());
         let result = validate_av1_samples(vec![(sync_sample.clone(), false)], &config);
-        assert_invalid_av1_track(&result, "sync sample がありません");
+        assert_invalid_av1_track(&result, "has no sync sample");
 
         // 先頭 sample が sync sample でない track。
         let non_sync_sample = make_obu(OBU_TYPE_FRAME, &[]);
         let result =
             validate_av1_samples(vec![(non_sync_sample, false), (sync_sample, true)], &config);
-        assert_invalid_av1_track(&result, "先頭 sample が sync sample ではありません");
+        assert_invalid_av1_track(&result, "first sample of AV1 track is not a sync sample");
     }
 
     /// sync sample が Sequence Header OBU を含まない場合と、
@@ -866,14 +864,14 @@ mod tests {
         // Frame OBU のみ (SH なし) の sync sample。
         let sample_bytes = make_obu(OBU_TYPE_FRAME, &[]);
         let result = validate_av1_samples(vec![(sample_bytes, true)], &config);
-        assert_invalid_av1_track(&result, "Sequence Header OBU を含みません");
+        assert_invalid_av1_track(&result, "does not contain a Sequence Header OBU");
 
         // Frame 先、SH 後の逆順で並べた sync sample。
         let mut reversed = Vec::new();
         reversed.extend_from_slice(&make_obu(OBU_TYPE_FRAME, &[]));
         reversed.extend_from_slice(&make_obu(OBU_TYPE_SEQUENCE_HEADER, &sh_payload));
         let result = validate_av1_samples(vec![(reversed, true)], &config);
-        assert_invalid_av1_track(&result, "Sequence Header が最初の Frame より後に現れます");
+        assert_invalid_av1_track(&result, "appears after the first Frame");
     }
 
     /// sync sample に Frame Header / Frame OBU が無いと RAP を検証できないので拒否する。
@@ -883,7 +881,7 @@ mod tests {
         let sample_bytes = make_obu(OBU_TYPE_SEQUENCE_HEADER, &sh_payload);
         let config = av1_track_config_for_reduced_still(Vec::new());
         let result = validate_av1_samples(vec![(sample_bytes, true)], &config);
-        assert_invalid_av1_track(&result, "Frame Header / Frame OBU がありません");
+        assert_invalid_av1_track(&result, "has no Frame Header / Frame OBU");
     }
 
     /// configOBUs || sample の連結で Temporal Delimiter / Padding を飛ばした先頭が
@@ -905,10 +903,7 @@ mod tests {
 
         let config = av1_track_config_for_reduced_still(Vec::new());
         let result = validate_av1_samples(vec![(sample_bytes, true)], &config);
-        assert_invalid_av1_track(
-            &result,
-            "RTP 送信対象の最初の OBU が Sequence Header ではありません",
-        );
+        assert_invalid_av1_track(&result, "first RTP payload OBU is not a Sequence Header");
         assert_invalid_av1_track(&result, "metadata");
     }
 
@@ -925,7 +920,7 @@ mod tests {
         config.seq_profile = 1; // 意図的に不一致にする
 
         let result = validate_av1_samples(vec![(sample_bytes, true)], &config);
-        assert_invalid_av1_track(&result, "Sequence Header と av1C が一致しません");
+        assert_invalid_av1_track(&result, "does not match av1C");
     }
 
     /// configOBUs の Sequence Header が複数存在する場合と、先頭 OBU でない場合を拒否する。
@@ -942,7 +937,7 @@ mod tests {
         config_obus.extend_from_slice(&make_obu(OBU_TYPE_SEQUENCE_HEADER, &sh_payload));
         let config = av1_track_config_for_reduced_still(config_obus);
         let result = validate_av1_samples(vec![(sample_bytes.clone(), true)], &config);
-        assert_invalid_av1_track(&result, "Sequence Header OBU が複数存在します");
+        assert_invalid_av1_track(&result, "multiple Sequence Header OBUs");
 
         // configOBUs の SH が先頭でない (TD が先行)。
         let mut config_obus = Vec::new();
@@ -950,7 +945,7 @@ mod tests {
         config_obus.extend_from_slice(&make_obu(OBU_TYPE_SEQUENCE_HEADER, &sh_payload));
         let config = av1_track_config_for_reduced_still(config_obus);
         let result = validate_av1_samples(vec![(sample_bytes, true)], &config);
-        assert_invalid_av1_track(&result, "Sequence Header OBU が先頭ではありません");
+        assert_invalid_av1_track(&result, "is not first");
     }
 
     /// 複数 operating point と非 0 の `operating_point_idc[0]` を拒否する。
@@ -968,7 +963,7 @@ mod tests {
         let config_obus = make_obu(OBU_TYPE_SEQUENCE_HEADER, &make_full_sh_payload(1, 0, 0));
         let config = av1_track_config_for_reduced_still(config_obus);
         let result = validate_av1_samples(vec![(sample_bytes.clone(), true)], &config);
-        assert_invalid_av1_track(&result, "単一 operating point ではありません");
+        assert_invalid_av1_track(&result, "not a single operating point");
 
         // sample 内 SH が非 0 の `operating_point_idc[0]` を持つ場合。
         let mut sample_bytes = Vec::new();
@@ -979,7 +974,7 @@ mod tests {
         sample_bytes.extend_from_slice(&make_obu(OBU_TYPE_FRAME, &[]));
         let config = av1_track_config_for_reduced_still(Vec::new());
         let result = validate_av1_samples(vec![(sample_bytes, true)], &config);
-        assert_invalid_av1_track(&result, "単一 operating point ではありません");
+        assert_invalid_av1_track(&result, "not a single operating point");
     }
 
     /// 同一 coded video sequence 内で Sequence Header payload が食い違うと拒否する。
@@ -1013,7 +1008,7 @@ mod tests {
         let result = validate_av1_samples(vec![(sample0, true), (sample1, false)], &config);
         assert_invalid_av1_track(
             &result,
-            "Sequence Header payload が同一 coded video sequence 内の基準と一致しません",
+            "does not match the baseline in the same coded video sequence",
         );
     }
 

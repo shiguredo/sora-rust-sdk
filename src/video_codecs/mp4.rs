@@ -121,17 +121,17 @@ pub enum Mp4Error {
 impl std::fmt::Display for Mp4Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Io(err) => write!(f, "読み込みに失敗しました: {err}"),
-            Self::Demux(err) => write!(f, "デマルチプレクスに失敗しました: {err}"),
-            Self::NoVideoTrack => f.write_str("映像トラックがありません"),
-            Self::NoVideoSamples => f.write_str("映像サンプルがありません"),
+            Self::Io(err) => write!(f, "failed to read: {err}"),
+            Self::Demux(err) => write!(f, "failed to demux: {err}"),
+            Self::NoVideoTrack => f.write_str("no video track"),
+            Self::NoVideoSamples => f.write_str("no video samples"),
             Self::UnsupportedVideoCodec => {
-                f.write_str("映像コーデックが未対応です (H.264, H.265, VP8, VP9, AV1 のみ対応)")
+                f.write_str("unsupported video codec (H.264, H.265, VP8, VP9, AV1 only)")
             }
             Self::InvalidNalLengthSize(size) => {
                 write!(
                     f,
-                    "NAL 長プレフィックスのバイト数が不正です: {size} (1, 2, 4 のみ有効)"
+                    "invalid NAL length prefix size: {size} (only 1, 2, or 4 are valid)"
                 )
             }
             Self::InputPositionOutOfRange {
@@ -140,7 +140,7 @@ impl std::fmt::Display for Mp4Error {
             } => {
                 write!(
                     f,
-                    "入力位置がファイルサイズ範囲外です: position={position}, file_size={file_size}"
+                    "input position is out of file size range: position={position}, file_size={file_size}"
                 )
             }
             Self::InconsistentSampleTable {
@@ -151,23 +151,23 @@ impl std::fmt::Display for Mp4Error {
             } => {
                 write!(
                     f,
-                    "サンプルテーブルに不整合があります: sample={index} offset={offset} size={size} file_size={file_size}"
+                    "inconsistent sample table: sample={index} offset={offset} size={size} file_size={file_size}"
                 )
             }
             Self::UnsupportedCompositionTimeOffset { index, codec_type } => {
                 write!(
                     f,
-                    "サンプルの composition time offset が非ゼロです: sample={index} codec={codec_type:?} (B フレームには未対応)"
+                    "sample composition time offset is non-zero: sample={index} codec={codec_type:?} (B frames are not supported)"
                 )
             }
             Self::InconsistentSampleDescription { index } => {
                 write!(
                     f,
-                    "サンプルエントリーが最初の設定と一致しません: sample={index}"
+                    "sample description does not match the first entry: sample={index}"
                 )
             }
             Self::InvalidAv1Track(err) => {
-                write!(f, "AV1 トラックの検証に失敗しました: {err}")
+                write!(f, "AV1 track validation failed: {err}")
             }
             Self::InvalidH264Track(err) => {
                 write!(f, "H.264 track validation failed: {err}")
