@@ -428,7 +428,7 @@ impl Mp4SampleReader {
         // 全サンプルを順次読み出す。
         // 最初のサンプルの sample_entry からコーデック情報 (解像度、parameter sets 等) を取得し、
         // 以後の Some(sample_entry) も extract_track_info に通して、
-        // `Mp4VideoTrackInfo` 全体 (`av1_config` を含む) の値等値を検証する。
+        // `Mp4VideoTrackInfo` 全体 (`h264_config` / `av1_config` を含む) の値等値を検証する。
         // サンプルエントリーが途中で切り替わる MP4 を
         // 気付かれないまま最初の設定のまま送出しないためのゲート。
         let mut track_info: Option<Mp4VideoTrackInfo> = None;
@@ -567,7 +567,9 @@ impl Mp4SampleReader {
 
     /// SampleEntry からコーデック種別、解像度、parameter sets を抽出する。
     ///
-    /// H.264: AvccBox から SPS/PPS を Annex B 形式で取得。
+    /// H.264: AvccBox から SPS / PPS を Annex B 形式で取得し、SPS と avcC の
+    /// profile-level-id / 寸法の一致と、固定 libwebrtc が認識する profile / level
+    /// であることを検証する。
     /// H.265: HvccBox から VPS/SPS/PPS を Annex B 形式で取得。
     /// AV1: `av1C` の AV1CodecConfigurationRecord と `configOBUs` を保持する。
     /// VP8/VP9: parameter sets は不要 (フレームデータに内包されている)。
@@ -867,11 +869,15 @@ impl Mp4SampleReader {
     ///   `tier` を 10 進文字列で設定する（[`av1_required_sdp_format`] 参照）
     fn required_sdp_format(&self) -> SdpVideoFormat {
         match self.inner.track_info.codec_type {
-            // H.264 track は reader 初期化時に h264_config が必ず設定される
-            // （`extract_track_info` の不変条件。欠落は `h264_required_sdp_format` が
-            // panic するため、plid 無しの bare H264 を広告することはない）。
             VideoCodecType::H264 => {
-                h264_required_sdp_format(self.inner.track_info.h264_config.as_ref())
+                // H.264 track は `extract_track_info` で h264_config が必ず設定される。
+                let config = self
+                    .inner
+                    .track_info
+                    .h264_config
+                    .as_ref()
+                    .expect("BUG: H.264 track must have h264_config");
+                h264_required_sdp_format(config)
             }
             VideoCodecType::H265 => SdpVideoFormat::new("H265"),
             VideoCodecType::Vp8 => SdpVideoFormat::new("VP8"),
@@ -1224,7 +1230,8 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
     /// - `level-idx` と `tier` は、MP4 のビットストリームが要求する値が受信側の能力以下かを調べる。
     /// - パラメーターの解析と範囲検証は `resolve_av1_incoming()` が行う。
     ///
-    /// H.264 では、RFC 6184 Section 8.1 の profile-level-id negotiation を検証する。
+    /// H.264 では、RFC 6184 Section 8.2.2 の Offer/Answer に沿って
+    /// profile-level-id / packetization-mode を検証する。
     /// - `packetization-mode` は 1 のみ受理し、`profile-level-id` の無い format は拒否する。
     /// - sub-profile は required (bitstream 実値) と完全一致を要求し、
     ///   受信側の level が required 以上の場合だけ受理する。
@@ -1453,10 +1460,9 @@ mod tests {
         }
     }
 
-    /// H.264 の fixture MP4 を一時ファイルに書き出して `Mp4SampleReader` を生成する。
+    /// H.264 の fixture バイト列を一時ファイルに書き出して `Mp4SampleReader` を生成する。
     /// 返される `FixtureFile` が drop されるまでファイルは残る。
-    fn h264_reader_from_fixture(tag: &str) -> (Mp4SampleReader, FixtureFile) {
-        let fixture = include_bytes!("../../testdata/red-320x320-h264.mp4");
+    fn h264_reader_from_bytes(tag: &str, fixture: &[u8]) -> (Mp4SampleReader, FixtureFile) {
         let tmp_name = format!(
             "sora-sdk-mp4-passthrough-{}-{}-{}.mp4",
             tag,
@@ -1470,6 +1476,11 @@ mod tests {
         std::fs::write(&path, fixture).expect("一時 fixture の書き込みに失敗しました");
         let reader = Mp4SampleReader::new(&path).expect("fixture MP4 のパースに失敗しました");
         (reader, FixtureFile { path })
+    }
+
+    /// High Profile fixture から `Mp4SampleReader` を生成する。
+    fn h264_reader_from_fixture(tag: &str) -> (Mp4SampleReader, FixtureFile) {
+        h264_reader_from_bytes(tag, include_bytes!("../../testdata/red-320x320-h264.mp4"))
     }
 
     #[test]
@@ -1501,6 +1512,8 @@ mod tests {
             Some("1"),
             "H.264 required format は packetization-mode=1 を保持するはずです"
         );
+        // profile-level-id の広告内容は
+        // `required_format_advertises_h264_profile_level_id` で検証する。
 
         // Decoder 側はパススルー送信のみなので空。
         assert!(
@@ -2758,20 +2771,10 @@ mod tests {
     ///   level_idc=0x15 (avcC と一致する)
     /// - B frame を含まない (`-bf 0` の I / P のみ)
     fn h264_main_reader_from_fixture(tag: &str) -> (Mp4SampleReader, FixtureFile) {
-        let fixture = include_bytes!("../../testdata/red-320x320-h264-main.mp4");
-        let tmp_name = format!(
-            "sora-sdk-mp4-passthrough-{}-{}-{}.mp4",
+        h264_reader_from_bytes(
             tag,
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("システム時刻は UNIX_EPOCH より後である必要があります")
-                .as_nanos()
-        );
-        let path = std::env::temp_dir().join(tmp_name);
-        std::fs::write(&path, fixture).expect("一時 fixture の書き込みに失敗しました");
-        let reader = Mp4SampleReader::new(&path).expect("fixture MP4 のパースに失敗しました");
-        (reader, FixtureFile { path })
+            include_bytes!("../../testdata/red-320x320-h264-main.mp4"),
+        )
     }
 
     /// 抽出された H.264 profile-level-id を 6 桁 hex で返す。
@@ -2908,6 +2911,20 @@ mod tests {
         );
     }
 
+    /// red-320x320-h264-main.mp4 (Main Profile Level 2.1) の SPS / PPS。
+    const H264_MAIN_SPS: &[u8] = &[
+        0x67, 0x4d, 0x40, 0x15, 0xd9, 0x01, 0x40, 0xa6, 0xc0, 0x44, 0x00, 0x00, 0x03, 0x00, 0x04,
+        0x00, 0x00, 0x03, 0x00, 0xc8, 0x3c, 0x58, 0xb9, 0x20,
+    ];
+    const H264_MAIN_PPS: &[u8] = &[0x68, 0xeb, 0xc3, 0xcb, 0x20];
+
+    /// red-320x320-h264.mp4 (High Profile Level 2.1) の SPS / PPS。
+    const H264_HIGH_SPS: &[u8] = &[
+        0x67, 0x64, 0x00, 0x15, 0xac, 0xb2, 0x02, 0x81, 0x4d, 0x80, 0x88, 0x00, 0x00, 0x03, 0x00,
+        0x08, 0x00, 0x00, 0x03, 0x01, 0x90, 0x78, 0xb1, 0x72, 0x40,
+    ];
+    const H264_HIGH_PPS: &[u8] = &[0x68, 0xeb, 0xc3, 0xcb, 0x22, 0xc0];
+
     /// SPS / PPS / avcC header から H.264 の SampleEntry を構築する。
     ///
     /// `chroma_format` が `Some` のときは、ISO/IEC 14496-15 の非 66 / 77 / 88
@@ -3032,12 +3049,8 @@ mod tests {
     /// `Mp4VideoTrackInfo::h264_config::avcc_box` の比較が相違を検出する。
     #[test]
     fn sample_reader_rejects_h264_sample_description_with_different_avcc_box() {
-        // red-320x320-h264.mp4 (High Profile Level 2.1) の SPS / PPS。
-        let sps: Vec<u8> = vec![
-            0x67, 0x64, 0x00, 0x15, 0xac, 0xb2, 0x02, 0x81, 0x4d, 0x80, 0x88, 0x00, 0x00, 0x03,
-            0x00, 0x08, 0x00, 0x00, 0x03, 0x01, 0x90, 0x78, 0xb1, 0x72, 0x40,
-        ];
-        let pps: Vec<u8> = vec![0x68, 0xeb, 0xc3, 0xcb, 0x22, 0xc0];
+        let sps = H264_HIGH_SPS.to_vec();
+        let pps = H264_HIGH_PPS.to_vec();
 
         let entry1 = build_avc1_sample_entry(
             std::slice::from_ref(&sps),
@@ -3069,22 +3082,19 @@ mod tests {
         }
     }
 
-    /// 2 個目以降の sample entry で抽出後の profile-level-id が変わる合成 MP4 を、
+    /// 2 個目以降の sample entry で H.264 の複数 field が変わる合成 MP4 を、
     /// `InconsistentSampleDescription` で拒否する。
+    ///
+    /// Main と High では SPS / PPS も avcC も profile-level-id も異なる。
+    /// SPS と avcC の profile-level-id 一致を要求するため、plid だけが違う
+    /// 一貫性エラーは作れない。本テストは H.264 抽出結果が全体として食い違う
+    /// ケースを拒否することを確認する。
     #[test]
     fn sample_reader_rejects_h264_sample_description_with_different_profile_level_id() {
-        // Main Profile (red-320x320-h264-main.mp4) の SPS / PPS。
-        let main_sps: Vec<u8> = vec![
-            0x67, 0x4d, 0x40, 0x15, 0xd9, 0x01, 0x40, 0xa6, 0xc0, 0x44, 0x00, 0x00, 0x03, 0x00,
-            0x04, 0x00, 0x00, 0x03, 0x00, 0xc8, 0x3c, 0x58, 0xb9, 0x20,
-        ];
-        let main_pps: Vec<u8> = vec![0x68, 0xeb, 0xc3, 0xcb, 0x20];
-        // High Profile (red-320x320-h264.mp4) の SPS / PPS。
-        let high_sps: Vec<u8> = vec![
-            0x67, 0x64, 0x00, 0x15, 0xac, 0xb2, 0x02, 0x81, 0x4d, 0x80, 0x88, 0x00, 0x00, 0x03,
-            0x00, 0x08, 0x00, 0x00, 0x03, 0x01, 0x90, 0x78, 0xb1, 0x72, 0x40,
-        ];
-        let high_pps: Vec<u8> = vec![0x68, 0xeb, 0xc3, 0xcb, 0x22, 0xc0];
+        let main_sps = H264_MAIN_SPS.to_vec();
+        let main_pps = H264_MAIN_PPS.to_vec();
+        let high_sps = H264_HIGH_SPS.to_vec();
+        let high_pps = H264_HIGH_PPS.to_vec();
 
         let entry1 =
             build_avc1_sample_entry(&[main_sps], &[main_pps], (0x4d, 0x40, 0x15), None, 320, 320);
@@ -3102,7 +3112,7 @@ mod tests {
             Err(crate::error::Error::Mp4 { source }) => {
                 assert!(
                     matches!(source, Mp4Error::InconsistentSampleDescription { index: 1 }),
-                    "profile-level-id の相違は InconsistentSampleDescription で拒否されるはずです: {source:?}"
+                    "H.264 抽出結果の相違は InconsistentSampleDescription で拒否されるはずです: {source:?}"
                 );
             }
             Err(e) => panic!("Mp4 エラーを期待しましたが、実際は: {e}"),
@@ -3115,7 +3125,7 @@ mod tests {
     fn sample_reader_rejects_h264_truncated_sps() {
         // 1 バイト目 (NAL ヘッダー) だけで profile_idc 以降が欠けた SPS。
         let truncated_sps: Vec<u8> = vec![0x67];
-        let pps: Vec<u8> = vec![0x68, 0xeb, 0xc3, 0xcb, 0x20];
+        let pps = H264_MAIN_PPS.to_vec();
         let entry =
             build_avc1_sample_entry(&[truncated_sps], &[pps], (0x4d, 0x40, 0x15), None, 320, 320);
 
@@ -3126,11 +3136,8 @@ mod tests {
     /// avcC と SPS の profile-level-id が一致しない合成 MP4 を reader 初期化時に拒否する。
     #[test]
     fn sample_reader_rejects_h264_avcc_sps_profile_level_id_mismatch() {
-        let sps: Vec<u8> = vec![
-            0x67, 0x4d, 0x40, 0x15, 0xd9, 0x01, 0x40, 0xa6, 0xc0, 0x44, 0x00, 0x00, 0x03, 0x00,
-            0x04, 0x00, 0x00, 0x03, 0x00, 0xc8, 0x3c, 0x58, 0xb9, 0x20,
-        ];
-        let pps: Vec<u8> = vec![0x68, 0xeb, 0xc3, 0xcb, 0x20];
+        let sps = H264_MAIN_SPS.to_vec();
+        let pps = H264_MAIN_PPS.to_vec();
         // SPS は Main (0x4d / 0x40 / 0x15) だが、avcC header は High (0x64 / 0x00 / 0x15)。
         let entry = build_avc1_sample_entry(&[sps], &[pps], (0x64, 0x00, 0x15), Some(1), 320, 320);
 
@@ -3141,14 +3148,11 @@ mod tests {
     /// 複数 SPS のいずれかが avcC と一致しない合成 MP4 を reader 初期化時に拒否する。
     #[test]
     fn sample_reader_rejects_h264_multiple_sps_inconsistency() {
-        let sps: Vec<u8> = vec![
-            0x67, 0x4d, 0x40, 0x15, 0xd9, 0x01, 0x40, 0xa6, 0xc0, 0x44, 0x00, 0x00, 0x03, 0x00,
-            0x04, 0x00, 0x00, 0x03, 0x00, 0xc8, 0x3c, 0x58, 0xb9, 0x20,
-        ];
+        let sps = H264_MAIN_SPS.to_vec();
         // 2 個目の SPS は level_idc を 0x3c (Level 6.0) に変えたもの。avcC と一致しない。
         let mut sps_level6 = sps.clone();
         sps_level6[3] = 0x3c;
-        let pps: Vec<u8> = vec![0x68, 0xeb, 0xc3, 0xcb, 0x20];
+        let pps = H264_MAIN_PPS.to_vec();
         let entry = build_avc1_sample_entry(
             &[sps, sps_level6],
             &[pps],
@@ -3165,11 +3169,8 @@ mod tests {
     /// SPS の寸法と avc1 の寸法が一致しない合成 MP4 を reader 初期化時に拒否する。
     #[test]
     fn sample_reader_rejects_h264_sps_visual_dimension_mismatch() {
-        let sps: Vec<u8> = vec![
-            0x67, 0x4d, 0x40, 0x15, 0xd9, 0x01, 0x40, 0xa6, 0xc0, 0x44, 0x00, 0x00, 0x03, 0x00,
-            0x04, 0x00, 0x00, 0x03, 0x00, 0xc8, 0x3c, 0x58, 0xb9, 0x20,
-        ];
-        let pps: Vec<u8> = vec![0x68, 0xeb, 0xc3, 0xcb, 0x20];
+        let sps = H264_MAIN_SPS.to_vec();
+        let pps = H264_MAIN_PPS.to_vec();
         // SPS は 320x320 だが、avc1 の寸法は 640x640。
         let entry = build_avc1_sample_entry(&[sps], &[pps], (0x4d, 0x40, 0x15), None, 640, 640);
 
@@ -3181,14 +3182,11 @@ mod tests {
     /// reader 初期化時に拒否する。
     #[test]
     fn sample_reader_rejects_h264_unrecognized_level() {
-        let mut sps: Vec<u8> = vec![
-            0x67, 0x4d, 0x40, 0x15, 0xd9, 0x01, 0x40, 0xa6, 0xc0, 0x44, 0x00, 0x00, 0x03, 0x00,
-            0x04, 0x00, 0x00, 0x03, 0x00, 0xc8, 0x3c, 0x58, 0xb9, 0x20,
-        ];
+        let mut sps = H264_MAIN_SPS.to_vec();
         // level_idc を 0x3c (Level 6.0) に変え、avcC / SPS を一致させる。
         // Level 6 系は固定 libwebrtc の H264Level enum に無い。
         sps[3] = 0x3c;
-        let pps: Vec<u8> = vec![0x68, 0xeb, 0xc3, 0xcb, 0x20];
+        let pps = H264_MAIN_PPS.to_vec();
         let entry = build_avc1_sample_entry(&[sps], &[pps], (0x4d, 0x40, 0x3c), None, 320, 320);
 
         let result = new_reader_for_h264_mp4("unrecognized-level", &[entry]);
@@ -3201,7 +3199,7 @@ mod tests {
     /// mux 側 `build_avc1_box` と同じ基準で拒否する。
     #[test]
     fn sample_reader_rejects_h264_empty_sps_list() {
-        let pps: Vec<u8> = vec![0x68, 0xeb, 0xc3, 0xcb, 0x20];
+        let pps = H264_MAIN_PPS.to_vec();
         let entry = build_avc1_sample_entry(&[], &[pps], (0x4d, 0x40, 0x15), None, 320, 320);
 
         let result = new_reader_for_h264_mp4("empty-sps", &[entry]);
@@ -3214,10 +3212,7 @@ mod tests {
     /// 拒否する。
     #[test]
     fn sample_reader_rejects_h264_empty_pps_list() {
-        let sps: Vec<u8> = vec![
-            0x67, 0x4d, 0x40, 0x15, 0xd9, 0x01, 0x40, 0xa6, 0xc0, 0x44, 0x00, 0x00, 0x03, 0x00,
-            0x04, 0x00, 0x00, 0x03, 0x00, 0xc8, 0x3c, 0x58, 0xb9, 0x20,
-        ];
+        let sps = H264_MAIN_SPS.to_vec();
         let entry = build_avc1_sample_entry(&[sps], &[], (0x4d, 0x40, 0x15), None, 320, 320);
 
         let result = new_reader_for_h264_mp4("empty-pps", &[entry]);
@@ -3231,10 +3226,7 @@ mod tests {
     /// 非空・fzb=0・NAL type 8 を要求するため、SDK は demux 経路の穴を塞ぐ。
     #[test]
     fn sample_reader_rejects_h264_invalid_pps() {
-        let sps: Vec<u8> = vec![
-            0x67, 0x4d, 0x40, 0x15, 0xd9, 0x01, 0x40, 0xa6, 0xc0, 0x44, 0x00, 0x00, 0x03, 0x00,
-            0x04, 0x00, 0x00, 0x03, 0x00, 0xc8, 0x3c, 0x58, 0xb9, 0x20,
-        ];
+        let sps = H264_MAIN_SPS.to_vec();
         // 空 NAL。
         let empty_pps: Vec<u8> = vec![];
         let entry = build_avc1_sample_entry(

@@ -25,7 +25,7 @@ shiguredo_amf = "~2026.3"
 shiguredo_http11 = "~2026.6"
 # libcamera 経由のカメラキャプチャ (Linux 向け)
 shiguredo_libcamera = "~2026.1"
-# MP4 ファイルからの映像入力で利用するデマルチプレクサ
+# MP4 ファイルからの映像入力で利用するデマルチプレクサと bitstream 解析
 shiguredo_mp4 = "~2026.5"
 # NVIDIA Video Codec によるハードウェアエンコード/デコード
 shiguredo_nvcodec = "~2026.2"

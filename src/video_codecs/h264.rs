@@ -33,17 +33,15 @@ pub(super) struct H264TrackConfig {
 
 /// 固定 libwebrtc が認識する H.264 sub-profile。
 ///
-/// RFC 6184 Section 8.1 Table 5 の 12 profile のうち、固定 libwebrtc の
-/// `kProfilePatterns` が認識する 6 profile だけを持つ。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// RFC 6184 Section 8.1 Table 5 は 12 profile を列挙する。固定 libwebrtc の
+/// `kProfilePatterns` が認識するのはそのうち Constrained Baseline / Baseline /
+/// Main / High / Predictive High 4:4:4 の 5 つに、 Table 5 に行が無い
+/// Constrained High を加えた 6 profile である。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum H264SubProfile {
-    /// Constrained Baseline
     ConstrainedBaseline,
-    /// Baseline
     Baseline,
-    /// Main
     Main,
-    /// High
     High,
     /// Constrained High（RFC 6184 Table 5 には行が無いが、固定 libwebrtc が認識する）
     ConstrainedHigh,
@@ -55,41 +53,24 @@ enum H264SubProfile {
 ///
 /// ITU-T H.264 Annex A Table A-1 のうち、固定 libwebrtc の `H264Level` enum が
 /// 持つ level だけを持つ。Level 6 / 6.1 / 6.2 は含まれない。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum H264Level {
-    /// Level 1b
     Level1b,
-    /// Level 1
     Level1,
-    /// Level 1.1
     Level1_1,
-    /// Level 1.2
     Level1_2,
-    /// Level 1.3
     Level1_3,
-    /// Level 2
     Level2,
-    /// Level 2.1
     Level2_1,
-    /// Level 2.2
     Level2_2,
-    /// Level 3
     Level3,
-    /// Level 3.1
     Level3_1,
-    /// Level 3.2
     Level3_2,
-    /// Level 4
     Level4,
-    /// Level 4.1
     Level4_1,
-    /// Level 4.2
     Level4_2,
-    /// Level 5
     Level5,
-    /// Level 5.1
     Level5_1,
-    /// Level 5.2
     Level5_2,
 }
 
@@ -126,11 +107,9 @@ impl H264Level {
 }
 
 /// sub-profile と level の正規化結果。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct H264ProfileLevel {
-    /// sub-profile。
     profile: H264SubProfile,
-    /// level。
     level: H264Level,
 }
 
@@ -148,9 +127,11 @@ struct H264ProfilePattern {
 
 /// 固定 libwebrtc の `kProfilePatterns` 相当。
 ///
-/// RFC 6184 Section 8.1 Table 5 の (profile_idc, profile-iop) パターンのうち、
-/// 固定 libwebrtc が認識する 9 row だけを mask / value で表現する。
-/// Extended / High10 / High42 / 各 Intra / CAVLC 4:4:4 Intra など、Table 5 の
+/// RFC 6184 Section 8.1 Table 5 の (profile_idc, profile-iop) 組み合わせのうち、
+/// 固定 libwebrtc が認識する 8 行 (Constrained Baseline 3 / Baseline 2 / Main /
+/// High / Predictive High 4:4:4) に、 Table 5 に無い Constrained High
+/// (profile_idc 64、 profile-iop 00001100) を加えた 9 行を mask / value で表現する。
+/// Extended / High 10 / High 4:2:2 / 各 Intra / CAVLC 4:4:4 Intra など、 Table 5 の
 /// 他の profile はここに含まれず unsupported になる。
 /// 全パターンが profile-iop の下位 2 bit（reserved_zero_2bits）に 0 を要求するため、
 /// 非 0 の組み合わせも自然に拒否される。
@@ -235,7 +216,7 @@ const H264_PROFILE_PATTERNS: &[H264ProfilePattern] = &[
 ///   `kProfilePatterns` に一致しない profile / constraint の組み合わせは
 ///   required と incoming が byte-for-byte 一致しても unsupported とする
 ///
-/// 根拠: 固定 libwebrtc commit 6f37672d358475cd17544121a12494da454d85fb の
+/// 根拠: 固定 libwebrtc (m152.7977.0.0 / commit 6f37672d358475cd17544121a12494da454d85fb) の
 /// `api/video_codecs/h264_profile_level_id.cc` の `ParseH264ProfileLevelId` /
 /// `kProfilePatterns` / `H264IsSameProfile`。
 /// 依存 `shiguredo_webrtc` の libwebrtc を更新した場合は、同ファイルの挙動を
@@ -284,13 +265,19 @@ pub(super) fn parse_profile_level_id(plid: H264ProfileLevelId) -> Option<H264Pro
 
 /// H.264 の incoming SDP format を required に照らして解決する。
 ///
-/// RFC 6184 Section 8.1 の profile-level-id negotiation に基づく判定:
+/// RFC 6184 Section 8.2.2 の Offer/Answer 規則に沿った判定:
 /// - codec 名が `H264` でなければ拒否
 /// - `packetization-mode` は 1 のみ受理
 /// - `profile-level-id` は必須で、`H264ProfileLevelId::from_hex` でデコードし
 ///   [`parse_profile_level_id`] で sub-profile / level を判定する
+///   （Section 8.1 の省略時既定 Baseline Profile Level 1 へ fallback しない）
 /// - sub-profile は required（bitstream 実値）と完全一致を要求する
+///   （8.2.2 は level 以外の media format configuration を対称に使う）
 /// - level は required 以上（受信側の能力が bitstream を下回る場合のみ拒否）
+///
+/// `level-asymmetry-allowed` と `max-recv-level` は解釈しない。
+/// 本 SDK は send-only で bitstream の level を required のまま送出するため、
+/// incoming の level が required 以上であることだけを見る。
 ///
 /// 通過時は検証済みの incoming format をそのまま返す。互換な higher level の
 /// negotiated format を parameter ごと保持して encoder handler へ渡すため、
@@ -299,7 +286,6 @@ pub(super) fn resolve_h264_incoming(
     required: &SdpVideoFormat,
     mut incoming: SdpVideoFormatRef<'_>,
 ) -> Option<SdpVideoFormat> {
-    // codec 名の一致 (H264)
     let name = incoming.name().ok()?;
     if VideoCodecType::try_from(name.as_str()).ok()? != VideoCodecType::H264 {
         return None;
@@ -342,18 +328,14 @@ pub(super) fn resolve_h264_incoming(
 
 /// H.264 の required SDP format を組み立てる。
 ///
-/// H.264 track は reader 初期化時に `h264_config` が必ず設定されるため、
-/// 欠落は実装バグとして panic する。AV1 の [`crate::video_codecs::av1::av1_required_sdp_format`]
-/// が config 欠落を parameter 省略で扱うのと対称のシグネチャだが、H.264 は
 /// `packetization-mode=1` に加えて `profile-level-id` を常に広告する
 /// （RFC 6184 Section 8.1 の implicit 既定 (Baseline Profile Level 1) へ fallback しない）。
-pub(super) fn h264_required_sdp_format(h264_config: Option<&H264TrackConfig>) -> SdpVideoFormat {
+pub(super) fn h264_required_sdp_format(h264_config: &H264TrackConfig) -> SdpVideoFormat {
     let mut format = SdpVideoFormat::new("H264");
     format.parameters_mut().set("packetization-mode", "1");
-    let config = h264_config.expect("BUG: H.264 track must have h264_config");
     format
         .parameters_mut()
-        .set("profile-level-id", &config.profile_level_id.to_hex());
+        .set("profile-level-id", &h264_config.profile_level_id.to_hex());
     format
 }
 
@@ -800,7 +782,7 @@ mod tests {
             avcc_box: None,
         };
 
-        let format = h264_required_sdp_format(Some(&config));
+        let format = h264_required_sdp_format(&config);
         assert_eq!(
             format
                 .name()
