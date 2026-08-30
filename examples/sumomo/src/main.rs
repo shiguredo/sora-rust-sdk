@@ -476,7 +476,7 @@ fn handle_on_track_event<F>(
         }
     };
 
-    let mut video_track = track.cast_to_video_track();
+    let video_track = track.cast_to_video_track();
     if let Some(old_entry) = tracks.remove(&track_id) {
         if !replace_existing {
             tracks.insert(track_id, old_entry);
@@ -513,7 +513,7 @@ fn handle_on_remove_track_event(
         rtc_log_warning!("Non-video track removed: kind={}", kind);
         return;
     }
-    let mut video_track = track.cast_to_video_track();
+    let video_track = track.cast_to_video_track();
     if let Some(entry) = tracks.remove(&track_id) {
         video_track.remove_sink(&entry.sink);
     }

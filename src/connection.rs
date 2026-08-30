@@ -867,8 +867,8 @@ impl SoraConnection {
                 proxy.user_agent(),
             );
         }
-        let mut rtc_config = PeerConnectionRtcConfiguration::new();
-        let pc = PeerConnection::create(pc_factory, &mut rtc_config, &mut deps)?;
+        let rtc_config = PeerConnectionRtcConfiguration::new();
+        let pc = PeerConnection::create(pc_factory, &rtc_config, deps)?;
 
         let connection = Self {
             data_channels: HashMap::new(),
@@ -1740,7 +1740,7 @@ impl SoraConnection {
             }
             config.servers().push(&server_entry);
         }
-        pc.set_configuration(&mut config)?;
+        pc.set_configuration(&config)?;
         Ok(())
     }
 
@@ -1825,8 +1825,8 @@ impl SoraConnection {
 
         {
             let pc = &self.pc;
-            let mut opts = PeerConnectionOfferAnswerOptions::new();
-            pc.create_answer(&mut ans_obs, &mut opts);
+            let opts = PeerConnectionOfferAnswerOptions::new();
+            pc.create_answer(&mut ans_obs, &opts);
         }
         let answer_sdp = tokio::time::timeout(SDP_OPERATION_TIMEOUT, ans_rx.recv())
             .await
@@ -1855,7 +1855,7 @@ impl SoraConnection {
 
     fn register_data_channel(
         &mut self,
-        mut channel: DataChannel,
+        channel: DataChannel,
         event_tx: &mpsc::UnboundedSender<SoraEvent>,
     ) {
         let Ok(label) = channel.label() else {
@@ -4533,10 +4533,10 @@ mod tests {
     /// compress 有効の DataChannel を実 PeerConnection 経由で登録するテスト用ヘルパー。
     fn register_compressed_data_channel(connection: &mut SoraConnection, label: &str) {
         register_data_channel_config(connection, label);
-        let mut init = DataChannelInit::new();
+        let init = DataChannelInit::new();
         let channel = connection
             .pc
-            .create_data_channel(label, &mut init)
+            .create_data_channel(label, &init)
             .expect("DataChannel の生成に失敗しました");
         let event_tx = connection.event_tx.clone();
         connection.register_data_channel(channel, &event_tx);

@@ -179,7 +179,7 @@ impl SoraConnectionContext {
         deps.enable_media();
 
         let (factory, connection_context) =
-            PeerConnectionFactory::create_modular_with_context(&mut deps)?;
+            PeerConnectionFactory::create_modular_with_context(deps)?;
         Ok(Arc::new(Self {
             factory,
             connection_context,

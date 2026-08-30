@@ -36,7 +36,7 @@ shiguredo_v4l2 = "~2026.2"
 # Intel VPL によるハードウェアエンコード/デコード
 shiguredo_vpl = "~2026.4"
 # WebRTC スタック本体 (PeerConnection、メディアエンジン等)
-shiguredo_webrtc = "~0.152.1-canary.0"
+shiguredo_webrtc = "~0.152.1-canary.1"
 # Sora シグナリングへの接続で利用する WebSocket クライアント実装
 shiguredo_websocket = "~2026.3"
 

@@ -1326,7 +1326,7 @@ impl Mp4VideoCapturer {
         let stop_clone = stop.clone();
 
         let thread_handle = thread::spawn(move || {
-            let mut source = source;
+            let source = source;
             let mut aligner = TimestampAligner::new();
 
             loop {
@@ -2422,7 +2422,7 @@ mod tests {
                 .expect("共有 reader からの Mp4VideoCapturer 生成に失敗しました");
             let (tx, rx) = std::sync::mpsc::channel();
             let sink = VideoSink::new_with_handler(Box::new(TestVideoSink { tx }));
-            let mut track = context
+            let track = context
                 .create_video_track(&capturer.video_source())
                 .expect("VideoTrack の生成に失敗しました");
             track.add_or_update_sink(&sink, &VideoSinkWants::new());
