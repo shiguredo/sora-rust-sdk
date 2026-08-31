@@ -11,7 +11,8 @@ use shiguredo_webrtc::{
     VideoFrameTypeVectorRef,
 };
 
-use crate::video_codec_capability::{CodecDirection, VideoCodecCapability, find_capability};
+use crate::codec_direction::CodecDirection;
+use crate::video_codec_capability::{VideoCodecCapability, find_capability};
 use crate::video_codec_preference::VideoCodecPreference;
 
 type VideoCodecCapabilities = Vec<Box<dyn VideoCodecCapability>>;

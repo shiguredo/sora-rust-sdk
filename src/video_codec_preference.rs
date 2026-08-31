@@ -5,9 +5,10 @@ use shiguredo_webrtc::VideoCodecType;
 
 use nojson::{DisplayJson, Json, JsonFormatter, JsonParseError, RawJsonValue};
 
+use crate::codec_direction::CodecDirection;
 use crate::error::{Error, Result};
 use crate::video_codec_capability::{
-    CodecDirection, VideoCodecCapability, VideoCodecImplementation, find_capability,
+    VideoCodecCapability, VideoCodecImplementation, find_capability,
 };
 
 /// 特定の方向・コーデック・実装の優先設定。

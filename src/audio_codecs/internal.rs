@@ -5,7 +5,7 @@ use shiguredo_webrtc::{
 };
 
 use crate::audio_codec_capability::{AudioCodecCapability, AudioCodecImplementation};
-use crate::video_codec_capability::CodecDirection;
+use crate::codec_direction::CodecDirection;
 
 /// WebRTC 組み込みのエンコーダー/デコーダーを使用する [AudioCodecCapability]。
 pub struct InternalAudioCodecCapability {
@@ -69,7 +69,7 @@ impl AudioCodecCapability for InternalAudioCodecCapability {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::video_codec_capability::CodecDirection;
+    use crate::codec_direction::CodecDirection;
     use shiguredo_webrtc::SdpAudioFormat;
 
     /// 非 Opus コーデックは builtin ファクトリが広告する実情報をそのまま広告することを検証する。

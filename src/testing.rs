@@ -10,9 +10,8 @@ use shiguredo_webrtc::{
 };
 
 use crate::audio_codec_capability::{AudioCodecCapability, AudioCodecImplementation};
-use crate::video_codec_capability::{
-    CodecDirection, VideoCodecCapability, VideoCodecImplementation,
-};
+use crate::codec_direction::CodecDirection;
+use crate::video_codec_capability::{VideoCodecCapability, VideoCodecImplementation};
 
 /// `VideoEncoderHandler` を最小限に実装したテスト専用の型。
 pub(crate) struct NoopVideoEncoder;

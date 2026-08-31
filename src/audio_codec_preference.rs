@@ -8,8 +8,8 @@ use nojson::{DisplayJson, Json, JsonFormatter, JsonParseError, RawJsonValue};
 use crate::audio_codec_capability::{
     AudioCodecCapability, AudioCodecImplementation, find_audio_capability,
 };
+use crate::codec_direction::CodecDirection;
 use crate::error::{Error, Result};
-use crate::video_codec_capability::CodecDirection;
 
 /// 特定の方向・コーデック・実装の優先設定。
 #[derive(Debug, Clone, PartialEq, Eq)]

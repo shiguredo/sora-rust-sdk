@@ -26,13 +26,12 @@ use shiguredo_webrtc::{
     i420_copy, rtc_log_error, rtc_log_warning,
 };
 
+use crate::codec_direction::CodecDirection;
 use crate::error::{Error, Result};
 #[cfg(feature = "libcamera")]
 use crate::libcamera::LibcameraNativeFrameBuffer;
 use crate::video_codec::{SimulcastCapabilityHelper, codec_type_from_format};
-use crate::video_codec_capability::{
-    CodecDirection, VideoCodecCapability, VideoCodecImplementation,
-};
+use crate::video_codec_capability::{VideoCodecCapability, VideoCodecImplementation};
 use crate::video_codecs::helpers;
 
 fn v4l2_supported_formats() -> Vec<SdpVideoFormat> {

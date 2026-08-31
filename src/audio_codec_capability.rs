@@ -5,7 +5,7 @@ use shiguredo_webrtc::{
 
 use nojson::{DisplayJson, JsonFormatter, JsonParseError, RawJsonValue};
 
-use crate::video_codec_capability::CodecDirection;
+use crate::codec_direction::CodecDirection;
 
 /// 音声コーデックの実装情報。
 ///

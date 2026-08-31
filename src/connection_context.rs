@@ -266,7 +266,7 @@ unsafe impl Sync for SoraConnectionContext {}
 #[cfg(all(test, any(target_os = "macos", target_os = "ios")))]
 mod tests {
     use super::*;
-    use crate::video_codec_capability::CodecDirection;
+    use crate::codec_direction::CodecDirection;
     use shiguredo_webrtc::VideoCodecType;
 
     #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -310,7 +310,7 @@ mod tests {
 #[cfg(test)]
 mod audio_default_config_tests {
     use super::*;
-    use crate::video_codec_capability::CodecDirection;
+    use crate::codec_direction::CodecDirection;
     use shiguredo_webrtc::AudioCodecType;
 
     #[test]

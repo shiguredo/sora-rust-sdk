@@ -9,7 +9,7 @@ use shiguredo_webrtc::{
 
 use crate::audio_codec_capability::{AudioCodecCapability, find_audio_capability};
 use crate::audio_codec_preference::AudioCodecPreference;
-use crate::video_codec_capability::CodecDirection;
+use crate::codec_direction::CodecDirection;
 
 type AudioCodecCapabilities = Vec<Box<dyn AudioCodecCapability>>;
 type SharedAudioCodecCapabilities = Arc<Mutex<AudioCodecCapabilities>>;
@@ -185,8 +185,8 @@ mod tests {
     use super::*;
     use crate::audio_codec_capability::{AudioCodecCapability, AudioCodecImplementation};
     use crate::audio_codec_preference::AudioPreferenceCodec;
+    use crate::codec_direction::CodecDirection;
     use crate::testing::TestAudioCodecCapability;
-    use crate::video_codec_capability::CodecDirection;
     use shiguredo_webrtc::{AudioCodecType, AudioSpeechType, Buffer, Environment, SdpAudioFormat};
 
     #[test]

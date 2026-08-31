@@ -58,6 +58,7 @@ mod audio_codec;
 mod audio_codec_capability;
 mod audio_codec_preference;
 mod audio_codecs;
+mod codec_direction;
 mod connection;
 mod connection_context;
 mod connection_event_handler;
@@ -81,6 +82,7 @@ pub use crate::audio_codec_preference::{
     AudioCodecPreference, AudioPreferenceCodec, validate_audio_codec_preference,
 };
 pub use crate::audio_codecs::internal::InternalAudioCodecCapability;
+pub use crate::codec_direction::CodecDirection;
 pub use crate::connection::{
     ParsedProxyInfo, SoraConnection, SoraConnectionBuilder, SoraConnectionHandle,
 };
@@ -102,9 +104,7 @@ pub use crate::types::{
 pub use crate::video_codec::{
     AlignmentEncoderAdapter, SimulcastCapabilityHelper, codec_type_from_format,
 };
-pub use crate::video_codec_capability::{
-    CodecDirection, VideoCodecCapability, VideoCodecImplementation,
-};
+pub use crate::video_codec_capability::{VideoCodecCapability, VideoCodecImplementation};
 pub use crate::video_codec_preference::{
     PreferenceCodec, VideoCodecPreference, validate_video_codec_preference,
 };
