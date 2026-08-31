@@ -15,13 +15,13 @@ type AudioCodecCapabilities = Vec<Box<dyn AudioCodecCapability>>;
 type SharedAudioCodecCapabilities = Arc<Mutex<AudioCodecCapabilities>>;
 
 /// [AudioCodecPreference] に基づき、利用可能な音声エンコーダーを提供するファクトリ。
-pub struct SoraAudioEncoderFactory {
+pub(crate) struct SoraAudioEncoderFactory {
     preference: AudioCodecPreference,
     capabilities: SharedAudioCodecCapabilities,
 }
 
 /// [AudioCodecPreference] に基づき、利用可能な音声デコーダーを提供するファクトリ。
-pub struct SoraAudioDecoderFactory {
+pub(crate) struct SoraAudioDecoderFactory {
     preference: AudioCodecPreference,
     capabilities: SharedAudioCodecCapabilities,
 }
@@ -56,7 +56,7 @@ impl AudioEncoderFactoryHandler for SoraAudioEncoderFactory {
             .capabilities
             .lock()
             .expect("capabilities should not be poisoned");
-        collect_supported_encoders(&self.preference, &capabilities, CodecDirection::Encoder)
+        collect_audio_codec_specs(&self.preference, &capabilities, CodecDirection::Encoder)
     }
 
     fn query_audio_encoder(&mut self, format: SdpAudioFormatRef<'_>) -> Option<AudioCodecInfo> {
@@ -99,7 +99,7 @@ impl AudioDecoderFactoryHandler for SoraAudioDecoderFactory {
             .capabilities
             .lock()
             .expect("capabilities should not be poisoned");
-        collect_supported_encoders(&self.preference, &capabilities, CodecDirection::Decoder)
+        collect_audio_codec_specs(&self.preference, &capabilities, CodecDirection::Decoder)
     }
 
     fn is_supported_decoder(&mut self, format: SdpAudioFormatRef<'_>) -> bool {
@@ -146,7 +146,7 @@ impl AudioDecoderFactoryHandler for SoraAudioDecoderFactory {
 }
 
 /// 指定方向の [AudioCodecPreference] から公開する [AudioCodecSpec] 一覧を構築する。
-fn collect_supported_encoders(
+fn collect_audio_codec_specs(
     preference: &AudioCodecPreference,
     capabilities: &[Box<dyn AudioCodecCapability>],
     direction: CodecDirection,
@@ -290,7 +290,7 @@ mod tests {
         // エンコーダーを生成し、実際にエンコードする。
         let mut encoder_factory = SoraAudioEncoderFactory::new(preference.clone(), shared.clone());
         let mut options = AudioEncoderFactoryOptions::new();
-        options.set_payload_type(111);
+        options.set_payload_type(120);
         let mut encoder = AudioEncoderFactoryHandler::create(
             &mut encoder_factory,
             env.as_ref(),
@@ -302,7 +302,11 @@ mod tests {
         let info = encoder.encode(0, &[0i16; 960], &mut out);
         assert_eq!(out.size(), 3, "エンコード結果が書き込まれていません");
         assert_eq!(info.encoded_bytes(), 3);
-        assert_eq!(info.payload_type(), 111);
+        assert_eq!(
+            info.payload_type(),
+            120,
+            "options.payload_type() が create_audio_encoder からエンコーダーへ伝播していません"
+        );
 
         // デコーダーを生成し、エンコード結果をデコードする。
         let mut decoder_factory = SoraAudioDecoderFactory::new(preference, shared);

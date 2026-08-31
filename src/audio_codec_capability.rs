@@ -92,6 +92,8 @@ pub trait AudioCodecCapability: Send {
     /// create_audio_encoder() は resolve_sdp_codec_spec() で解決されるフォーマット
     /// (get_supported_codec_specs() のいずれかと一致するフォーマット) で呼び出される
     /// ことが想定されている。
+    /// get_supported_codec_specs() で返されないフォーマットで呼び出された場合の動作は
+    /// 実装に依存するため、None が返されることは保証されない。
     ///
     /// `payload_type` はネゴシエーションで決まった音声ペイロードタイプであり、
     /// エンコーダーの RTP ペイロードタイプとして利用する必要がある。
@@ -110,6 +112,8 @@ pub trait AudioCodecCapability: Send {
     /// create_audio_decoder() は resolve_sdp_codec_spec() で解決されるフォーマット
     /// (get_supported_codec_specs() のいずれかと一致するフォーマット) で呼び出される
     /// ことが想定されている。
+    /// get_supported_codec_specs() で返されないフォーマットで呼び出された場合の動作は
+    /// 実装に依存するため、None が返されることは保証されない。
     #[expect(unused_variables)]
     fn create_audio_decoder(
         &self,

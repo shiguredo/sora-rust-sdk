@@ -140,7 +140,17 @@ impl VideoCodecCapability for TestVideoCodecCapability {
 ///
 /// `encode` は決まったバイト列 (`0x01, 0x02, 0x03`) をバッファへ追記し、
 /// エンコード結果の整合 (追記バイト数 = encoded_bytes) を満たす。
-pub(crate) struct TestAudioEncoder;
+pub(crate) struct TestAudioEncoder {
+    payload_type: i32,
+}
+
+impl TestAudioEncoder {
+    /// 指定したペイロードタイプを報告するエンコーダーを生成する。
+    pub(crate) fn with_payload_type(payload_type: i32) -> Self {
+        Self { payload_type }
+    }
+}
+
 impl AudioEncoderHandler for TestAudioEncoder {
     fn sample_rate_hz(&mut self) -> i32 {
         48000
@@ -166,7 +176,7 @@ impl AudioEncoderHandler for TestAudioEncoder {
         encoded.append_data(&[0x01, 0x02, 0x03]);
         let mut info = AudioEncoderEncodedInfo::new();
         info.set_encoded_bytes(encoded.size());
-        info.set_payload_type(111);
+        info.set_payload_type(self.payload_type);
         info
     }
     fn reset(&mut self) {}
@@ -292,14 +302,16 @@ impl AudioCodecCapability for TestAudioCodecCapability {
         &self,
         _env: EnvironmentRef<'_>,
         format: SdpAudioFormatRef<'_>,
-        _payload_type: i32,
+        payload_type: i32,
     ) -> Option<AudioEncoder> {
         let codec_type = format
             .name()
             .ok()
             .and_then(|name| AudioCodecType::try_from(name.as_str()).ok())?;
         if self.is_supported(CodecDirection::Encoder, codec_type) {
-            Some(AudioEncoder::new_with_handler(Box::new(TestAudioEncoder)))
+            Some(AudioEncoder::new_with_handler(Box::new(
+                TestAudioEncoder::with_payload_type(payload_type),
+            )))
         } else {
             None
         }

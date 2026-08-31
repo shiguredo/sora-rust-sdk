@@ -18,13 +18,13 @@ type VideoCodecCapabilities = Vec<Box<dyn VideoCodecCapability>>;
 type SharedVideoCodecCapabilities = Arc<Mutex<VideoCodecCapabilities>>;
 
 /// [VideoCodecPreference] に基づき、利用可能なビデオエンコーダーを提供するファクトリ。
-pub struct SoraVideoEncoderFactory {
+pub(crate) struct SoraVideoEncoderFactory {
     preference: VideoCodecPreference,
     capabilities: SharedVideoCodecCapabilities,
 }
 
 /// [VideoCodecPreference] に基づき、利用可能なビデオデコーダーを提供するファクトリ。
-pub struct SoraVideoDecoderFactory {
+pub(crate) struct SoraVideoDecoderFactory {
     preference: VideoCodecPreference,
     capabilities: SharedVideoCodecCapabilities,
 }

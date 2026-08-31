@@ -76,7 +76,6 @@ mod video_codec_preference;
 mod video_codecs;
 mod zlib;
 
-pub use crate::audio_codec::{SoraAudioDecoderFactory, SoraAudioEncoderFactory};
 pub use crate::audio_codec_capability::{AudioCodecCapability, AudioCodecImplementation};
 pub use crate::audio_codec_preference::{
     AudioCodecPreference, AudioPreferenceCodec, validate_audio_codec_preference,
@@ -101,8 +100,7 @@ pub use crate::types::{
     VideoAV1Params, VideoCodecType, VideoH264Params, VideoH265Params, VideoVP9Params,
 };
 pub use crate::video_codec::{
-    AlignmentEncoderAdapter, SimulcastCapabilityHelper, SoraVideoDecoderFactory,
-    SoraVideoEncoderFactory, codec_type_from_format,
+    AlignmentEncoderAdapter, SimulcastCapabilityHelper, codec_type_from_format,
 };
 pub use crate::video_codec_capability::{
     CodecDirection, VideoCodecCapability, VideoCodecImplementation,

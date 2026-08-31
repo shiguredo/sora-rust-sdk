@@ -25,7 +25,7 @@ pub struct AudioCodecPreference {
     codecs: Vec<AudioPreferenceCodec>,
 }
 
-/// 色度で列挙する音声コーデック種別。
+/// 定義順で列挙する音声コーデック種別。
 const AUDIO_CODEC_TYPES: [AudioCodecType; 5] = [
     AudioCodecType::Opus,
     AudioCodecType::Isac,
@@ -553,5 +553,56 @@ mod tests {
             .find(CodecDirection::Decoder, AudioCodecType::Opus)
             .expect("マージ後に opus デコーダーが存在する必要があります");
         assert_eq!(opus_decoder.implementation().name(), "other");
+    }
+
+    /// 片方向のみ対応の capability に対して、指定方向が非対応の場合に
+    /// `{direction} not supported` で検証が失敗することを検証する。
+    #[test]
+    fn validate_fails_when_encoder_or_decoder_not_supported() {
+        // エンコーダー非対応 (デコーダーは対応) の capability。
+        // エンコーダー方向を指定すると "encoder not supported" になる。
+        let encoder_only_capabilities: Vec<Box<dyn AudioCodecCapability>> =
+            vec![Box::new(TestAudioCodecCapability::new(
+                AudioCodecImplementation::new("internal", "WebRTC built-in"),
+                Vec::new(),
+                vec![AudioCodecType::Opus],
+            ))];
+        let encoder_preference = AudioCodecPreference::new(vec![default_preference_codec(
+            CodecDirection::Encoder,
+            AudioCodecType::Opus,
+            AudioCodecImplementation::new("internal", "WebRTC built-in"),
+        )]);
+        let error =
+            validate_audio_codec_preference(&encoder_preference, &encoder_only_capabilities)
+                .expect_err("失敗する必要があります");
+        match error {
+            Error::InvalidAudioCodecPreference { reason } => {
+                assert!(reason.contains("encoder not supported"));
+            }
+            other => panic!("予期しないエラー: {other:?}"),
+        }
+
+        // デコーダー非対応 (エンコーダーは対応) の capability。
+        // デコーダー方向を指定すると "decoder not supported" になる。
+        let decoder_only_capabilities: Vec<Box<dyn AudioCodecCapability>> =
+            vec![Box::new(TestAudioCodecCapability::new(
+                AudioCodecImplementation::new("internal", "WebRTC built-in"),
+                vec![AudioCodecType::Opus],
+                Vec::new(),
+            ))];
+        let decoder_preference = AudioCodecPreference::new(vec![default_preference_codec(
+            CodecDirection::Decoder,
+            AudioCodecType::Opus,
+            AudioCodecImplementation::new("internal", "WebRTC built-in"),
+        )]);
+        let error =
+            validate_audio_codec_preference(&decoder_preference, &decoder_only_capabilities)
+                .expect_err("失敗する必要があります");
+        match error {
+            Error::InvalidAudioCodecPreference { reason } => {
+                assert!(reason.contains("decoder not supported"));
+            }
+            other => panic!("予期しないエラー: {other:?}"),
+        }
     }
 }
