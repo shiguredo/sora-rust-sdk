@@ -54,6 +54,10 @@
 //!
 //! [Sora]: https://sora.shiguredo.jp/
 #![warn(missing_docs)]
+mod audio_codec;
+mod audio_codec_capability;
+mod audio_codec_preference;
+mod audio_codecs;
 mod connection;
 mod connection_context;
 mod connection_event_handler;
@@ -72,6 +76,12 @@ mod video_codec_preference;
 mod video_codecs;
 mod zlib;
 
+pub use crate::audio_codec::{SoraAudioDecoderFactory, SoraAudioEncoderFactory};
+pub use crate::audio_codec_capability::{AudioCodecCapability, AudioCodecImplementation};
+pub use crate::audio_codec_preference::{
+    AudioCodecPreference, AudioPreferenceCodec, validate_audio_codec_preference,
+};
+pub use crate::audio_codecs::internal::InternalAudioCodecCapability;
 pub use crate::connection::{
     ParsedProxyInfo, SoraConnection, SoraConnectionBuilder, SoraConnectionHandle,
 };

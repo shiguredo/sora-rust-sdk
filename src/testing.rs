@@ -2,10 +2,13 @@
 //!
 //! 本モジュールはテストビルド (`#[cfg(test)]`) でのみコンパイルされる。
 use shiguredo_webrtc::{
-    EnvironmentRef, SdpVideoFormat, SdpVideoFormatRef, VideoCodecType, VideoDecoder,
-    VideoDecoderHandler, VideoEncoder, VideoEncoderHandler,
+    AudioCodecType, AudioDecoder, AudioDecoderHandler, AudioEncoder, AudioEncoderEncodedInfo,
+    AudioEncoderHandler, AudioSpeechType, BufferRef, EnvironmentRef, RawBufferWriter,
+    SdpAudioFormat, SdpAudioFormatRef, SdpVideoFormat, SdpVideoFormatRef, VideoCodecType,
+    VideoDecoder, VideoDecoderHandler, VideoEncoder, VideoEncoderHandler,
 };
 
+use crate::audio_codec_capability::{AudioCodecCapability, AudioCodecImplementation};
 use crate::video_codec_capability::{
     CodecDirection, VideoCodecCapability, VideoCodecImplementation,
 };
@@ -126,6 +129,180 @@ impl VideoCodecCapability for TestVideoCodecCapability {
             .and_then(|name| VideoCodecType::try_from(name.as_str()).ok())?;
         if self.is_supported(CodecDirection::Decoder, codec_type) {
             Some(VideoDecoder::new_with_handler(Box::new(NoopVideoDecoder)))
+        } else {
+            None
+        }
+    }
+}
+
+/// `AudioEncoderHandler` を実装したテスト専用の型。
+///
+/// `encode` は決まったバイト列 (`0x01, 0x02, 0x03`) をバッファへ追記し、
+/// エンコード結果の整合 (追記バイト数 = encoded_bytes) を満たす。
+pub(crate) struct TestAudioEncoder;
+impl AudioEncoderHandler for TestAudioEncoder {
+    fn sample_rate_hz(&mut self) -> i32 {
+        48000
+    }
+    fn num_channels(&mut self) -> usize {
+        2
+    }
+    fn num_10ms_frames_in_next_packet(&mut self) -> usize {
+        1
+    }
+    fn max_10ms_frames_in_a_packet(&mut self) -> usize {
+        1
+    }
+    fn get_target_bitrate(&mut self) -> i32 {
+        32000
+    }
+    fn encode(
+        &mut self,
+        _rtp_timestamp: u32,
+        _audio: &[i16],
+        encoded: &mut BufferRef<'_>,
+    ) -> AudioEncoderEncodedInfo {
+        encoded.append_data(&[0x01, 0x02, 0x03]);
+        let mut info = AudioEncoderEncodedInfo::new();
+        info.set_encoded_bytes(encoded.size());
+        info.set_payload_type(111);
+        info
+    }
+    fn reset(&mut self) {}
+    fn get_frame_length_range(&mut self) -> Option<(i64, i64)> {
+        None
+    }
+}
+
+/// `AudioDecoderHandler` を実装したテスト専用の型。
+///
+/// `decode` は決まったサンプル列 (`0x1111` × 160) を書き込み、160 サンプルと Speech を返す。
+pub(crate) struct TestAudioDecoder;
+impl AudioDecoderHandler for TestAudioDecoder {
+    fn sample_rate_hz(&mut self) -> i32 {
+        48000
+    }
+    fn channels(&mut self) -> usize {
+        2
+    }
+    fn decode(
+        &mut self,
+        _encoded: &[u8],
+        _sample_rate_hz: i32,
+        decoded: &mut RawBufferWriter<'_, i16>,
+    ) -> (i32, AudioSpeechType) {
+        decoded.write(&[0x1111i16; 160]);
+        (160, AudioSpeechType::Speech)
+    }
+    fn reset(&mut self) {}
+}
+
+/// `AudioCodecCapability` を本物のコードで実装したテスト専用の型。
+pub(crate) struct TestAudioCodecCapability {
+    implementation: AudioCodecImplementation,
+    encoder_formats: Vec<AudioCodecType>,
+    decoder_formats: Vec<AudioCodecType>,
+    /// false のときは `is_supported` が true でも `resolve_sdp_format` は None を返す。
+    resolves_sdp_format: bool,
+}
+
+impl TestAudioCodecCapability {
+    /// 方向ごとのコーデック種別リストを指定して生成する。
+    pub(crate) fn new(
+        implementation: AudioCodecImplementation,
+        encoder_formats: Vec<AudioCodecType>,
+        decoder_formats: Vec<AudioCodecType>,
+    ) -> Self {
+        Self {
+            implementation,
+            encoder_formats,
+            decoder_formats,
+            resolves_sdp_format: true,
+        }
+    }
+
+    /// `resolve_sdp_format` が常に None を返す capability に変換する。
+    pub(crate) fn without_sdp_format_resolution(mut self) -> Self {
+        self.resolves_sdp_format = false;
+        self
+    }
+
+    /// 指定した方向のコーデック種別リストを返す。
+    fn formats(&self, direction: CodecDirection) -> &[AudioCodecType] {
+        match direction {
+            CodecDirection::Encoder => &self.encoder_formats,
+            CodecDirection::Decoder => &self.decoder_formats,
+        }
+    }
+}
+
+impl AudioCodecCapability for TestAudioCodecCapability {
+    fn get_implementation(&self) -> AudioCodecImplementation {
+        self.implementation.clone()
+    }
+
+    fn get_supported_formats(&self, direction: CodecDirection) -> Vec<SdpAudioFormat> {
+        self.formats(direction)
+            .iter()
+            .filter_map(|codec_type| {
+                codec_type
+                    .as_str()
+                    .map(|name| SdpAudioFormat::new(name, 48000, 2))
+            })
+            .collect()
+    }
+
+    fn is_supported(&self, direction: CodecDirection, codec_type: AudioCodecType) -> bool {
+        self.formats(direction).contains(&codec_type)
+    }
+
+    fn resolve_sdp_format(
+        &self,
+        direction: CodecDirection,
+        format: SdpAudioFormatRef<'_>,
+    ) -> Option<SdpAudioFormat> {
+        if !self.resolves_sdp_format {
+            return None;
+        }
+        let codec_type = format
+            .name()
+            .ok()
+            .and_then(|name| AudioCodecType::try_from(name.as_str()).ok())?;
+        if !self.is_supported(direction, codec_type) {
+            return None;
+        }
+        let codec_name = codec_type.as_str()?;
+        Some(SdpAudioFormat::new(codec_name, 48000, 2))
+    }
+
+    fn create_audio_encoder(
+        &self,
+        _env: EnvironmentRef<'_>,
+        format: SdpAudioFormatRef<'_>,
+        _payload_type: i32,
+    ) -> Option<AudioEncoder> {
+        let codec_type = format
+            .name()
+            .ok()
+            .and_then(|name| AudioCodecType::try_from(name.as_str()).ok())?;
+        if self.is_supported(CodecDirection::Encoder, codec_type) {
+            Some(AudioEncoder::new_with_handler(Box::new(TestAudioEncoder)))
+        } else {
+            None
+        }
+    }
+
+    fn create_audio_decoder(
+        &self,
+        _env: EnvironmentRef<'_>,
+        format: SdpAudioFormatRef<'_>,
+    ) -> Option<AudioDecoder> {
+        let codec_type = format
+            .name()
+            .ok()
+            .and_then(|name| AudioCodecType::try_from(name.as_str()).ok())?;
+        if self.is_supported(CodecDirection::Decoder, codec_type) {
+            Some(AudioDecoder::new_with_handler(Box::new(TestAudioDecoder)))
         } else {
             None
         }

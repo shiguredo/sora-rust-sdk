@@ -8,6 +8,10 @@ use shiguredo_webrtc::{
     Thread, VideoDecoderFactory, VideoEncoderFactory, VideoTrack, VideoTrackSource, random_string,
 };
 
+use crate::audio_codec::{SoraAudioDecoderFactory, SoraAudioEncoderFactory};
+use crate::audio_codec_capability::AudioCodecCapability;
+use crate::audio_codec_preference::{AudioCodecPreference, validate_audio_codec_preference};
+use crate::audio_codecs::internal::InternalAudioCodecCapability;
 use crate::error::Result;
 use crate::video_codec::{SoraVideoDecoderFactory, SoraVideoEncoderFactory};
 use crate::video_codec_capability::VideoCodecCapability;
@@ -45,6 +49,17 @@ pub struct SoraConnectionContextConfig {
     /// [Default::default()] では [InternalVideoCodecCapability] が含まれ、
     /// macOS/iOS では `InternalAppleVideoCodecCapability` も追加される。
     pub video_codec_capabilities: Vec<Box<dyn VideoCodecCapability>>,
+    /// 音声コーデックごとに使用する実装を指定する優先設定。
+    ///
+    /// 各エントリ（[AudioPreferenceCodec](crate::audio_codec_preference::AudioPreferenceCodec)）は、
+    /// 特定の方向（エンコード/デコード）とコーデック種別に対して、
+    /// どの [AudioCodecCapability] 実装を使うかを指定する。
+    /// [Default::default()] では [InternalAudioCodecCapability] から自動生成される。
+    pub audio_codec_preference: AudioCodecPreference,
+    /// 音声のエンコーダー/デコーダーを実際に生成する capability 実装のリスト。
+    ///
+    /// [Default::default()] では [InternalAudioCodecCapability] が含まれる。
+    pub audio_codec_capabilities: Vec<Box<dyn AudioCodecCapability>>,
 }
 
 impl Default for SoraConnectionContextConfig {
@@ -69,10 +84,21 @@ impl Default for SoraConnectionContextConfig {
             video_codec_capabilities.push(internal_apple_capability);
         }
 
+        let mut audio_codec_preference = AudioCodecPreference::default();
+        let mut audio_codec_capabilities: Vec<Box<dyn AudioCodecCapability>> = Vec::new();
+        let internal_audio_capability: Box<dyn AudioCodecCapability> =
+            Box::new(InternalAudioCodecCapability::new());
+        audio_codec_preference.merge(&AudioCodecPreference::new_from_capability(
+            internal_audio_capability.as_ref(),
+        ));
+        audio_codec_capabilities.push(internal_audio_capability);
+
         Self {
             adm_config: AdmConfig::default(),
             video_codec_preference,
             video_codec_capabilities,
+            audio_codec_preference,
+            audio_codec_capabilities,
         }
     }
 }
@@ -121,8 +147,11 @@ impl SoraConnectionContext {
             adm_config,
             video_codec_preference,
             video_codec_capabilities,
+            audio_codec_preference,
+            audio_codec_capabilities,
         } = config;
         validate_video_codec_preference(&video_codec_preference, &video_codec_capabilities)?;
+        validate_audio_codec_preference(&audio_codec_preference, &audio_codec_capabilities)?;
 
         // video_codec_capabilities は WebRTC 内部のエンコーダー/デコーダーファクトリが
         // ワーカースレッド等から並行に参照するため、Mutex で保護する。
@@ -138,6 +167,20 @@ impl SoraConnectionContext {
             )));
         let video_decoder_factory = VideoDecoderFactory::new_with_handler(Box::new(
             SoraVideoDecoderFactory::new(video_codec_preference, shared_video_codec_capabilities),
+        ));
+
+        // audio_codec_capabilities は WebRTC 内部のエンコーダー/デコーダーファクトリが
+        // ワーカースレッド等から並行に参照するため、Mutex で保護する。
+        // ロック保持は各 get_supported_encoders / get_supported_decoders / create の
+        // 呼び出し内だけであり、await をまたいだ保持やロック順序の入れ替えは発生しない。
+        let shared_audio_codec_capabilities = Arc::new(Mutex::new(audio_codec_capabilities));
+        let audio_encoder_factory =
+            AudioEncoderFactory::new_with_handler(Box::new(SoraAudioEncoderFactory::new(
+                audio_codec_preference.clone(),
+                shared_audio_codec_capabilities.clone(),
+            )));
+        let audio_decoder_factory = AudioDecoderFactory::new_with_handler(Box::new(
+            SoraAudioDecoderFactory::new(audio_codec_preference, shared_audio_codec_capabilities),
         ));
 
         let env = Environment::new();
@@ -168,10 +211,8 @@ impl SoraConnectionContext {
                 deps.set_audio_device_module(&external_adm);
             }
         };
-        let audio_enc = AudioEncoderFactory::builtin();
-        let audio_dec = AudioDecoderFactory::builtin();
-        deps.set_audio_encoder_factory(&audio_enc);
-        deps.set_audio_decoder_factory(&audio_dec);
+        deps.set_audio_encoder_factory(&audio_encoder_factory);
+        deps.set_audio_decoder_factory(&audio_decoder_factory);
         deps.set_video_encoder_factory(video_encoder_factory);
         deps.set_video_decoder_factory(video_decoder_factory);
         let apb = AudioProcessingBuilder::new_builtin();
@@ -262,6 +303,38 @@ mod tests {
                     "internal-apple が {direction:?} {codec_type:?} で優先されなければなりません",
                 );
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod audio_default_config_tests {
+    use super::*;
+    use crate::video_codec_capability::CodecDirection;
+    use shiguredo_webrtc::AudioCodecType;
+
+    #[test]
+    fn default_config_contains_internal_audio_capability() {
+        let config = SoraConnectionContextConfig::default();
+        let internal = config
+            .audio_codec_capabilities
+            .iter()
+            .find(|cap| cap.get_implementation().name() == "internal")
+            .expect("デフォルト構成に内部音声 capability が含まれる必要があります");
+
+        for direction in [CodecDirection::Encoder, CodecDirection::Decoder] {
+            if !internal.is_supported(direction, AudioCodecType::Opus) {
+                continue;
+            }
+            let preference = config
+                .audio_codec_preference
+                .find(direction, AudioCodecType::Opus)
+                .expect("preference エントリは必ず存在する");
+            assert_eq!(
+                preference.implementation().name(),
+                "internal",
+                "internal が {direction:?} Opus で使われなければなりません",
+            );
         }
     }
 }

@@ -103,6 +103,7 @@ fn build_context_config(
             adm_config,
             video_codec_preference: VideoCodecPreference::default(),
             video_codec_capabilities: Vec::new(),
+            ..SoraConnectionContextConfig::default()
         },
     };
 

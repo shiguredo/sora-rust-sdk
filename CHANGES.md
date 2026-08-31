@@ -22,6 +22,14 @@
   - 既存 variant の日本語メッセージを英語に置き換える
   - `InvalidAv1Track` の内部メッセージも英語にする
   - @sile
+- [ADD] AudioEncoder / AudioDecoder をユーザー側でカスタマイズ可能にするための音声コーデックフレームワークを追加する
+  - `AudioCodecCapability` trait (`src/audio_codec_capability.rs`) を追加する
+  - `AudioCodecPreference` / `AudioPreferenceCodec` (`src/audio_codec_preference.rs`) を追加する
+  - `SoraAudioEncoderFactory` / `SoraAudioDecoderFactory` (`src/audio_codec.rs`) を追加する
+  - `InternalAudioCodecCapability` (`src/audio_codecs/internal.rs`) を追加する
+  - `SoraConnectionContextConfig` に `audio_codec_preference` / `audio_codec_capabilities` を追加する。デフォルトは `InternalAudioCodecCapability` のみで builtin と等価
+  - shiguredo_webrtc の `AudioEncoder` / `AudioDecoder` をユーザー注入可能にする upstream API に依存する
+  - @melpon
 - [ADD] Mp4SampleReader を複数の Mp4VideoCapturer で共有できるようにする
   - @sile
 - [UPDATE] shiguredo_mp4 を 2026.4.0 から 2026.5.0 に更新する

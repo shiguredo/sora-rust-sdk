@@ -591,6 +591,15 @@ pub fn sum_video_stats_field_for_type(
     sum_stats_field_for_type_internal(stats_json, stat_type, field_name, Some("video"))
 }
 
+/// 統計情報から指定した type と kind=audio のエントリを検索し、指定したフィールドの値を合計して返す。
+pub fn sum_audio_stats_field_for_type(
+    stats_json: &JsonString,
+    stat_type: &str,
+    field_name: &str,
+) -> u64 {
+    sum_stats_field_for_type_internal(stats_json, stat_type, field_name, Some("audio"))
+}
+
 /// 統計情報から指定した type のエントリを検索し、指定したフィールドの合計値が 0 より大きいか確認する。
 pub fn verify_stats_field_positive(
     stats_json: &JsonString,
@@ -609,17 +618,27 @@ pub fn verify_video_stats_field_positive(
     sum_video_stats_field_for_type(stats_json, stat_type, field_name) > 0
 }
 
-/// 統計情報から video RTP の codec が期待する mimeType か確認する。
-pub fn verify_video_codec_mime_type(
+/// 統計情報から指定した type と kind=audio のエントリを検索し、指定したフィールドの合計値が 0 より大きいか確認する。
+pub fn verify_audio_stats_field_positive(
+    stats_json: &JsonString,
+    stat_type: &str,
+    field_name: &str,
+) -> bool {
+    sum_audio_stats_field_for_type(stats_json, stat_type, field_name) > 0
+}
+
+/// 統計情報から指定した kind の RTP の codec が期待する mimeType か確認する。
+fn verify_codec_mime_type_internal(
     stats_json: &JsonString,
     stat_type: &str,
     expected_mime_type: &str,
+    kind: &str,
 ) -> bool {
     use std::collections::HashSet;
 
     let stats = parse_stats_lossy(stats_json);
     let mut expected_codec_ids = HashSet::new();
-    let mut video_codec_ids = Vec::new();
+    let mut rtp_codec_ids = Vec::new();
 
     for stat in &stats {
         match stat {
@@ -629,17 +648,17 @@ pub fn verify_video_codec_mime_type(
                 expected_codec_ids.insert(codec.id());
             }
             WebRtcStat::InboundRtp(inbound) if stat_type == "inbound-rtp" => {
-                if inbound.kind() == "video"
+                if inbound.kind() == kind
                     && let Some(codec_id) = inbound.codec_id()
                 {
-                    video_codec_ids.push(codec_id);
+                    rtp_codec_ids.push(codec_id);
                 }
             }
             WebRtcStat::OutboundRtp(outbound) if stat_type == "outbound-rtp" => {
-                if outbound.kind() == "video"
+                if outbound.kind() == kind
                     && let Some(codec_id) = outbound.codec_id()
                 {
-                    video_codec_ids.push(codec_id);
+                    rtp_codec_ids.push(codec_id);
                 }
             }
             _ => {}
@@ -649,9 +668,27 @@ pub fn verify_video_codec_mime_type(
     if expected_codec_ids.is_empty() {
         return false;
     }
-    video_codec_ids
+    rtp_codec_ids
         .iter()
         .any(|codec_id| expected_codec_ids.contains(codec_id))
+}
+
+/// 統計情報から video RTP の codec が期待する mimeType か確認する。
+pub fn verify_video_codec_mime_type(
+    stats_json: &JsonString,
+    stat_type: &str,
+    expected_mime_type: &str,
+) -> bool {
+    verify_codec_mime_type_internal(stats_json, stat_type, expected_mime_type, "video")
+}
+
+/// 統計情報から audio RTP の codec が期待する mimeType か確認する。
+pub fn verify_audio_codec_mime_type(
+    stats_json: &JsonString,
+    stat_type: &str,
+    expected_mime_type: &str,
+) -> bool {
+    verify_codec_mime_type_internal(stats_json, stat_type, expected_mime_type, "audio")
 }
 
 /// 統計情報から data-channel タイプのエントリを検索し、指定した label が存在するか確認する。
@@ -709,10 +746,13 @@ pub fn has_simulcast_rids(stats_json: &JsonString, expected: &[&str]) -> bool {
     expected.is_subset(&actual)
 }
 
+pub mod fake_audio_device_module;
 pub mod fake_video_capturer;
 pub mod stats;
 pub mod test_connection;
+pub use fake_audio_device_module::{FakeAudioDeviceModule, FakeAudioDeviceModuleConfig};
 pub use fake_video_capturer::{FakeVideoCapturer, FakeVideoCapturerConfig};
+
 pub use test_connection::{
     SoraTestConnection, SoraTestConnectionBuilder, SoraTestEvent,
     build_recvonly_data_channel_signaling_connection,
