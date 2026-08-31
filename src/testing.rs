@@ -2,10 +2,11 @@
 //!
 //! 本モジュールはテストビルド (`#[cfg(test)]`) でのみコンパイルされる。
 use shiguredo_webrtc::{
-    AudioCodecType, AudioDecoder, AudioDecoderHandler, AudioEncoder, AudioEncoderEncodedInfo,
-    AudioEncoderHandler, AudioSpeechType, BufferRef, EnvironmentRef, RawBufferWriter,
-    SdpAudioFormat, SdpAudioFormatRef, SdpVideoFormat, SdpVideoFormatRef, VideoCodecType,
-    VideoDecoder, VideoDecoderHandler, VideoEncoder, VideoEncoderHandler,
+    AudioCodecInfo, AudioCodecSpec, AudioCodecType, AudioDecoder, AudioDecoderHandler,
+    AudioEncoder, AudioEncoderEncodedInfo, AudioEncoderHandler, AudioSpeechType, BufferRef,
+    EnvironmentRef, RawBufferWriter, SdpAudioFormat, SdpAudioFormatRef, SdpVideoFormat,
+    SdpVideoFormatRef, VideoCodecType, VideoDecoder, VideoDecoderHandler, VideoEncoder,
+    VideoEncoderHandler,
 };
 
 use crate::audio_codec_capability::{AudioCodecCapability, AudioCodecImplementation};
@@ -197,12 +198,19 @@ impl AudioDecoderHandler for TestAudioDecoder {
     fn reset(&mut self) {}
 }
 
+/// `TestAudioCodecCapability` が広告するテスト用のコーデック情報。
+///
+/// テストではビットレート等の実値に依存しないため、固定値を返す。
+fn test_audio_codec_info() -> AudioCodecInfo {
+    AudioCodecInfo::new(48000, 2, 32000, 6000, 510000)
+}
+
 /// `AudioCodecCapability` を本物のコードで実装したテスト専用の型。
 pub(crate) struct TestAudioCodecCapability {
     implementation: AudioCodecImplementation,
     encoder_formats: Vec<AudioCodecType>,
     decoder_formats: Vec<AudioCodecType>,
-    /// false のときは `is_supported` が true でも `resolve_sdp_format` は None を返す。
+    /// false のときは `is_supported` が true でも `resolve_sdp_codec_spec` は None を返す。
     resolves_sdp_format: bool,
 }
 
@@ -221,7 +229,7 @@ impl TestAudioCodecCapability {
         }
     }
 
-    /// `resolve_sdp_format` が常に None を返す capability に変換する。
+    /// `resolve_sdp_codec_spec` が常に None を返す capability に変換する。
     pub(crate) fn without_sdp_format_resolution(mut self) -> Self {
         self.resolves_sdp_format = false;
         self
@@ -241,13 +249,15 @@ impl AudioCodecCapability for TestAudioCodecCapability {
         self.implementation.clone()
     }
 
-    fn get_supported_formats(&self, direction: CodecDirection) -> Vec<SdpAudioFormat> {
+    fn get_supported_codec_specs(&self, direction: CodecDirection) -> Vec<AudioCodecSpec> {
         self.formats(direction)
             .iter()
             .filter_map(|codec_type| {
-                codec_type
-                    .as_str()
-                    .map(|name| SdpAudioFormat::new(name, 48000, 2))
+                let name = codec_type.as_str()?;
+                Some(AudioCodecSpec::new(
+                    SdpAudioFormat::new(name, 48000, 2),
+                    test_audio_codec_info(),
+                ))
             })
             .collect()
     }
@@ -256,11 +266,11 @@ impl AudioCodecCapability for TestAudioCodecCapability {
         self.formats(direction).contains(&codec_type)
     }
 
-    fn resolve_sdp_format(
+    fn resolve_sdp_codec_spec(
         &self,
         direction: CodecDirection,
         format: SdpAudioFormatRef<'_>,
-    ) -> Option<SdpAudioFormat> {
+    ) -> Option<AudioCodecSpec> {
         if !self.resolves_sdp_format {
             return None;
         }
@@ -272,7 +282,10 @@ impl AudioCodecCapability for TestAudioCodecCapability {
             return None;
         }
         let codec_name = codec_type.as_str()?;
-        Some(SdpAudioFormat::new(codec_name, 48000, 2))
+        Some(AudioCodecSpec::new(
+            SdpAudioFormat::new(codec_name, 48000, 2),
+            test_audio_codec_info(),
+        ))
     }
 
     fn create_audio_encoder(

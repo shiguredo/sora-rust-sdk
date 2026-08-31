@@ -68,19 +68,12 @@ impl AudioEncoderFactoryHandler for SoraAudioEncoderFactory {
             .lock()
             .expect("capabilities should not be poisoned");
         let capability = find_audio_capability(&capabilities, preference.implementation())?;
-        let info = default_audio_codec_info(&format);
-        if capability
-            .resolve_sdp_format(CodecDirection::Encoder, format)
-            .is_some()
-        {
-            Some(info)
-        } else {
-            None
-        }
+        let resolved = capability.resolve_sdp_codec_spec(CodecDirection::Encoder, format)?;
+        Some(resolved.info())
     }
 
-    // 要求された `format` を `capability.resolve_sdp_format` に通し、その返り値
-    // （解決済み format）を `capability.create_audio_encoder` に渡す。
+    // 要求された `format` を `capability.resolve_sdp_codec_spec` に通し、その返り値
+    // （解決済み spec）のフォーマットを `capability.create_audio_encoder` に渡す。
     fn create(
         &mut self,
         env: EnvironmentRef<'_>,
@@ -95,8 +88,8 @@ impl AudioEncoderFactoryHandler for SoraAudioEncoderFactory {
             .lock()
             .expect("capabilities should not be poisoned");
         let capability = find_audio_capability(&capabilities, preference.implementation())?;
-        let resolved = capability.resolve_sdp_format(CodecDirection::Encoder, format)?;
-        capability.create_audio_encoder(env, resolved.as_ref(), options.payload_type())
+        let resolved = capability.resolve_sdp_codec_spec(CodecDirection::Encoder, format)?;
+        capability.create_audio_encoder(env, resolved.format().as_ref(), options.payload_type())
     }
 }
 
@@ -128,12 +121,12 @@ impl AudioDecoderFactoryHandler for SoraAudioDecoderFactory {
             return false;
         };
         capability
-            .resolve_sdp_format(CodecDirection::Decoder, format)
+            .resolve_sdp_codec_spec(CodecDirection::Decoder, format)
             .is_some()
     }
 
-    // Encoder 側と同じ規則。要求された `format` を `capability.resolve_sdp_format` に
-    // 通し、返り値を `capability.create_audio_decoder` に渡す。
+    // Encoder 側と同じ規則。要求された `format` を `capability.resolve_sdp_codec_spec` に
+    // 通し、返り値（解決済み spec）のフォーマットを `capability.create_audio_decoder` に渡す。
     fn create(
         &mut self,
         env: EnvironmentRef<'_>,
@@ -147,8 +140,8 @@ impl AudioDecoderFactoryHandler for SoraAudioDecoderFactory {
             .lock()
             .expect("capabilities should not be poisoned");
         let capability = find_audio_capability(&capabilities, preference.implementation())?;
-        let resolved = capability.resolve_sdp_format(CodecDirection::Decoder, format)?;
-        capability.create_audio_decoder(env, resolved.as_ref())
+        let resolved = capability.resolve_sdp_codec_spec(CodecDirection::Decoder, format)?;
+        capability.create_audio_decoder(env, resolved.format().as_ref())
     }
 }
 
@@ -166,7 +159,8 @@ fn collect_supported_encoders(
         let Some(capability) = find_audio_capability(capabilities, codec.implementation()) else {
             continue;
         };
-        for format in capability.get_supported_formats(codec.direction()) {
+        for spec in capability.get_supported_codec_specs(codec.direction()) {
+            let format = spec.format();
             let format_codec_type = format
                 .name()
                 .ok()
@@ -180,33 +174,10 @@ fn collect_supported_encoders(
             {
                 continue;
             }
-            let info = default_audio_codec_info(&format.as_ref());
-            specs.push(AudioCodecSpec::new(format, info));
+            specs.push(AudioCodecSpec::new(format, spec.info()));
         }
     }
     specs
-}
-
-/// フォーマットから [AudioCodecInfo] を推定する。
-///
-/// 現時点で SDK が対象とするのは Opus のみであり、Opus の実値を返す。
-/// それ以外のコーデックはクロックレートを既定ビットレートとして扱う。
-fn default_audio_codec_info(format: &SdpAudioFormatRef<'_>) -> AudioCodecInfo {
-    let clockrate_hz = format.clockrate_hz();
-    let num_channels = format.num_channels();
-    match format.name().ok().as_deref() {
-        Some("opus") => AudioCodecInfo::new(48000, 2, 32000, 6000, 510000),
-        _ => {
-            let default_bitrate = clockrate_hz * 16;
-            AudioCodecInfo::new(
-                clockrate_hz,
-                num_channels,
-                default_bitrate,
-                0,
-                default_bitrate,
-            )
-        }
-    }
 }
 
 #[cfg(test)]

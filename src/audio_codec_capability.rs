@@ -1,6 +1,6 @@
 //! 音声コーデックの実装情報と capability トレイト。
 use shiguredo_webrtc::{
-    AudioCodecType, AudioDecoder, AudioEncoder, EnvironmentRef, SdpAudioFormat, SdpAudioFormatRef,
+    AudioCodecSpec, AudioCodecType, AudioDecoder, AudioEncoder, EnvironmentRef, SdpAudioFormatRef,
 };
 
 use nojson::{DisplayJson, JsonFormatter, JsonParseError, RawJsonValue};
@@ -57,40 +57,42 @@ pub trait AudioCodecCapability: Send {
     /// 実装名は `AudioCodecPreference` との突き合わせに利用されるため、実装ごとに一意である必要がある。
     fn get_implementation(&self) -> AudioCodecImplementation;
 
-    /// 指定したエンコーダー/デコーダーでサポートされている SDP フォーマットのリストを返す。
-    fn get_supported_formats(&self, direction: CodecDirection) -> Vec<SdpAudioFormat>;
+    /// 指定したエンコーダー/デコーダーでサポートされているコーデック仕様のリストを返す。
+    fn get_supported_codec_specs(&self, direction: CodecDirection) -> Vec<AudioCodecSpec>;
 
     /// 指定方向で `codec_type` が利用可能かどうかを返す。
     ///
-    /// デフォルト実装では `resolve_sdp_format()` による解決可否で判定する。
+    /// デフォルト実装では [Self::get_supported_codec_specs] のフォーマット名で判定する。
     fn is_supported(&self, direction: CodecDirection, codec_type: AudioCodecType) -> bool {
         let Some(codec_name) = codec_type.as_str() else {
             return false;
         };
-        let requested = SdpAudioFormat::new(codec_name, 0, 0);
-        self.resolve_sdp_format(direction, requested.as_ref())
-            .is_some()
+        self.get_supported_codec_specs(direction)
+            .iter()
+            .any(|spec| spec.format().name().ok().as_deref() == Some(codec_name))
     }
 
-    /// 要求 `format` に対して、実装が実際に利用する具体的な SDP フォーマットを解決する。
+    /// 要求 `format` に対して、実装が実際に利用するコーデック仕様を返す。
     ///
-    /// デフォルト実装は `get_supported_formats()` に含まれるフォーマットとの
-    /// コーデック名一致で解決する。
-    fn resolve_sdp_format(
+    /// デフォルト実装は [Self::get_supported_codec_specs()] に対する
+    /// [shiguredo_webrtc::SdpAudioFormat::matches] を使う。
+    fn resolve_sdp_codec_spec(
         &self,
         direction: CodecDirection,
         format: SdpAudioFormatRef<'_>,
-    ) -> Option<SdpAudioFormat> {
-        let format_name = format.name().ok()?;
-        self.get_supported_formats(direction)
+    ) -> Option<AudioCodecSpec> {
+        let request = format.to_owned();
+        self.get_supported_codec_specs(direction)
             .into_iter()
-            .find(|supported| supported.name().ok().as_deref() == Some(format_name.as_str()))
+            .find(|spec| spec.format().matches(request.as_ref()))
     }
 
     /// 指定したフォーマットでエンコーダーがサポートされている場合は AudioEncoder を返す。
     ///
-    /// create_audio_encoder() は get_supported_formats() で返されるフォーマットの
-    /// いずれかとマッチするフォーマットで呼び出されることが想定されている。
+    /// create_audio_encoder() は resolve_sdp_codec_spec() で解決されるフォーマット
+    /// (get_supported_codec_specs() のいずれかと一致するフォーマット) で呼び出される
+    /// ことが想定されている。
+    ///
     /// `payload_type` はネゴシエーションで決まった音声ペイロードタイプであり、
     /// エンコーダーの RTP ペイロードタイプとして利用する必要がある。
     #[expect(unused_variables)]
@@ -105,8 +107,9 @@ pub trait AudioCodecCapability: Send {
 
     /// 指定したフォーマットでデコーダーがサポートされている場合は AudioDecoder を返す。
     ///
-    /// create_audio_decoder() は get_supported_formats() で返されるフォーマットの
-    /// いずれかとマッチするフォーマットで呼び出されることが想定されている。
+    /// create_audio_decoder() は resolve_sdp_codec_spec() で解決されるフォーマット
+    /// (get_supported_codec_specs() のいずれかと一致するフォーマット) で呼び出される
+    /// ことが想定されている。
     #[expect(unused_variables)]
     fn create_audio_decoder(
         &self,
@@ -152,7 +155,7 @@ pub(crate) fn find_audio_capability<'a>(
 mod tests {
     use super::*;
     use nojson::Json;
-    use shiguredo_webrtc::AudioCodecType;
+    use shiguredo_webrtc::{AudioCodecType, SdpAudioFormat};
 
     use crate::testing::TestAudioCodecCapability;
 

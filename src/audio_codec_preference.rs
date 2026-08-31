@@ -509,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_succeeds_when_supported_even_if_resolve_sdp_format_is_none() {
+    fn validate_succeeds_when_supported_even_if_resolve_sdp_codec_spec_is_none() {
         let preference = AudioCodecPreference::new(vec![default_preference_codec(
             CodecDirection::Encoder,
             AudioCodecType::Opus,
