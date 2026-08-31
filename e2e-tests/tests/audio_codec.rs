@@ -13,8 +13,11 @@ fn test_channel_id(suffix: &str) -> String {
     format!("{}-{}", base, suffix)
 }
 
-/// 音声のみの SendRecv クライアントを作成・起動し、SoraTestConnection を返す。
-fn connect_audio_sendrecv(urls: &[String], channel_id: &str) -> SoraTestConnection {
+/// 音声のみの SendRecv クライアントを作成・起動し、接続とダミー音声入力を返す。
+fn connect_audio_sendrecv(
+    urls: &[String],
+    channel_id: &str,
+) -> (SoraTestConnection, FakeAudioDeviceModule) {
     // マイクが存在しない環境でも動くよう、正弦波を流すダミー AudioDeviceModule を使う。
     let fake = FakeAudioDeviceModule::new(FakeAudioDeviceModuleConfig::default());
     let config = SoraConnectionContextConfig {
@@ -44,9 +47,10 @@ fn connect_audio_sendrecv(urls: &[String], channel_id: &str) -> SoraTestConnecti
         builder = builder.metadata(build_metadata_with_access_token(&token));
     }
 
-    builder
+    let connection = builder
         .connect()
-        .expect("SoraTestConnection の作成に失敗しました")
+        .expect("SoraTestConnection の作成に失敗しました");
+    (connection, fake)
 }
 
 /// Opus (audio/opus) が実接続で送受信できることを検証する。
@@ -58,7 +62,7 @@ async fn test_opus_sendrecv() {
     let channel_id = test_channel_id("opus-sendrecv");
 
     // クライアント 1 を作成・起動
-    let mut client1 = connect_audio_sendrecv(&urls, &channel_id);
+    let (mut client1, _fake1) = connect_audio_sendrecv(&urls, &channel_id);
     client1
         .wait_for_connect(Duration::from_secs(10))
         .await
@@ -67,7 +71,7 @@ async fn test_opus_sendrecv() {
     println!("クライアント 1 接続完了、クライアント 2 を起動します");
 
     // クライアント 2 を作成・起動
-    let mut client2 = connect_audio_sendrecv(&urls, &channel_id);
+    let (mut client2, _fake2) = connect_audio_sendrecv(&urls, &channel_id);
     client2
         .wait_for_connect(Duration::from_secs(10))
         .await
