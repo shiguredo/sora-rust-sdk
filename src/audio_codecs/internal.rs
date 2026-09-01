@@ -50,11 +50,11 @@ impl AudioCodecCapability for InternalAudioCodecCapability {
         &self,
         env: EnvironmentRef<'_>,
         format: SdpAudioFormatRef<'_>,
-        payload_type: i32,
+        options: &AudioEncoderFactoryOptions,
     ) -> Option<AudioEncoder> {
-        let mut options = AudioEncoderFactoryOptions::new();
-        options.set_payload_type(payload_type);
-        self.encoder_factory.create(env, format, &options)
+        // Options を再構築せずそのまま渡すことで、payload_type だけでなく
+        // codec_pair_id (Redundant Encoding のペアリング) 等も保持する。
+        self.encoder_factory.create(env, format, options)
     }
 
     fn create_audio_decoder(

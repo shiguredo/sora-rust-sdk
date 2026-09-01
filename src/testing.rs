@@ -1,12 +1,14 @@
 //! テストで共有するテスト用ヘルパー型。
 //!
 //! 本モジュールはテストビルド (`#[cfg(test)]`) でのみコンパイルされる。
+use std::cell::RefCell;
+
 use shiguredo_webrtc::{
     AudioCodecInfo, AudioCodecSpec, AudioCodecType, AudioDecoder, AudioDecoderHandler,
-    AudioEncoder, AudioEncoderEncodedInfo, AudioEncoderHandler, AudioSpeechType, BufferRef,
-    EnvironmentRef, RawBufferWriter, SdpAudioFormat, SdpAudioFormatRef, SdpVideoFormat,
-    SdpVideoFormatRef, VideoCodecType, VideoDecoder, VideoDecoderHandler, VideoEncoder,
-    VideoEncoderHandler,
+    AudioEncoder, AudioEncoderEncodedInfo, AudioEncoderFactoryOptions, AudioEncoderHandler,
+    AudioSpeechType, BufferRef, EnvironmentRef, RawBufferWriter, SdpAudioFormat, SdpAudioFormatRef,
+    SdpVideoFormat, SdpVideoFormatRef, VideoCodecType, VideoDecoder, VideoDecoderHandler,
+    VideoEncoder, VideoEncoderHandler,
 };
 
 use crate::audio_codec_capability::{AudioCodecCapability, AudioCodecImplementation};
@@ -221,6 +223,9 @@ pub(crate) struct TestAudioCodecCapability {
     decoder_formats: Vec<AudioCodecType>,
     /// false のときは `is_supported` が true でも `resolve_sdp_codec_spec` は None を返す。
     resolves_sdp_format: bool,
+    /// `create_audio_encoder` が最後に受け取ったコーデックペア ID (数値表現)。
+    /// Options が素通しで届くことを検証するために記録する。
+    received_codec_pair_id: RefCell<Option<u64>>,
 }
 
 impl TestAudioCodecCapability {
@@ -235,7 +240,13 @@ impl TestAudioCodecCapability {
             encoder_formats,
             decoder_formats,
             resolves_sdp_format: true,
+            received_codec_pair_id: RefCell::new(None),
         }
+    }
+
+    /// `create_audio_encoder` が最後に受け取ったコーデックペア ID を返す。
+    pub(crate) fn received_codec_pair_id(&self) -> Option<u64> {
+        *self.received_codec_pair_id.borrow()
     }
 
     /// `resolve_sdp_codec_spec` が常に None を返す capability に変換する。
@@ -301,15 +312,18 @@ impl AudioCodecCapability for TestAudioCodecCapability {
         &self,
         _env: EnvironmentRef<'_>,
         format: SdpAudioFormatRef<'_>,
-        payload_type: i32,
+        options: &AudioEncoderFactoryOptions,
     ) -> Option<AudioEncoder> {
         let codec_type = format
             .name()
             .ok()
             .and_then(|name| AudioCodecType::try_from(name.as_str()).ok())?;
         if self.is_supported(CodecDirection::Encoder, codec_type) {
+            *self.received_codec_pair_id.borrow_mut() = options
+                .codec_pair_id()
+                .map(|id| id.numeric_representation());
             Some(AudioEncoder::new_with_handler(Box::new(
-                TestAudioEncoder::with_payload_type(payload_type),
+                TestAudioEncoder::with_payload_type(options.payload_type()),
             )))
         } else {
             None

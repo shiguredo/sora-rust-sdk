@@ -145,10 +145,10 @@ impl AudioCodecPreference {
     }
 
     /// 指定された [AudioCodecImplementation] が含まれているかどうかを返す。
-    pub fn has_implementation(&self, implementation: AudioCodecImplementation) -> bool {
+    pub fn has_implementation(&self, implementation: &AudioCodecImplementation) -> bool {
         self.codecs
             .iter()
-            .any(|codec| codec.implementation == implementation)
+            .any(|codec| codec.implementation == *implementation)
     }
 
     /// 別の [AudioCodecPreference] をマージする。
@@ -539,8 +539,10 @@ mod tests {
         );
         codec.set_implementation(AudioCodecImplementation::new("internal", "WebRTC built-in"));
         assert!(
-            preference
-                .has_implementation(AudioCodecImplementation::new("internal", "WebRTC built-in"))
+            preference.has_implementation(&AudioCodecImplementation::new(
+                "internal",
+                "WebRTC built-in"
+            ))
         );
 
         let merged = AudioCodecPreference::new(vec![default_preference_codec(

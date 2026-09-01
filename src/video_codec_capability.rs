@@ -46,7 +46,7 @@ impl PartialEq for VideoCodecImplementation {
     }
 }
 
-/// コーデックの方向 (エンコード/デコード) は共有モジュール `codec_direction` が提供する。
+// コーデックの方向 (エンコード/デコード) は共有モジュール `codec_direction` が提供する。
 use crate::codec_direction::CodecDirection;
 
 /// `VideoCodecCapability` は、各 codec 実装ごとの差分を吸収するためのインターフェース。

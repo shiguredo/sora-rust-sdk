@@ -89,7 +89,7 @@ impl AudioEncoderFactoryHandler for SoraAudioEncoderFactory {
             .expect("capabilities should not be poisoned");
         let capability = find_audio_capability(&capabilities, preference.implementation())?;
         let resolved = capability.resolve_sdp_codec_spec(CodecDirection::Encoder, format)?;
-        capability.create_audio_encoder(env, resolved.format().as_ref(), options.payload_type())
+        capability.create_audio_encoder(env, resolved.format().as_ref(), options)
     }
 }
 

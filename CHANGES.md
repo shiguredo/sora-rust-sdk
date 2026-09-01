@@ -22,12 +22,18 @@
   - 既存 variant の日本語メッセージを英語に置き換える
   - `InvalidAv1Track` の内部メッセージも英語にする
   - @sile
+- [CHANGE] `VideoCodecPreference::has_implementation` の引数を実値から参照に変更する
+  - 不要な所有権移動を避けるため `&VideoCodecImplementation` を受ける
+  - @melpon
 - [ADD] AudioEncoder / AudioDecoder をユーザー側でカスタマイズ可能にするための音声コーデックフレームワークを追加する
   - `AudioCodecCapability` trait (`src/audio_codec_capability.rs`) を追加する
+  - `AudioCodecImplementation` (`src/audio_codec_capability.rs`) を追加する
   - `AudioCodecPreference` / `AudioPreferenceCodec` (`src/audio_codec_preference.rs`) を追加する
-  - `SoraAudioEncoderFactory` / `SoraAudioDecoderFactory` (`src/audio_codec.rs`) を追加する
+  - `validate_audio_codec_preference` (`src/audio_codec_preference.rs`) を追加する
+  - `Error::InvalidAudioCodecCapability` / `Error::InvalidAudioCodecPreference` (`src/error.rs`) を追加する
   - `InternalAudioCodecCapability` (`src/audio_codecs/internal.rs`) を追加する
-  - `SoraConnectionContextConfig` に `audio_codec_preference` / `audio_codec_capabilities` を追加する。デフォルトは `InternalAudioCodecCapability` のみで builtin と等価
+  - `SoraConnectionContextConfig` に `audio_codec_preference` / `audio_codec_capabilities` を追加する。デフォルトは `InternalAudioCodecCapability` のみで、builtin のうち Opus / ISAC / G722 / PCMU / PCMA を広告する
+  - `SoraAudioEncoderFactory` / `SoraAudioDecoderFactory` (`src/audio_codec.rs`) を内部実装として追加する
   - shiguredo_webrtc の `AudioEncoder` / `AudioDecoder` をユーザー注入可能にする upstream API に依存する
   - @melpon
 - [ADD] Mp4SampleReader を複数の Mp4VideoCapturer で共有できるようにする

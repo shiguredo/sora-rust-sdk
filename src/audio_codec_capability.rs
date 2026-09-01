@@ -1,6 +1,7 @@
 //! 音声コーデックの実装情報と capability トレイト。
 use shiguredo_webrtc::{
-    AudioCodecSpec, AudioCodecType, AudioDecoder, AudioEncoder, EnvironmentRef, SdpAudioFormatRef,
+    AudioCodecSpec, AudioCodecType, AudioDecoder, AudioEncoder, AudioEncoderFactoryOptions,
+    EnvironmentRef, SdpAudioFormatRef,
 };
 
 use nojson::{DisplayJson, JsonFormatter, JsonParseError, RawJsonValue};
@@ -95,14 +96,15 @@ pub trait AudioCodecCapability: Send {
     /// get_supported_codec_specs() で返されないフォーマットで呼び出された場合の動作は
     /// 実装に依存するため、None が返されることは保証されない。
     ///
-    /// `payload_type` はネゴシエーションで決まった音声ペイロードタイプであり、
-    /// エンコーダーの RTP ペイロードタイプとして利用する必要がある。
+    /// `options` はネゴシエーションで決まる音声エンコーダーの設定であり、
+    /// ペイロードタイプやコーデックペア ID (Redundant Encoding 用) が含まれる。
+    /// エンコーダーへ渡す際は設定を捨てずにそのまま引き継ぐこと。
     #[expect(unused_variables)]
     fn create_audio_encoder(
         &self,
         env: EnvironmentRef<'_>,
         format: SdpAudioFormatRef<'_>,
-        payload_type: i32,
+        options: &AudioEncoderFactoryOptions,
     ) -> Option<AudioEncoder> {
         None
     }
@@ -184,15 +186,48 @@ mod tests {
         assert!(capability.is_supported(CodecDirection::Decoder, AudioCodecType::Opus));
         let opus = SdpAudioFormat::new("opus", 48000, 2);
         let env = shiguredo_webrtc::Environment::new();
+        let mut options = shiguredo_webrtc::AudioEncoderFactoryOptions::new();
+        options.set_payload_type(111);
         assert!(
             capability
-                .create_audio_encoder(env.as_ref(), opus.as_ref(), 111)
+                .create_audio_encoder(env.as_ref(), opus.as_ref(), &options)
                 .is_some()
         );
         assert!(
             capability
                 .create_audio_decoder(env.as_ref(), opus.as_ref())
                 .is_some()
+        );
+    }
+
+    /// `create_audio_encoder` が Options を素通しで受け取り、codec_pair_id まで
+    /// 引き継げることを検証する。
+    ///
+    /// 以前は引数が `payload_type: i32` のみで、`AudioEncoderFactoryOptions` を
+    /// 作り直すため codec_pair_id が失われていた (Redundant Encoding のペアリング破壊)。
+    #[test]
+    fn audio_encoder_create_forwards_codec_pair_id_in_options() {
+        let capability = TestAudioCodecCapability::new(
+            AudioCodecImplementation::new("test", "Test Codec"),
+            vec![AudioCodecType::Opus],
+            vec![AudioCodecType::Opus],
+        );
+        let env = shiguredo_webrtc::Environment::new();
+        let opus = SdpAudioFormat::new("opus", 48000, 2);
+        let mut options = shiguredo_webrtc::AudioEncoderFactoryOptions::new();
+        options.set_payload_type(111);
+        let pair_id = shiguredo_webrtc::AudioCodecPairId::create();
+        options.set_codec_pair_id(Some(&pair_id));
+
+        assert!(
+            capability
+                .create_audio_encoder(env.as_ref(), opus.as_ref(), &options)
+                .is_some()
+        );
+        assert_eq!(
+            capability.received_codec_pair_id(),
+            Some(pair_id.numeric_representation()),
+            "codec_pair_id が create_audio_encoder まで素通しされていません"
         );
     }
 }

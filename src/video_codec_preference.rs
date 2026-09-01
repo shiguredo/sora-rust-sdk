@@ -139,10 +139,10 @@ impl VideoCodecPreference {
     }
 
     /// 指定された [VideoCodecImplementation] が含まれているかどうかを返す。
-    pub fn has_implementation(&self, implementation: VideoCodecImplementation) -> bool {
+    pub fn has_implementation(&self, implementation: &VideoCodecImplementation) -> bool {
         self.codecs
             .iter()
-            .any(|codec| codec.implementation == implementation)
+            .any(|codec| codec.implementation == *implementation)
     }
 
     /// 別の [VideoCodecPreference] をマージする。
@@ -668,10 +668,12 @@ mod tests {
             "nvcodec",
             "NVIDIA NVENC/NVDEC",
         ));
-        assert!(preference.has_implementation(VideoCodecImplementation::new(
-            "nvcodec",
-            "NVIDIA NVENC/NVDEC"
-        )));
+        assert!(
+            preference.has_implementation(&VideoCodecImplementation::new(
+                "nvcodec",
+                "NVIDIA NVENC/NVDEC"
+            ))
+        );
 
         let merged = VideoCodecPreference::new(vec![
             default_preference_codec(
