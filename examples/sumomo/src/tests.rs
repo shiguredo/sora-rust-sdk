@@ -234,27 +234,27 @@ fn validate_args_rejects_mp4_with_video_codec_type() {
 fn video_from_codec_type_builds_codec_specific_video() {
     let bit_rate = Some(30000);
     assert_eq!(
-        video_from_codec_type(shiguredo_webrtc::VideoCodecType::Vp8, bit_rate)
+        video_from_codec_type(shiguredo_webrtc::VideoCodecType::Vp8, bit_rate, None)
             .expect("vp8 は Video を生成できるはずです"),
         sora_sdk::Video::new_vp8(bit_rate)
     );
     assert_eq!(
-        video_from_codec_type(shiguredo_webrtc::VideoCodecType::Vp9, bit_rate)
+        video_from_codec_type(shiguredo_webrtc::VideoCodecType::Vp9, bit_rate, None)
             .expect("vp9 は Video を生成できるはずです"),
         sora_sdk::Video::new_vp9(bit_rate, None)
     );
     assert_eq!(
-        video_from_codec_type(shiguredo_webrtc::VideoCodecType::Av1, bit_rate)
+        video_from_codec_type(shiguredo_webrtc::VideoCodecType::Av1, bit_rate, None)
             .expect("av1 は Video を生成できるはずです"),
         sora_sdk::Video::new_av1(bit_rate, None)
     );
     assert_eq!(
-        video_from_codec_type(shiguredo_webrtc::VideoCodecType::H264, bit_rate)
+        video_from_codec_type(shiguredo_webrtc::VideoCodecType::H264, bit_rate, None)
             .expect("h264 は Video を生成できるはずです"),
         sora_sdk::Video::new_h264(bit_rate, None)
     );
     assert_eq!(
-        video_from_codec_type(shiguredo_webrtc::VideoCodecType::H265, bit_rate)
+        video_from_codec_type(shiguredo_webrtc::VideoCodecType::H265, bit_rate, None)
             .expect("h265 は Video を生成できるはずです"),
         sora_sdk::Video::new_h265(bit_rate, None)
     );
@@ -262,20 +262,86 @@ fn video_from_codec_type_builds_codec_specific_video() {
 
 #[test]
 fn video_from_codec_type_rejects_unknown_codec() {
-    let err = video_from_codec_type(shiguredo_webrtc::VideoCodecType::Generic, None)
+    let err = video_from_codec_type(shiguredo_webrtc::VideoCodecType::Generic, None, None)
         .expect_err("Generic はエラーになるはずです");
     let message = err.to_string();
     assert!(
         message.contains("unsupported video codec type"),
         "エラーメッセージが期待と異なります: {message}"
     );
-    let err = video_from_codec_type(shiguredo_webrtc::VideoCodecType::Unknown(0), None)
+    let err = video_from_codec_type(shiguredo_webrtc::VideoCodecType::Unknown(0), None, None)
         .expect_err("Unknown はエラーになるはずです");
     let message = err.to_string();
     assert!(
         message.contains("unsupported video codec type"),
         "エラーメッセージが期待と異なります: {message}"
     );
+}
+
+/// fixture MP4 から一時ファイル経由で `Mp4SampleReader` を作る。
+///
+/// 呼び出し側が reader を drop したあとで一時ファイルを削除する前提。
+fn mp4_reader_from_fixture(fixture: &[u8], tag: &str) -> (Mp4SampleReader, std::path::PathBuf) {
+    let tmp_name = format!(
+        "sumomo-mp4-reader-{}-{}-{}.mp4",
+        tag,
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("システム時刻は UNIX_EPOCH より後である必要があります")
+            .as_nanos()
+    );
+    let path = std::env::temp_dir().join(tmp_name);
+    std::fs::write(&path, fixture).expect("一時 fixture の書き込みに失敗しました");
+    let reader = Mp4SampleReader::new(&path).expect("fixture MP4 のパースに失敗しました");
+    (reader, path)
+}
+
+#[test]
+fn h264_params_from_mp4_passthrough_fills_profile_level_id() {
+    // H.264 MP4 なら avcC 由来の profile-level-id を connect 用 h264_params に載せる。
+    // fixture は High Profile Level 2.1 (profile-level-id=640015)。
+    let fixture: &[u8] = include_bytes!("../../../testdata/red-320x320-h264.mp4");
+    let (reader, path) = mp4_reader_from_fixture(fixture, "fills-h264-plid");
+    let params = h264_params_from_mp4_passthrough(&reader)
+        .expect("H.264 fixture では h264_params が補完されるはずです");
+    assert_eq!(
+        params.profile_level_id.as_deref(),
+        Some("640015"),
+        "High Profile fixture の profile_level_id が載るはずです"
+    );
+    assert_eq!(params.b_frame, None, "b_frame は自動補完しないはずです");
+
+    // video_from_codec_type 経由でも connect JSON に含まれることを確認する。
+    let video = video_from_codec_type(
+        shiguredo_webrtc::VideoCodecType::H264,
+        Some(30000),
+        Some(params),
+    )
+    .expect("h264 Video を生成できるはずです");
+    let json = nojson::Json(&video).to_string();
+    assert!(
+        json.contains("\"profile_level_id\":\"640015\""),
+        "connect 用 Video JSON に profile_level_id が含まれるべき: {json}"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn h264_params_from_mp4_passthrough_returns_none_for_av1() {
+    // H.264 以外では h264_params を補完しない。
+    let fixture: &[u8] = include_bytes!("../../../testdata/red-320x320-av1.mp4");
+    let (reader, path) = mp4_reader_from_fixture(fixture, "no-h264-params-for-av1");
+    assert_eq!(
+        reader.codec_type(),
+        shiguredo_webrtc::VideoCodecType::Av1,
+        "AV1 fixture を使うはずです"
+    );
+    assert!(
+        h264_params_from_mp4_passthrough(&reader).is_none(),
+        "AV1 では h264_params を補完してはならない"
+    );
+    let _ = std::fs::remove_file(&path);
 }
 
 #[test]

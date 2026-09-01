@@ -255,18 +255,47 @@ fn prepare_mp4_state(args: &Args) -> Result<Option<Mp4SampleReader>> {
     }
 }
 
+/// MP4 パススルー時に、connect へ載せる H.264 パラメータをファイル実値から作る。
+///
+/// Sora は offerer のため、offer の `profile-level-id` と bitstream 実値が合わないと
+/// クライアント側の SDP answer で video m-line が reject される。
+/// `--input-mp4` で H.264 を送る場合は、avcC 由来の `profile-level-id` を
+/// `h264_params` として connect に載せる（Sora 側で `signaling_h264_params` が必要）。
+/// H.264 以外、または `profile-level-id` が capability に無い場合は `None` を返す。
+fn h264_params_from_mp4_passthrough(reader: &Mp4SampleReader) -> Option<sora_sdk::VideoH264Params> {
+    if reader.codec_type() != VideoCodecType::H264 {
+        return None;
+    }
+    let mut formats = reader
+        .passthrough_capability()
+        .get_supported_formats(CodecDirection::Encoder);
+    let format = formats.first_mut()?;
+    let params: HashMap<String, String> = format.parameters_mut().iter().collect();
+    let plid = params.get("profile-level-id")?;
+    rtc_log_info!(
+        "MP4 passthrough: filling connect h264_params.profile_level_id={}",
+        plid
+    );
+    Some(sora_sdk::VideoH264Params {
+        profile_level_id: Some(plid.clone()),
+        b_frame: None,
+    })
+}
+
 /// [VideoCodecType] からシグナリング用の [sora_sdk::Video] を生成する。
 ///
-/// [VideoCodecType::Generic] や [VideoCodecType::Unknown] の場合はエラーになる
+/// [VideoCodecType::Generic] や [VideoCodecType::Unknown] の場合はエラーになる。
+/// H.264 のときだけ `h264_params` を connect の `h264_params` として載せる。
 fn video_from_codec_type(
     codec_type: VideoCodecType,
     bit_rate: Option<u32>,
+    h264_params: Option<sora_sdk::VideoH264Params>,
 ) -> Result<sora_sdk::Video> {
     match codec_type {
         VideoCodecType::Vp8 => Ok(sora_sdk::Video::new_vp8(bit_rate)),
         VideoCodecType::Vp9 => Ok(sora_sdk::Video::new_vp9(bit_rate, None)),
         VideoCodecType::Av1 => Ok(sora_sdk::Video::new_av1(bit_rate, None)),
-        VideoCodecType::H264 => Ok(sora_sdk::Video::new_h264(bit_rate, None)),
+        VideoCodecType::H264 => Ok(sora_sdk::Video::new_h264(bit_rate, h264_params)),
         VideoCodecType::H265 => Ok(sora_sdk::Video::new_h265(bit_rate, None)),
         VideoCodecType::Generic | VideoCodecType::Unknown(_) => {
             Err(io::Error::other(format!("unsupported video codec type: {codec_type:?}")).into())
@@ -277,21 +306,30 @@ fn video_from_codec_type(
 fn apply_video_options(
     mut builder: SoraConnectionBuilder,
     args: &Args,
-    mp4_codec_type: Option<VideoCodecType>,
+    mp4_reader: Option<&Mp4SampleReader>,
 ) -> Result<SoraConnectionBuilder> {
     // MP4 使用時は MP4 から検出した実際のコーデックを使う (--video-codec-type とは併用不可)。
     // ただし、受信専用 (RecvOnly) では MP4 のコーデックを利用せず、--video-codec-type に従う。
     // `--input-mp4` は送信専用のオプションであるため、RecvOnly 時の `video` の設定へ波及させない。
+    let mp4_codec_type = mp4_reader.map(|reader| reader.codec_type());
     let video_codec_type = if args.role.wants_send() {
         mp4_codec_type.or(args.video_codec_type)
     } else {
         args.video_codec_type
     };
+    // 送信ロールかつ H.264 の MP4 パススルー時のみ、connect 用 h264_params を補完する。
+    let h264_params = if args.role.wants_send() {
+        mp4_reader.and_then(h264_params_from_mp4_passthrough)
+    } else {
+        None
+    };
 
     if let Some(video) = args.video {
         if video {
             let video_setting = match video_codec_type {
-                Some(codec_type) => video_from_codec_type(codec_type, args.video_bit_rate)?,
+                Some(codec_type) => {
+                    video_from_codec_type(codec_type, args.video_bit_rate, h264_params)?
+                }
                 None => sora_sdk::Video::new_bool(true),
             };
             builder = builder.video(video_setting);
@@ -299,7 +337,11 @@ fn apply_video_options(
             builder = builder.video(sora_sdk::Video::new_bool(false));
         }
     } else if let Some(codec_type) = video_codec_type {
-        builder = builder.video(video_from_codec_type(codec_type, args.video_bit_rate)?);
+        builder = builder.video(video_from_codec_type(
+            codec_type,
+            args.video_bit_rate,
+            h264_params,
+        )?);
     }
     Ok(builder)
 }
@@ -333,7 +375,7 @@ fn build_connection_builder(
     context: Arc<SoraConnectionContext>,
     args: &Args,
     event_tx: mpsc::UnboundedSender<AppEvent>,
-    mp4_codec_type: Option<VideoCodecType>,
+    mp4_reader: Option<&Mp4SampleReader>,
 ) -> Result<SoraConnectionBuilder> {
     let mut builder = SoraConnection::builder(
         context,
@@ -350,7 +392,7 @@ fn build_connection_builder(
     if let Some(audio) = args.audio {
         builder = builder.audio(sora_sdk::Audio::new_bool(audio));
     }
-    builder = apply_video_options(builder, args, mp4_codec_type)?;
+    builder = apply_video_options(builder, args, mp4_reader)?;
     if let Some(data_channel_signaling) = args.data_channel_signaling {
         builder = builder.data_channel_signaling(data_channel_signaling);
     }
@@ -544,7 +586,6 @@ fn build_and_run_connection(
 
     // --input-mp4 が指定されている場合は MP4 を読み込んでパススルーの準備をする
     let mp4_state = prepare_mp4_state(args)?;
-    let mp4_codec_type = mp4_state.as_ref().map(|reader| reader.codec_type());
 
     #[cfg(feature = "media-device")]
     let adm_config = if let Some(external_adm) = &external_adm {
@@ -584,7 +625,7 @@ fn build_and_run_connection(
         None
     };
 
-    let builder = build_connection_builder(context.clone(), args, event_tx, mp4_codec_type)?;
+    let builder = build_connection_builder(context.clone(), args, event_tx, mp4_state.as_ref())?;
     let (builder, video_capturer) = attach_sender_tracks(builder, &context, args, mp4_state)?;
 
     let (connection, handle) = builder.build()?;
