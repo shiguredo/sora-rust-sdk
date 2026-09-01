@@ -261,23 +261,25 @@ fn prepare_mp4_state(args: &Args) -> Result<Option<Mp4SampleReader>> {
 /// クライアント側の SDP answer で video m-line が reject される。
 /// `--input-mp4` で H.264 を送る場合は、avcC 由来の `profile-level-id` を
 /// `h264_params` として connect に載せる（Sora 側で `signaling_h264_params` が必要）。
-/// H.264 以外、または `profile-level-id` が capability に無い場合は `None` を返す。
+/// H.264 以外では `None` を返す。H.264 なのに format / `profile-level-id` が無い場合は
+/// reader / capability の不変条件破壊なのでパニックする。
 fn h264_params_from_mp4_passthrough(reader: &Mp4SampleReader) -> Option<sora_sdk::VideoH264Params> {
     if reader.codec_type() != VideoCodecType::H264 {
         return None;
     }
-    let mut formats = reader
+    let mut format = reader
         .passthrough_capability()
-        .get_supported_formats(CodecDirection::Encoder);
-    let format = formats.first_mut()?;
-    let params: HashMap<String, String> = format.parameters_mut().iter().collect();
-    let plid = params.get("profile-level-id")?;
-    rtc_log_info!(
-        "MP4 passthrough: filling connect h264_params.profile_level_id={}",
-        plid
-    );
+        .get_supported_formats(CodecDirection::Encoder)
+        .into_iter()
+        .next()
+        .expect("BUG: H.264 passthrough must advertise an encoder format");
+    let plid = format
+        .parameters_mut()
+        .iter()
+        .find_map(|(key, value)| (key == "profile-level-id").then(|| value.clone()))
+        .expect("BUG: H.264 passthrough format must advertise profile-level-id");
     Some(sora_sdk::VideoH264Params {
-        profile_level_id: Some(plid.clone()),
+        profile_level_id: Some(plid),
         b_frame: None,
     })
 }
@@ -285,7 +287,8 @@ fn h264_params_from_mp4_passthrough(reader: &Mp4SampleReader) -> Option<sora_sdk
 /// [VideoCodecType] からシグナリング用の [sora_sdk::Video] を生成する。
 ///
 /// [VideoCodecType::Generic] や [VideoCodecType::Unknown] の場合はエラーになる。
-/// H.264 のときだけ `h264_params` を connect の `h264_params` として載せる。
+/// `h264_params` は H.264 のときだけ connect の `h264_params` として載せる。
+/// 非 H.264 では無視する。
 fn video_from_codec_type(
     codec_type: VideoCodecType,
     bit_rate: Option<u32>,
@@ -317,9 +320,23 @@ fn apply_video_options(
     } else {
         args.video_codec_type
     };
-    // 送信ロールかつ H.264 の MP4 パススルー時のみ、connect 用 h264_params を補完する。
-    let h264_params = if args.role.wants_send() {
-        mp4_reader.and_then(h264_params_from_mp4_passthrough)
+    // connect にコーデック付き Video を載せるときだけ h264_params を補完する。
+    // `--video false` では計算もしない（誤って "filling connect" ログを出さない）。
+    let will_set_codec_video = match args.video {
+        Some(false) => false,
+        Some(true) | None => video_codec_type.is_some(),
+    };
+    let h264_params = if args.role.wants_send() && will_set_codec_video {
+        let params = mp4_reader.and_then(h264_params_from_mp4_passthrough);
+        if let Some(ref params) = params
+            && let Some(ref plid) = params.profile_level_id
+        {
+            rtc_log_info!(
+                "MP4 passthrough: filling connect h264_params.profile_level_id={}",
+                plid
+            );
+        }
+        params
     } else {
         None
     };

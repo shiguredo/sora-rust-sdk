@@ -1,15 +1,11 @@
 use super::*;
 use sora_sdk::{CodecDirection, Role};
 
-/// H.264 の fixture MP4 から `Mp4PassthroughVideoCodecCapability` を取り出す。
+/// fixture MP4 から一時ファイル経由で `Mp4SampleReader` を作る。
 ///
-/// build_context_config 系のテストは capability 構築だけを検証するので、reader も
-/// 一時ファイルも呼び出し側に残す必要がない。helper 内で capability を生成したあと
-/// 一時ファイルを削除し、capability だけを返す（capability はファイル I/O を持たない）。
-/// なお reader は関数末尾で drop されるため、Unix では open 中のファイルを
+/// 呼び出し側が一時ファイルを削除する。Unix では reader が open 中でも
 /// 削除できる挙動に依存している（既存の mp4 テスト群と同じ流儀）。
-fn h264_capability_from_fixture(tag: &str) -> Mp4PassthroughVideoCodecCapability {
-    let fixture: &[u8] = include_bytes!("../../../testdata/red-320x320-h264.mp4");
+fn mp4_reader_from_fixture(fixture: &[u8], tag: &str) -> (Mp4SampleReader, std::path::PathBuf) {
     let tmp_name = format!(
         "sumomo-mp4-{}-{}-{}.mp4",
         tag,
@@ -22,7 +18,19 @@ fn h264_capability_from_fixture(tag: &str) -> Mp4PassthroughVideoCodecCapability
     let path = std::env::temp_dir().join(tmp_name);
     std::fs::write(&path, fixture).expect("一時 fixture の書き込みに失敗しました");
     let reader = Mp4SampleReader::new(&path).expect("fixture MP4 のパースに失敗しました");
+    (reader, path)
+}
+
+/// H.264 の fixture MP4 から `Mp4PassthroughVideoCodecCapability` を取り出す。
+///
+/// build_context_config 系のテストは capability 構築だけを検証するので、reader も
+/// 一時ファイルも呼び出し側に残す必要がない。helper 内で capability を生成したあと
+/// 一時ファイルを削除し、capability だけを返す（capability はファイル I/O を持たない）。
+fn h264_capability_from_fixture(tag: &str) -> Mp4PassthroughVideoCodecCapability {
+    let fixture: &[u8] = include_bytes!("../../../testdata/red-320x320-h264.mp4");
+    let (reader, path) = mp4_reader_from_fixture(fixture, tag);
     let capability = reader.passthrough_capability();
+    drop(reader);
     let _ = std::fs::remove_file(&path);
     capability
 }
@@ -278,28 +286,8 @@ fn video_from_codec_type_rejects_unknown_codec() {
     );
 }
 
-/// fixture MP4 から一時ファイル経由で `Mp4SampleReader` を作る。
-///
-/// 呼び出し側が reader を drop したあとで一時ファイルを削除する前提。
-fn mp4_reader_from_fixture(fixture: &[u8], tag: &str) -> (Mp4SampleReader, std::path::PathBuf) {
-    let tmp_name = format!(
-        "sumomo-mp4-reader-{}-{}-{}.mp4",
-        tag,
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("システム時刻は UNIX_EPOCH より後である必要があります")
-            .as_nanos()
-    );
-    let path = std::env::temp_dir().join(tmp_name);
-    std::fs::write(&path, fixture).expect("一時 fixture の書き込みに失敗しました");
-    let reader = Mp4SampleReader::new(&path).expect("fixture MP4 のパースに失敗しました");
-    (reader, path)
-}
-
 #[test]
 fn h264_params_from_mp4_passthrough_fills_profile_level_id() {
-    // H.264 MP4 なら avcC 由来の profile-level-id を connect 用 h264_params に載せる。
     // fixture は High Profile Level 2.1 (profile-level-id=640015)。
     let fixture: &[u8] = include_bytes!("../../../testdata/red-320x320-h264.mp4");
     let (reader, path) = mp4_reader_from_fixture(fixture, "fills-h264-plid");
@@ -321,15 +309,14 @@ fn h264_params_from_mp4_passthrough_fills_profile_level_id() {
     .expect("h264 Video を生成できるはずです");
     let json = nojson::Json(&video).to_string();
     assert!(
-        json.contains("\"profile_level_id\":\"640015\""),
-        "connect 用 Video JSON に profile_level_id が含まれるべき: {json}"
+        json.contains("\"h264_params\"") && json.contains("\"profile_level_id\":\"640015\""),
+        "connect 用 Video JSON に h264_params.profile_level_id が含まれるべき: {json}"
     );
     let _ = std::fs::remove_file(&path);
 }
 
 #[test]
 fn h264_params_from_mp4_passthrough_returns_none_for_av1() {
-    // H.264 以外では h264_params を補完しない。
     let fixture: &[u8] = include_bytes!("../../../testdata/red-320x320-av1.mp4");
     let (reader, path) = mp4_reader_from_fixture(fixture, "no-h264-params-for-av1");
     assert_eq!(

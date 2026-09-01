@@ -21,6 +21,7 @@ sumomo の `--input-mp4` オプションと Sora Rust SDK の API から利用�
 - 不正な AV1 トラックを含む MP4 は初期化時に拒否する
 - 再送やキーフレーム要求は無視する
 - MP4 の末尾に到達すると先頭に戻りループ再生する
+- H.264 のとき、sumomo は connect の `h264_params.profile_level_id` を MP4 実値から自動補完する。Sora 側で `signaling_h264_params` が有効である必要がある
 
 ## sumomo での利用
 

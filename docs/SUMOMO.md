@@ -43,7 +43,7 @@ sumomo は [WebRTC Native Client Momo](https://github.com/shiguredo/momo) の so
 | `--resolution` | o | 未実装 | Rust SDK は 640x480 固定 |
 | `--video-device` | o | o | Rust SDK は `--video-input-device` (media-device フィーチャー時のみ) |
 | `--hw-mjpeg-decoder` | o | 未実装 | NVIDIA Jetson のみで利用可能 |
-| `--input-mp4` | 未実装 | o | MP4 ファイルからエンコード済み映像をそのまま送信する |
+| `--input-mp4` | 未実装 | o | MP4 ファイルからエンコード済み映像をそのまま送信する。H.264 では connect の `h264_params.profile_level_id` を自動補完する（`--video-h264-params` CLI とは別） |
 
 ### 音声
 
