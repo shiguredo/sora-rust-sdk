@@ -24,6 +24,9 @@
   - @sile
 - [ADD] Mp4SampleReader を複数の Mp4VideoCapturer で共有できるようにする
   - @sile
+- [ADD] リリース時に sumomo の Linux バイナリを GitHub Release に添付する
+  - Ubuntu 24.04 / 26.04 の x86_64 / aarch64 向けバイナリを tag リリース時に添付する
+  - @voluntas
 - [UPDATE] shiguredo_mp4 を 2026.4.0 から 2026.5.0 に更新する
   - @sile
 - [FIX] MP4 AV1 の `configOBUs` を各 sync sample の先頭に付与するようにする
