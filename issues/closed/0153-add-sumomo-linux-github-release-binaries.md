@@ -28,7 +28,6 @@ tag によるリリース時に、サンプルクライアント `sumomo` の Li
   - Ubuntu 22.04、macOS、Windows は本 issue の対象外とする
   - `ubuntu-slim` は使わない。`shiguredo-github-actions` は slim 優先だが、sumomo / `shiguredo_webrtc` のネイティブビルドには `ci.yml` の Linux job と同様の `apt` 依存（`build-essential`、X11 / Wayland / ALSA / DRM 等）が必要で、slim では要件を満たさない
 - ビルドジョブは `ci.yml` の Linux 依存インストールに揃えたうえで `cargo build -p sumomo --release --locked` を実行する。sumomo 側の追加 feature は付けない
-  - `sora_sdk` の default feature (`openh264`) は依存経由で有効になる
   - HWA 向け feature (`amf` / `nvcodec` / `vpl` / `libcamera` / `v4l2`) は有効にしない
   - libwebrtc が標準で持つコーデック実装以外のハードウェアアクセラレーションは本 issue の配布物に含めない
 - 上記 HWA feature 付きビルドは本 issue の対象外とする
