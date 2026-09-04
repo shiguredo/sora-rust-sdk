@@ -24,11 +24,10 @@ use shiguredo_webrtc::{
     rtc_log_warning,
 };
 
+use crate::codec_direction::CodecDirection;
 use crate::error::Result;
 use crate::video_codec::{SimulcastCapabilityHelper, codec_type_from_format};
-use crate::video_codec_capability::{
-    CodecDirection, VideoCodecCapability, VideoCodecImplementation,
-};
+use crate::video_codec_capability::{VideoCodecCapability, VideoCodecImplementation};
 use crate::video_codecs::helpers;
 
 fn collect_supported_formats(

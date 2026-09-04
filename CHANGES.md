@@ -22,6 +22,20 @@
   - 既存 variant の日本語メッセージを英語に置き換える
   - `InvalidAv1Track` の内部メッセージも英語にする
   - @sile
+- [CHANGE] `VideoCodecPreference::has_implementation` の引数を実値から参照に変更する
+  - 不要な所有権移動を避けるため `&VideoCodecImplementation` を受ける
+  - @melpon
+- [ADD] AudioEncoder / AudioDecoder をユーザー側でカスタマイズ可能にするための音声コーデックフレームワークを追加する
+  - `AudioCodecCapability` trait (`src/audio_codec_capability.rs`) を追加する
+  - `AudioCodecImplementation` (`src/audio_codec_capability.rs`) を追加する
+  - `AudioCodecPreference` / `AudioPreferenceCodec` (`src/audio_codec_preference.rs`) を追加する
+  - `validate_audio_codec_preference` (`src/audio_codec_preference.rs`) を追加する
+  - `Error::InvalidAudioCodecCapability` / `Error::InvalidAudioCodecPreference` (`src/error.rs`) を追加する
+  - `InternalAudioCodecCapability` (`src/audio_codecs/internal.rs`) を追加する
+  - `SoraConnectionContextConfig` に `audio_codec_preference` / `audio_codec_capabilities` を追加する。デフォルトは `InternalAudioCodecCapability` のみで、builtin のうち Opus / ISAC / G722 / PCMU / PCMA を広告する
+  - `SoraAudioEncoderFactory` / `SoraAudioDecoderFactory` (`src/audio_codec.rs`) を内部実装として追加する
+  - shiguredo_webrtc の `AudioEncoder` / `AudioDecoder` をユーザー注入可能にする upstream API に依存する
+  - @melpon
 - [ADD] Mp4SampleReader を複数の Mp4VideoCapturer で共有できるようにする
   - @sile
 - [ADD] リリース時に sumomo の Linux バイナリを GitHub Release に添付する
@@ -29,6 +43,8 @@
   - @voluntas
 - [UPDATE] shiguredo_mp4 を 2026.4.0 から 2026.5.0 に更新する
   - @sile
+- [UPDATE] shiguredo_webrtc を 0.152.1-canary.1 から 0.152.1-canary.2 に更新する
+  - @melpon
 - [FIX] MP4 AV1 の `configOBUs` を各 sync sample の先頭に付与するようにする
   - 今までは `configOBUs` を破棄しており、Sequence Header OBU や静的 Metadata OBU が sync sample に含まれない入力では受信側が decode できない payload になっていた
   - `Mp4SampleReader` 初期化時に AV1 track の OBU 列と Sequence Header 一貫性 / RTP packetizer 順序 / random access 条件を検証し、不正な入力は `Mp4Error::InvalidAv1Track` で拒否する
