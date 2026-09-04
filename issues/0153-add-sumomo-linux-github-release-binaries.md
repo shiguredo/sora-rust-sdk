@@ -24,7 +24,7 @@ tag によるリリース時に、サンプルクライアント `sumomo` の Li
     - `ubuntu-24.04-arm`（aarch64）
     - `ubuntu-26.04`（x86_64）
     - `ubuntu-26.04-arm`（aarch64）
-  - Ubuntu バージョンごとにネイティブビルドしたバイナリを出す。24.04 ビルドを 26.04 で兼用しない（共有ライブラリ依存の差で動かないため）
+  - Ubuntu バージョンごとにネイティブビルドしたバイナリを出す。24.04 ビルドを 26.04 利用者向けに兼用しない（実行環境ごとの共有ライブラリ差を踏まえ、ビルドホストの Ubuntu バージョンごとに asset を分ける）
   - Ubuntu 22.04、macOS、Windows は本 issue の対象外とする
   - `ubuntu-slim` は使わない。`shiguredo-github-actions` は slim 優先だが、sumomo / `shiguredo_webrtc` のネイティブビルドには `ci.yml` の Linux job と同様の `apt` 依存（`build-essential`、X11 / Wayland / ALSA / DRM 等）が必要で、slim では要件を満たさない
 - ビルドジョブは `ci.yml` の Linux 依存インストールに揃えたうえで `cargo build -p sumomo --release` を実行する。sumomo 側の追加 feature は付けない
