@@ -276,7 +276,7 @@ fn h264_params_from_mp4_passthrough(reader: &Mp4SampleReader) -> Option<sora_sdk
     let plid = format
         .parameters_mut()
         .iter()
-        .find_map(|(key, value)| (key == "profile-level-id").then(|| value.clone()))
+        .find_map(|(key, value)| (key == "profile-level-id").then_some(value))
         .expect("BUG: H.264 passthrough format must advertise profile-level-id");
     Some(sora_sdk::VideoH264Params {
         profile_level_id: Some(plid),

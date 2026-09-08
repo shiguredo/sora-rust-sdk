@@ -312,6 +312,7 @@ fn h264_params_from_mp4_passthrough_fills_profile_level_id() {
         json.contains("\"h264_params\"") && json.contains("\"profile_level_id\":\"640015\""),
         "connect 用 Video JSON に h264_params.profile_level_id が含まれるべき: {json}"
     );
+    drop(reader);
     let _ = std::fs::remove_file(&path);
 }
 
@@ -328,6 +329,7 @@ fn h264_params_from_mp4_passthrough_returns_none_for_av1() {
         h264_params_from_mp4_passthrough(&reader).is_none(),
         "AV1 では h264_params を補完してはならない"
     );
+    drop(reader);
     let _ = std::fs::remove_file(&path);
 }
 
