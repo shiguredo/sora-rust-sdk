@@ -38,6 +38,66 @@ jobs:
               --notes "Release ${{ steps.get_version.outputs.VERSION }}"
           fi
 
+  # sumomo の Linux リリースバイナリをビルドして GitHub Release に添付する。
+  # Ubuntu バージョンごとにネイティブビルドする（24.04 と 26.04 を兼用しない）。
+  # ubuntu-slim は apt 依存（X11 / Wayland / ALSA / DRM 等）を満たせないため使わない。
+  build-sumomo:
+    name: "Build sumomo (ubuntu-${{ matrix.ubuntu }}-${{ matrix.arch }})"
+    needs: github-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            ubuntu: "24.04"
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            ubuntu: "24.04"
+            arch: aarch64
+          - os: ubuntu-26.04
+            ubuntu: "26.04"
+            arch: x86_64
+          - os: ubuntu-26.04-arm
+            ubuntu: "26.04"
+            arch: aarch64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential \
+            libx11-dev libxext-dev libxrandr-dev libxi-dev libxfixes-dev libxcursor-dev libxss-dev libxtst-dev \
+            libwayland-dev libxkbcommon-dev \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev \
+            libvulkan-dev \
+            libdbus-1-dev libudev-dev libdrm-dev libgbm-dev \
+            libclang-dev
+
+      - run: rustup update stable
+      - uses: shiguredo/github-actions/.github/actions/rust-cache@main
+        with:
+          os: ${{ matrix.os }}
+          toolchain: stable
+
+      # HWA feature (amf / nvcodec / vpl / libcamera / v4l2) は付けない。
+      - name: Build sumomo
+        run: cargo build -p sumomo --release --locked
+
+      - name: Upload sumomo binary
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.github-release.outputs.version }}
+          UBUNTU: ${{ matrix.ubuntu }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          ASSET="sumomo-${VERSION}-ubuntu-${UBUNTU}-${ARCH}"
+          cp target/release/sumomo "${ASSET}"
+          gh release upload "${VERSION}" "${ASSET}" --clobber
+
   publish:
     needs: github-release
     runs-on: ubuntu-24.04
@@ -53,7 +113,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
   slack_notify:
-    needs: [github-release, publish]
+    needs: [github-release, build-sumomo, publish]
     runs-on: ubuntu-slim
     if: ${{ !cancelled() }}
     steps:
