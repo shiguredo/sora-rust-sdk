@@ -27,6 +27,10 @@
 - [ADD] リリース時に sumomo の Linux バイナリを GitHub Release に添付する
   - Ubuntu 24.04 / 26.04 の x86_64 / aarch64 向けバイナリを tag リリース時に添付する
   - @voluntas
+- [ADD] sumomo の MP4 パススルーで H.264 の h264_params を自動補完する
+  - `--input-mp4` で H.264 を送るとき、avcC 由来の `profile_level_id` を connect に載せる
+  - Sora offer と bitstream の不一致による reject を防ぐ
+  - @voluntas
 - [UPDATE] shiguredo_mp4 を 2026.4.0 から 2026.5.0 に更新する
   - @sile
 - [FIX] MP4 AV1 の `configOBUs` を各 sync sample の先頭に付与するようにする
