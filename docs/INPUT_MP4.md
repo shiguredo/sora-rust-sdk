@@ -39,6 +39,9 @@ cargo run -p sumomo -- \
   --audio false
 ```
 
+H.264 のとき、sumomo は connect の `h264_params.profile_level_id` を MP4 実値から自動補完する。
+この補完が offer に反映されるには、Sora 側で `signaling_h264_params` が有効である必要がある（デフォルトは無効）。
+
 ## SDK での利用
 
 SDK から MP4 パススルーを利用する場合は、`Mp4SampleReader` で MP4 ファイルを読み込み、同じ `Mp4SampleReader` からパススルーエンコーダーの capability と `Mp4VideoCapturer` を生成する。

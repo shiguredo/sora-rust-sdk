@@ -1,7 +1,7 @@
 # sumomo の MP4 パススルーで H.264 の h264_params を自動補完する
 
 - Created: 2026-09-08
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-08
 - Branch: feature/add-sumomo-mp4-h264-params
 - Polished: {YYYY-MM-DD}
 
@@ -38,11 +38,33 @@ video m-line reject を防ぐ。
 - H.264 の `--input-mp4` 送信で connect の `h264_params.profile_level_id` が MP4 実値になる
 - 非 H.264 MP4、および `--video false` / RecvOnly では `h264_params` を補完しない
 - 上記を fixture ベースのテストで固定する
-- `docs/INPUT_MP4.md` / `docs/SUMOMO.md` に自動補完と Sora 前提を注記する
+- `docs/INPUT_MP4.md` に自動補完と Sora 前提（`signaling_h264_params`）を注記する
 
 ## 変更対象
 
 - `examples/sumomo/src/main.rs`
 - `examples/sumomo/src/tests.rs`
 - `docs/INPUT_MP4.md`
-- `docs/SUMOMO.md`
+- `CHANGES.md`
+
+## 解決方法
+
+### 実装
+
+- `h264_params_from_mp4_passthrough` を追加し、H.264 のときだけ
+  `passthrough_capability` の encoder format から `profile-level-id` を取り
+  `VideoH264Params` を返すようにした
+- `apply_video_options` は `Mp4SampleReader` を受け取り、送信方向かつコーデック付き
+  `Video` を載せるときだけ補完する。`--video false` / RecvOnly では補完もログも出さない
+- `video_from_codec_type` の H.264 分岐で `Video::new_h264` に `h264_params` を渡すようにした
+- `docs/INPUT_MP4.md` の sumomo 節に自動補完を注記し、
+  `signaling_h264_params`（デフォルト無効）が必要な旨も書いた。
+  `docs/SUMOMO.md` はオプション比較表のため自動補完の注記は入れない
+- `CHANGES.md` に `[ADD]` を追記した
+
+### テスト
+
+- H.264 fixture で `profile_level_id=640015` が補完され、connect 用 Video JSON に載ることを固定した
+- AV1 fixture では `h264_params` が `None` になることを固定した
+- `--video false` / RecvOnly のゲートは実装で守り、境界表によるレビューで確認した。
+  Builder が opaque なため、ゲート単体の fixture 切り出しはコストに見合わず見送った
