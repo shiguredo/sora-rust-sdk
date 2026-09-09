@@ -39,9 +39,8 @@ use shiguredo_webrtc::{
     rtc_log_warning,
 };
 
-use crate::video_codec_capability::{
-    CodecDirection, VideoCodecCapability, VideoCodecImplementation,
-};
+use crate::codec_direction::CodecDirection;
+use crate::video_codec_capability::{VideoCodecCapability, VideoCodecImplementation};
 use crate::video_codecs::av1::{
     Av1TrackConfig, assemble_av1_encoded_sample_data, av1_required_sdp_format,
     resolve_av1_incoming, validate_av1_track,

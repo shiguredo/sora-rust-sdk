@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-08-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-01
 - Model: deepseek-v4-flash
 - Branch: feature/add-audio-codec-capability
 - Polished: {YYYY-MM-DD}
@@ -49,3 +49,14 @@ MP4 音声入力（カスタム AudioEncoder での Opus passthrough）の前提
 - `src/connection_context.rs`（`SoraConnectionContextConfig` の拡張）
 - `Cargo.toml` / `Cargo.lock`（shiguredo_webrtc の更新）
 - `CHANGES.md`
+
+## 解決方法
+
+- `shiguredo_webrtc` を 0.152.1-canary.2 に更新し、音声エンコーダー / デコーダーをユーザー注入可能にする API（`AudioCodecType`、`AudioEncoderFactoryHandler` / `AudioDecoderFactoryHandler` など）を追加した
+- `AudioCodecCapability` trait / `AudioCodecImplementation`（`src/audio_codec_capability.rs`）、`AudioCodecPreference` / `AudioPreferenceCodec` / `validate_audio_codec_preference`（`src/audio_codec_preference.rs`）、`Error::InvalidAudioCodecCapability` / `Error::InvalidAudioCodecPreference`（`src/error.rs`）を追加した
+- `SoraAudioEncoderFactory` / `SoraAudioDecoderFactory`（内部実装、`src/audio_codec.rs`）と `InternalAudioCodecCapability`（builtin 委譲、`src/audio_codecs/internal.rs`）を追加した
+- `SoraConnectionContextConfig` に `audio_codec_preference` / `audio_codec_capabilities` を追加し、デフォルトは `InternalAudioCodecCapability` のみ（builtin のうち Opus / ISAC / G722 / PCMU / PCMA を広告）とした
+- capability は `AudioCodecSpec`（フォーマットとコーデック情報）を一体で返し、`resolve_sdp_codec_spec` は `SdpAudioFormat::matches` で互換性を判定する。「カテゴリ判定（`is_supported`）」と「フォーマット解決（`resolve_sdp_codec_spec`）」は役割を分離した
+- `create_audio_encoder` は `AudioEncoderFactoryOptions` を素通しし、`payload_type` だけでなく `codec_pair_id`（Redundant Encoding のペアリング）も保持する
+- `CodecDirection` を共有モジュール（`src/codec_direction.rs`）へ移動し、音声・ビデオ双方から参照するようにした
+- 音声 e2e テスト（Opus 双方向送受信の統計検証）を追加し、実サーバーで全テストを通した

@@ -5,9 +5,10 @@ use shiguredo_webrtc::VideoCodecType;
 
 use nojson::{DisplayJson, Json, JsonFormatter, JsonParseError, RawJsonValue};
 
+use crate::codec_direction::CodecDirection;
 use crate::error::{Error, Result};
 use crate::video_codec_capability::{
-    CodecDirection, VideoCodecCapability, VideoCodecImplementation, find_capability,
+    VideoCodecCapability, VideoCodecImplementation, find_capability,
 };
 
 /// 特定の方向・コーデック・実装の優先設定。
@@ -138,10 +139,10 @@ impl VideoCodecPreference {
     }
 
     /// 指定された [VideoCodecImplementation] が含まれているかどうかを返す。
-    pub fn has_implementation(&self, implementation: VideoCodecImplementation) -> bool {
+    pub fn has_implementation(&self, implementation: &VideoCodecImplementation) -> bool {
         self.codecs
             .iter()
-            .any(|codec| codec.implementation == implementation)
+            .any(|codec| codec.implementation == *implementation)
     }
 
     /// 別の [VideoCodecPreference] をマージする。
@@ -667,10 +668,12 @@ mod tests {
             "nvcodec",
             "NVIDIA NVENC/NVDEC",
         ));
-        assert!(preference.has_implementation(VideoCodecImplementation::new(
-            "nvcodec",
-            "NVIDIA NVENC/NVDEC"
-        )));
+        assert!(
+            preference.has_implementation(&VideoCodecImplementation::new(
+                "nvcodec",
+                "NVIDIA NVENC/NVDEC"
+            ))
+        );
 
         let merged = VideoCodecPreference::new(vec![
             default_preference_codec(
