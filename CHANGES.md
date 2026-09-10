@@ -31,6 +31,10 @@
   - `--input-mp4` で H.264 を送るとき、avcC 由来の `profile_level_id` を connect に載せる
   - Sora offer と bitstream の不一致による reject を防ぐ
   - @voluntas
+- [UPDATE] shiguredo_webrtc を 0.152.1-canary.2 から 0.154.0 に更新する
+  - libwebrtc を m152 から m154 に更新する
+  - 固定 libwebrtc の AV1 / H.264 source audit を m154 の commit で再検証する
+  - @voluntas
 - [UPDATE] shiguredo_mp4 を 2026.4.0 から 2026.5.0 に更新する
   - @sile
 - [FIX] MP4 AV1 の `configOBUs` を各 sync sample の先頭に付与するようにする
