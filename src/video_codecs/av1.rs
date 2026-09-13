@@ -379,14 +379,13 @@ pub(super) fn validate_av1_track(
 
 // -----------------------------------------------------------------
 // 固定 libwebrtc の AV1 コード source audit
-// (m152.7977.0.0 / commit 6f37672d358475cd17544121a12494da454d85fb)
+// (m154.8037.1.1 / commit c2b761bb73f0b2ced096274abb415f6c7559a28b)
 //
 // 依存 `shiguredo_webrtc` の libwebrtc を更新した場合は、以下 file / function の
 // 挙動を再検証し、本コメントを更新すること。RTP packetization と SDP profile 判定を
 // 委ねる境界であり、本 SDK の AV1 payload 生成と SDP 検証はこの挙動に依存する。
-// m150 (commit 1f975dfd761af6e5d76d28333191973b258d82a8) との差分確認済み:
-// `rtp_packetizer_av1.cc` は同一、`av1_profile.cc` は `params.find(std::string(...))`
-// の std::string ラップという 1 行の差分だけで挙動は変わらない。
+// m152 (commit 6f37672d358475cd17544121a12494da454d85fb) との差分確認済み:
+// `rtp_packetizer_av1.cc` / `av1_profile.cc` はともに同一で挙動は変わらない。
 //
 // `modules/rtp_rtcp/source/rtp_packetizer_av1.cc` の `RtpPacketizerAv1::ParseObus`:
 // - encoder callback から渡された payload を Low Overhead Bitstream Format の OBU 列として

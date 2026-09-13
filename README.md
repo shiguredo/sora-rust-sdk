@@ -437,6 +437,9 @@ cargo run -p sumomo -- \
     --role sendrecv
 ```
 
+GitHub Releases には Ubuntu 24.04 / 26.04 向けの Linux バイナリ (x86_64 / aarch64) を添付しています。
+ファイル名は `sumomo-<tag>-ubuntu-<24.04|26.04>-<x86_64|aarch64>` です。
+
 ## ビルド
 
 ### 前提条件

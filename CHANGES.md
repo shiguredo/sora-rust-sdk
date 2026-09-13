@@ -38,6 +38,17 @@
   - @melpon
 - [ADD] Mp4SampleReader を複数の Mp4VideoCapturer で共有できるようにする
   - @sile
+- [ADD] リリース時に sumomo の Linux バイナリを GitHub Release に添付する
+  - Ubuntu 24.04 / 26.04 の x86_64 / aarch64 向けバイナリを tag リリース時に添付する
+  - @voluntas
+- [ADD] sumomo の MP4 パススルーで H.264 の h264_params を自動補完する
+  - `--input-mp4` で H.264 を送るとき、avcC 由来の `profile_level_id` を connect に載せる
+  - Sora offer と bitstream の不一致による reject を防ぐ
+  - @voluntas
+- [UPDATE] shiguredo_webrtc を 0.152.1-canary.2 から 0.154.0 に更新する
+  - libwebrtc を m152 から m154 に更新する
+  - 固定 libwebrtc の AV1 / H.264 source audit を m154 の commit で再検証する
+  - @voluntas
 - [UPDATE] shiguredo_mp4 を 2026.4.0 から 2026.5.0 に更新する
   - @sile
 - [UPDATE] shiguredo_webrtc を 0.152.1-canary.1 から 0.152.1-canary.2 に更新する
