@@ -509,27 +509,6 @@ mod tests {
     }
 
     #[test]
-    fn validate_succeeds_when_supported_even_if_resolve_sdp_codec_spec_is_none() {
-        let preference = AudioCodecPreference::new(vec![default_preference_codec(
-            CodecDirection::Encoder,
-            AudioCodecType::Opus,
-            AudioCodecImplementation::new("internal", "WebRTC built-in"),
-        )]);
-        let capabilities: Vec<Box<dyn AudioCodecCapability>> = vec![Box::new(
-            TestAudioCodecCapability::new(
-                AudioCodecImplementation::new("internal", "WebRTC built-in"),
-                vec![AudioCodecType::Opus],
-                Vec::new(),
-            )
-            .without_sdp_format_resolution(),
-        )];
-        assert!(
-            validate_audio_codec_preference(&preference, &capabilities).is_ok(),
-            "is_supported が true なら resolve が None でも検証は成功するはずです"
-        );
-    }
-
-    #[test]
     fn get_or_add_has_implementation_and_merge_work() {
         let mut preference = AudioCodecPreference::default();
         let codec = preference.get_or_add(

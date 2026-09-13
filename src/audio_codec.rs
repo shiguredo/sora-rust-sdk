@@ -68,12 +68,11 @@ impl AudioEncoderFactoryHandler for SoraAudioEncoderFactory {
             .lock()
             .expect("capabilities should not be poisoned");
         let capability = find_audio_capability(&capabilities, preference.implementation())?;
-        let resolved = capability.resolve_sdp_codec_spec(CodecDirection::Encoder, format)?;
-        Some(resolved.info())
+        capability.query(CodecDirection::Encoder, format)
     }
 
-    // 要求された `format` を `capability.resolve_sdp_codec_spec` に通し、その返り値
-    // （解決済み spec）のフォーマットを `capability.create_audio_encoder` に渡す。
+    // 交渉で決まったパラメータ (stereo / maxaveragebitrate 等) を失わないよう、
+    // 元の `format` をそのまま `capability.create_audio_encoder` に渡す。
     fn create(
         &mut self,
         env: EnvironmentRef<'_>,
@@ -88,8 +87,7 @@ impl AudioEncoderFactoryHandler for SoraAudioEncoderFactory {
             .lock()
             .expect("capabilities should not be poisoned");
         let capability = find_audio_capability(&capabilities, preference.implementation())?;
-        let resolved = capability.resolve_sdp_codec_spec(CodecDirection::Encoder, format)?;
-        capability.create_audio_encoder(env, resolved.format().as_ref(), options)
+        capability.create_audio_encoder(env, format, options)
     }
 }
 
@@ -120,13 +118,11 @@ impl AudioDecoderFactoryHandler for SoraAudioDecoderFactory {
         else {
             return false;
         };
-        capability
-            .resolve_sdp_codec_spec(CodecDirection::Decoder, format)
-            .is_some()
+        capability.query(CodecDirection::Decoder, format).is_some()
     }
 
-    // Encoder 側と同じ規則。要求された `format` を `capability.resolve_sdp_codec_spec` に
-    // 通し、返り値（解決済み spec）のフォーマットを `capability.create_audio_decoder` に渡す。
+    // Encoder 側と同じ規則。交渉で決まった元の `format` をそのまま
+    // `capability.create_audio_decoder` に渡す。
     fn create(
         &mut self,
         env: EnvironmentRef<'_>,
@@ -140,8 +136,7 @@ impl AudioDecoderFactoryHandler for SoraAudioDecoderFactory {
             .lock()
             .expect("capabilities should not be poisoned");
         let capability = find_audio_capability(&capabilities, preference.implementation())?;
-        let resolved = capability.resolve_sdp_codec_spec(CodecDirection::Decoder, format)?;
-        capability.create_audio_decoder(env, resolved.format().as_ref())
+        capability.create_audio_decoder(env, format)
     }
 }
 
@@ -324,6 +319,108 @@ mod tests {
         assert!(
             decoded[160..].iter().all(|&v| v == 0x7FFF),
             "未書き込み領域の番兵が破壊されました"
+        );
+    }
+
+    /// ネゴシエーションで決まったパラメータが `create_audio_encoder` まで素通しで届くことを検証する。
+    ///
+    /// 従来の resolve_sdp_codec_spec を経由する実装では、広告 spec に置き換わることで
+    /// stereo 等の交渉値が失われていた。本テストはその回帰を検出する。
+    #[test]
+    fn encoder_create_forwards_negotiated_format_parameters() {
+        let encoder_recorder = Arc::new(Mutex::new(None));
+        let decoder_recorder = Arc::new(Mutex::new(None));
+        let capability = TestAudioCodecCapability::new_with_format_recorders(
+            AudioCodecImplementation::new("recording", "Recording Codec"),
+            vec![AudioCodecType::Opus],
+            Vec::new(),
+            encoder_recorder.clone(),
+            decoder_recorder.clone(),
+        );
+        let preference = AudioCodecPreference::new(vec![AudioPreferenceCodec::new(
+            CodecDirection::Encoder,
+            AudioCodecType::Opus,
+            AudioCodecImplementation::new("recording", "Recording Codec"),
+        )]);
+        let capabilities: Vec<Box<dyn AudioCodecCapability>> = vec![Box::new(capability)];
+        let shared = Arc::new(Mutex::new(capabilities));
+        let mut factory = SoraAudioEncoderFactory::new(preference, shared);
+        let env = Environment::new();
+
+        // ネゴシエーションで stereo=1 と ptime=20 が決まったことをシミュレートする。
+        let mut format = SdpAudioFormat::new("opus", 48000, 2);
+        format.parameters_mut().set("stereo", "1");
+        format.parameters_mut().set("ptime", "20");
+
+        let options = AudioEncoderFactoryOptions::new();
+        assert!(
+            AudioEncoderFactoryHandler::create(
+                &mut factory,
+                env.as_ref(),
+                format.as_ref(),
+                &options,
+            )
+            .is_some(),
+            "エンコーダーの生成に失敗しました"
+        );
+
+        let recorded = encoder_recorder
+            .lock()
+            .expect("エンコーダー用レコーダーは poison しないはず")
+            .clone()
+            .expect("create_audio_encoder が呼ばれたはずです");
+        assert_eq!(
+            recorded.get("stereo").map(String::as_str),
+            Some("1"),
+            "交渉で決まった stereo=1 が create_audio_encoder に届いていません"
+        );
+        assert_eq!(
+            recorded.get("ptime").map(String::as_str),
+            Some("20"),
+            "交渉で決まった ptime=20 が create_audio_encoder に届いていません"
+        );
+    }
+
+    /// ネゴシエーションで決まったパラメータが `create_audio_decoder` まで素通しで届くことを検証する。
+    #[test]
+    fn decoder_create_forwards_negotiated_format_parameters() {
+        let encoder_recorder = Arc::new(Mutex::new(None));
+        let decoder_recorder = Arc::new(Mutex::new(None));
+        let capability = TestAudioCodecCapability::new_with_format_recorders(
+            AudioCodecImplementation::new("recording", "Recording Codec"),
+            Vec::new(),
+            vec![AudioCodecType::Opus],
+            encoder_recorder.clone(),
+            decoder_recorder.clone(),
+        );
+        let preference = AudioCodecPreference::new(vec![AudioPreferenceCodec::new(
+            CodecDirection::Decoder,
+            AudioCodecType::Opus,
+            AudioCodecImplementation::new("recording", "Recording Codec"),
+        )]);
+        let capabilities: Vec<Box<dyn AudioCodecCapability>> = vec![Box::new(capability)];
+        let shared = Arc::new(Mutex::new(capabilities));
+        let mut factory = SoraAudioDecoderFactory::new(preference, shared);
+        let env = Environment::new();
+
+        let mut format = SdpAudioFormat::new("opus", 48000, 2);
+        format.parameters_mut().set("stereo", "1");
+
+        assert!(
+            AudioDecoderFactoryHandler::create(&mut factory, env.as_ref(), format.as_ref())
+                .is_some(),
+            "デコーダーの生成に失敗しました"
+        );
+
+        let recorded = decoder_recorder
+            .lock()
+            .expect("デコーダー用レコーダーは poison しないはず")
+            .clone()
+            .expect("create_audio_decoder が呼ばれたはずです");
+        assert_eq!(
+            recorded.get("stereo").map(String::as_str),
+            Some("1"),
+            "交渉で決まった stereo=1 が create_audio_decoder に届いていません"
         );
     }
 }

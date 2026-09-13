@@ -1,7 +1,7 @@
 //! WebRTC 組み込みの音声コーデック実装。
 use shiguredo_webrtc::{
-    AudioCodecSpec, AudioDecoder, AudioDecoderFactory, AudioEncoder, AudioEncoderFactory,
-    AudioEncoderFactoryOptions, EnvironmentRef, SdpAudioFormatRef,
+    AudioCodecInfo, AudioCodecSpec, AudioDecoder, AudioDecoderFactory, AudioEncoder,
+    AudioEncoderFactory, AudioEncoderFactoryOptions, EnvironmentRef, SdpAudioFormatRef,
 };
 
 use crate::audio_codec_capability::{AudioCodecCapability, AudioCodecImplementation};
@@ -43,6 +43,28 @@ impl AudioCodecCapability for InternalAudioCodecCapability {
         match direction {
             CodecDirection::Encoder => self.encoder_factory.get_supported_encoders(),
             CodecDirection::Decoder => self.decoder_factory.get_supported_decoders(),
+        }
+    }
+
+    fn query(
+        &self,
+        direction: CodecDirection,
+        format: SdpAudioFormatRef<'_>,
+    ) -> Option<AudioCodecInfo> {
+        match direction {
+            // エンコーダーは下位ファクトリの問い合わせをそのまま利用する。
+            // ネゴシエーションで決まったパラメータを反映した情報を返す。
+            CodecDirection::Encoder => self.encoder_factory.query_audio_encoder(format),
+            // デコーダー側は問い合わせ API が無いため、広告 spec (名前・クロックレート・
+            // チャンネル数) との一致で判定する。パラメータの厳密な照合は create が受け持つ。
+            CodecDirection::Decoder => {
+                let request = format.to_owned();
+                self.decoder_factory
+                    .get_supported_decoders()
+                    .into_iter()
+                    .find(|spec| spec.format().matches(request.as_ref()))
+                    .map(|spec| spec.info())
+            }
         }
     }
 
@@ -127,40 +149,53 @@ mod tests {
         assert_eq!(dec.info().default_bitrate_bps(), 64000);
     }
 
-    /// 未支援コーデックの resolve は None を返すことを検証する。
+    /// 未対応コーデックの問い合わせは None を返すことを検証する。
     #[test]
-    fn resolve_returns_none_for_unsupported_codec() {
+    fn query_returns_none_for_unsupported_codec() {
         let capability = InternalAudioCodecCapability::new();
-        let format = SdpAudioFormat::new("not-a-codec", 48000, 1);
-        assert!(
-            capability
-                .resolve_sdp_codec_spec(CodecDirection::Encoder, format.as_ref())
-                .is_none()
-        );
+        for direction in [CodecDirection::Encoder, CodecDirection::Decoder] {
+            let format = SdpAudioFormat::new("not-a-codec", 48000, 1);
+            assert!(
+                capability.query(direction, format.as_ref()).is_none(),
+                "未対応コーデックは問い合わせできないはずです"
+            );
+        }
     }
 
-    /// 名前が一致しても互換性のない設定 (クロックレート不一致) は resolve しないことを検証する。
+    /// 名前が一致しても互換性のない設定 (クロックレート不一致) は受け付けないことを検証する。
     ///
-    /// 名前だけの一致では opus@16000Hz を opus@48000 の仕様に誤って解決してしまうため、
-    /// matches による互換性判定が必要。
+    /// 名前だけの一致では opus@16000Hz を opus@48000 のコーデックとして誤って扱ってしまうため、
+    /// SdpAudioFormat::matches による互換性判定を行う。
     #[test]
-    fn resolve_rejects_incompatible_clockrate() {
+    fn query_rejects_incompatible_clockrate() {
         let capability = InternalAudioCodecCapability::new();
-        // builtin の Opus は 48kHz を広告するため、16kHz の要求は不一致になる。
-        let incompatible = SdpAudioFormat::new("opus", 16000, 1);
+        for direction in [CodecDirection::Encoder, CodecDirection::Decoder] {
+            // builtin の Opus は 48kHz/2ch を広告するため、16kHz の要求は不一致になる。
+            let incompatible = SdpAudioFormat::new("opus", 16000, 1);
+            assert!(
+                capability.query(direction, incompatible.as_ref()).is_none(),
+                "互換性のないクロックレートは問い合わせできないはずです"
+            );
+            // 一致する要求は問い合わせできる。
+            let compatible = SdpAudioFormat::new("opus", 48000, 2);
+            assert!(
+                capability.query(direction, compatible.as_ref()).is_some(),
+                "相容れる Opus は問い合わせできるはずです"
+            );
+        }
+    }
+
+    /// デコーダーでチャネル数不一致のフォーマットを受け付けないことを検証する。
+    #[test]
+    fn query_decoder_rejects_incompatible_channel_count() {
+        let capability = InternalAudioCodecCapability::new();
+        // builtin の Opus デコーダーは 2ch を広告するため、1ch の要求は不一致になる。
+        let incompatible = SdpAudioFormat::new("opus", 48000, 1);
         assert!(
             capability
-                .resolve_sdp_codec_spec(CodecDirection::Encoder, incompatible.as_ref())
+                .query(CodecDirection::Decoder, incompatible.as_ref())
                 .is_none(),
-            "互換性のないクロックレートは解決されるべきではありません"
-        );
-        // 一致する要求は解決できる。
-        let compatible = SdpAudioFormat::new("opus", 48000, 2);
-        assert!(
-            capability
-                .resolve_sdp_codec_spec(CodecDirection::Encoder, compatible.as_ref())
-                .is_some(),
-            "相容れる Opus は解決されるべきです"
+            "チャネル数が不一致の Opus は受け付けないはずです"
         );
     }
 }

@@ -2,6 +2,8 @@
 //!
 //! 本モジュールはテストビルド (`#[cfg(test)]`) でのみコンパイルされる。
 use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use shiguredo_webrtc::{
     AudioCodecInfo, AudioCodecSpec, AudioCodecType, AudioDecoder, AudioDecoderHandler,
@@ -216,16 +218,28 @@ fn test_audio_codec_info() -> AudioCodecInfo {
     AudioCodecInfo::new(48000, 2, 32000, 6000, 510000)
 }
 
+/// `format` の持つコーデックパラメータを `BTreeMap` として収集する。
+///
+/// ネゴシエーションで決まったパラメータが `create_audio_encoder` まで素通しで届くことを
+/// 検証するために用いる。
+fn collect_audio_format_parameters(format: SdpAudioFormatRef<'_>) -> BTreeMap<String, String> {
+    format.to_owned().parameters_mut().iter().collect()
+}
+
 /// `AudioCodecCapability` を本物のコードで実装したテスト専用の型。
 pub(crate) struct TestAudioCodecCapability {
     implementation: AudioCodecImplementation,
     encoder_formats: Vec<AudioCodecType>,
     decoder_formats: Vec<AudioCodecType>,
-    /// false のときは `is_supported` が true でも `resolve_sdp_codec_spec` は None を返す。
-    resolves_sdp_format: bool,
     /// `create_audio_encoder` が最後に受け取ったコーデックペア ID (数値表現)。
     /// Options が素通しで届くことを検証するために記録する。
     received_codec_pair_id: RefCell<Option<u64>>,
+    /// `create_audio_encoder` が最後に受け取ったフォーマットのパラメータ。
+    /// ネゴシエーションで決まったパラメータが素通しで届くことを検証するために記録する。
+    encoder_format_parameters: Arc<Mutex<Option<BTreeMap<String, String>>>>,
+    /// `create_audio_decoder` が最後に受け取ったフォーマットのパラメータ。
+    /// ネゴシエーションで決まったパラメータが素通しで届くことを検証するために記録する。
+    decoder_format_parameters: Arc<Mutex<Option<BTreeMap<String, String>>>>,
 }
 
 impl TestAudioCodecCapability {
@@ -239,20 +253,33 @@ impl TestAudioCodecCapability {
             implementation,
             encoder_formats,
             decoder_formats,
-            resolves_sdp_format: true,
             received_codec_pair_id: RefCell::new(None),
+            encoder_format_parameters: Arc::new(Mutex::new(None)),
+            decoder_format_parameters: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// エンコーダー/デコーダーへ届くフォーマットを外部から検証できるよう、共有レコーダーを指定して生成する。
+    pub(crate) fn new_with_format_recorders(
+        implementation: AudioCodecImplementation,
+        encoder_formats: Vec<AudioCodecType>,
+        decoder_formats: Vec<AudioCodecType>,
+        encoder_recorder: Arc<Mutex<Option<BTreeMap<String, String>>>>,
+        decoder_recorder: Arc<Mutex<Option<BTreeMap<String, String>>>>,
+    ) -> Self {
+        Self {
+            implementation,
+            encoder_formats,
+            decoder_formats,
+            received_codec_pair_id: RefCell::new(None),
+            encoder_format_parameters: encoder_recorder,
+            decoder_format_parameters: decoder_recorder,
         }
     }
 
     /// `create_audio_encoder` が最後に受け取ったコーデックペア ID を返す。
     pub(crate) fn received_codec_pair_id(&self) -> Option<u64> {
         *self.received_codec_pair_id.borrow()
-    }
-
-    /// `resolve_sdp_codec_spec` が常に None を返す capability に変換する。
-    pub(crate) fn without_sdp_format_resolution(mut self) -> Self {
-        self.resolves_sdp_format = false;
-        self
     }
 
     /// 指定した方向のコーデック種別リストを返す。
@@ -286,26 +313,20 @@ impl AudioCodecCapability for TestAudioCodecCapability {
         self.formats(direction).contains(&codec_type)
     }
 
-    fn resolve_sdp_codec_spec(
+    fn query(
         &self,
         direction: CodecDirection,
         format: SdpAudioFormatRef<'_>,
-    ) -> Option<AudioCodecSpec> {
-        if !self.resolves_sdp_format {
-            return None;
-        }
+    ) -> Option<AudioCodecInfo> {
         let codec_type = format
             .name()
             .ok()
             .and_then(|name| AudioCodecType::try_from(name.as_str()).ok())?;
-        if !self.is_supported(direction, codec_type) {
-            return None;
+        if self.is_supported(direction, codec_type) {
+            Some(test_audio_codec_info())
+        } else {
+            None
         }
-        let codec_name = codec_type.as_str()?;
-        Some(AudioCodecSpec::new(
-            SdpAudioFormat::new(codec_name, 48000, 2),
-            test_audio_codec_info(),
-        ))
     }
 
     fn create_audio_encoder(
@@ -322,6 +343,11 @@ impl AudioCodecCapability for TestAudioCodecCapability {
             *self.received_codec_pair_id.borrow_mut() = options
                 .codec_pair_id()
                 .map(|id| id.numeric_representation());
+            *self
+                .encoder_format_parameters
+                .lock()
+                .expect("encoder_format_parameters は poison しないはず") =
+                Some(collect_audio_format_parameters(format));
             Some(AudioEncoder::new_with_handler(Box::new(
                 TestAudioEncoder::with_payload_type(options.payload_type()),
             )))
@@ -340,6 +366,11 @@ impl AudioCodecCapability for TestAudioCodecCapability {
             .ok()
             .and_then(|name| AudioCodecType::try_from(name.as_str()).ok())?;
         if self.is_supported(CodecDirection::Decoder, codec_type) {
+            *self
+                .decoder_format_parameters
+                .lock()
+                .expect("decoder_format_parameters は poison しないはず") =
+                Some(collect_audio_format_parameters(format));
             Some(AudioDecoder::new_with_handler(Box::new(TestAudioDecoder)))
         } else {
             None

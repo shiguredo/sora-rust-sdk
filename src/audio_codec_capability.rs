@@ -1,7 +1,7 @@
 //! 音声コーデックの実装情報と capability トレイト。
 use shiguredo_webrtc::{
-    AudioCodecSpec, AudioCodecType, AudioDecoder, AudioEncoder, AudioEncoderFactoryOptions,
-    EnvironmentRef, SdpAudioFormatRef,
+    AudioCodecInfo, AudioCodecSpec, AudioCodecType, AudioDecoder, AudioEncoder,
+    AudioEncoderFactoryOptions, EnvironmentRef, SdpAudioFormatRef,
 };
 
 use nojson::{DisplayJson, JsonFormatter, JsonParseError, RawJsonValue};
@@ -73,32 +73,28 @@ pub trait AudioCodecCapability: Send {
             .any(|spec| spec.format().name().ok().as_deref() == Some(codec_name))
     }
 
-    /// 要求 `format` に対して、実装が実際に利用するコーデック仕様を返す。
+    /// `format` に対応するコーデック情報を返す。
     ///
-    /// デフォルト実装は [Self::get_supported_codec_specs()] に対する
-    /// [shiguredo_webrtc::SdpAudioFormat::matches] を使う。
-    fn resolve_sdp_codec_spec(
+    /// `format` はネゴシエーションで決まったフォーマット。
+    ///
+    /// 指定方向で `format` を利用できるかを判定し、利用できる場合にコーデック情報を返す。
+    /// 対応しないフォーマットの場合は None を返す。
+    fn query(
         &self,
         direction: CodecDirection,
         format: SdpAudioFormatRef<'_>,
-    ) -> Option<AudioCodecSpec> {
-        let request = format.to_owned();
-        self.get_supported_codec_specs(direction)
-            .into_iter()
-            .find(|spec| spec.format().matches(request.as_ref()))
-    }
+    ) -> Option<AudioCodecInfo>;
 
     /// 指定したフォーマットでエンコーダーがサポートされている場合は AudioEncoder を返す。
     ///
-    /// create_audio_encoder() は resolve_sdp_codec_spec() で解決されるフォーマット
-    /// (get_supported_codec_specs() のいずれかと一致するフォーマット) で呼び出される
-    /// ことが想定されている。
-    /// get_supported_codec_specs() で返されないフォーマットで呼び出された場合の動作は
-    /// 実装に依存するため、None が返されることは保証されない。
+    /// `format` はネゴシエーションで決まったフォーマット。
     ///
     /// `options` はネゴシエーションで決まる音声エンコーダーの設定であり、
     /// ペイロードタイプやコーデックペア ID (Redundant Encoding 用) が含まれる。
     /// エンコーダーへ渡す際は設定を捨てずにそのまま引き継ぐこと。
+    ///
+    /// 対応しないフォーマットで呼び出された場合の動作は実装に依存するため、
+    /// None が返されることは保証されない。
     #[expect(unused_variables)]
     fn create_audio_encoder(
         &self,
@@ -111,11 +107,10 @@ pub trait AudioCodecCapability: Send {
 
     /// 指定したフォーマットでデコーダーがサポートされている場合は AudioDecoder を返す。
     ///
-    /// create_audio_decoder() は resolve_sdp_codec_spec() で解決されるフォーマット
-    /// (get_supported_codec_specs() のいずれかと一致するフォーマット) で呼び出される
-    /// ことが想定されている。
-    /// get_supported_codec_specs() で返されないフォーマットで呼び出された場合の動作は
-    /// 実装に依存するため、None が返されることは保証されない。
+    /// `format` はネゴシエーションで決まったフォーマット。
+    ///
+    /// 対応しないフォーマットで呼び出された場合の動作は実装に依存するため、
+    /// None が返されることは保証されない。
     #[expect(unused_variables)]
     fn create_audio_decoder(
         &self,
