@@ -52,6 +52,11 @@
   - sample entry 一貫性検証の比較対象に `avcC` box 全体と抽出後の profile-level-id を含める
   - ISO/IEC 14496-15 に違反するが実在する chroma 拡張欠落の `avcC` は mp4-rs と同様に受理し、再エンコード不能のため `avcc_box` は `None` として扱う
   - @sile
+- [FIX] MP4 パススルーで sample 欠落やキーフレーム要求のあと次の実在キーフレームへ復帰する
+  - 圧縮済み sample の serial 連続性を監視し、欠落・keyframe request・encoded image callback 失敗では delta を送らずに待ちへ移る
+  - capturer は jump command で次の sync sample へ再生位置を進め、loop 境界もまたいで復帰する
+  - sync sample が 1 件もない MP4 は `Mp4Error::NoSyncSample` で初期化時に拒否する
+  - @sile
 
 ### misc
 

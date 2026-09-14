@@ -19,7 +19,9 @@ sumomo の `--input-mp4` オプションと Sora Rust SDK の API から利用�
 - B フレームを含む MP4 は初期化時に拒否する
 - 不正な H.264 トラックを含む MP4 は初期化時に拒否する
 - 不正な AV1 トラックを含む MP4 は初期化時に拒否する
-- 再送やキーフレーム要求は無視する
+- sync sample が 1 件もない MP4 は初期化時に拒否する
+- RTP 再送はパススルーエンコーダーでは処理しない
+- キーフレーム要求や sample 欠落を検出した場合は、参照先を失った delta sample を送らず、次の実在するキーフレームから送信を再開する
 - MP4 の末尾に到達すると先頭に戻りループ再生する
 
 ## sumomo での利用
@@ -87,3 +89,4 @@ assertion `left == right` failed: video_frame_buffer callback called from multip
 4. H.264 の場合は AVCC フォーマットから Annex B フォーマットへの変換と、IDR フレーム前への SPS/PPS 付与を行う
 5. H.265 の場合は HVCC フォーマットから Annex B フォーマットへの変換と、IDR フレーム前への VPS/SPS/PPS 付与を行う
 6. AV1 の場合は sync sample の先頭に configOBUs (Sequence Header 等) を付与する
+7. sample 欠落やキーフレーム要求で圧縮済み sample の連続性が失われた場合は、パススルーエンコーダーが次の sync sample まで delta を抑え、キャプチャラーが再生位置を移動する

@@ -19,6 +19,10 @@
 //! 共有される。
 //! 複数の `Mp4VideoCapturer` からの読み出し要求は、このスレッドが順番に処理する。
 //!
+//! sample 欠落やキーフレーム要求で圧縮済み sample の連続性が失われた場合、
+//! `Mp4PassthroughEncoder` は次の実在する sync sample まで delta を出力せず、
+//! 対応する `Mp4VideoCapturer` へ jump command を送って再生位置を合わせる。
+//!
 //! 対応コーデック: H.264, H.265, VP8, VP9, AV1
 use std::io::{self, BufReader, Read, Seek};
 use std::path::Path;
@@ -49,6 +53,7 @@ use crate::video_codecs::av1::{
 use crate::video_codecs::h264::{
     H264TrackConfig, h264_required_sdp_format, parse_profile_level_id, resolve_h264_incoming,
 };
+use crate::video_codecs::helpers;
 
 /// MP4 ファイル処理中に発生するエラー。
 #[derive(Debug)]
@@ -112,6 +117,10 @@ pub enum Mp4Error {
     ///
     /// [`Mp4SampleReader::new`] の初期化時に返る。拒否理由の詳細は Display メッセージに含まれる。
     InvalidH264Track(String),
+    /// sync sample が 1 件もないため、キーフレーム欠落後に復帰できない。
+    ///
+    /// [`Mp4SampleReader::new`] の初期化時に返る。
+    NoSyncSample,
 }
 
 impl std::fmt::Display for Mp4Error {
@@ -168,6 +177,7 @@ impl std::fmt::Display for Mp4Error {
             Self::InvalidH264Track(err) => {
                 write!(f, "H.264 track validation failed: {err}")
             }
+            Self::NoSyncSample => f.write_str("video track has no sync sample"),
         }
     }
 }
@@ -186,7 +196,8 @@ impl std::error::Error for Mp4Error {
             | Self::UnsupportedCompositionTimeOffset { .. }
             | Self::InconsistentSampleDescription { .. }
             | Self::InvalidAv1Track(_)
-            | Self::InvalidH264Track(_) => None,
+            | Self::InvalidH264Track(_)
+            | Self::NoSyncSample => None,
         }
     }
 }
@@ -204,6 +215,14 @@ impl From<shiguredo_mp4::demux::DemuxError> for Mp4Error {
 }
 
 type Result<T> = std::result::Result<T, Mp4Error>;
+
+/// capturer の feeder へ送る jump 要求。
+///
+/// `request_serial` は、要求を発生させた sample の serial である。
+#[derive(Debug, Clone, Copy)]
+struct Mp4JumpCommand {
+    request_serial: u64,
+}
 
 /// MP4 から抽出したエンコード済みビデオサンプル。
 ///
@@ -224,6 +243,13 @@ pub(crate) struct Mp4EncodedSample {
     pub height: u32,
     /// ビデオコーデック種別。
     pub codec_type: VideoCodecType,
+    /// MP4 内の sample index。
+    pub sample_index: usize,
+    /// capturer ごとの再生順 serial。encoder の連続性判定に使う。
+    pub sample_serial: u64,
+    /// この sample を供給した capturer への jump command 送信口。
+    /// capturer 経由以外で作られた sample では `None`。
+    jump_tx: Option<Sender<Mp4JumpCommand>>,
 }
 
 impl VideoFrameBufferHandler for Mp4EncodedSample {
@@ -327,6 +353,9 @@ struct Mp4SampleReaderInner {
     /// サンプルメタデータは I/O スレッドが所有するため、`len()` と `is_empty()` に必要な
     /// 件数だけを保持する。
     sample_count: usize,
+    /// 各 sample が sync sample (keyframe) かどうか。
+    /// jump 先の検索に使う。長さは `sample_count`。
+    is_keyframes: Vec<bool>,
     /// 各フレームの累積再生時刻。
     /// cumulative[0] = 0, cumulative[i] = フレーム 0..i の合計再生時間。
     /// 長さは samples.len() + 1 で、末尾が動画全体の長さ。
@@ -482,6 +511,11 @@ impl Mp4SampleReader {
             return Err(Mp4Error::NoVideoSamples);
         }
 
+        // 全コーデック共通: sync sample が無いと欠落後に復帰できない。
+        if !samples.iter().any(|sample| sample.is_keyframe) {
+            return Err(Mp4Error::NoSyncSample);
+        }
+
         for (index, sample) in samples.iter().enumerate() {
             let data_size_u64 = sample.data_size as u64;
             if sample
@@ -535,8 +569,9 @@ impl Mp4SampleReader {
 
         // ファイルとサンプルメタデータは、1 本の I/O スレッドが所有する。
         // クローン間で `BufReader` を共有してロックする代わりに、読み出し要求を直列化する。
-        // `samples` は I/O スレッドへ移すため、`len()` と `is_empty()` に必要な件数だけを残す。
+        // `samples` は I/O スレッドへ移すため、件数と keyframe フラグだけを残す。
         let sample_count = samples.len();
+        let is_keyframes: Vec<bool> = samples.iter().map(|sample| sample.is_keyframe).collect();
         let (io_sender, io_receiver) = mpsc::channel::<Mp4SampleIoRequest>();
         // I/O スレッドから `Mp4SampleReaderInner` を参照すると `Arc` の循環参照になるため、
         // 読み出しに必要な値だけをスレッドへ移す。
@@ -552,6 +587,7 @@ impl Mp4SampleReader {
             inner: Arc::new(Mp4SampleReaderInner {
                 track_info,
                 sample_count,
+                is_keyframes,
                 cumulative,
                 io: Mp4SampleReaderIo {
                     sender: Some(io_sender),
@@ -948,6 +984,24 @@ impl Mp4SampleReader {
     fn cumulative_duration(&self, index: usize) -> std::time::Duration {
         self.inner.cumulative[index].to_duration()
     }
+
+    /// `from_inclusive` 以降で最も近い sync sample の index を返す。
+    ///
+    /// 現在の loop に無ければ、先頭側の最初の sync sample を選び `wrapped=true` を返す。
+    /// 初期化時に sync sample が 1 件以上あることを保証している。
+    fn next_sync_sample_index(&self, from_inclusive: usize) -> (usize, bool) {
+        let keyframes = &self.inner.is_keyframes;
+        for (offset, is_keyframe) in keyframes.iter().enumerate().skip(from_inclusive) {
+            if *is_keyframe {
+                return (offset, false);
+            }
+        }
+        let first = keyframes
+            .iter()
+            .position(|is_keyframe| *is_keyframe)
+            .expect("BUG: Mp4SampleReader must reject tracks without sync samples");
+        (first, true)
+    }
 }
 
 /// 指定インデックスのサンプルデータをファイルから読み出し、送信用に変換して返す。
@@ -990,6 +1044,10 @@ fn read_sample(
         width: track_info.width as u32,
         height: track_info.height as u32,
         codec_type: track_info.codec_type,
+        sample_index: index,
+        // capturer が再生順 serial と jump sender を付与する。
+        sample_serial: 0,
+        jump_tx: None,
     })
 }
 
@@ -1057,12 +1115,58 @@ fn length_prefixed_nalu_to_annex_b(data: &[u8], nal_length_size: u8) -> Vec<u8> 
 /// 実際のエンコード処理は行わず、`VideoFrame` の native `VideoFrameBuffer` から
 /// 事前エンコード済みのサンプルを取り出して `EncodedImage` として WebRTC に渡す。
 ///
+/// 圧縮済み sample の参照関係を壊さないため、serial 欠落・keyframe request・
+/// encoded image callback 失敗を検出したら keyframe 待ちへ移行し、
+/// 実在する keyframe の送信が成功するまで delta sample を出力しない。
+///
 /// `has_trusted_rate_controller=true` を設定することで、
 /// WebRTC のビットレート制御がこのエンコーダーに対して介入しないようにする。
 /// パススルーなのでビットレートの調整は不可能であり、
 /// 代わりに `--video-bit-rate` で十分な帯域を確保する必要がある。
 struct Mp4PassthroughEncoder {
     callback: Option<VideoEncoderEncodedImageCallbackPtr>,
+    /// 直前に encoded image callback が成功した sample の serial。
+    last_ok_serial: Option<u64>,
+    /// 次に実在する keyframe の送信成功を待つ状態。
+    waiting_for_keyframe: bool,
+}
+
+impl Mp4PassthroughEncoder {
+    fn new() -> Self {
+        Self {
+            callback: None,
+            last_ok_serial: None,
+            // capturer は encoder 接続前から再生を始めるため、
+            // 最初の sample が GOP 途中の delta でも送り続けない。
+            waiting_for_keyframe: true,
+        }
+    }
+
+    fn enter_keyframe_wait(&mut self, sample: &Mp4EncodedSample, reason: &str) {
+        if !self.waiting_for_keyframe {
+            rtc_log_info!(
+                "MP4Passthrough: enter keyframe wait: reason={reason} sample_index={} serial={}",
+                sample.sample_index,
+                sample.sample_serial
+            );
+        }
+        self.waiting_for_keyframe = true;
+    }
+
+    fn request_jump(sample: &Mp4EncodedSample) {
+        let Some(jump_tx) = sample.jump_tx.as_ref() else {
+            return;
+        };
+        if let Err(err) = jump_tx.send(Mp4JumpCommand {
+            request_serial: sample.sample_serial,
+        }) {
+            rtc_log_warning!(
+                "MP4Passthrough: failed to send jump command: sample_index={} serial={} err={err}",
+                sample.sample_index,
+                sample.sample_serial
+            );
+        }
+    }
 }
 
 impl VideoEncoderHandler for Mp4PassthroughEncoder {
@@ -1078,18 +1182,27 @@ impl VideoEncoderHandler for Mp4PassthroughEncoder {
             codec.height(),
             codec.start_bitrate_kbps()
         );
+        self.last_ok_serial = None;
+        self.waiting_for_keyframe = true;
         VideoCodecStatus::Ok
     }
 
     fn encode(
         &mut self,
         frame: VideoFrameRef<'_>,
-        _frame_types: Option<VideoFrameTypeVectorRef<'_>>,
+        frame_types: Option<VideoFrameTypeVectorRef<'_>>,
     ) -> VideoCodecStatus {
         let callback = match self.callback {
             Some(callback) => callback,
             None => return VideoCodecStatus::Uninitialized,
         };
+
+        let requested_frame_type = helpers::requested_frame_type(frame_types);
+        if matches!(requested_frame_type, Some(VideoFrameType::Empty)) {
+            // Empty は出力しない。連続性の基準にもせず、次は実 keyframe を要求する。
+            self.waiting_for_keyframe = true;
+            return VideoCodecStatus::NoOutput;
+        }
 
         let frame_buffer = frame.buffer();
         // 安全性: encode() 呼び出し中の参照のみを取得し、同一実体への同時アクセスは行わない。
@@ -1103,13 +1216,41 @@ impl VideoEncoderHandler for Mp4PassthroughEncoder {
             }
         };
 
+        // 通常状態では serial の連続性を要求する。欠落・重複・巻き戻りは待ちへ移行する。
+        if !self.waiting_for_keyframe
+            && let Some(last_ok_serial) = self.last_ok_serial
+            && sample.sample_serial != last_ok_serial.wrapping_add(1)
+        {
+            self.enter_keyframe_wait(
+                sample,
+                &format!(
+                    "serial gap: last_ok={last_ok_serial} got={}",
+                    sample.sample_serial
+                ),
+            );
+        }
+
+        // libwebrtc は非負 status のあと next_frame_types を delta に戻すため、
+        // keyframe 要求は実 keyframe の送信成功まで encoder 内に保持する。
+        if matches!(requested_frame_type, Some(VideoFrameType::Key)) && !sample.is_keyframe {
+            self.enter_keyframe_wait(sample, "keyframe requested");
+        }
+
+        if self.waiting_for_keyframe && !sample.is_keyframe {
+            Self::request_jump(sample);
+            return VideoCodecStatus::NoOutput;
+        }
+
         rtc_log_verbose!(
-            "MP4Passthrough: encode() keyframe={} size={} bytes",
+            "MP4Passthrough: encode() keyframe={} index={} serial={} size={} bytes",
             sample.is_keyframe,
+            sample.sample_index,
+            sample.sample_serial,
             sample.data.len()
         );
 
         // EncodedImage を構築して WebRTC に渡す。
+        // delta の metadata だけを keyframe に書き換えない。
         let mut encoded_image = EncodedImage::new();
         let encoded_buffer = EncodedImageBuffer::from_bytes(&sample.data);
         encoded_image.set_encoded_data(&encoded_buffer);
@@ -1136,10 +1277,24 @@ impl VideoEncoderHandler for Mp4PassthroughEncoder {
         };
         if result.error() != VideoEncoderEncodedImageCallbackResultError::Ok {
             rtc_log_warning!(
-                "MP4Passthrough: on_encoded_image returned non-Ok status; continue encoding to avoid libwebrtc crash"
+                "MP4Passthrough: on_encoded_image failed; enter keyframe wait: sample_index={} serial={}",
+                sample.sample_index,
+                sample.sample_serial
             );
+            self.enter_keyframe_wait(sample, "encoded image callback failed");
+            Self::request_jump(sample);
+            return VideoCodecStatus::Ok;
         }
 
+        self.last_ok_serial = Some(sample.sample_serial);
+        if self.waiting_for_keyframe {
+            rtc_log_info!(
+                "MP4Passthrough: leave keyframe wait: sample_index={} serial={}",
+                sample.sample_index,
+                sample.sample_serial
+            );
+        }
+        self.waiting_for_keyframe = false;
         VideoCodecStatus::Ok
     }
 
@@ -1155,6 +1310,8 @@ impl VideoEncoderHandler for Mp4PassthroughEncoder {
     fn release(&mut self) -> VideoCodecStatus {
         rtc_log_info!("MP4Passthrough: release()");
         self.callback = None;
+        self.last_ok_serial = None;
+        self.waiting_for_keyframe = true;
         VideoCodecStatus::Ok
     }
 
@@ -1261,7 +1418,7 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
             return None;
         }
         Some(VideoEncoder::new_with_handler(Box::new(
-            Mp4PassthroughEncoder { callback: None },
+            Mp4PassthroughEncoder::new(),
         )))
     }
 }
@@ -1284,26 +1441,139 @@ pub struct Mp4VideoCapturer {
 
 /// 停止フラグの確認間隔の上限。
 ///
-/// フレーム間隔の待機をこの時間ずつに分割して `thread::sleep` し、
-/// 停止フラグの確認を挟むことで、停止までの最大遅延をこの値に制限する。
-/// 値自体に特別な意味はなく、停止までの最大遅延が実用上十分に小さく
-/// （100ms は体感できない程度）、かつ通常のフレーム間隔 (30 fps で約 33ms) の
-/// 待機を分割しない程度の値として選んだ。
+/// command receiver の `recv_timeout` をこの時間で区切り、停止フラグ確認と
+/// jump command の取り込みを挟む。値自体に特別な意味はなく、停止までの最大遅延が
+/// 実用上十分に小さく（100ms は体感できない程度）、かつ通常のフレーム間隔
+/// (30 fps で約 33ms) の待機を分割しない程度の値として選んだ。
 const MAX_SLEEP_DURATION: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// feeder の deadline 待ち結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FeederWaitResult {
+    /// 停止フラグが立った。
+    Stopped,
+    /// deadline に到達した。
+    DeadlineReached,
+}
+
+/// 未処理の jump command を受信チャネルから回収し、最大の要求元 serial に集約する。
+fn drain_jump_commands(
+    command_rx: &mpsc::Receiver<Mp4JumpCommand>,
+    pending_request_serial: &mut Option<u64>,
+) {
+    while let Ok(command) = command_rx.try_recv() {
+        *pending_request_serial = Some(
+            pending_request_serial.map_or(command.request_serial, |serial| {
+                serial.max(command.request_serial)
+            }),
+        );
+    }
+}
+
+/// 停止フラグを確認しながら deadline まで待機し、その間に届いた jump command を集約する。
+///
+/// jump command を受け取っても、集約だけして待ちは継続する。
+/// 呼び出し側は戻り後に `pending_request_serial` を見て jump を適用する。
+/// 停止フラグが設定されたら `Stopped`、deadline に到達したら `DeadlineReached` を返す。
+fn wait_until_stop_or_commands(
+    stop: &AtomicBool,
+    deadline: std::time::Instant,
+    command_rx: &mpsc::Receiver<Mp4JumpCommand>,
+    pending_request_serial: &mut Option<u64>,
+) -> FeederWaitResult {
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return FeederWaitResult::Stopped;
+        }
+        drain_jump_commands(command_rx, pending_request_serial);
+        // jump 要求があれば deadline 待ちを打ち切り、選択した sync sample を速やかに供給する。
+        if pending_request_serial.is_some() {
+            return FeederWaitResult::DeadlineReached;
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return FeederWaitResult::DeadlineReached;
+        }
+        match command_rx.recv_timeout(remaining.min(MAX_SLEEP_DURATION)) {
+            Ok(command) => {
+                *pending_request_serial = Some(
+                    pending_request_serial.map_or(command.request_serial, |serial| {
+                        serial.max(command.request_serial)
+                    }),
+                );
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                // capturer が持つ sender が全て drop された場合だけ到達する。
+                // feeder 自身が sender を持つ間は通常起きない。
+            }
+        }
+    }
+}
 
 /// 停止フラグを確認しながら deadline まで待機する。
 ///
 /// 停止フラグが設定されたら `true`、deadline に到達したら `false` を返す。
+/// テスト向けの薄いラッパー。
+#[cfg(test)]
 fn wait_until_or_stop(stop: &AtomicBool, deadline: std::time::Instant) -> bool {
-    loop {
-        if stop.load(Ordering::Acquire) {
-            return true;
+    let (_tx, rx) = mpsc::channel::<Mp4JumpCommand>();
+    let mut pending = None;
+    matches!(
+        wait_until_stop_or_commands(stop, deadline, &rx, &mut pending),
+        FeederWaitResult::Stopped
+    )
+}
+
+/// NTP timestamp (マイクロ秒) を、直前フレームより少なくとも 1ms 進めて割り当てる。
+///
+/// libwebrtc は同一または過去の NTP ms を encode 前に破棄するため。
+/// RTP timestamp は 90 kHz 換算で、32 bit wrap を許容して前進させる。
+fn allocate_frame_timestamps(last_timestamp_us: &mut Option<i64>, candidate_us: i64) -> (i64, u32) {
+    let mut timestamp_us = candidate_us;
+    if let Some(last_us) = *last_timestamp_us {
+        let last_ms = last_us.div_euclid(1000);
+        let candidate_ms = timestamp_us.div_euclid(1000);
+        if candidate_ms <= last_ms {
+            timestamp_us = (last_ms + 1).saturating_mul(1000);
         }
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() {
-            return false;
-        }
-        thread::sleep(remaining.min(MAX_SLEEP_DURATION));
+    }
+    *last_timestamp_us = Some(timestamp_us);
+    let rtp_timestamp = (timestamp_us.div_euclid(1000) as u32).wrapping_mul(90);
+    (timestamp_us, rtp_timestamp)
+}
+
+/// jump 要求に応じて再生位置を次の sync sample へ進める。
+///
+/// 要求元 serial より後の keyframe をすでに供給済みなら、古い要求として無視する。
+fn apply_jump_command(
+    reader: &Mp4SampleReader,
+    request_serial: u64,
+    last_supplied_keyframe_serial: Option<u64>,
+    index: &mut usize,
+    loop_start: &mut std::time::Instant,
+) {
+    if last_supplied_keyframe_serial.is_some_and(|serial| serial > request_serial) {
+        rtc_log_verbose!(
+            "MP4: ignore stale jump: request_serial={request_serial} last_keyframe_serial={last_supplied_keyframe_serial:?}"
+        );
+        return;
+    }
+
+    let (new_index, wrapped) = reader.next_sync_sample_index(*index);
+    *index = new_index;
+    // 新しい sample 位置を「いま」供給できるように再生時計を rebase する。
+    let elapsed = reader.cumulative_duration(new_index);
+    *loop_start = std::time::Instant::now()
+        .checked_sub(elapsed)
+        .unwrap_or_else(std::time::Instant::now);
+
+    if wrapped {
+        rtc_log_info!(
+            "MP4: jump to next-loop keyframe index={new_index} request_serial={request_serial}"
+        );
+    } else {
+        rtc_log_info!("MP4: jump to keyframe index={new_index} request_serial={request_serial}");
     }
 }
 
@@ -1312,6 +1582,9 @@ impl Mp4VideoCapturer {
     ///
     /// 生成と同時に専用スレッドを起動し、MP4 のフレームタイミングに従って
     /// 映像フレームを WebRTC に供給する。動画末尾に達すると先頭に戻りループ再生する。
+    ///
+    /// sample 欠落や keyframe request で encoder が復帰を要求した場合は、
+    /// feeder が中間の delta を読み飛ばし、次の実在する sync sample から供給を再開する。
     ///
     /// 同じ [`Mp4SampleReader`] から複数のキャプチャラーを生成する場合は、リーダーをクローンし、
     /// 各 `Mp4VideoCapturer::new()` に 1 つずつ渡す。
@@ -1324,64 +1597,101 @@ impl Mp4VideoCapturer {
         let video_source = source.cast_to_video_track_source();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_clone = stop.clone();
+        let (jump_tx, jump_rx) = mpsc::channel::<Mp4JumpCommand>();
 
         let thread_handle = thread::spawn(move || {
             let source = source;
             let mut aligner = TimestampAligner::new();
+            let mut index = 0usize;
+            let mut next_serial = 0u64;
+            let mut last_supplied_keyframe_serial: Option<u64> = None;
+            let mut last_timestamp_us: Option<i64> = None;
+            let mut pending_jump: Option<u64> = None;
+            let mut loop_start = std::time::Instant::now();
 
             loop {
-                // ループ再生の先頭で基準時刻を記録する。
-                // 各フレームの送信タイミングはこの基準時刻からの累積オフセットで決まる。
-                let loop_start = std::time::Instant::now();
-
-                for i in 0..reader.len() {
-                    if stop_clone.load(Ordering::Acquire) {
-                        return;
-                    }
-
-                    // サンプルを内包した native VideoFrameBuffer を送信して encode() をトリガーする。
-                    // adapt_frame() は WebRTC のフレームアダプター (解像度/フレームレート調整) を通す。
-                    // applied=false の場合はフレームドロッパーがスキップを指示している。
-                    let timestamp_us = shiguredo_webrtc::time_millis() * 1000;
-                    let AdaptFrameResult { applied, .. } =
-                        source.adapt_frame(width, height, timestamp_us);
-                    if applied {
-                        // サンプルを取得できない場合は、フレーム供給スレッドを終了する。
-                        let sample = match reader.get_sample(i, &stop_clone) {
-                            Ok(Some(sample)) => sample,
-                            Ok(None) => return,
-                            Err(err) => {
-                                rtc_log_error!("MP4: failed to read sample: {err:?}");
-                                return;
-                            }
-                        };
-                        let frame_buffer = VideoFrameBuffer::new_with_handler(Box::new(sample));
-                        let ts =
-                            aligner.translate(timestamp_us, shiguredo_webrtc::time_millis() * 1000);
-                        let video_frame = VideoFrame::builder(&frame_buffer)
-                            .set_timestamp_us(ts)
-                            .set_rtp_timestamp(0)
-                            .build();
-                        source.on_frame(&video_frame);
-                    }
-
-                    // 次のフレームの絶対送信時刻まで待機する。
-                    // cumulative_duration(i+1) は「フレーム 0 から i までの合計再生時間」を返す。
-                    // loop_start からのオフセットとして使うことで、累積ドリフトを防止する。
-                    let next_frame_time = reader.cumulative_duration(i + 1);
-                    let Some(target) = loop_start.checked_add(next_frame_time) else {
-                        // 累積再生時間が Instant の表現範囲を超えるのは、再生時間が極めて長い破損入力に限られる。
-                        // 実用上は発生しないが、発生した場合はログを残してフィーダースレッドを終了する。
-                        rtc_log_warning!("MP4: loop deadline overflow, stopping feeder thread");
-                        return;
-                    };
-                    // 停止フラグが設定されたらフィーダースレッドを終了する。
-                    if wait_until_or_stop(&stop_clone, target) {
-                        return;
-                    }
+                if stop_clone.load(Ordering::Acquire) {
+                    return;
                 }
 
-                rtc_log_info!("MP4 reached end of file, looping back to the beginning");
+                drain_jump_commands(&jump_rx, &mut pending_jump);
+                if let Some(request_serial) = pending_jump.take() {
+                    apply_jump_command(
+                        &reader,
+                        request_serial,
+                        last_supplied_keyframe_serial,
+                        &mut index,
+                        &mut loop_start,
+                    );
+                }
+
+                // adapt_frame の成否にかかわらず、再生対象 sample ごとに serial を進める。
+                // jump で読み飛ばした sample には serial を振らず、巻き戻しもしない。
+                next_serial = next_serial
+                    .checked_add(1)
+                    .expect("BUG: MP4 sample serial overflow");
+                let sample_serial = next_serial;
+
+                // サンプルを内包した native VideoFrameBuffer を送信して encode() をトリガーする。
+                // adapt_frame() は WebRTC のフレームアダプター (解像度/フレームレート調整) を通す。
+                // applied=false の場合はフレームドロッパーがスキップを指示している。
+                let timestamp_us = shiguredo_webrtc::time_millis() * 1000;
+                let AdaptFrameResult { applied, .. } =
+                    source.adapt_frame(width, height, timestamp_us);
+                if applied {
+                    // サンプルを取得できない場合は、フレーム供給スレッドを終了する。
+                    let mut sample = match reader.get_sample(index, &stop_clone) {
+                        Ok(Some(sample)) => sample,
+                        Ok(None) => return,
+                        Err(err) => {
+                            rtc_log_error!("MP4: failed to read sample: {err:?}");
+                            return;
+                        }
+                    };
+                    sample.sample_serial = sample_serial;
+                    sample.jump_tx = Some(jump_tx.clone());
+                    if sample.is_keyframe {
+                        last_supplied_keyframe_serial = Some(sample_serial);
+                    }
+
+                    let frame_buffer = VideoFrameBuffer::new_with_handler(Box::new(sample));
+                    let aligned =
+                        aligner.translate(timestamp_us, shiguredo_webrtc::time_millis() * 1000);
+                    let (ts, rtp_timestamp) =
+                        allocate_frame_timestamps(&mut last_timestamp_us, aligned);
+                    let video_frame = VideoFrame::builder(&frame_buffer)
+                        .set_timestamp_us(ts)
+                        .set_rtp_timestamp(rtp_timestamp)
+                        .build();
+                    source.on_frame(&video_frame);
+                }
+
+                let wait_index = index;
+                index += 1;
+                let reached_end = index >= reader.len();
+                if reached_end {
+                    index = 0;
+                }
+
+                // 次のフレームの絶対送信時刻まで待機する。
+                // cumulative_duration(wait_index+1) は「フレーム 0 から wait_index までの合計再生時間」。
+                let next_frame_time = reader.cumulative_duration(wait_index + 1);
+                let Some(target) = loop_start.checked_add(next_frame_time) else {
+                    // 累積再生時間が Instant の表現範囲を超えるのは、再生時間が極めて長い破損入力に限られる。
+                    rtc_log_warning!("MP4: loop deadline overflow, stopping feeder thread");
+                    return;
+                };
+                match wait_until_stop_or_commands(&stop_clone, target, &jump_rx, &mut pending_jump)
+                {
+                    FeederWaitResult::Stopped => return,
+                    FeederWaitResult::DeadlineReached => {}
+                }
+
+                if reached_end {
+                    // ファイル末尾までの待機を終えたあと、次 loop の再生時計を張り直す。
+                    loop_start = std::time::Instant::now();
+                    rtc_log_info!("MP4 reached end of file, looping back to the beginning");
+                }
             }
         });
 
@@ -1413,16 +1723,14 @@ impl Mp4VideoCapturer {
 impl Drop for Mp4VideoCapturer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
-        if let Some(handle) = self.thread_handle.take() {
-            // フレーム供給スレッドは、フレーム待機中は `MAX_SLEEP_DURATION` ごとに、
-            // I/O 応答待ち中は 1 ms ごとに停止フラグを確認する。
-            if let Err(payload) = handle.join() {
-                // フレーム供給スレッドの `panic` は実装バグなので、ログに記録する。
-                rtc_log_error!(
-                    "MP4: feeder thread panicked: {:?}",
-                    payload.downcast_ref::<&str>()
-                );
-            }
+        if let Some(handle) = self.thread_handle.take()
+            && let Err(payload) = handle.join()
+        {
+            // フレーム供給スレッドの `panic` は実装バグなので、ログに記録する。
+            rtc_log_error!(
+                "MP4: feeder thread panicked: {:?}",
+                payload.downcast_ref::<&str>()
+            );
         }
     }
 }
@@ -2663,20 +2971,22 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let callback =
             VideoEncoderEncodedImageCallback::new_with_handler(Box::new(RecordingHandler { tx }));
-        let mut encoder = Mp4PassthroughEncoder { callback: None };
+        let mut encoder = Mp4PassthroughEncoder::new();
         assert_eq!(
             encoder.register_encode_complete_callback(Some(callback.as_ref())),
             VideoCodecStatus::Ok
         );
 
         for i in 0..reader.len() {
-            let sample = reader
+            let mut sample = reader
                 .get_sample(i, &stop)
                 .expect("fixture の sample を読み出せるはずです")
                 .expect("停止フラグは未設定のため中断されないはずです");
+            // capturer 相当の serial を付与する。連続供給を再現する。
+            sample.sample_serial = (i as u64).saturating_add(1);
             let frame_buffer = VideoFrameBuffer::new_with_handler(Box::new(sample));
             let video_frame = VideoFrame::builder(&frame_buffer)
-                .set_timestamp_us(0)
+                .set_timestamp_us((i as i64).saturating_mul(1000))
                 .set_rtp_timestamp(i as u32)
                 .build();
             assert_eq!(
@@ -2742,6 +3052,519 @@ mod tests {
             VideoEncoderEncodedImageCallbackResult::new(
                 VideoEncoderEncodedImageCallbackResultError::Ok,
             )
+        }
+    }
+
+    /// 最初の 1 回だけ `ErrorSendFailed` を返し、以降は成功する実 callback。
+    struct FailOnceHandler {
+        tx: std::sync::mpsc::Sender<(VideoFrameType, Vec<u8>)>,
+        failed_once: bool,
+    }
+
+    impl VideoEncoderEncodedImageCallbackHandler for FailOnceHandler {
+        fn on_encoded_image(
+            &mut self,
+            encoded_image: EncodedImageRef<'_>,
+            _codec_specific_info: Option<CodecSpecificInfoRef<'_>>,
+        ) -> VideoEncoderEncodedImageCallbackResult {
+            if !self.failed_once {
+                self.failed_once = true;
+                return VideoEncoderEncodedImageCallbackResult::new(
+                    VideoEncoderEncodedImageCallbackResultError::ErrorSendFailed,
+                );
+            }
+            let data = encoded_image
+                .encoded_data()
+                .map(|buf| buf.data().to_vec())
+                .unwrap_or_default();
+            self.tx
+                .send((encoded_image.frame_type(), data))
+                .expect("callback 結果の送信に失敗しました");
+            VideoEncoderEncodedImageCallbackResult::new(
+                VideoEncoderEncodedImageCallbackResultError::Ok,
+            )
+        }
+    }
+
+    /// テスト用に sample へ serial と jump sender を付与して encode する。
+    fn encode_with_context(
+        encoder: &mut Mp4PassthroughEncoder,
+        mut sample: Mp4EncodedSample,
+        sample_serial: u64,
+        jump_tx: &Sender<Mp4JumpCommand>,
+        frame_types: Option<shiguredo_webrtc::VideoFrameTypeVectorRef<'_>>,
+    ) -> VideoCodecStatus {
+        sample.sample_serial = sample_serial;
+        sample.jump_tx = Some(jump_tx.clone());
+        let frame_buffer = VideoFrameBuffer::new_with_handler(Box::new(sample));
+        let video_frame = VideoFrame::builder(&frame_buffer)
+            .set_timestamp_us((sample_serial as i64).saturating_mul(1000))
+            .set_rtp_timestamp(sample_serial as u32)
+            .build();
+        encoder.encode(video_frame.as_ref(), frame_types)
+    }
+
+    /// 初回が delta のとき、実 keyframe まで callback へ渡さないことを確認する。
+    #[test]
+    fn passthrough_encoder_skips_initial_delta_until_real_keyframe() {
+        let (reader, _fixture) = av1_reader_from_fixture("initial-delta");
+        let stop = AtomicBool::new(false);
+        let (jump_tx, jump_rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
+        let callback =
+            VideoEncoderEncodedImageCallback::new_with_handler(Box::new(RecordingHandler { tx }));
+        let mut encoder = Mp4PassthroughEncoder::new();
+        assert_eq!(
+            encoder.register_encode_complete_callback(Some(callback.as_ref())),
+            VideoCodecStatus::Ok
+        );
+
+        // AV1 fixture の index 1 は non-sync。生成直後の待ち状態では出力しない。
+        let delta = reader
+            .get_sample(1, &stop)
+            .expect("delta sample を読めるはずです")
+            .expect("停止していないはずです");
+        assert!(!delta.is_keyframe);
+        assert_eq!(
+            encode_with_context(&mut encoder, delta, 1, &jump_tx, None),
+            VideoCodecStatus::NoOutput
+        );
+        let jump = jump_rx
+            .try_recv()
+            .expect("初回 delta では jump を要求するはずです");
+        assert_eq!(jump.request_serial, 1);
+
+        let key = reader
+            .get_sample(8, &stop)
+            .expect("keyframe を読めるはずです")
+            .expect("停止していないはずです");
+        assert!(key.is_keyframe);
+        assert_eq!(
+            encode_with_context(&mut encoder, key, 2, &jump_tx, None),
+            VideoCodecStatus::Ok
+        );
+
+        drop(callback);
+        let images: Vec<_> = rx.iter().collect();
+        assert_eq!(
+            images.len(),
+            1,
+            "keyframe 1 件だけが callback に届くはずです"
+        );
+        assert_eq!(images[0].0, VideoFrameType::Key);
+    }
+
+    /// serial 欠落後は次の実 keyframe まで delta を出力しないことを確認する。
+    #[test]
+    fn passthrough_encoder_skips_delta_after_serial_gap() {
+        let (reader, _fixture) = av1_reader_from_fixture("serial-gap");
+        let stop = AtomicBool::new(false);
+        let (jump_tx, jump_rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
+        let callback =
+            VideoEncoderEncodedImageCallback::new_with_handler(Box::new(RecordingHandler { tx }));
+        let mut encoder = Mp4PassthroughEncoder::new();
+        assert_eq!(
+            encoder.register_encode_complete_callback(Some(callback.as_ref())),
+            VideoCodecStatus::Ok
+        );
+
+        let key0 = reader
+            .get_sample(0, &stop)
+            .expect("先頭 keyframe を読めるはずです")
+            .expect("停止していないはずです");
+        assert_eq!(
+            encode_with_context(&mut encoder, key0, 1, &jump_tx, None),
+            VideoCodecStatus::Ok
+        );
+
+        // serial 2 を欠落させ、3 の delta を渡す。
+        let delta = reader
+            .get_sample(1, &stop)
+            .expect("delta を読めるはずです")
+            .expect("停止していないはずです");
+        assert!(!delta.is_keyframe);
+        assert_eq!(
+            encode_with_context(&mut encoder, delta, 3, &jump_tx, None),
+            VideoCodecStatus::NoOutput
+        );
+        assert_eq!(
+            jump_rx
+                .try_recv()
+                .expect("欠落検出で jump するはずです")
+                .request_serial,
+            3
+        );
+
+        // 欠落後の別 delta も出力せず、再 jump する。
+        let delta2 = reader
+            .get_sample(2, &stop)
+            .expect("後続 delta を読めるはずです")
+            .expect("停止していないはずです");
+        assert_eq!(
+            encode_with_context(&mut encoder, delta2, 4, &jump_tx, None),
+            VideoCodecStatus::NoOutput
+        );
+        assert_eq!(
+            jump_rx
+                .try_recv()
+                .expect("待ち中の delta でも jump を再要求するはずです")
+                .request_serial,
+            4
+        );
+
+        let key = reader
+            .get_sample(8, &stop)
+            .expect("次の keyframe を読めるはずです")
+            .expect("停止していないはずです");
+        assert_eq!(
+            encode_with_context(&mut encoder, key, 5, &jump_tx, None),
+            VideoCodecStatus::Ok
+        );
+
+        drop(callback);
+        let images: Vec<_> = rx.iter().collect();
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0].0, VideoFrameType::Key);
+        assert_eq!(images[1].0, VideoFrameType::Key);
+    }
+
+    /// keyframe request を受けたら、実 keyframe まで delta を出力しないことを確認する。
+    #[test]
+    fn passthrough_encoder_latches_keyframe_request_until_real_keyframe() {
+        use shiguredo_webrtc::VideoFrameTypeVector;
+
+        let (reader, _fixture) = av1_reader_from_fixture("key-request");
+        let stop = AtomicBool::new(false);
+        let (jump_tx, jump_rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
+        let callback =
+            VideoEncoderEncodedImageCallback::new_with_handler(Box::new(RecordingHandler { tx }));
+        let mut encoder = Mp4PassthroughEncoder::new();
+        assert_eq!(
+            encoder.register_encode_complete_callback(Some(callback.as_ref())),
+            VideoCodecStatus::Ok
+        );
+
+        let key0 = reader
+            .get_sample(0, &stop)
+            .expect("先頭 keyframe を読めるはずです")
+            .expect("停止していないはずです");
+        assert_eq!(
+            encode_with_context(&mut encoder, key0, 1, &jump_tx, None),
+            VideoCodecStatus::Ok
+        );
+
+        let mut key_types = VideoFrameTypeVector::new(0);
+        key_types.push(VideoFrameType::Key);
+        let delta = reader
+            .get_sample(1, &stop)
+            .expect("delta を読めるはずです")
+            .expect("停止していないはずです");
+        assert_eq!(
+            encode_with_context(&mut encoder, delta, 2, &jump_tx, Some(key_types.as_ref())),
+            VideoCodecStatus::NoOutput
+        );
+        assert_eq!(
+            jump_rx
+                .try_recv()
+                .expect("keyframe request で jump するはずです")
+                .request_serial,
+            2
+        );
+
+        // libwebrtc は次回 frame_types を delta に戻す想定。要求は latch されている。
+        let delta2 = reader
+            .get_sample(2, &stop)
+            .expect("後続 delta を読めるはずです")
+            .expect("停止していないはずです");
+        assert_eq!(
+            encode_with_context(&mut encoder, delta2, 3, &jump_tx, None),
+            VideoCodecStatus::NoOutput
+        );
+
+        let key = reader
+            .get_sample(8, &stop)
+            .expect("次の keyframe を読めるはずです")
+            .expect("停止していないはずです");
+        assert_eq!(
+            encode_with_context(&mut encoder, key, 4, &jump_tx, None),
+            VideoCodecStatus::Ok
+        );
+
+        drop(callback);
+        let images: Vec<_> = rx.iter().collect();
+        assert_eq!(images.len(), 2);
+        assert!(
+            images
+                .iter()
+                .all(|(frame_type, _)| *frame_type == VideoFrameType::Key)
+        );
+    }
+
+    /// jump 先 keyframe が欠落したあと、後続 delta が再 jump できることを確認する。
+    #[test]
+    fn passthrough_encoder_rerequests_jump_when_keyframe_never_arrives() {
+        let (reader, _fixture) = av1_reader_from_fixture("rejump");
+        let stop = AtomicBool::new(false);
+        let (jump_tx, jump_rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
+        let callback =
+            VideoEncoderEncodedImageCallback::new_with_handler(Box::new(RecordingHandler { tx }));
+        let mut encoder = Mp4PassthroughEncoder::new();
+        assert_eq!(
+            encoder.register_encode_complete_callback(Some(callback.as_ref())),
+            VideoCodecStatus::Ok
+        );
+
+        let key0 = reader
+            .get_sample(0, &stop)
+            .expect("先頭 keyframe を読めるはずです")
+            .expect("停止していないはずです");
+        assert_eq!(
+            encode_with_context(&mut encoder, key0, 1, &jump_tx, None),
+            VideoCodecStatus::Ok
+        );
+
+        // serial gap で待ちへ入り、jump 先 keyframe (serial 3) は encode に届かない想定。
+        let delta = reader
+            .get_sample(1, &stop)
+            .expect("delta を読めるはずです")
+            .expect("停止していないはずです");
+        assert_eq!(
+            encode_with_context(&mut encoder, delta, 3, &jump_tx, None),
+            VideoCodecStatus::NoOutput
+        );
+        assert_eq!(jump_rx.try_recv().expect("1 回目の jump").request_serial, 3);
+
+        let later_delta = reader
+            .get_sample(9, &stop)
+            .expect("jump 先欠落後の delta を読めるはずです")
+            .expect("停止していないはずです");
+        assert!(!later_delta.is_keyframe);
+        assert_eq!(
+            encode_with_context(&mut encoder, later_delta, 4, &jump_tx, None),
+            VideoCodecStatus::NoOutput
+        );
+        assert_eq!(
+            jump_rx
+                .try_recv()
+                .expect("keyframe 欠落後も再 jump するはずです")
+                .request_serial,
+            4
+        );
+
+        drop(callback);
+        assert!(rx.try_recv().is_ok(), "先頭 keyframe は出力済みのはずです");
+        assert!(rx.try_recv().is_err(), "それ以外は出力されないはずです");
+    }
+
+    /// encoded image callback 失敗は連続性の基準にせず、待ちへ移行することを確認する。
+    #[test]
+    fn passthrough_encoder_enters_wait_when_callback_fails() {
+        let (reader, _fixture) = av1_reader_from_fixture("callback-fail");
+        let stop = AtomicBool::new(false);
+        let (jump_tx, jump_rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
+        let callback =
+            VideoEncoderEncodedImageCallback::new_with_handler(Box::new(FailOnceHandler {
+                tx,
+                failed_once: false,
+            }));
+        let mut encoder = Mp4PassthroughEncoder::new();
+        assert_eq!(
+            encoder.register_encode_complete_callback(Some(callback.as_ref())),
+            VideoCodecStatus::Ok
+        );
+
+        let key0 = reader
+            .get_sample(0, &stop)
+            .expect("先頭 keyframe を読めるはずです")
+            .expect("停止していないはずです");
+        assert_eq!(
+            encode_with_context(&mut encoder, key0, 1, &jump_tx, None),
+            VideoCodecStatus::Ok
+        );
+        assert_eq!(
+            jump_rx
+                .try_recv()
+                .expect("callback 失敗で jump するはずです")
+                .request_serial,
+            1
+        );
+
+        // 失敗した serial=1 は基準にならないため、serial=2 の delta も出力しない。
+        let delta = reader
+            .get_sample(1, &stop)
+            .expect("delta を読めるはずです")
+            .expect("停止していないはずです");
+        assert_eq!(
+            encode_with_context(&mut encoder, delta, 2, &jump_tx, None),
+            VideoCodecStatus::NoOutput
+        );
+
+        let key = reader
+            .get_sample(8, &stop)
+            .expect("次の keyframe を読めるはずです")
+            .expect("停止していないはずです");
+        assert_eq!(
+            encode_with_context(&mut encoder, key, 3, &jump_tx, None),
+            VideoCodecStatus::Ok
+        );
+
+        drop(callback);
+        let images: Vec<_> = rx.iter().collect();
+        assert_eq!(
+            images.len(),
+            1,
+            "成功した keyframe だけが記録されるはずです"
+        );
+        assert_eq!(images[0].0, VideoFrameType::Key);
+    }
+
+    /// `frame_types` 先頭が Empty のときは NoOutput とし、待ち状態へ入ることを確認する。
+    #[test]
+    fn passthrough_encoder_returns_no_output_for_empty_frame_type() {
+        use shiguredo_webrtc::VideoFrameTypeVector;
+
+        let (reader, _fixture) = av1_reader_from_fixture("empty-frame-type");
+        let stop = AtomicBool::new(false);
+        let (jump_tx, _jump_rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
+        let callback =
+            VideoEncoderEncodedImageCallback::new_with_handler(Box::new(RecordingHandler { tx }));
+        let mut encoder = Mp4PassthroughEncoder::new();
+        assert_eq!(
+            encoder.register_encode_complete_callback(Some(callback.as_ref())),
+            VideoCodecStatus::Ok
+        );
+
+        let key0 = reader
+            .get_sample(0, &stop)
+            .expect("先頭 keyframe を読めるはずです")
+            .expect("停止していないはずです");
+        assert_eq!(
+            encode_with_context(&mut encoder, key0, 1, &jump_tx, None),
+            VideoCodecStatus::Ok
+        );
+
+        let mut empty_types = VideoFrameTypeVector::new(0);
+        empty_types.push(VideoFrameType::Empty);
+        let delta = reader
+            .get_sample(1, &stop)
+            .expect("delta を読めるはずです")
+            .expect("停止していないはずです");
+        assert_eq!(
+            encode_with_context(&mut encoder, delta, 2, &jump_tx, Some(empty_types.as_ref())),
+            VideoCodecStatus::NoOutput
+        );
+
+        // Empty のあとは待ち状態なので、直後の delta も出力しない。
+        let delta2 = reader
+            .get_sample(2, &stop)
+            .expect("後続 delta を読めるはずです")
+            .expect("停止していないはずです");
+        assert_eq!(
+            encode_with_context(&mut encoder, delta2, 3, &jump_tx, None),
+            VideoCodecStatus::NoOutput
+        );
+
+        drop(callback);
+        let images: Vec<_> = rx.iter().collect();
+        assert_eq!(images.len(), 1);
+    }
+
+    /// 古い jump 要求は、すでに供給した新しい keyframe より先へ進めないことを確認する。
+    #[test]
+    fn apply_jump_command_ignores_stale_request_after_newer_keyframe() {
+        let (reader, _fixture) = av1_reader_from_fixture("stale-jump");
+        let mut index = 9usize;
+        let mut loop_start = std::time::Instant::now();
+        // serial 5 の keyframe を供給済みのとき、serial 3 の古い要求は無視する。
+        apply_jump_command(&reader, 3, Some(5), &mut index, &mut loop_start);
+        assert_eq!(index, 9, "古い jump では再生位置を動かさないはずです");
+
+        // まだ新しい keyframe を供給していない要求は、未供給位置から次の sync へ進む。
+        apply_jump_command(&reader, 5, Some(5), &mut index, &mut loop_start);
+        assert_eq!(index, 16, "未供給位置 9 から次の sync 16 へ進むはずです");
+    }
+
+    /// 現在 loop に後続 keyframe が無いときは、次 loop 先頭側の sync へ wrap することを確認する。
+    #[test]
+    fn next_sync_sample_index_wraps_to_first_keyframe() {
+        let (reader, _fixture) = h264_reader_from_fixture("wrap-sync");
+        // H.264 High Profile fixture は sync が index 0 のみ。
+        let (index, wrapped) = reader.next_sync_sample_index(1);
+        assert!(wrapped, "後続 sync が無いときは wrap するはずです");
+        assert_eq!(index, 0);
+
+        let (index, wrapped) = reader.next_sync_sample_index(0);
+        assert!(!wrapped);
+        assert_eq!(index, 0);
+    }
+
+    /// timestamp はミリ秒単位で厳密増加し、RTP timestamp も前進することを確認する。
+    #[test]
+    fn allocate_frame_timestamps_strictly_increase() {
+        let mut last = None;
+        let (ts1, rtp1) = allocate_frame_timestamps(&mut last, 1_000_000);
+        let (ts2, rtp2) = allocate_frame_timestamps(&mut last, 1_000_000);
+        assert!(ts2 > ts1, "同一候補でも timestamp は増加するはずです");
+        assert!(ts2.div_euclid(1000) > ts1.div_euclid(1000));
+        assert_ne!(rtp1, rtp2, "RTP timestamp も前進するはずです");
+
+        // wrap を含む前進: 大きな ms からでも単調に進められる。
+        let mut last = Some(((u32::MAX as i64) / 90) * 1000);
+        let (_ts, rtp) = allocate_frame_timestamps(&mut last, 0);
+        let (_ts2, rtp2) = allocate_frame_timestamps(&mut last, 0);
+        assert_ne!(rtp, rtp2);
+    }
+
+    /// sync sample が 1 件もない MP4 を初期化時に拒否することを確認する。
+    #[test]
+    fn sample_reader_rejects_mp4_without_sync_sample() {
+        let fixture = include_bytes!("../../testdata/red-320x320-h264.mp4");
+        let mut patched = fixture.to_vec();
+        let stss_type = patched
+            .windows(4)
+            .position(|window| window == b"stss")
+            .expect("fixture に stss が必要です");
+        // stss: size(4) + type(4) + version/flags(4) + entry_count(4) + entries
+        let entry_count_offset = stss_type + 8;
+        assert_eq!(
+            u32::from_be_bytes(
+                patched[entry_count_offset..entry_count_offset + 4]
+                    .try_into()
+                    .expect("entry_count は 4 バイト")
+            ),
+            1,
+            "fixture の stss entry_count が変化しています"
+        );
+        // entry_count だけ 0 にする。box size は変えず、親 box のサイズ整合を崩さない。
+        patched[entry_count_offset..entry_count_offset + 4].copy_from_slice(&0u32.to_be_bytes());
+
+        let tmp_name = format!(
+            "sora-sdk-mp4-no-sync-{}-{}.mp4",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("システム時刻は UNIX_EPOCH より後である必要があります")
+                .as_nanos()
+        );
+        let tmp_path = std::env::temp_dir().join(tmp_name);
+        std::fs::write(&tmp_path, &patched).expect("一時 fixture の書き込みに失敗しました");
+        let result = Mp4SampleReader::new(&tmp_path);
+        let _ = std::fs::remove_file(&tmp_path);
+
+        match result {
+            Err(crate::error::Error::Mp4 { source }) => {
+                assert!(
+                    matches!(source, Mp4Error::NoSyncSample),
+                    "NoSyncSample を期待しましたが: {source}"
+                );
+            }
+            Err(err) => panic!("NoSyncSample を期待しましたが別エラーです: {err}"),
+            Ok(_) => panic!("NoSyncSample を期待しましたが Ok でした"),
         }
     }
 
