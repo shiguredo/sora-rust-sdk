@@ -37,9 +37,9 @@
   - @voluntas
 - [UPDATE] shiguredo_mp4 を 2026.4.0 から 2026.5.0 に更新する
   - @sile
-- [FIX] MP4 パススルーで encode 前の sample 欠落後に後続の delta sample を送信しないようにする
-  - capturer は再生順の `playback_serial` を付け、encoder は不連続を検出したら実キーフレームまで待つ
-  - 再生位置は変更しない。復帰時間は入力 MP4 のキーフレーム間隔に依存する
+- [FIX] MP4 パススルーで encode 前に sample が欠落した場合、後続の delta sample を送信しないようにする
+  - capturer は再生順を示す `playback_serial` を付与し、encoder は値の不連続を検出した場合、次のキーフレームまで待つ
+  - 再生位置は変更せず、送信再開までの時間は入力 MP4 のキーフレーム間隔に依存する
   - @sile
 - [FIX] MP4 AV1 の `configOBUs` を各 sync sample の先頭に付与するようにする
   - 今までは `configOBUs` を破棄しており、Sequence Header OBU や静的 Metadata OBU が sync sample に含まれない入力では受信側が decode できない payload になっていた

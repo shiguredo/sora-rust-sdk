@@ -225,12 +225,13 @@ pub(crate) struct Mp4EncodedSample {
     pub height: u32,
     /// ビデオコーデック種別。
     pub codec_type: VideoCodecType,
-    /// capturer が MP4 の時間軸を進めた通し番号。
+    /// capturer が再生対象として処理した sample の通し番号。
     ///
-    /// MP4 の sample index でも RTP sequence number でもない。
-    /// capturer は `adapt_frame` の成否にかかわらず再生対象の sample ごとに進め、
-    /// loop 境界でも巻き戻さない。
-    /// encoder は不連続を encode 前の欠落とみなし、実キーフレームまで delta を送らない。
+    /// MP4 内の sample index や RTP sequence number とは異なる。
+    /// capturer は `adapt_frame` の成否にかかわらず、再生対象の sample ごとに値を増やし、
+    /// ループ境界でも値を巻き戻さない。
+    /// encoder は値の不連続を encode 前の sample 欠落とみなし、次のキーフレームまで
+    /// delta sample を送らない。
     playback_serial: u64,
 }
 
@@ -998,7 +999,8 @@ fn read_sample(
         width: track_info.width as u32,
         height: track_info.height as u32,
         codec_type: track_info.codec_type,
-        // capturer が再生順の通し番号を上書きする。reader 単体の読み出しでは未設定のまま。
+        // playback_serial は capturer が再生順に従って上書きする。
+        // reader から読み出した直後は初期値のままとする。
         playback_serial: 0,
     })
 }
@@ -1067,10 +1069,11 @@ fn length_prefixed_nalu_to_annex_b(data: &[u8], nal_length_size: u8) -> Vec<u8> 
 /// 実際のエンコード処理は行わず、`VideoFrame` の native `VideoFrameBuffer` から
 /// 事前エンコード済みのサンプルを取り出して `EncodedImage` として WebRTC に渡す。
 ///
-/// 圧縮済み sample は参照関係が bitstream に固定されている。
-/// encode 前に sample が欠落すると後続の delta をデコードできないため、
-/// `playback_serial` の不連続を検出したら実キーフレームまで delta を送らない。
-/// capturer の再生位置は変えず、次の実キーフレームが自然に到着するのを待つ。
+/// 圧縮済み sample の参照関係は bitstream 内で確定している。
+/// encode 前に参照先の sample が欠落すると、後続の delta sample をデコードできない。
+/// そのため、`playback_serial` の不連続を検出した場合は、次のキーフレームまで
+/// delta sample を送らない。
+/// capturer の再生位置は変更せず、通常の再生順で次のキーフレームを受け取るまで待つ。
 ///
 /// `has_trusted_rate_controller=true` を設定することで、
 /// WebRTC のビットレート制御がこのエンコーダーに対して介入しないようにする。
@@ -1078,7 +1081,7 @@ fn length_prefixed_nalu_to_annex_b(data: &[u8], nal_length_size: u8) -> Vec<u8> 
 /// 代わりに `--video-bit-rate` で十分な帯域を確保する必要がある。
 struct Mp4PassthroughEncoder {
     callback: Option<VideoEncoderEncodedImageCallbackPtr>,
-    /// 実キーフレームを encoded image callback へ渡すまで delta を抑止する。
+    /// 次のキーフレームを encoded image callback へ渡すまで delta sample を抑止する。
     waiting_for_keyframe: bool,
     /// 直前に encoded image callback へ渡した sample の `playback_serial`。
     last_playback_serial: Option<u64>,
@@ -1095,16 +1098,17 @@ impl Mp4PassthroughEncoder {
 
     /// キーフレーム待ちへ戻す。
     ///
-    /// 生成時と `init_encode` のたびに呼ぶ。
-    /// capturer は encoder 接続前から再生を始めるため、待ちなしだと GOP 途中の delta を送ってしまう。
+    /// encoder の生成時と `init_encode` のたびに、この状態へ移行する。
+    /// capturer は encoder への接続前から再生を始めるため、キーフレーム待ちを行わないと、
+    /// GOP の途中にある delta sample を送信する可能性がある。
     fn enter_keyframe_wait(&mut self) {
         self.waiting_for_keyframe = true;
         self.last_playback_serial = None;
     }
 
-    /// この sample を encoded image callback へ渡してよいかを決める。
+    /// sample を encoded image callback へ渡すかどうかを判定する。
     ///
-    /// delta の metadata は書き換えない。渡さないか、入力の `is_keyframe` のまま渡すかだけを返す。
+    /// delta sample を渡す場合も metadata は変更せず、入力の `is_keyframe` を維持する。
     fn should_forward_sample(&mut self, is_keyframe: bool, playback_serial: u64) -> bool {
         if self.waiting_for_keyframe {
             if is_keyframe {
@@ -1362,10 +1366,11 @@ impl VideoCodecCapability for Mp4PassthroughVideoCodecCapability {
 /// 処理時間の累積ドリフトを防止する。
 /// MP4 の末尾に到達すると先頭に戻りループ再生する。
 ///
-/// 各 sample には再生順の `playback_serial` を付ける。
-/// `adapt_frame` で捨てた sample も含めて通し番号を進めるため、encoder は欠落後の
-/// delta を送らず、次の実キーフレームが自然に到着するまで待つ。
-/// 再生位置は変更しない。復帰時間は入力 MP4 のキーフレーム間隔に依存する。
+/// 各 sample には再生順を示す `playback_serial` を付与する。
+/// `adapt_frame` で破棄した sample も含めて通し番号を進めるため、encoder は
+/// sample の欠落を検出できる。欠落を検出した後は delta sample を送らず、
+/// 通常の再生順で次のキーフレームを受け取るまで待つ。
+/// 再生位置は変更せず、送信再開までの時間は入力 MP4 のキーフレーム間隔に依存する。
 pub struct Mp4VideoCapturer {
     video_source: VideoTrackSource,
     /// フィーダースレッドへの停止フラグ。
@@ -1407,7 +1412,7 @@ impl Mp4VideoCapturer {
     /// 同じ [`Mp4SampleReader`] から複数のキャプチャラーを生成する場合は、リーダーをクローンし、
     /// 各 `Mp4VideoCapturer::new()` に 1 つずつ渡す。
     /// 各キャプチャラーは、フレーム供給スレッドと再生時計を個別に持つ。
-    /// `playback_serial` とキーフレーム待ちも capturer / encoder ごとに独立する。
+    /// 各 capturer の `playback_serial` と各 encoder のキーフレーム待ち状態も独立している。
     pub fn new(reader: Mp4SampleReader) -> crate::error::Result<Self> {
         let width = reader.inner.track_info.width as i32;
         let height = reader.inner.track_info.height as i32;
@@ -1420,7 +1425,8 @@ impl Mp4VideoCapturer {
         let thread_handle = thread::spawn(move || {
             let source = source;
             let mut aligner = TimestampAligner::new();
-            // capturer ごとの再生順。MP4 の index とは別で、loop しても巻き戻さない。
+            // capturer ごとの再生順を表す。
+            // MP4 内の sample index とは異なり、ループしても巻き戻さない。
             let mut next_playback_serial: u64 = 0;
 
             loop {
@@ -1437,7 +1443,8 @@ impl Mp4VideoCapturer {
                     next_playback_serial = match next_playback_serial.checked_add(1) {
                         Some(serial) => serial,
                         None => {
-                            // u64 を使い切るのは実用上起きないが、ラップすると欠落検出が壊れる。
+                            // u64 が上限に達することは実用上想定しにくいが、
+                            // ラップすると sample の欠落を検出できなくなる。
                             rtc_log_warning!(
                                 "MP4: playback_serial overflow, stopping feeder thread"
                             );
@@ -1448,7 +1455,8 @@ impl Mp4VideoCapturer {
                     // サンプルを内包した native VideoFrameBuffer を送信して encode() をトリガーする。
                     // adapt_frame() は WebRTC のフレームアダプター (解像度/フレームレート調整) を通す。
                     // applied=false の場合はフレームドロッパーがスキップを指示している。
-                    // スキップしても playback_serial は進める。encoder が欠落を検出するため。
+                    // sample を破棄しても playback_serial を進め、
+                    // encoder が欠落を検出できるようにする。
                     let timestamp_us = shiguredo_webrtc::time_millis() * 1000;
                     let AdaptFrameResult { applied, .. } =
                         source.adapt_frame(width, height, timestamp_us);
@@ -2569,19 +2577,20 @@ mod tests {
                     "capturer {index} のフレームコーデックは H.264 のはずです"
                 );
                 if received == 0 {
-                    // capturer は VideoTrack 接続前から再生を始めるため、
-                    // 先頭 sample は adapt_frame で捨てられ、最初に届く serial は 0 とは限らない。
+                    // capturer は VideoTrack への接続前から再生を始める。
+                    // 先頭 sample が adapt_frame で破棄されることもあり、
+                    // 最初に届く serial は 0 とは限らない。
                     assert!(
                         frame.playback_serial < 10,
-                        "capturer {index} は独立した通し番号を持つはずです: first={}",
+                        "capturer {index} は個別に通し番号を管理するはずです: 先頭={}",
                         frame.playback_serial
                     );
                     last_serial = Some(frame.playback_serial);
                 } else {
-                    let last = last_serial.expect("2 枚目以降は直前の serial があるはずです");
+                    let last = last_serial.expect("2 枚目以降には直前の serial があるはずです");
                     assert!(
                         frame.playback_serial > last,
-                        "capturer {index} の playback_serial は単調増加するはずです: last={last} current={}",
+                        "capturer {index} の playback_serial は単調に増加するはずです: 直前={last} 現在={}",
                         frame.playback_serial
                     );
                     last_serial = Some(frame.playback_serial);
@@ -2907,7 +2916,7 @@ mod tests {
         }
     }
 
-    /// 実 encoder と実 callback で sample 列を通し、出力 EncodedImage を返す。
+    /// 実際の encoder と callback に複数の sample を渡し、出力された EncodedImage を返す。
     fn forward_samples_through_encoder(
         encoder: &mut Mp4PassthroughEncoder,
         samples: Vec<Mp4EncodedSample>,
@@ -2926,8 +2935,8 @@ mod tests {
         rx.iter().collect()
     }
 
-    /// 生成直後の encoder はキーフレーム待ちなので、最初の delta は送らず、
-    /// 実キーフレームから出力を始める。
+    /// 生成直後の encoder はキーフレーム待ちのため、最初の delta sample を破棄し、
+    /// 次のキーフレームから出力を始める。
     #[test]
     fn passthrough_encoder_drops_initial_delta_until_keyframe() {
         let (reader, _fixture) = av1_reader_from_fixture("av1-initial-delta");
@@ -2956,7 +2965,7 @@ mod tests {
         assert_eq!(
             images.len(),
             2,
-            "初回 delta は捨て、キーフレームとその次の連続 delta だけ出力するはずです"
+            "最初の delta sample を破棄し、キーフレームと直後の delta sample だけを出力するはずです"
         );
         assert_eq!(images[0].0, VideoFrameType::Key);
         assert_eq!(
@@ -2970,8 +2979,9 @@ mod tests {
         );
     }
 
-    /// `playback_serial` が飛んだ直後が delta なら、その sample と後続 delta は出さず、
-    /// 実キーフレームで復帰する。delta の metadata を Key に書き換えない。
+    /// `playback_serial` が不連続で、その直後が delta sample の場合は、
+    /// その sample と後続の delta sample を出力せず、次のキーフレームで復帰する。
+    /// delta sample の metadata を `Key` に書き換えない。
     #[test]
     fn passthrough_encoder_drops_deltas_after_playback_serial_gap() {
         let (reader, _fixture) = av1_reader_from_fixture("av1-serial-gap-delta");
@@ -3002,8 +3012,13 @@ mod tests {
             &mut Mp4PassthroughEncoder::new(),
             vec![key0, delta1, dropped_delta, delta4, key8, delta9],
         );
-        // 残るのは key(0), delta(1), key(8), delta(9)。欠落後の delta(3,4) は出ない。
-        assert_eq!(images.len(), 4, "欠落後の delta は出力されないはずです");
+        // 出力されるのは、serial が 0 のキーフレーム、1 の delta sample、
+        // 8 のキーフレーム、9 の delta sample だけである。
+        assert_eq!(
+            images.len(),
+            4,
+            "欠落後の delta sample は出力されないはずです"
+        );
         assert_eq!(images[0].0, VideoFrameType::Key);
         assert_eq!(
             images[0].1,
@@ -3028,17 +3043,17 @@ mod tests {
             images.iter().all(|(frame_type, data)| {
                 *frame_type != VideoFrameType::Key || data.as_slice() != dropped_payload.as_slice()
             }),
-            "欠落した delta の payload をキーフレームとして出してはいけません"
+            "欠落した delta sample の payload をキーフレームとして出力してはいけません"
         );
         assert!(
             !images
                 .iter()
                 .any(|(_, data)| data.as_slice() == dropped_payload.as_slice()),
-            "欠落直後の delta payload は callback に届かないはずです"
+            "欠落直後の delta sample の payload は callback に渡されないはずです"
         );
     }
 
-    /// 不連続の直後が実キーフレームなら、そのキーフレームから出力を再開する。
+    /// 不連続の直後がキーフレームの場合は、そのキーフレームから出力を再開する。
     #[test]
     fn passthrough_encoder_resumes_on_keyframe_immediately_after_gap() {
         let (reader, _fixture) = av1_reader_from_fixture("av1-serial-gap-key");
@@ -3078,7 +3093,7 @@ mod tests {
         );
     }
 
-    /// loop 境界でも `playback_serial` が連続していれば、キーフレーム待ちに入らない。
+    /// ループ境界でも `playback_serial` が連続していれば、キーフレーム待ちに入らない。
     #[test]
     fn passthrough_encoder_keeps_forwarding_across_loop_boundary_serial() {
         let (reader, _fixture) = av1_reader_from_fixture("av1-loop-serial");
@@ -3113,11 +3128,11 @@ mod tests {
         assert_eq!(
             images.len(),
             4,
-            "loop 境界で serial が連続なら 4 sample とも出力するはずです"
+            "ループ境界で serial が連続していれば、4 個の sample をすべて出力するはずです"
         );
         assert!(
             !encoder.waiting_for_keyframe,
-            "loop 境界の連続 serial でキーフレーム待ちへ入ってはいけません"
+            "ループ境界で serial が連続している場合、キーフレーム待ちへ移行してはいけません"
         );
         assert_eq!(encoder.last_playback_serial, Some(last as u64 + 2));
         assert_eq!(images[0].0, VideoFrameType::Key);
@@ -3142,7 +3157,7 @@ mod tests {
         );
     }
 
-    /// 複数 encoder は `playback_serial` とキーフレーム待ちを共有しない。
+    /// 複数の encoder 間で `playback_serial` とキーフレーム待ち状態を共有しない。
     #[test]
     fn passthrough_encoders_do_not_share_playback_serial_state() {
         let (reader, _fixture) = av1_reader_from_fixture("av1-encoder-isolation");
@@ -3158,18 +3173,19 @@ mod tests {
             forward_samples_through_encoder(&mut Mp4PassthroughEncoder::new(), vec![key, delta]);
         assert!(
             waiting.is_empty(),
-            "待ち状態の encoder は初回 delta を出力しないはずです"
+            "キーフレーム待ち状態の encoder は最初の delta sample を出力しないはずです"
         );
         assert_eq!(
             consecutive.len(),
             2,
-            "別 encoder は連続する keyframe と delta を従来どおり出力するはずです"
+            "別の encoder は連続するキーフレームと delta sample を従来どおり出力するはずです"
         );
         assert_eq!(consecutive[0].0, VideoFrameType::Key);
         assert_eq!(consecutive[1].0, VideoFrameType::Delta);
     }
 
-    /// `init_encode` 相当のキーフレーム待ち再入場のあと、delta は捨てて実キーフレームから再開する。
+    /// `init_encode` と同様にキーフレーム待ちへ戻した後は、delta sample を破棄し、
+    /// 次のキーフレームから出力を再開する。
     #[test]
     fn passthrough_encoder_reenters_keyframe_wait_after_enter_keyframe_wait() {
         let (reader, _fixture) = av1_reader_from_fixture("av1-reenter-wait");
@@ -3194,8 +3210,8 @@ mod tests {
         );
         encode_passthrough_sample(&mut encoder, key0, 0);
         encode_passthrough_sample(&mut encoder, delta1, 1);
-        // `init_encode` は VideoEncoderSettings をテストから組み立てられないため、
-        // 同じ待ち状態へ戻す `enter_keyframe_wait` で再入場を確認する。
+        // テストでは VideoEncoderSettings を組み立てられないため、
+        // enter_keyframe_wait を直接呼び、同じ待ち状態へ戻ることを確認する。
         encoder.enter_keyframe_wait();
         encode_passthrough_sample(&mut encoder, delta2, 2);
         encode_passthrough_sample(&mut encoder, key8, 8);
@@ -3204,7 +3220,7 @@ mod tests {
         assert_eq!(
             images.len(),
             3,
-            "再入場後の delta は捨て、実キーフレームから再開するはずです"
+            "キーフレーム待ちへ戻った後は delta sample を破棄し、次のキーフレームから再開するはずです"
         );
         assert_eq!(images[0].0, VideoFrameType::Key);
         assert_eq!(
