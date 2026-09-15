@@ -59,6 +59,10 @@
 
 ### misc
 
+- [UPDATE] SoraConnectionContext の worker thread に network thread を使う
+  - 専用 worker thread の生成を削除し、`PeerConnectionFactoryDependencies::set_worker_thread` に network thread を渡す
+  - @melpon
+
 ## 2026.1.0
 
 **リリース日**: 2026-08-25

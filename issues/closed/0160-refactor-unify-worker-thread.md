@@ -1,7 +1,7 @@
 # SoraConnectionContext の worker thread を network thread に統一する
 
 - Created: 2026-09-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-15
 - Branch: feature/refactor-unify-worker-thread
 - Polished: {YYYY-MM-DD}
 
@@ -59,3 +59,16 @@ worker thread の API を無くす対応は、558821261 を実装した libwebrt
 
 - モックやスタブを使用しない
 - 既存のテストが回帰の検証になる (`SoraConnectionContext::new()` は `src/connection.rs` と `src/video_codecs/mp4.rs` のテストで生成しており、`cargo test --workspace` で実行される)
+
+## 解決方法
+
+SoraConnectionContext の worker thread として network thread を使うようにした。
+
+- `src/connection_context.rs` の `SoraConnectionContext` から `_worker` フィールドと worker 用の `Thread::new()` / `start()` を削除し、`set_worker_thread` に network thread を渡すようにした
+- フィールドの宣言順は変えず、コメントを実態に合わせて更新した
+- `skills/sora-rust-sdk/SKILL.md` の内部スレッドの記述を network / signaling の 2 本に更新した
+- `CHANGES.md` の `## develop` の `### misc` に追記した
+
+確認:
+
+- `cargo fmt --all --check` / `cargo clippy --workspace -- -D warnings` / `cargo test --workspace` が通ることを確認した

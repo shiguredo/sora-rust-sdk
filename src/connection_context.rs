@@ -100,10 +100,13 @@ pub struct SoraConnectionContext {
     // したがって connection_context を factory より前に配置し、
     // Rust 側の参照を先に手放すことで、factory 破棄時の signaling スレッド上での
     // 解放が ConnectionContext の最後の C++ 参照になるようにしている。
+    //
+    // また _network / _signaling は factory が内部で参照し続けるため、
+    // factory より後に配置して factory の破棄後に drop されるようにする。
+    // worker thread には network thread を使うため、専用の worker thread は保持しない。
     connection_context: ConnectionContext,
     factory: PeerConnectionFactory,
     _network: Thread,
-    _worker: Thread,
     _signaling: Thread,
 }
 
@@ -142,15 +145,14 @@ impl SoraConnectionContext {
 
         let env = Environment::new();
         let mut network = Thread::new_with_socket_server();
-        let mut worker = Thread::new();
         let mut signaling = Thread::new();
         network.start();
-        worker.start();
         signaling.start();
 
         let mut deps = PeerConnectionFactoryDependencies::new();
         deps.set_network_thread(&network);
-        deps.set_worker_thread(&worker);
+        // worker thread には network thread を使う
+        deps.set_worker_thread(&network);
         deps.set_signaling_thread(&signaling);
         let event_log = RtcEventLogFactory::new();
         deps.set_event_log_factory(event_log);
@@ -184,7 +186,6 @@ impl SoraConnectionContext {
             factory,
             connection_context,
             _network: network,
-            _worker: worker,
             _signaling: signaling,
         }))
     }
