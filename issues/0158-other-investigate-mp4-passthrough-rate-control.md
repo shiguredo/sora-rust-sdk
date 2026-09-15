@@ -63,8 +63,8 @@ SDK が使用する libwebrtc について、次の呼び出しと条件をソ�
 
 調査結果から、少なくとも次の候補を比較して 1 つに絞る。
 
-1. MP4 パススルー側で dependency-safe な sample 抑止を行い、trusted rate controller として target bitrate に追従する。
-2. `has_trusted_rate_controller=false` に変更し、sora-rust-sdk の issue 0157 による keyframe 復帰と組み合わせる。
+1. MP4 パススルー側で dependency-safe な rate control を行い、trusted rate controller として target bitrate に追従する。
+2. `has_trusted_rate_controller=false` に変更し、sora-rust-sdk の issue 0159 による sample 欠落後の delta 抑止と組み合わせる。
 3. パススルーでは target bitrate への追従を保証せず、入力 bitrate と送信設定の不整合を接続前に検出して拒否または警告する。
 
 再エンコードを必要とする方針は MP4 パススルーの目的に反するため採用しない。
@@ -92,5 +92,6 @@ SDK が使用する libwebrtc について、次の呼び出しと条件をソ�
 
 ## 関連 issue
 
-- sora-rust-sdk の 0157: sample 欠落と keyframe request の後で次の実在する keyframe へ復帰する。
+- sora-rust-sdk の 0157: MP4 パススルーのキーフレーム要求への対応を検討する。
+- sora-rust-sdk の 0159: encode 前の sample 欠落後に delta sample を抑止する。
 - Sora の issue 0190: VP9 E2E の末尾デコード失敗と MP4 パススルー固有の経路を調査した。
