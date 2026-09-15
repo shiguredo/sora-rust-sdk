@@ -20,6 +20,8 @@ sumomo の `--input-mp4` オプションと Sora Rust SDK の API から利用�
 - 不正な H.264 トラックを含む MP4 は初期化時に拒否する
 - 不正な AV1 トラックを含む MP4 は初期化時に拒否する
 - 再送やキーフレーム要求は無視する
+- encode 前に sample が欠落した場合、次の実キーフレームが到着するまで後続の delta sample は送信しない。再生位置は変更しない
+- 欠落からの復帰時間は入力 MP4 のキーフレーム間隔に依存するため、キーフレーム間隔を短めにする
 - MP4 の末尾に到達すると先頭に戻りループ再生する
 
 ## sumomo での利用
@@ -83,7 +85,7 @@ assertion `left == right` failed: video_frame_buffer callback called from multip
 
 1. `shiguredo_mp4` クレートで MP4 ファイルを読み込み、ビデオトラックのエンコード済みサンプルを抽出する
 2. カスタムの `VideoCodecCapability` (パススルーエンコーダー) を WebRTC のエンコーダーパイプラインに登録する
-3. パススルーエンコーダーは `encode()` 呼び出し時に、事前抽出したエンコード済みデータをそのまま `EncodedImage` として出力する
+3. パススルーエンコーダーは `encode()` 呼び出し時に、事前抽出したエンコード済みデータをそのまま `EncodedImage` として出力する。encode 前の欠落を検出した場合は、実キーフレームが来るまで delta sample を出力しない
 4. H.264 の場合は AVCC フォーマットから Annex B フォーマットへの変換と、IDR フレーム前への SPS/PPS 付与を行う
 5. H.265 の場合は HVCC フォーマットから Annex B フォーマットへの変換と、IDR フレーム前への VPS/SPS/PPS 付与を行う
 6. AV1 の場合は sync sample の先頭に configOBUs (Sequence Header 等) を付与する
