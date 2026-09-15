@@ -51,7 +51,7 @@ WebRTC SFU Sora のクライアントを Rust で実装するための SDK。シ
 
 | 型 | 説明 | 主要メソッド |
 |----|------|-------------|
-| `SoraConnectionContext` | `PeerConnectionFactory` と内部スレッド (network / worker / signaling) をまとめて保持。プロセス全体で 1 つ作って `Arc` で共有する | `new() -> Result<Arc<Self>>`, `new_with_config(SoraConnectionContextConfig) -> Result<Arc<Self>>`, `create_audio_source() -> Result<AudioTrackSource>`, `create_audio_track(&AudioTrackSource) -> Result<AudioTrack>`, `create_video_track(&VideoTrackSource) -> Result<VideoTrack>` |
+| `SoraConnectionContext` | `PeerConnectionFactory` と内部スレッド (network / signaling) をまとめて保持。プロセス全体で 1 つ作って `Arc` で共有する | `new() -> Result<Arc<Self>>`, `new_with_config(SoraConnectionContextConfig) -> Result<Arc<Self>>`, `create_audio_source() -> Result<AudioTrackSource>`, `create_audio_track(&AudioTrackSource) -> Result<AudioTrack>`, `create_video_track(&VideoTrackSource) -> Result<VideoTrack>` |
 | `SoraConnectionContextConfig` | コンテキストの設定 (フィールド: `adm_config`, `video_codec_preference`, `video_codec_capabilities`) | `Default::default()` (Internal / InternalApple capabilities を自動登録) |
 | `AdmConfig` | AudioDeviceModule の選択 | `NoAudioDevice` (既定、Dummy ADM), `UseBuiltIn` (OS 標準), `UseExternal(shiguredo_webrtc::AudioDeviceModule)` |
 
@@ -577,7 +577,7 @@ if let Some(url) = handle.selected_signaling_url().await? {
 
 ## 既知の制限事項・注意点
 
-- **コンテキスト生成は重い**: `SoraConnectionContext::new()` は内部スレッドを 3 本起動するため、プロセスあたり 1 つに集約し `Arc` で共有する。
+- **コンテキスト生成は重い**: `SoraConnectionContext::new()` は内部スレッドを 2 本起動するため、プロセスあたり 1 つに集約し `Arc` で共有する。
 - **`connection.run()` はブロッキング**: 別タスクで実行し、外部制御は `SoraConnectionHandle` (Clone) を介する。
 - **コールバックを長時間ブロックしない**: 内部タスクから呼ばれるため、重い処理は自分の async タスクへ転送する。
 - **HTTP プロキシは `http://` のみ**: `https://` プロキシ、パス、クエリ、userinfo はサポート外。
