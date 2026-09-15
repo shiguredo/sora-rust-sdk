@@ -1,7 +1,7 @@
 # MP4 パススルーで sample 欠落後の delta sample を抑止する
 
 - Created: 2026-09-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-15
 - Branch: feature/fix-mp4-passthrough-sample-gap
 - Polished: 2026-09-15
 
@@ -99,3 +99,14 @@ capturer は再生位置を変更せず、MP4 の通常の再生順と再生タ�
 - sora-rust-sdk の 0157: MP4 パススルーのキーフレーム要求への対応を検討する。
 - sora-rust-sdk の 0158: MP4 パススルーの rate-control 契約を調査する。
 - Sora の issue 0190: VP9 E2E のデコード失敗と MP4 パススルー固有の sample 欠落経路を調査した。
+
+## 解決方法
+
+`Mp4EncodedSample` に capturer ごとの再生順を表す非公開の `playback_serial` を追加した。
+`Mp4VideoCapturer` は `adapt_frame` の結果にかかわらず通し番号を進め、MP4 の loop 境界でも番号を巻き戻さないようにした。
+
+`Mp4PassthroughEncoder` は生成時と `init_encode` の実行時にキーフレーム待ちとなり、最初の delta sample と `playback_serial` の欠落後に続く delta sample を encoded image callback へ渡さないようにした。
+通常の再生順で次のキーフレームを受け取ると送信を再開し、delta sample の metadata は変更しない。
+
+実 MP4 fixture を使い、初回 delta sample の破棄、sample 欠落後の抑止と復帰、loop 境界での通し番号、複数の capturer と encoder の状態分離をテストした。
+`docs/INPUT_MP4.md` と関連 rustdoc には、欠落後の動作と入力 MP4 のキーフレーム間隔に関する制約を追記した。
