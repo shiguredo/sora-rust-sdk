@@ -27,6 +27,10 @@ reference frame だけが破棄されると、後続の delta frame をデコー
 libwebrtc の `VideoStreamEncoder::OnFrame` と `VideoStreamEncoder::MaybeEncodeVideoFrame` には、`has_trusted_rate_controller` の値にかかわらず encode 前の frame を破棄する経路もある。
 どの drop 経路を encoder 情報で制御できるかを分けて確認する必要がある。
 
+`Mp4VideoCapturer::new` が sample ごとに呼び出す `AdaptedVideoTrackSource::adapt_frame` も、sink wants に基づく `VideoAdapter` の判断によって `applied=false` を返し得る。
+この判定は `has_trusted_rate_controller` とは独立している。
+定常的なフレーム間引きが発生すると、sample 欠落後の delta sample 抑止によって次のキーフレームまで送信が止まり、送信映像がキーフレーム中心になる可能性がある。
+
 Sora の issue 0190 で扱った E2E は、約 2 Mbps の VP9 MP4 を sumomo の `--video-bit-rate` 未指定で送信する。
 Sora の既定 target bitrate は 500 kbps であり、入力 bitrate と target bitrate に約 4 倍の差がある。
 この条件では pacer backlog と keyframe flushing が発生しているが、MP4 パススルーの rate-control 申告との因果関係は確定していない。
@@ -39,6 +43,7 @@ SDK が使用する libwebrtc について、次の呼び出しと条件をソ�
 
 - `VideoStreamEncoder` が `VideoEncoder::SetRates` を呼ぶ条件
 - `has_trusted_rate_controller` が media optimization の frame dropper に与える影響
+- `AdaptedVideoTrackSource::adapt_frame` と `VideoAdapter` が sink wants に基づいて frame を破棄する条件
 - queue overload、congestion window pushback、送信停止など、encoder 情報では抑止できない encode 前 drop
 - pacer queue の backlog と keyframe flushing が発生する条件
 
@@ -51,6 +56,7 @@ SDK が使用する libwebrtc について、次の呼び出しと条件をソ�
 各条件で次を記録する。
 
 - `SetRates` へ渡される target bitrate と framerate
+- `adapt_frame` の適用結果と sink wants の最大フレームレート
 - capturer が供給した sample index と encoder callback へ到達した sample index
 - keyframe flag と keyframe request
 - 送信 RTP の timestamp、marker、sequence number
@@ -63,8 +69,8 @@ SDK が使用する libwebrtc について、次の呼び出しと条件をソ�
 
 調査結果から、少なくとも次の候補を比較して 1 つに絞る。
 
-1. MP4 パススルー側で dependency-safe な sample 抑止を行い、trusted rate controller として target bitrate に追従する。
-2. `has_trusted_rate_controller=false` に変更し、sora-rust-sdk の issue 0157 による keyframe 復帰と組み合わせる。
+1. MP4 パススルー側で dependency-safe な rate control を行い、trusted rate controller として target bitrate に追従する。
+2. `has_trusted_rate_controller=false` に変更し、sora-rust-sdk の issue 0159 による sample 欠落後の delta 抑止と組み合わせる。
 3. パススルーでは target bitrate への追従を保証せず、入力 bitrate と送信設定の不整合を接続前に検出して拒否または警告する。
 
 再エンコードを必要とする方針は MP4 パススルーの目的に反するため採用しない。
@@ -73,6 +79,7 @@ SDK が使用する libwebrtc について、次の呼び出しと条件をソ�
 
 - `has_trusted_rate_controller` が libwebrtc の各 frame drop 経路へ与える影響がシンボル単位で整理されていること
 - `has_trusted_rate_controller=true` でも `SetRates` が呼ばれるかどうかを確認していること
+- `adapt_frame` による drop と encoder 内の drop を区別し、通常の配信条件で定常的なフレーム間引きが発生するかを確認していること
 - 入力 bitrate と target bitrate を変えた実 MP4 配信の測定結果が記録されていること
 - pacer backlog、keyframe flushing、encode 前 drop を区別できていること
 - 圧縮済み sample の参照関係を壊さない rate-control 方針が 1 つに決まっていること
@@ -83,14 +90,18 @@ SDK が使用する libwebrtc について、次の呼び出しと条件をソ�
 
 調査対象は次のとおりである。
 
+- `src/video_codecs/mp4.rs` の `Mp4VideoCapturer::new`
 - `src/video_codecs/mp4.rs` の `Mp4PassthroughEncoder::set_rates`
 - `src/video_codecs/mp4.rs` の `Mp4PassthroughEncoder::get_encoder_info`
 - `examples/sumomo/src/args.rs` の video bitrate 設定
 - libwebrtc の `VideoEncoder::EncoderInfo`
+- libwebrtc の `AdaptedVideoTrackSource`
+- libwebrtc の `VideoAdapter`
 - libwebrtc の `VideoStreamEncoder`
 - libwebrtc の `PacingController`
 
 ## 関連 issue
 
-- sora-rust-sdk の 0157: sample 欠落と keyframe request の後で次の実在する keyframe へ復帰する。
+- sora-rust-sdk の 0157: MP4 パススルーのキーフレーム要求への対応を検討する。
+- sora-rust-sdk の 0159: encode 前の sample 欠落後に delta sample を抑止する。
 - Sora の issue 0190: VP9 E2E の末尾デコード失敗と MP4 パススルー固有の経路を調査した。

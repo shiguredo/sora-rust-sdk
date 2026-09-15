@@ -51,8 +51,10 @@
   - @voluntas
 - [UPDATE] shiguredo_mp4 を 2026.4.0 から 2026.5.0 に更新する
   - @sile
-- [UPDATE] shiguredo_webrtc を 0.152.1-canary.1 から 0.152.1-canary.2 に更新する
-  - @melpon
+- [FIX] MP4 パススルーで encode 前に sample が欠落した場合、後続の delta sample を送信しないようにする
+  - capturer は再生順を示す `playback_serial` を付与し、encoder は値の不連続を検出した場合、次のキーフレームまで待つ
+  - 再生位置は変更せず、送信再開までの時間は入力 MP4 のキーフレーム間隔に依存する
+  - @sile
 - [FIX] MP4 AV1 の `configOBUs` を各 sync sample の先頭に付与するようにする
   - 今までは `configOBUs` を破棄しており、Sequence Header OBU や静的 Metadata OBU が sync sample に含まれない入力では受信側が decode できない payload になっていた
   - `Mp4SampleReader` 初期化時に AV1 track の OBU 列と Sequence Header 一貫性 / RTP packetizer 順序 / random access 条件を検証し、不正な入力は `Mp4Error::InvalidAv1Track` で拒否する
@@ -70,6 +72,10 @@
   - @sile
 
 ### misc
+
+- [UPDATE] SoraConnectionContext の worker thread に network thread を使う
+  - 専用 worker thread の生成を削除し、`PeerConnectionFactoryDependencies::set_worker_thread` に network thread を渡す
+  - @melpon
 
 ## 2026.1.0
 

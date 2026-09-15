@@ -15,6 +15,13 @@ use shiguredo_webrtc::{
 };
 use sora_sdk::{Role, SoraConnectionContext};
 
+/// transform の呼び出し回数を待機する期限。
+///
+/// 受信 transform はデパケタイザーが完成したフレームを渡すまで呼ばれないため、
+/// RTP パケットの受信を観測しただけでは呼び出しを保証できない。
+/// 呼び出し回数そのものを期限付きで待機するために使う。
+const TRANSFORM_WAIT: Duration = Duration::from_secs(10);
+
 /// テスト用のチャンネル ID を生成する (suffix 付き)
 fn test_channel_id(suffix: &str) -> String {
     let base = generate_channel_id();
@@ -191,22 +198,23 @@ async fn test_video_transform_passthrough() {
         .await
         .expect("クライアント 2 の送受信 stats が条件を満たしませんでした");
 
-    assert!(
-        sender_count1.load(Ordering::Relaxed) > 0,
-        "クライアント 1 の送信 transform が呼び出されませんでした"
-    );
-    assert!(
-        receiver_count1.load(Ordering::Relaxed) > 0,
-        "クライアント 1 の受信 transform が呼び出されませんでした"
-    );
-    assert!(
-        sender_count2.load(Ordering::Relaxed) > 0,
-        "クライアント 2 の送信 transform が呼び出されませんでした"
-    );
-    assert!(
-        receiver_count2.load(Ordering::Relaxed) > 0,
-        "クライアント 2 の受信 transform が呼び出されませんでした"
-    );
+    // transform の呼び出し回数は stats の観測と競合するため、期限付きで待機する。
+    client1
+        .wait_for_atomic_usize(&sender_count1, |count| count > 0, TRANSFORM_WAIT)
+        .await
+        .expect("クライアント 1 の送信 transform が呼び出されませんでした");
+    client1
+        .wait_for_atomic_usize(&receiver_count1, |count| count > 0, TRANSFORM_WAIT)
+        .await
+        .expect("クライアント 1 の受信 transform が呼び出されませんでした");
+    client2
+        .wait_for_atomic_usize(&sender_count2, |count| count > 0, TRANSFORM_WAIT)
+        .await
+        .expect("クライアント 2 の送信 transform が呼び出されませんでした");
+    client2
+        .wait_for_atomic_usize(&receiver_count2, |count| count > 0, TRANSFORM_WAIT)
+        .await
+        .expect("クライアント 2 の受信 transform が呼び出されませんでした");
 
     client1
         .disconnect_and_wait(Duration::from_secs(10))
@@ -285,10 +293,13 @@ async fn test_video_transform_drop_all() {
         )
         .await
         .expect("クライアント 2 がパケットを受信できませんでした");
-    assert!(
-        drop_count.load(Ordering::Relaxed) > 0,
-        "クライアント 2 の受信 transform が呼び出されませんでした"
-    );
+    // 受信 transform は完成したフレームがデパケタイザーから渡されるまで呼ばれない。
+    // パケット受信を観測した時点では呼び出し回数が 0 のことがあるため、
+    // 呼び出し回数そのものを期限付きで待機する。
+    client2
+        .wait_for_atomic_usize(&drop_count, |count| count > 0, TRANSFORM_WAIT)
+        .await
+        .expect("クライアント 2 の受信 transform が呼び出されませんでした");
 
     // フレームが全てドロップされデコードされないことを確認する。
     client2
@@ -377,10 +388,12 @@ async fn test_video_transform_corrupt_data() {
         )
         .await
         .expect("クライアント 2 がパケットを受信できませんでした");
-    assert!(
-        corrupt_count.load(Ordering::Relaxed) > 0,
-        "クライアント 1 の送信 transform が呼び出されませんでした"
-    );
+    // 送信 transform はパケット送出より前に呼ばれるが、
+    // 呼び出し回数の観測は受信側と同様に期限付きで行う。
+    client1
+        .wait_for_atomic_usize(&corrupt_count, |count| count > 0, TRANSFORM_WAIT)
+        .await
+        .expect("クライアント 1 の送信 transform が呼び出されませんでした");
 
     // データを全てゼロに書き換えたためデコードに失敗し、
     // framesDecoded が 0 のままであることを確認する。
@@ -474,10 +487,11 @@ async fn test_video_transform_write_metadata() {
         .expect("クライアント 2 の受信 stats が条件を満たしませんでした");
 
     // 書き換え (set_metadata) がフレームごとに実行されたことを確認する。
-    assert!(
-        write_count.load(Ordering::Relaxed) > 0,
-        "メタデータ書き換え transform が呼び出されませんでした"
-    );
+    // 呼び出し回数の観測は stats の観測と競合するため、期限付きで待機する。
+    client1
+        .wait_for_atomic_usize(&write_count, |count| count > 0, TRANSFORM_WAIT)
+        .await
+        .expect("メタデータ書き換え transform が呼び出されませんでした");
 
     client1
         .disconnect_and_wait(Duration::from_secs(10))

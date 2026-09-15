@@ -1,5 +1,6 @@
 use std::io;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use shiguredo_webrtc::{AudioTrack, FrameTransformerHandler, IceServer, VideoTrack};
@@ -14,6 +15,9 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 const STATS_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+// 条件の再判定の間隔。stats と異なりネットワーク往復を伴わないため短くする。
+const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// `SoraTestConnection` が保持するイベントログの要素。
 ///
@@ -676,6 +680,38 @@ impl SoraTestConnection {
             }
 
             tokio::time::sleep(STATS_POLL_INTERVAL.min(remaining)).await;
+        }
+    }
+
+    /// `atomic` の値が `predicate` を満たすまで期限付きで待機する。
+    ///
+    /// 条件を満たさないまま `timeout` が経過した場合はエラーを返す。
+    /// 値は別スレッドや別タスクが更新するため、1 回だけ判定すると条件の成立と
+    /// 観測の間に競合が生じる。期限まで繰り返し判定する。
+    /// 値の読み出しは `Relaxed` で行う。
+    pub async fn wait_for_atomic_usize<P>(
+        &self,
+        atomic: &AtomicUsize,
+        predicate: P,
+        timeout: Duration,
+    ) -> Result<()>
+    where
+        P: Fn(usize) -> bool,
+    {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if predicate(atomic.load(Ordering::Relaxed)) {
+                return Ok(());
+            }
+
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return Self::timeout_error();
+            };
+            if remaining.is_zero() {
+                return Self::timeout_error();
+            }
+
+            tokio::time::sleep(WAIT_POLL_INTERVAL.min(remaining)).await;
         }
     }
 
