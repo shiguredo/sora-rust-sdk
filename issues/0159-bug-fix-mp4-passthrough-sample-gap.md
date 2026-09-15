@@ -3,7 +3,7 @@
 - Created: 2026-09-15
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-mp4-passthrough-sample-gap
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-09-15
 
 ## 目的
 
@@ -21,7 +21,7 @@ libwebrtc の `VideoStreamEncoder::OnFrame` と `VideoStreamEncoder::MaybeEncode
 通常の raw frame encoder は、実際に encode した frame から codec dependency を構築できる。
 MP4 パススルーは圧縮済み sample をそのまま送るため、参照先の sample だけが欠落すると、後続の delta sample をデコードできない可能性がある。
 
-現在の `Mp4EncodedSample` は再生順を示す serial を持たない。
+現在の `Mp4EncodedSample` は再生順を示す `playback_serial` を持たない。
 そのため、`Mp4PassthroughEncoder::encode` は encode 前の sample 欠落を検出できず、後続の delta sample をそのまま encoded image callback へ渡す。
 
 Sora の issue 0190 では、VP9 録画の末尾に `P-frame -> timestamp gap -> P-frame` が残り、後続 sample をデコードできない事例を確認した。
@@ -31,16 +31,17 @@ Sora の issue 0190 では、VP9 録画の末尾に `P-frame -> timestamp gap ->
 
 ### sample の連続性
 
-`Mp4EncodedSample` に capturer ごとの再生順を表す非公開の sample serial を追加する。
+`Mp4EncodedSample` に capturer ごとの再生順を表す非公開の `playback_serial` を追加する。
+`playback_serial` は capturer が MP4 の時間軸を進めた通し番号であり、MP4 の sample index でも RTP sequence number でもない。
 
-capturer は `adapt_frame` の結果にかかわらず、再生対象として処理した sample ごとに serial を進める。
-serial は MP4 の loop 境界でも巻き戻さない。
-これにより、`adapt_frame` または libwebrtc の encode 前 drop で sample が欠落すると、encoder に到着する serial が不連続になる。
+capturer は `adapt_frame` の結果にかかわらず、再生対象として処理した sample ごとに `playback_serial` を進める。
+`playback_serial` は MP4 の loop 境界でも巻き戻さない。
+これにより、`adapt_frame` または libwebrtc の encode 前 drop で sample が欠落すると、encoder に到着する `playback_serial` が不連続になる。
 
 encoder は生成時と `init_encode` のたびにキーフレーム待ち状態から開始する。
 `Mp4VideoCapturer` は encoder の接続前から再生を開始するため、最初に到着した sample が GOP の途中の delta sample でも送信しない。
 
-通常状態では、直前に encoded image callback へ渡した sample の serial と、次に到着した sample の serial が連続していることを確認する。
+通常状態では、直前に encoded image callback へ渡した sample の `playback_serial` と、次に到着した sample の `playback_serial` が連続していることを確認する。
 不連続を検出した場合は、欠落した sample が codec dependency に含まれていた可能性があるものとして、保守的にキーフレーム待ち状態へ移行する。
 欠落した sample が実際には参照されない場合も delta sample を抑止することは、安全側の動作として許容する。
 
@@ -72,13 +73,13 @@ capturer は再生位置を変更せず、MP4 の通常の再生順と再生タ�
 
 - encoder が最初に delta sample を受け取った場合、実キーフレームまで encoded image callback へ渡さないこと
 - 連続する keyframe と delta sample は従来どおり出力されること
-- serial の不連続直後が delta sample の場合、その sample と後続の delta sample が出力されないこと
-- serial の不連続直後がキーフレームの場合、そのキーフレームから出力を再開すること
+- `playback_serial` の不連続直後が delta sample の場合、その sample と後続の delta sample が出力されないこと
+- `playback_serial` の不連続直後がキーフレームの場合、そのキーフレームから出力を再開すること
 - キーフレーム待ち状態で自然に到着した実キーフレームと、その後の連続する delta sample が出力されること
-- MP4 の loop 境界でも serial が連続し、誤ってキーフレーム待ちへ移行しないこと
-- 複数の capturer と encoder の間で serial とキーフレーム待ち状態を共有しないこと
+- MP4 の loop 境界でも `playback_serial` が連続し、誤ってキーフレーム待ちへ移行しないこと
+- 複数の capturer と encoder の間で `playback_serial` とキーフレーム待ち状態を共有しないこと
 - delta sample の metadata をキーフレームへ書き換えないこと
-- 実 MP4 fixture を使い、初回 delta sample、serial の不連続、実キーフレームでの復帰を確認すること
+- 実 MP4 fixture を使い、初回 delta sample、`playback_serial` の不連続、実キーフレームでの復帰を確認すること
 - モックやスタブを使用しないこと
 - Sora の flaky E2E が再現しないことを完了条件にしないこと
 - `cargo test --workspace` と `cargo clippy --workspace --all-targets -- -D warnings` が成功すること
