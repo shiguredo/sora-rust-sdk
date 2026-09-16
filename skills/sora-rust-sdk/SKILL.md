@@ -12,7 +12,7 @@ WebRTC SFU Sora のクライアントを Rust で実装するための SDK。シ
 - **Sora シグナリング**: WebSocket / DataChannel シグナリング両対応。複数シグナリング URL のレース接続、リダイレクト対応。
 - **複数ロール**: `sendonly` / `recvonly` / `sendrecv` をサポート。
 - **メディア機能**: マルチストリーム、サイマルキャスト、スポットライト、転送フィルター、シグナリング通知。
-- **コーデック**: 映像は VP8 / VP9 / AV1 / H.264 / H.265。OpenH264 / Apple VideoToolbox / AMD AMF / NVIDIA Video Codec / Intel VPL / V4L2-M2M のバックエンド統合。音声は Opus / ISAC / G722 / PCMU / PCMA に対応し、`AudioCodecCapability` でエンコーダー / デコーダーを差し替え可能。
+- **コーデック**: 映像は VP8 / VP9 / AV1 / H.264 / H.265。OpenH264 / Apple VideoToolbox / AMD AMF / NVIDIA Video Codec / Intel VPL / V4L2-M2M のバックエンド統合。音声は libwebrtc 内蔵の Opus / G722 / PCMU / PCMA に対応し、`AudioCodecCapability` でエンコーダー / デコーダーを差し替え可能 (独自 capability を登録すれば ISAC などのコーデックも扱える)。
 - **MP4 無変換送信**: `Mp4PassthroughVideoCodecCapability` で MP4 ファイルの映像トラックをデコード / エンコードを挟まずに Sora へ送信し、音声トラックは無視する。capability は `Mp4SampleReader::passthrough_capability()` から生成する。
 - **DataChannel メッセージング**: `#` プレフィックスのユーザー定義 DataChannel でバイナリ送受信。
 - **JSON-RPC 2.0 over DataChannel**: SDK が id 採番とエンベロープを担当。
@@ -223,13 +223,12 @@ H.264 / H.265 の `b_frame: true` は Sora 側の `sora.conf` で対応する設
 
 | 型 | 説明 |
 |----|------|
-| `VideoCodecPreference` | コーデック選好。`default()` で空。`new(Vec<PreferenceCodec>)` / `new_from_capability(&dyn VideoCodecCapability)` で生成。`codecs()` / `find(direction, codec_type)` / `find_mut(...)` / `get_or_add(...)` / `has_implementation(impl)` / `merge(&other)` を提供 |
+| `VideoCodecPreference` | コーデック選好。`default()` で空。`new(Vec<PreferenceCodec>)` / `new_from_capability(&dyn VideoCodecCapability)` で生成。`codecs()` / `find(direction, codec_type)` / `find_mut(...)` / `get_or_add(...)` / `has_implementation(&impl)` / `merge(&other)` を提供 |
 | `PreferenceCodec` | preference 内のコーデックエントリ。`new(direction, codec_type, implementation)` で生成。`direction()` / `codec_type()` / `implementation()` / `set_implementation(impl)` を提供 |
 | `VideoCodecCapability` | トレイト (`: Send`)。各バックエンドが実装する。`SoraConnectionContextConfig::video_codec_capabilities` に `Box<dyn VideoCodecCapability>` を積む。必須メソッドは `get_implementation()` と `get_supported_formats(direction)`。デフォルト実装つきメソッドは `is_supported(direction, codec_type)` / `resolve_sdp_format(direction, format)` / `create_video_encoder(env, format) -> Option<VideoEncoder>` / `create_video_decoder(env, format) -> Option<VideoDecoder>` |
 | `VideoCodecImplementation` | 実装識別。`new(name, description)` で生成。`name()` / `description()` を提供 |
 | `CodecDirection` | encoder / decoder の方向。音声と映像で共有する。`as_str()` (`"Encoder"` / `"Decoder"`) / `as_label()` (`"encoder"` / `"decoder"`) を提供 |
 | `validate_video_codec_preference(&preference, &[Box<dyn VideoCodecCapability>])` | `new_with_config` 内部でも呼ばれる整合性チェック。可否判定は各 capability の `is_supported` の結果を正とする。preference と capabilities が一致しない場合 `Error::InvalidVideoCodecPreference` |
-| `SoraVideoEncoderFactory` / `SoraVideoDecoderFactory` | 内部で利用される factory (通常はユーザーが直接触らない) |
 | `AlignmentEncoderAdapter` | エンコーダーのアライメント補正アダプター |
 | `SimulcastCapabilityHelper` | `new(primary_factory)` / `new_with_builder(...)` で生成するサイマルキャスト対応ヘルパー。`get_supported_formats()` / `create_video_encoder(...)` を提供 |
 | `codec_type_from_format(&SdpVideoFormatRef)` | フォーマットから `VideoCodecType` を解決 |
@@ -238,7 +237,7 @@ H.264 / H.265 の `b_frame: true` は Sora 側の `sora.conf` で対応する設
 
 | 型 | feature / 条件 | 生成方法 | 用途 |
 |----|---------------|----------|------|
-| `InternalVideoCodecCapability` | 常時 | `new() -> Self` | libwebrtc 内蔵 (VP8 / VP9 / AV1 など) |
+| `InternalVideoCodecCapability` | 常時 | `new() -> Self` | libwebrtc 内蔵 (VP8 / VP9 / AV1)。H.264 / H.265 は内蔵されておらず、有効にしたバックエンドの capability が担当する |
 | `InternalAppleVideoCodecCapability` | macOS / iOS | `new() -> Option<Self>` | VideoToolbox による H.264 / H.265 |
 | `Mp4PassthroughVideoCodecCapability` | 常時 | `Mp4SampleReader::passthrough_capability() -> Self` | MP4 ファイル無変換送信 (Encoder 方向のみ、デコーダーは提供しない) |
 | `Openh264VideoCodecCapability` | `openh264` | `new(path) -> Result<Self>` | OpenH264 ソフトウェア H.264 |
@@ -253,19 +252,19 @@ H.264 / H.265 の `b_frame: true` は Sora 側の `sora.conf` で対応する設
 
 | 型 | 説明 |
 |----|------|
-| `AudioCodecPreference` | 音声コーデック選好。`default()` で空。`new(Vec<AudioPreferenceCodec>)` / `new_from_capability(&dyn AudioCodecCapability)` で生成。`codecs()` / `find(direction, codec_type)` / `find_mut(...)` / `get_or_add(...)` / `has_implementation(impl)` / `merge(&other)` を提供 |
+| `AudioCodecPreference` | 音声コーデック選好。`default()` で空。`new(Vec<AudioPreferenceCodec>)` / `new_from_capability(&dyn AudioCodecCapability)` で生成。`codecs()` / `find(direction, codec_type)` / `find_mut(...)` / `get_or_add(...)` / `has_implementation(&impl)` / `merge(&other)` を提供 |
 | `AudioPreferenceCodec` | preference 内の音声コーデックエントリ。`new(direction, codec_type, implementation)` で生成。`direction()` / `codec_type()` / `implementation()` / `set_implementation(impl)` を提供 |
 | `AudioCodecCapability` | トレイト (`: Send`)。各バックエンドが実装する。`SoraConnectionContextConfig::audio_codec_capabilities` に `Box<dyn AudioCodecCapability>` を積む。必須メソッドは `get_implementation()` / `get_supported_codec_specs(direction) -> Vec<AudioCodecSpec>` / `query(direction, format) -> Option<AudioCodecInfo>`。デフォルト実装つきメソッドは `is_supported(direction, codec_type)` / `create_audio_encoder(env, format, options) -> Option<AudioEncoder>` / `create_audio_decoder(env, format) -> Option<AudioDecoder>` |
 | `AudioCodecImplementation` | 実装識別。`new(name, description)` で生成。`name()` / `description()` を提供 |
 | `validate_audio_codec_preference(&preference, &[Box<dyn AudioCodecCapability>])` | `new_with_config` 内部でも呼ばれる整合性チェック。可否判定は各 capability の `is_supported` の結果を正とする。同じ方向・コーデック種別の重複、capabilities 内の実装名の重複、capabilities に無い実装、実装が対応しない方向・コーデックを検出する。preference と capabilities が一致しない場合 `Error::InvalidAudioCodecPreference`、実装名が重複する場合 `Error::InvalidAudioCodecCapability` |
 
-`codec_type` は `shiguredo_webrtc::AudioCodecType` (`Opus` / `Isac` / `G722` / `PcmA` / `PcmU`) を取る。connect メッセージの音声設定で使う `sora_sdk::AudioCodecType` (`Opus` のみ) とは別の型なので注意すること。
+`codec_type` は `shiguredo_webrtc::AudioCodecType` を取る。指定できるのは `Opus` / `Isac` / `G722` / `PcmA` / `PcmU` で、SDP コーデック名を持たない `Other` / `Unknown(i32)` を指定すると `Error::InvalidAudioCodecPreference` になる。connect メッセージの音声設定で使う `sora_sdk::AudioCodecType` (`Opus` のみ) とは別の型なので注意すること。
 
 #### 標準の音声コーデックバックエンド
 
 | 型 | feature / 条件 | 生成方法 | 用途 |
 |----|---------------|----------|------|
-| `InternalAudioCodecCapability` | 常時 | `new() -> Self` | libwebrtc 内蔵 (Opus / ISAC / G722 / PCMU / PCMA) |
+| `InternalAudioCodecCapability` | 常時 | `new() -> Self` | libwebrtc 内蔵の音声コーデック (Opus / G722 / PCMU / PCMA)。ISAC は builtin factory に無く、L16 / multi-channel Opus は広告されないため選択対象にならない |
 
 新しい capability を加えるたびに、対応する `AudioCodecPreference` を `merge` して preference 側にも追加すること。`SoraConnectionContextConfig::default()` は `InternalAudioCodecCapability` を自動登録し、そこから `AudioCodecPreference` を生成する。
 
@@ -609,7 +608,7 @@ if let Some(url) = handle.selected_signaling_url().await? {
 - **ハードウェアコーデックは feature + runtime 両方の条件**: feature 有効化だけでなく GPU / ドライバが揃わないと `*Capability::new()` がエラーを返す。
 - **VPL は Linux 専用**: `vpl` feature は Linux 以外の OS ではコンパイルされず、`VplVideoCodecCapability` と `Error::Vpl` 系のバリアントも Linux 限定。
 - **音声コーデックは preference と capabilities の両方を更新する**: `audio_codec_preference` に実装名を書いても `audio_codec_capabilities` にその実装が無いと `Error::InvalidAudioCodecPreference` になる。`Default::default()` は `InternalAudioCodecCapability` から両方を生成する。
-- **`AudioCodecType` は 2 種類ある**: connect メッセージの音声設定は `sora_sdk::AudioCodecType` (`Opus` のみ) を、音声コーデックの preference は `shiguredo_webrtc::AudioCodecType` (`Opus` / `Isac` / `G722` / `PcmA` / `PcmU`) を使う。
+- **`AudioCodecType` は 2 種類ある**: connect メッセージの音声設定は `sora_sdk::AudioCodecType` (`Opus` のみ) を、音声コーデックの preference は `shiguredo_webrtc::AudioCodecType` (`Opus` / `Isac` / `G722` / `PcmA` / `PcmU`) を使う。`shiguredo_webrtc::AudioCodecType` の `Other` / `Unknown(i32)` は SDP コーデック名を持たないため preference には指定できない。
 - **`VideoTrackSource` は本クレートでは作らない**: `shiguredo_webrtc` 側の capturer / source、もしくは本クレートの `Mp4VideoCapturer` / `LibcameraVideoCapturer` から生成する。
 - **MP4 パススルーの入力制約**: B フレーム (非ゼロ composition time offset) を含む MP4、途中でサンプルエントリー (コーデック・解像度など) が切り替わる MP4、不正な H.264 / AV1 トラックを含む MP4 は `Mp4SampleReader::new()` が拒否する。
 - **`send_message` のラベル制約**: SDK 内部用ラベル（`signaling`、`stats`、`push`、`notify`、`rpc`）および `#` プレフィックスのないラベル、Offer 応答の `data_channels` に含まれていないラベルを渡すと `Error::InvalidDataChannelLabel` を返す。`on_message` は `#` プレフィックスのユーザー定義 DataChannel 専用。
