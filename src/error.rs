@@ -216,6 +216,16 @@ pub enum Error {
         /// 失敗理由。
         reason: String,
     },
+    /// 音声コーデックの capability 指定が不正。
+    InvalidAudioCodecCapability {
+        /// 失敗理由。
+        reason: String,
+    },
+    /// 音声コーデックの preference 指定が不正。
+    InvalidAudioCodecPreference {
+        /// 失敗理由。
+        reason: String,
+    },
     /// libcamera からのエラーメッセージ（`feature = "libcamera"` 時のみ有効）。
     #[cfg(feature = "libcamera")]
     LibcameraMessage {
@@ -470,6 +480,12 @@ impl std::fmt::Display for Error {
             }
             Error::InvalidVideoCodecPreference { reason } => {
                 write!(f, "VideoCodecPreference が不正です: {reason}")
+            }
+            Error::InvalidAudioCodecCapability { reason } => {
+                write!(f, "AudioCodecCapability が不正です: {reason}")
+            }
+            Error::InvalidAudioCodecPreference { reason } => {
+                write!(f, "AudioCodecPreference が不正です: {reason}")
             }
             #[cfg(feature = "libcamera")]
             Error::LibcameraMessage { message } => write!(f, "libcamera エラー: {message}"),

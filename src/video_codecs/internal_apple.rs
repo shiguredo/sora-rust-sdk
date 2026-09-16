@@ -6,10 +6,9 @@ use shiguredo_webrtc::{
     VideoEncoder, VideoEncoderFactory,
 };
 
+use crate::codec_direction::CodecDirection;
 use crate::video_codec::SimulcastCapabilityHelper;
-use crate::video_codec_capability::{
-    CodecDirection, VideoCodecCapability, VideoCodecImplementation,
-};
+use crate::video_codec_capability::{VideoCodecCapability, VideoCodecImplementation};
 
 /// Apple プラットフォームの ObjC デフォルトビデオコーデックを使用する [VideoCodecCapability]。
 ///

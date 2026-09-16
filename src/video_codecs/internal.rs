@@ -7,9 +7,8 @@ use shiguredo_webrtc::{
 #[cfg(test)]
 use shiguredo_webrtc::VideoCodecType;
 
-use crate::video_codec_capability::{
-    CodecDirection, VideoCodecCapability, VideoCodecImplementation,
-};
+use crate::codec_direction::CodecDirection;
+use crate::video_codec_capability::{VideoCodecCapability, VideoCodecImplementation};
 
 /// WebRTC 組み込みのエンコーダー/デコーダーを使用する [VideoCodecCapability]。
 pub struct InternalVideoCodecCapability {

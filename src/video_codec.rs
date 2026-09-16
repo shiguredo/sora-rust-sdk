@@ -11,20 +11,21 @@ use shiguredo_webrtc::{
     VideoFrameTypeVectorRef,
 };
 
-use crate::video_codec_capability::{CodecDirection, VideoCodecCapability, find_capability};
+use crate::codec_direction::CodecDirection;
+use crate::video_codec_capability::{VideoCodecCapability, find_capability};
 use crate::video_codec_preference::VideoCodecPreference;
 
 type VideoCodecCapabilities = Vec<Box<dyn VideoCodecCapability>>;
 type SharedVideoCodecCapabilities = Arc<Mutex<VideoCodecCapabilities>>;
 
 /// [VideoCodecPreference] に基づき、利用可能なビデオエンコーダーを提供するファクトリ。
-pub struct SoraVideoEncoderFactory {
+pub(crate) struct SoraVideoEncoderFactory {
     preference: VideoCodecPreference,
     capabilities: SharedVideoCodecCapabilities,
 }
 
 /// [VideoCodecPreference] に基づき、利用可能なビデオデコーダーを提供するファクトリ。
-pub struct SoraVideoDecoderFactory {
+pub(crate) struct SoraVideoDecoderFactory {
     preference: VideoCodecPreference,
     capabilities: SharedVideoCodecCapabilities,
 }

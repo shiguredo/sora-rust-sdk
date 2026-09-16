@@ -1,14 +1,20 @@
 //! テストで共有するテスト用ヘルパー型。
 //!
 //! 本モジュールはテストビルド (`#[cfg(test)]`) でのみコンパイルされる。
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+
 use shiguredo_webrtc::{
-    EnvironmentRef, SdpVideoFormat, SdpVideoFormatRef, VideoCodecType, VideoDecoder,
-    VideoDecoderHandler, VideoEncoder, VideoEncoderHandler,
+    AudioCodecInfo, AudioCodecSpec, AudioCodecType, AudioDecoder, AudioDecoderHandler,
+    AudioEncoder, AudioEncoderEncodedInfo, AudioEncoderFactoryOptions, AudioEncoderHandler,
+    AudioSpeechType, BufferRef, EnvironmentRef, RawBufferWriter, SdpAudioFormat, SdpAudioFormatRef,
+    SdpVideoFormat, SdpVideoFormatRef, VideoCodecType, VideoDecoder, VideoDecoderHandler,
+    VideoEncoder, VideoEncoderHandler,
 };
 
-use crate::video_codec_capability::{
-    CodecDirection, VideoCodecCapability, VideoCodecImplementation,
-};
+use crate::audio_codec_capability::{AudioCodecCapability, AudioCodecImplementation};
+use crate::codec_direction::CodecDirection;
+use crate::video_codec_capability::{VideoCodecCapability, VideoCodecImplementation};
 
 /// `VideoEncoderHandler` を最小限に実装したテスト専用の型。
 pub(crate) struct NoopVideoEncoder;
@@ -126,6 +132,282 @@ impl VideoCodecCapability for TestVideoCodecCapability {
             .and_then(|name| VideoCodecType::try_from(name.as_str()).ok())?;
         if self.is_supported(CodecDirection::Decoder, codec_type) {
             Some(VideoDecoder::new_with_handler(Box::new(NoopVideoDecoder)))
+        } else {
+            None
+        }
+    }
+}
+
+/// `AudioEncoderHandler` を実装したテスト専用の型。
+///
+/// `encode` は決まったバイト列 (`0x01, 0x02, 0x03`) をバッファへ追記し、
+/// エンコード結果の整合 (追記バイト数 = encoded_bytes) を満たす。
+pub(crate) struct TestAudioEncoder {
+    payload_type: i32,
+}
+
+impl TestAudioEncoder {
+    /// 指定したペイロードタイプを報告するエンコーダーを生成する。
+    pub(crate) fn with_payload_type(payload_type: i32) -> Self {
+        Self { payload_type }
+    }
+}
+
+impl AudioEncoderHandler for TestAudioEncoder {
+    fn sample_rate_hz(&mut self) -> i32 {
+        48000
+    }
+    fn num_channels(&mut self) -> usize {
+        2
+    }
+    fn num_10ms_frames_in_next_packet(&mut self) -> usize {
+        1
+    }
+    fn max_10ms_frames_in_a_packet(&mut self) -> usize {
+        1
+    }
+    fn get_target_bitrate(&mut self) -> i32 {
+        32000
+    }
+    fn encode(
+        &mut self,
+        _rtp_timestamp: u32,
+        _audio: &[i16],
+        encoded: &mut BufferRef<'_>,
+    ) -> AudioEncoderEncodedInfo {
+        encoded.append_data(&[0x01, 0x02, 0x03]);
+        let mut info = AudioEncoderEncodedInfo::new();
+        info.set_encoded_bytes(encoded.size());
+        info.set_payload_type(self.payload_type);
+        info
+    }
+    fn reset(&mut self) {}
+    fn get_frame_length_range(&mut self) -> Option<(i64, i64)> {
+        None
+    }
+}
+
+/// `AudioDecoderHandler` を実装したテスト専用の型。
+///
+/// `decode` は決まったサンプル列 (`0x1111` × 160) を書き込み、160 サンプルと Speech を返す。
+pub(crate) struct TestAudioDecoder;
+impl AudioDecoderHandler for TestAudioDecoder {
+    fn sample_rate_hz(&mut self) -> i32 {
+        48000
+    }
+    fn channels(&mut self) -> usize {
+        2
+    }
+    fn decode(
+        &mut self,
+        _encoded: &[u8],
+        _sample_rate_hz: i32,
+        decoded: &mut RawBufferWriter<'_, i16>,
+    ) -> (i32, AudioSpeechType) {
+        decoded.write(&[0x1111i16; 160]);
+        (160, AudioSpeechType::Speech)
+    }
+    fn reset(&mut self) {}
+}
+
+/// `TestAudioCodecCapability` が広告するテスト用のコーデック情報。
+///
+/// テストではビットレート等の実値に依存しないため、固定値を返す。
+fn test_audio_codec_info() -> AudioCodecInfo {
+    AudioCodecInfo::new(48000, 2, 32000, 6000, 510000)
+}
+
+/// `format` の持つコーデックパラメータを `BTreeMap` として収集する。
+///
+/// ネゴシエーションで決まったパラメータが `create_audio_encoder` まで素通しで届くことを
+/// 検証するために用いる。
+fn collect_audio_format_parameters(format: SdpAudioFormatRef<'_>) -> BTreeMap<String, String> {
+    format.to_owned().parameters_mut().iter().collect()
+}
+
+/// `TestAudioCodecCapability` が受け取った値をテスト側から読み出すためのレコーダー。
+///
+/// capability は libwebrtc 側から呼ばれるため、受け取った値をテスト本体まで
+/// 返す経路が必要になる。3 つのレコーダーをまとめて扱う。
+#[derive(Clone)]
+pub(crate) struct TestingAudioCodecRecorders {
+    codec_pair_id: Arc<Mutex<Option<u64>>>,
+    encoder_format_parameters: Arc<Mutex<Option<BTreeMap<String, String>>>>,
+    decoder_format_parameters: Arc<Mutex<Option<BTreeMap<String, String>>>>,
+}
+
+impl TestingAudioCodecRecorders {
+    /// 空のレコーダーを生成する。
+    pub(crate) fn new() -> Self {
+        Self {
+            codec_pair_id: Arc::new(Mutex::new(None)),
+            encoder_format_parameters: Arc::new(Mutex::new(None)),
+            decoder_format_parameters: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// `create_audio_encoder` が最後に受け取ったコーデックペア ID を返す。
+    pub(crate) fn codec_pair_id(&self) -> Option<u64> {
+        *self
+            .codec_pair_id
+            .lock()
+            .expect("codec_pair_id は poison しないはず")
+    }
+
+    /// `create_audio_encoder` が最後に受け取ったフォーマットのパラメータを返す。
+    pub(crate) fn encoder_format_parameters(&self) -> BTreeMap<String, String> {
+        self.encoder_format_parameters
+            .lock()
+            .expect("encoder_format_parameters は poison しないはず")
+            .clone()
+            .expect("create_audio_encoder が呼ばれたはずです")
+    }
+
+    /// `create_audio_decoder` が最後に受け取ったフォーマットのパラメータを返す。
+    pub(crate) fn decoder_format_parameters(&self) -> BTreeMap<String, String> {
+        self.decoder_format_parameters
+            .lock()
+            .expect("decoder_format_parameters は poison しないはず")
+            .clone()
+            .expect("create_audio_decoder が呼ばれたはずです")
+    }
+}
+
+/// `AudioCodecCapability` を本物のコードで実装したテスト専用の型。
+pub(crate) struct TestAudioCodecCapability {
+    implementation: AudioCodecImplementation,
+    encoder_formats: Vec<AudioCodecType>,
+    decoder_formats: Vec<AudioCodecType>,
+    /// `create_audio_encoder` が受け取った値の記録先。
+    recorders: TestingAudioCodecRecorders,
+}
+
+impl TestAudioCodecCapability {
+    /// 方向ごとのコーデック種別リストを指定して生成する。
+    pub(crate) fn new(
+        implementation: AudioCodecImplementation,
+        encoder_formats: Vec<AudioCodecType>,
+        decoder_formats: Vec<AudioCodecType>,
+    ) -> Self {
+        Self::new_with_recorders(
+            implementation,
+            encoder_formats,
+            decoder_formats,
+            TestingAudioCodecRecorders::new(),
+        )
+    }
+
+    /// 記録先のレコーダーを指定して生成する。
+    pub(crate) fn new_with_recorders(
+        implementation: AudioCodecImplementation,
+        encoder_formats: Vec<AudioCodecType>,
+        decoder_formats: Vec<AudioCodecType>,
+        recorders: TestingAudioCodecRecorders,
+    ) -> Self {
+        Self {
+            implementation,
+            encoder_formats,
+            decoder_formats,
+            recorders,
+        }
+    }
+
+    /// 指定した方向のコーデック種別リストを返す。
+    fn formats(&self, direction: CodecDirection) -> &[AudioCodecType] {
+        match direction {
+            CodecDirection::Encoder => &self.encoder_formats,
+            CodecDirection::Decoder => &self.decoder_formats,
+        }
+    }
+}
+
+impl AudioCodecCapability for TestAudioCodecCapability {
+    fn get_implementation(&self) -> AudioCodecImplementation {
+        self.implementation.clone()
+    }
+
+    fn get_supported_codec_specs(&self, direction: CodecDirection) -> Vec<AudioCodecSpec> {
+        self.formats(direction)
+            .iter()
+            .filter_map(|codec_type| {
+                let name = codec_type.as_str()?;
+                Some(AudioCodecSpec::new(
+                    SdpAudioFormat::new(name, 48000, 2),
+                    test_audio_codec_info(),
+                ))
+            })
+            .collect()
+    }
+
+    fn is_supported(&self, direction: CodecDirection, codec_type: AudioCodecType) -> bool {
+        self.formats(direction).contains(&codec_type)
+    }
+
+    fn query(
+        &self,
+        direction: CodecDirection,
+        format: SdpAudioFormatRef<'_>,
+    ) -> Option<AudioCodecInfo> {
+        let codec_type = format
+            .name()
+            .ok()
+            .and_then(|name| AudioCodecType::try_from(name.as_str()).ok())?;
+        if self.is_supported(direction, codec_type) {
+            Some(test_audio_codec_info())
+        } else {
+            None
+        }
+    }
+
+    fn create_audio_encoder(
+        &self,
+        _env: EnvironmentRef<'_>,
+        format: SdpAudioFormatRef<'_>,
+        options: &AudioEncoderFactoryOptions,
+    ) -> Option<AudioEncoder> {
+        let codec_type = format
+            .name()
+            .ok()
+            .and_then(|name| AudioCodecType::try_from(name.as_str()).ok())?;
+        if self.is_supported(CodecDirection::Encoder, codec_type) {
+            *self
+                .recorders
+                .codec_pair_id
+                .lock()
+                .expect("codec_pair_id は poison しないはず") = options
+                .codec_pair_id()
+                .map(|id| id.numeric_representation());
+            *self
+                .recorders
+                .encoder_format_parameters
+                .lock()
+                .expect("encoder_format_parameters は poison しないはず") =
+                Some(collect_audio_format_parameters(format));
+            Some(AudioEncoder::new_with_handler(Box::new(
+                TestAudioEncoder::with_payload_type(options.payload_type()),
+            )))
+        } else {
+            None
+        }
+    }
+
+    fn create_audio_decoder(
+        &self,
+        _env: EnvironmentRef<'_>,
+        format: SdpAudioFormatRef<'_>,
+    ) -> Option<AudioDecoder> {
+        let codec_type = format
+            .name()
+            .ok()
+            .and_then(|name| AudioCodecType::try_from(name.as_str()).ok())?;
+        if self.is_supported(CodecDirection::Decoder, codec_type) {
+            *self
+                .recorders
+                .decoder_format_parameters
+                .lock()
+                .expect("decoder_format_parameters は poison しないはず") =
+                Some(collect_audio_format_parameters(format));
+            Some(AudioDecoder::new_with_handler(Box::new(TestAudioDecoder)))
         } else {
             None
         }
