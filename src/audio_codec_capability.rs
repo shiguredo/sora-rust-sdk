@@ -158,7 +158,7 @@ mod tests {
     use nojson::Json;
     use shiguredo_webrtc::{AudioCodecType, SdpAudioFormat};
 
-    use crate::testing::TestAudioCodecCapability;
+    use crate::testing::{TestAudioCodecCapability, TestingAudioCodecRecorders};
 
     #[test]
     fn audio_codec_implementation_round_trip() {
@@ -198,14 +198,16 @@ mod tests {
     /// `create_audio_encoder` が Options を素通しで受け取り、codec_pair_id まで
     /// 引き継げることを検証する。
     ///
-    /// 以前は引数が `payload_type: i32` のみで、`AudioEncoderFactoryOptions` を
-    /// 作り直すため codec_pair_id が失われていた (Redundant Encoding のペアリング破壊)。
+    /// `AudioEncoderFactoryOptions` を引数で受け取り作り直さずに下位へ渡す契約なので、
+    /// codec_pair_id (Redundant Encoding のペアリング) も保持される。
     #[test]
     fn audio_encoder_create_forwards_codec_pair_id_in_options() {
-        let capability = TestAudioCodecCapability::new(
+        let recorders = TestingAudioCodecRecorders::new();
+        let capability = TestAudioCodecCapability::new_with_recorders(
             AudioCodecImplementation::new("test", "Test Codec"),
             vec![AudioCodecType::Opus],
             vec![AudioCodecType::Opus],
+            recorders.clone(),
         );
         let env = shiguredo_webrtc::Environment::new();
         let opus = SdpAudioFormat::new("opus", 48000, 2);
@@ -220,7 +222,7 @@ mod tests {
                 .is_some()
         );
         assert_eq!(
-            capability.received_codec_pair_id(),
+            recorders.codec_pair_id(),
             Some(pair_id.numeric_representation()),
             "codec_pair_id が create_audio_encoder まで素通しされていません"
         );

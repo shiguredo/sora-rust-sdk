@@ -1,7 +1,6 @@
 //! テストで共有するテスト用ヘルパー型。
 //!
 //! 本モジュールはテストビルド (`#[cfg(test)]`) でのみコンパイルされる。
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -226,20 +225,61 @@ fn collect_audio_format_parameters(format: SdpAudioFormatRef<'_>) -> BTreeMap<St
     format.to_owned().parameters_mut().iter().collect()
 }
 
+/// `TestAudioCodecCapability` が受け取った値をテスト側から読み出すためのレコーダー。
+///
+/// capability は libwebrtc 側から呼ばれるため、受け取った値をテスト本体まで
+/// 返す経路が必要になる。3 つのレコーダーをまとめて扱う。
+#[derive(Clone)]
+pub(crate) struct TestingAudioCodecRecorders {
+    codec_pair_id: Arc<Mutex<Option<u64>>>,
+    encoder_format_parameters: Arc<Mutex<Option<BTreeMap<String, String>>>>,
+    decoder_format_parameters: Arc<Mutex<Option<BTreeMap<String, String>>>>,
+}
+
+impl TestingAudioCodecRecorders {
+    /// 空のレコーダーを生成する。
+    pub(crate) fn new() -> Self {
+        Self {
+            codec_pair_id: Arc::new(Mutex::new(None)),
+            encoder_format_parameters: Arc::new(Mutex::new(None)),
+            decoder_format_parameters: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// `create_audio_encoder` が最後に受け取ったコーデックペア ID を返す。
+    pub(crate) fn codec_pair_id(&self) -> Option<u64> {
+        *self
+            .codec_pair_id
+            .lock()
+            .expect("codec_pair_id は poison しないはず")
+    }
+
+    /// `create_audio_encoder` が最後に受け取ったフォーマットのパラメータを返す。
+    pub(crate) fn encoder_format_parameters(&self) -> BTreeMap<String, String> {
+        self.encoder_format_parameters
+            .lock()
+            .expect("encoder_format_parameters は poison しないはず")
+            .clone()
+            .expect("create_audio_encoder が呼ばれたはずです")
+    }
+
+    /// `create_audio_decoder` が最後に受け取ったフォーマットのパラメータを返す。
+    pub(crate) fn decoder_format_parameters(&self) -> BTreeMap<String, String> {
+        self.decoder_format_parameters
+            .lock()
+            .expect("decoder_format_parameters は poison しないはず")
+            .clone()
+            .expect("create_audio_decoder が呼ばれたはずです")
+    }
+}
+
 /// `AudioCodecCapability` を本物のコードで実装したテスト専用の型。
 pub(crate) struct TestAudioCodecCapability {
     implementation: AudioCodecImplementation,
     encoder_formats: Vec<AudioCodecType>,
     decoder_formats: Vec<AudioCodecType>,
-    /// `create_audio_encoder` が最後に受け取ったコーデックペア ID (数値表現)。
-    /// Options が素通しで届くことを検証するために記録する。
-    received_codec_pair_id: RefCell<Option<u64>>,
-    /// `create_audio_encoder` が最後に受け取ったフォーマットのパラメータ。
-    /// ネゴシエーションで決まったパラメータが素通しで届くことを検証するために記録する。
-    encoder_format_parameters: Arc<Mutex<Option<BTreeMap<String, String>>>>,
-    /// `create_audio_decoder` が最後に受け取ったフォーマットのパラメータ。
-    /// ネゴシエーションで決まったパラメータが素通しで届くことを検証するために記録する。
-    decoder_format_parameters: Arc<Mutex<Option<BTreeMap<String, String>>>>,
+    /// `create_audio_encoder` が受け取った値の記録先。
+    recorders: TestingAudioCodecRecorders,
 }
 
 impl TestAudioCodecCapability {
@@ -249,37 +289,27 @@ impl TestAudioCodecCapability {
         encoder_formats: Vec<AudioCodecType>,
         decoder_formats: Vec<AudioCodecType>,
     ) -> Self {
-        Self {
+        Self::new_with_recorders(
             implementation,
             encoder_formats,
             decoder_formats,
-            received_codec_pair_id: RefCell::new(None),
-            encoder_format_parameters: Arc::new(Mutex::new(None)),
-            decoder_format_parameters: Arc::new(Mutex::new(None)),
-        }
+            TestingAudioCodecRecorders::new(),
+        )
     }
 
-    /// エンコーダー/デコーダーへ届くフォーマットを外部から検証できるよう、共有レコーダーを指定して生成する。
-    pub(crate) fn new_with_format_recorders(
+    /// 記録先のレコーダーを指定して生成する。
+    pub(crate) fn new_with_recorders(
         implementation: AudioCodecImplementation,
         encoder_formats: Vec<AudioCodecType>,
         decoder_formats: Vec<AudioCodecType>,
-        encoder_recorder: Arc<Mutex<Option<BTreeMap<String, String>>>>,
-        decoder_recorder: Arc<Mutex<Option<BTreeMap<String, String>>>>,
+        recorders: TestingAudioCodecRecorders,
     ) -> Self {
         Self {
             implementation,
             encoder_formats,
             decoder_formats,
-            received_codec_pair_id: RefCell::new(None),
-            encoder_format_parameters: encoder_recorder,
-            decoder_format_parameters: decoder_recorder,
+            recorders,
         }
-    }
-
-    /// `create_audio_encoder` が最後に受け取ったコーデックペア ID を返す。
-    pub(crate) fn received_codec_pair_id(&self) -> Option<u64> {
-        *self.received_codec_pair_id.borrow()
     }
 
     /// 指定した方向のコーデック種別リストを返す。
@@ -340,10 +370,15 @@ impl AudioCodecCapability for TestAudioCodecCapability {
             .ok()
             .and_then(|name| AudioCodecType::try_from(name.as_str()).ok())?;
         if self.is_supported(CodecDirection::Encoder, codec_type) {
-            *self.received_codec_pair_id.borrow_mut() = options
+            *self
+                .recorders
+                .codec_pair_id
+                .lock()
+                .expect("codec_pair_id は poison しないはず") = options
                 .codec_pair_id()
                 .map(|id| id.numeric_representation());
             *self
+                .recorders
                 .encoder_format_parameters
                 .lock()
                 .expect("encoder_format_parameters は poison しないはず") =
@@ -367,6 +402,7 @@ impl AudioCodecCapability for TestAudioCodecCapability {
             .and_then(|name| AudioCodecType::try_from(name.as_str()).ok())?;
         if self.is_supported(CodecDirection::Decoder, codec_type) {
             *self
+                .recorders
                 .decoder_format_parameters
                 .lock()
                 .expect("decoder_format_parameters は poison しないはず") =

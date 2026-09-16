@@ -186,7 +186,7 @@ mod tests {
     use crate::audio_codec_capability::{AudioCodecCapability, AudioCodecImplementation};
     use crate::audio_codec_preference::AudioPreferenceCodec;
     use crate::codec_direction::CodecDirection;
-    use crate::testing::TestAudioCodecCapability;
+    use crate::testing::{TestAudioCodecCapability, TestingAudioCodecRecorders};
     use shiguredo_webrtc::{AudioCodecType, AudioSpeechType, Buffer, Environment, SdpAudioFormat};
 
     #[test]
@@ -329,18 +329,16 @@ mod tests {
 
     /// ネゴシエーションで決まったパラメータが `create_audio_encoder` まで素通しで届くことを検証する。
     ///
-    /// 従来の resolve_sdp_codec_spec を経由する実装では、広告 spec に置き換わることで
-    /// stereo 等の交渉値が失われていた。本テストはその回帰を検出する。
+    /// 交渉値が広告 spec に置き換わると stereo 等のパラメータが失われるため、
+    /// `format` をそのまま渡していることを検証する。
     #[test]
     fn encoder_create_forwards_negotiated_format_parameters() {
-        let encoder_recorder = Arc::new(Mutex::new(None));
-        let decoder_recorder = Arc::new(Mutex::new(None));
-        let capability = TestAudioCodecCapability::new_with_format_recorders(
+        let recorders = TestingAudioCodecRecorders::new();
+        let capability = TestAudioCodecCapability::new_with_recorders(
             AudioCodecImplementation::new("recording", "Recording Codec"),
             vec![AudioCodecType::Opus],
             Vec::new(),
-            encoder_recorder.clone(),
-            decoder_recorder.clone(),
+            recorders.clone(),
         );
         let preference = AudioCodecPreference::new(vec![AudioPreferenceCodec::new(
             CodecDirection::Encoder,
@@ -369,11 +367,7 @@ mod tests {
             "エンコーダーの生成に失敗しました"
         );
 
-        let recorded = encoder_recorder
-            .lock()
-            .expect("エンコーダー用レコーダーは poison しないはず")
-            .clone()
-            .expect("create_audio_encoder が呼ばれたはずです");
+        let recorded = recorders.encoder_format_parameters();
         assert_eq!(
             recorded.get("stereo").map(String::as_str),
             Some("1"),
@@ -389,14 +383,12 @@ mod tests {
     /// ネゴシエーションで決まったパラメータが `create_audio_decoder` まで素通しで届くことを検証する。
     #[test]
     fn decoder_create_forwards_negotiated_format_parameters() {
-        let encoder_recorder = Arc::new(Mutex::new(None));
-        let decoder_recorder = Arc::new(Mutex::new(None));
-        let capability = TestAudioCodecCapability::new_with_format_recorders(
+        let recorders = TestingAudioCodecRecorders::new();
+        let capability = TestAudioCodecCapability::new_with_recorders(
             AudioCodecImplementation::new("recording", "Recording Codec"),
             Vec::new(),
             vec![AudioCodecType::Opus],
-            encoder_recorder.clone(),
-            decoder_recorder.clone(),
+            recorders.clone(),
         );
         let preference = AudioCodecPreference::new(vec![AudioPreferenceCodec::new(
             CodecDirection::Decoder,
@@ -417,11 +409,7 @@ mod tests {
             "デコーダーの生成に失敗しました"
         );
 
-        let recorded = decoder_recorder
-            .lock()
-            .expect("デコーダー用レコーダーは poison しないはず")
-            .clone()
-            .expect("create_audio_decoder が呼ばれたはずです");
+        let recorded = recorders.decoder_format_parameters();
         assert_eq!(
             recorded.get("stereo").map(String::as_str),
             Some("1"),
