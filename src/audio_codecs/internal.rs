@@ -55,10 +55,13 @@ impl AudioCodecCapability for InternalAudioCodecCapability {
             // エンコーダーは下位ファクトリの問い合わせをそのまま利用する。
             // ネゴシエーションで決まったパラメータを反映した情報を返す。
             CodecDirection::Encoder => self.encoder_factory.query_audio_encoder(format),
-            // デコーダー側は問い合わせ API が無いため、広告 spec (名前・クロックレート・
-            // チャンネル数) との一致で判定する。パラメータの厳密な照合は create が受け持つ。
+            // デコーダーは下位ファクトリの対応判定に委ね、対応する場合に広告 spec の
+            // コーデック情報を返す。
             CodecDirection::Decoder => {
                 let request = format.to_owned();
+                if !self.decoder_factory.is_supported_decoder(request.as_ref()) {
+                    return None;
+                }
                 self.decoder_factory
                     .get_supported_decoders()
                     .into_iter()
@@ -164,8 +167,7 @@ mod tests {
 
     /// 名前が一致しても互換性のない設定 (クロックレート不一致) は受け付けないことを検証する。
     ///
-    /// 名前だけの一致では opus@16000Hz を opus@48000 のコーデックとして誤って扱ってしまうため、
-    /// SdpAudioFormat::matches による互換性判定を行う。
+    /// 名前だけの一致では opus@16000Hz を opus@48000 のコーデックとして誤って扱ってしまう。
     #[test]
     fn query_rejects_incompatible_clockrate() {
         let capability = InternalAudioCodecCapability::new();
@@ -183,6 +185,24 @@ mod tests {
                 "相容れる Opus は問い合わせできるはずです"
             );
         }
+    }
+
+    /// 名前・クロックレート・チャンネル数が一致しても、パラメータが不正な設定は
+    /// 受け付けないことを検証する。
+    ///
+    /// 広告 spec との `matches` は名前・クロックレート・チャンネル数しか見ないため、
+    /// `stereo=2` のような不正値を弾けない。対応判定はファクトリに委ねる必要がある。
+    #[test]
+    fn query_decoder_rejects_malformed_parameter() {
+        let capability = InternalAudioCodecCapability::new();
+        let mut malformed = SdpAudioFormat::new("opus", 48000, 2);
+        malformed.parameters_mut().set("stereo", "2");
+        assert!(
+            capability
+                .query(CodecDirection::Decoder, malformed.as_ref())
+                .is_none(),
+            "不正なパラメータを持つ Opus は受け付けないはずです"
+        );
     }
 
     /// デコーダーでチャネル数不一致のフォーマットを受け付けないことを検証する。
