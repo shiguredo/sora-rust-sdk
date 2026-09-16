@@ -141,6 +141,11 @@ impl AudioDecoderFactoryHandler for SoraAudioDecoderFactory {
 }
 
 /// 指定方向の [AudioCodecPreference] から公開する [AudioCodecSpec] 一覧を構築する。
+///
+/// 各 codec について `capability.get_supported_codec_specs()` から対象 codec の
+/// spec を取り出す。
+/// 返却時は `SdpAudioFormat::is_equal` で重複を除外する。
+/// なお、走査順は入力の `preference.codecs()` に従う。
 fn collect_audio_codec_specs(
     preference: &AudioCodecPreference,
     capabilities: &[Box<dyn AudioCodecCapability>],
