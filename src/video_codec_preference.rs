@@ -60,6 +60,15 @@ impl PreferenceCodec {
     }
 }
 
+/// 有効なビデオコーデック種別。
+const VIDEO_CODEC_TYPES: [VideoCodecType; 5] = [
+    VideoCodecType::Vp8,
+    VideoCodecType::Vp9,
+    VideoCodecType::H264,
+    VideoCodecType::H265,
+    VideoCodecType::Av1,
+];
+
 impl VideoCodecPreference {
     /// [PreferenceCodec] のリストから [VideoCodecPreference] を生成する。
     pub fn new(codecs: Vec<PreferenceCodec>) -> Self {
@@ -70,13 +79,7 @@ impl VideoCodecPreference {
     pub fn new_from_capability(capability: &dyn VideoCodecCapability) -> Self {
         let implementation = capability.get_implementation();
         let mut codecs = Vec::new();
-        for codec_type in [
-            VideoCodecType::Vp8,
-            VideoCodecType::Vp9,
-            VideoCodecType::H264,
-            VideoCodecType::H265,
-            VideoCodecType::Av1,
-        ] {
+        for codec_type in VIDEO_CODEC_TYPES {
             for direction in [CodecDirection::Encoder, CodecDirection::Decoder] {
                 if capability.is_supported(direction, codec_type) {
                     codecs.push(PreferenceCodec::new(
@@ -205,6 +208,7 @@ impl<'text, 'raw> TryFrom<RawJsonValue<'text, 'raw>> for VideoCodecPreference {
 
 /// [VideoCodecPreference] の妥当性を検証する。
 ///
+/// - 各エントリのコーデック種別が [VIDEO_CODEC_TYPES] に含まれること
 /// - 同じ方向・コーデック種別の重複がないこと
 /// - 各エントリの実装が `capabilities` に存在すること
 /// - 各エントリの方向・コーデックが実装でサポートされていること
@@ -214,13 +218,21 @@ pub fn validate_video_codec_preference(
 ) -> Result<()> {
     validate_capabilities(capabilities)?;
 
-    for codec_type in [
-        VideoCodecType::Vp8,
-        VideoCodecType::Vp9,
-        VideoCodecType::H264,
-        VideoCodecType::H265,
-        VideoCodecType::Av1,
-    ] {
+    // 対応していないコーデック種別を弾く
+    for codec in preference.codecs() {
+        if VIDEO_CODEC_TYPES.contains(&codec.codec_type()) {
+            continue;
+        }
+        let codec_type_name = video_codec_type_to_json_str(codec.codec_type()).unwrap_or("Unknown");
+        return Err(Error::InvalidVideoCodecPreference {
+            reason: format!(
+                "unsupported codec type: {} {codec_type_name}",
+                codec.direction().as_label()
+            ),
+        });
+    }
+
+    for codec_type in VIDEO_CODEC_TYPES {
         for direction in [CodecDirection::Encoder, CodecDirection::Decoder] {
             let count = preference
                 .codecs()
@@ -578,6 +590,41 @@ mod tests {
                 assert!(reason.contains("codec type not found"));
             }
             other => panic!("予期しないエラー: {other:?}"),
+        }
+    }
+
+    /// [VIDEO_CODEC_TYPES] に含まれないコーデック種別を preference に指定すると、
+    /// panic せずに `Error::InvalidVideoCodecPreference` を返すことを検証する。
+    ///
+    /// `VideoCodecType::Generic` は SDP コーデック名を持つが preference の対象外である。
+    /// `VideoCodecType::Unknown` は SDP コーデック名を持たず JSON 表現を作れないため、
+    /// この検証が他の検証より先に行われないとエラーメッセージの組み立てで panic する。
+    #[test]
+    fn validate_fails_on_unsupported_codec_type() {
+        for (codec_type, expected) in [
+            (
+                VideoCodecType::Generic,
+                "unsupported codec type: encoder Generic",
+            ),
+            (
+                VideoCodecType::Unknown(7),
+                "unsupported codec type: encoder Unknown",
+            ),
+        ] {
+            let preference = VideoCodecPreference::new(vec![default_preference_codec(
+                CodecDirection::Encoder,
+                codec_type,
+                VideoCodecImplementation::new("nvcodec", "NVIDIA NVENC/NVDEC"),
+            )]);
+            let capabilities = sample_capabilities();
+            let error = validate_video_codec_preference(&preference, &capabilities)
+                .expect_err("失敗する必要があります");
+            match error {
+                Error::InvalidVideoCodecPreference { reason } => {
+                    assert_eq!(reason, expected, "コーデック種別: {codec_type:?}");
+                }
+                other => panic!("予期しないエラー: {other:?}"),
+            }
         }
     }
 

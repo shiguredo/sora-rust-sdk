@@ -25,7 +25,7 @@ pub struct AudioCodecPreference {
     codecs: Vec<AudioPreferenceCodec>,
 }
 
-/// 定義順で列挙する音声コーデック種別。
+/// 有効な音声コーデック種別。
 const AUDIO_CODEC_TYPES: [AudioCodecType; 5] = [
     AudioCodecType::Opus,
     AudioCodecType::Isac,
@@ -211,6 +211,7 @@ impl<'text, 'raw> TryFrom<RawJsonValue<'text, 'raw>> for AudioCodecPreference {
 
 /// [AudioCodecPreference] の妥当性を検証する。
 ///
+/// - 各エントリのコーデック種別が [AUDIO_CODEC_TYPES] に含まれること
 /// - 同じ方向・コーデック種別の重複がないこと
 /// - 各エントリの実装が `capabilities` に存在すること
 /// - 各エントリの方向・コーデックが実装でサポートされていること
@@ -219,6 +220,20 @@ pub fn validate_audio_codec_preference(
     capabilities: &[Box<dyn AudioCodecCapability>],
 ) -> Result<()> {
     validate_capabilities(capabilities)?;
+
+    // 対応していないコーデック種別を弾く
+    for codec in preference.codecs() {
+        if AUDIO_CODEC_TYPES.contains(&codec.codec_type()) {
+            continue;
+        }
+        let codec_type_name = audio_codec_type_to_json_str(codec.codec_type()).unwrap_or("Unknown");
+        return Err(Error::InvalidAudioCodecPreference {
+            reason: format!(
+                "unsupported codec type: {} {codec_type_name}",
+                codec.direction().as_label()
+            ),
+        });
+    }
 
     for codec_type in AUDIO_CODEC_TYPES {
         for direction in [CodecDirection::Encoder, CodecDirection::Decoder] {
@@ -463,6 +478,40 @@ mod tests {
                 assert!(reason.contains("implementation not found"));
             }
             other => panic!("予期しないエラー: {other:?}"),
+        }
+    }
+
+    /// [AUDIO_CODEC_TYPES] に含まれないコーデック種別を preference に指定すると、
+    /// panic せずに `Error::InvalidAudioCodecPreference` を返すことを検証する。
+    ///
+    /// この検証は他の検証より先に行われる。`AudioCodecType::Other` / `Unknown` は
+    /// SDP コーデック名を持たず JSON 表現を作れないため、他の検証が
+    /// エラーメッセージを組み立てる段階に進むと panic する。
+    #[test]
+    fn validate_fails_on_unsupported_codec_type() {
+        for (codec_type, expected) in [
+            (
+                AudioCodecType::Other,
+                "unsupported codec type: encoder Unknown",
+            ),
+            (
+                AudioCodecType::Unknown(7),
+                "unsupported codec type: encoder Unknown",
+            ),
+        ] {
+            let preference = AudioCodecPreference::new(vec![default_preference_codec(
+                CodecDirection::Encoder,
+                codec_type,
+                AudioCodecImplementation::new("internal", "WebRTC built-in"),
+            )]);
+            let error = validate_audio_codec_preference(&preference, &sample_capabilities())
+                .expect_err("失敗する必要があります");
+            match error {
+                Error::InvalidAudioCodecPreference { reason } => {
+                    assert_eq!(reason, expected, "コーデック種別: {codec_type:?}");
+                }
+                other => panic!("予期しないエラー: {other:?}"),
+            }
         }
     }
 
