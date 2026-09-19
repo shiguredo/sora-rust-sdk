@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use shiguredo_webrtc::{AudioDeviceModule, AudioDeviceModuleHandler, AudioTransportRef};
+use shiguredo_webrtc::{AudioDeviceModule, AudioDeviceModuleHandler, AudioTransportPtr};
 
 /// FakeAudioDeviceModule の設定。
 #[derive(Clone)]
@@ -35,18 +35,18 @@ impl Default for FakeAudioDeviceModuleConfig {
 
 struct FakeAudioDeviceModuleState {
     recording: Arc<AtomicBool>,
-    audio_transport: Arc<Mutex<Option<AudioTransportRef>>>,
+    audio_transport: Arc<Mutex<Option<AudioTransportPtr>>>,
     config: FakeAudioDeviceModuleConfig,
     stop: Arc<AtomicBool>,
 }
 
 struct FakeAudioDeviceModuleHandler {
     recording: Arc<AtomicBool>,
-    audio_transport: Arc<Mutex<Option<AudioTransportRef>>>,
+    audio_transport: Arc<Mutex<Option<AudioTransportPtr>>>,
 }
 
 impl AudioDeviceModuleHandler for FakeAudioDeviceModuleHandler {
-    fn register_audio_callback(&self, transport: Option<AudioTransportRef>) -> i32 {
+    fn register_audio_callback(&mut self, transport: Option<AudioTransportPtr>) -> i32 {
         let mut stored = self
             .audio_transport
             .lock()
@@ -55,23 +55,23 @@ impl AudioDeviceModuleHandler for FakeAudioDeviceModuleHandler {
         0
     }
 
-    fn init(&self) -> i32 {
+    fn init(&mut self) -> i32 {
         0
     }
 
-    fn terminate(&self) -> i32 {
+    fn terminate(&mut self) -> i32 {
         0
     }
 
-    fn initialized(&self) -> bool {
+    fn initialized(&mut self) -> bool {
         true
     }
 
-    fn recording_devices(&self) -> i16 {
+    fn recording_devices(&mut self) -> i16 {
         1
     }
 
-    fn recording_device_name(&self, index: u16) -> Option<(String, String)> {
+    fn recording_device_name(&mut self, index: u16) -> Option<(String, String)> {
         if index == 0 {
             Some((
                 "Fake Audio Input".to_string(),
@@ -82,30 +82,30 @@ impl AudioDeviceModuleHandler for FakeAudioDeviceModuleHandler {
         }
     }
 
-    fn recording_is_available(&self, available: &mut bool) -> i32 {
+    fn recording_is_available(&mut self, available: &mut bool) -> i32 {
         *available = true;
         0
     }
 
-    fn init_recording(&self) -> i32 {
+    fn init_recording(&mut self) -> i32 {
         0
     }
 
-    fn recording_is_initialized(&self) -> bool {
+    fn recording_is_initialized(&mut self) -> bool {
         true
     }
 
-    fn start_recording(&self) -> i32 {
+    fn start_recording(&mut self) -> i32 {
         self.recording.store(true, Ordering::SeqCst);
         0
     }
 
-    fn stop_recording(&self) -> i32 {
+    fn stop_recording(&mut self) -> i32 {
         self.recording.store(false, Ordering::SeqCst);
         0
     }
 
-    fn recording(&self) -> bool {
+    fn recording(&mut self) -> bool {
         self.recording.load(Ordering::SeqCst)
     }
 }

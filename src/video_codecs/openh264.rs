@@ -13,7 +13,7 @@ use shiguredo_webrtc::{
     I420Buffer, ScalabilityMode, SdpVideoFormat, SdpVideoFormatRef, VideoCodecRef,
     VideoCodecStatus, VideoCodecType, VideoDecoder, VideoDecoderDecodedImageCallbackPtr,
     VideoDecoderDecoderInfo, VideoDecoderHandler, VideoDecoderSettingsRef, VideoEncoder,
-    VideoEncoderEncodedImageCallbackPtr, VideoEncoderEncodedImageCallbackRef,
+    VideoEncoderEncodedImageCallbackPtr, VideoEncoderEncodedImageCallbackRefMut,
     VideoEncoderEncodedImageCallbackResultError, VideoEncoderEncoderInfo, VideoEncoderHandler,
     VideoEncoderRateControlParametersRef, VideoEncoderSettingsRef, VideoFrame, VideoFrameRef,
     VideoFrameType, VideoFrameTypeVectorRef, i420_copy, rtc_log_warning,
@@ -274,10 +274,10 @@ impl VideoEncoderHandler for Openh264VideoEncoder {
 
     fn register_encode_complete_callback(
         &mut self,
-        callback: Option<VideoEncoderEncodedImageCallbackRef<'_>>,
+        callback: Option<VideoEncoderEncodedImageCallbackRefMut<'_>>,
     ) -> VideoCodecStatus {
         self.callback = callback
-            .map(|callback| unsafe { VideoEncoderEncodedImageCallbackPtr::from_ref(callback) });
+            .map(|callback| unsafe { VideoEncoderEncodedImageCallbackPtr::from_mut(&callback) });
         VideoCodecStatus::Ok
     }
 
@@ -449,12 +449,12 @@ impl VideoDecoderHandler for Openh264VideoDecoder {
             return VideoCodecStatus::Error;
         }
 
-        let frame = VideoFrame::builder(&i420.cast_to_video_frame_buffer())
+        let mut frame = VideoFrame::builder(&i420.cast_to_video_frame_buffer())
             .set_timestamp_us(render_time_ms.saturating_mul(1000))
             .set_rtp_timestamp(input_image.rtp_timestamp())
             .build();
         unsafe {
-            callback.decoded(frame.as_ref());
+            callback.decoded(frame.as_mut());
         }
 
         VideoCodecStatus::Ok

@@ -7,9 +7,9 @@ use std::sync::{Arc, Mutex};
 use shiguredo_webrtc::{
     AudioCodecInfo, AudioCodecSpec, AudioCodecType, AudioDecoder, AudioDecoderHandler,
     AudioEncoder, AudioEncoderEncodedInfo, AudioEncoderFactoryOptions, AudioEncoderHandler,
-    AudioSpeechType, BufferRef, EnvironmentRef, RawBufferWriter, SdpAudioFormat, SdpAudioFormatRef,
-    SdpVideoFormat, SdpVideoFormatRef, VideoCodecType, VideoDecoder, VideoDecoderHandler,
-    VideoEncoder, VideoEncoderHandler,
+    AudioSpeechType, BufferRefMut, EnvironmentRef, RawBufferWriter, SdpAudioFormat,
+    SdpAudioFormatRef, SdpVideoFormat, SdpVideoFormatRef, VideoCodecType, VideoDecoder,
+    VideoDecoderHandler, VideoEncoder, VideoEncoderHandler,
 };
 
 use crate::audio_codec_capability::{AudioCodecCapability, AudioCodecImplementation};
@@ -173,7 +173,7 @@ impl AudioEncoderHandler for TestAudioEncoder {
         &mut self,
         _rtp_timestamp: u32,
         _audio: &[i16],
-        encoded: &mut BufferRef<'_>,
+        encoded: &mut BufferRefMut<'_>,
     ) -> AudioEncoderEncodedInfo {
         encoded.append_data(&[0x01, 0x02, 0x03]);
         let mut info = AudioEncoderEncodedInfo::new();
@@ -204,7 +204,11 @@ impl AudioDecoderHandler for TestAudioDecoder {
         _sample_rate_hz: i32,
         decoded: &mut RawBufferWriter<'_, i16>,
     ) -> (i32, AudioSpeechType) {
-        decoded.write(&[0x1111i16; 160]);
+        // write は書き込み先の容量を超えないことを呼び出し側が保証する契約である。
+        // このハンドラは 160 サンプルを書き込むため、呼び出し元は 160 サンプル以上の領域を渡す。
+        unsafe {
+            decoded.write(&[0x1111i16; 160]);
+        }
         (160, AudioSpeechType::Speech)
     }
     fn reset(&mut self) {}

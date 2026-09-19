@@ -15,7 +15,7 @@ use shiguredo_webrtc::{
     H264PacketizationMode, NV12Buffer, SdpVideoFormat, SdpVideoFormatRef, VideoCodecRef,
     VideoCodecStatus, VideoCodecType, VideoDecoder, VideoDecoderDecodedImageCallbackPtr,
     VideoDecoderDecoderInfo, VideoDecoderHandler, VideoDecoderSettingsRef, VideoEncoder,
-    VideoEncoderEncodedImageCallbackPtr, VideoEncoderEncodedImageCallbackRef,
+    VideoEncoderEncodedImageCallbackPtr, VideoEncoderEncodedImageCallbackRefMut,
     VideoEncoderEncodedImageCallbackResultError, VideoEncoderEncoderInfo, VideoEncoderHandler,
     VideoEncoderRateControlParametersRef, VideoEncoderSettingsRef, VideoFrame, VideoFrameRef,
     VideoFrameType, VideoFrameTypeVectorRef, i420_to_nv12, nv12_copy, rtc_log_error,
@@ -458,14 +458,14 @@ impl VideoEncoderHandler for AmfVideoEncoder {
 
     fn register_encode_complete_callback(
         &mut self,
-        callback: Option<VideoEncoderEncodedImageCallbackRef<'_>>,
+        callback: Option<VideoEncoderEncodedImageCallbackRefMut<'_>>,
     ) -> VideoCodecStatus {
         let mut callback_state = self
             .callback_state
             .lock()
             .expect("callback_state should not be poisoned");
         callback_state.callback = callback
-            .map(|callback| unsafe { VideoEncoderEncodedImageCallbackPtr::from_ref(callback) });
+            .map(|callback| unsafe { VideoEncoderEncodedImageCallbackPtr::from_mut(&callback) });
         VideoCodecStatus::Ok
     }
 
@@ -588,7 +588,7 @@ fn handle_amf_decode_callback(
         }
     }
 
-    let decoded_frame = VideoFrame::builder(&nv12.cast_to_video_frame_buffer())
+    let mut decoded_frame = VideoFrame::builder(&nv12.cast_to_video_frame_buffer())
         .set_timestamp_us(value.render_time_ms.saturating_mul(1000))
         .set_rtp_timestamp(value.rtp_timestamp)
         .build();
@@ -600,7 +600,7 @@ fn handle_amf_decode_callback(
         return;
     };
     unsafe {
-        callback.decoded(decoded_frame.as_ref());
+        callback.decoded(decoded_frame.as_mut());
     }
 }
 

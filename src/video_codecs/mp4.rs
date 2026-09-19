@@ -31,7 +31,7 @@ use shiguredo_webrtc::{
     AdaptFrameResult, AdaptedVideoTrackSource, CodecSpecificInfo, EncodedImage, EncodedImageBuffer,
     H264PacketizationMode, I420Buffer, SdpVideoFormat, SdpVideoFormatRef, TimestampAligner,
     VideoCodecRef, VideoCodecStatus, VideoCodecType, VideoEncoder,
-    VideoEncoderEncodedImageCallbackPtr, VideoEncoderEncodedImageCallbackRef,
+    VideoEncoderEncodedImageCallbackPtr, VideoEncoderEncodedImageCallbackRefMut,
     VideoEncoderEncodedImageCallbackResultError, VideoEncoderEncoderInfo, VideoEncoderHandler,
     VideoEncoderRateControlParametersRef, VideoEncoderSettingsRef, VideoFrame, VideoFrameBuffer,
     VideoFrameBufferHandler, VideoFrameRef, VideoFrameType, VideoFrameTypeVectorRef,
@@ -1227,10 +1227,10 @@ impl VideoEncoderHandler for Mp4PassthroughEncoder {
 
     fn register_encode_complete_callback(
         &mut self,
-        callback: Option<VideoEncoderEncodedImageCallbackRef<'_>>,
+        callback: Option<VideoEncoderEncodedImageCallbackRefMut<'_>>,
     ) -> VideoCodecStatus {
         self.callback = callback
-            .map(|callback| unsafe { VideoEncoderEncodedImageCallbackPtr::from_ref(callback) });
+            .map(|callback| unsafe { VideoEncoderEncodedImageCallbackPtr::from_mut(&callback) });
         VideoCodecStatus::Ok
     }
 
@@ -2792,11 +2792,11 @@ mod tests {
 
         // 実 encoder と実 callback を使う。mock / stub は使わない。
         let (tx, rx) = std::sync::mpsc::channel();
-        let callback =
+        let mut callback =
             VideoEncoderEncodedImageCallback::new_with_handler(Box::new(RecordingHandler { tx }));
         let mut encoder = Mp4PassthroughEncoder::new();
         assert_eq!(
-            encoder.register_encode_complete_callback(Some(callback.as_ref())),
+            encoder.register_encode_complete_callback(Some(callback.as_mut())),
             VideoCodecStatus::Ok
         );
 
@@ -2914,10 +2914,10 @@ mod tests {
         samples: Vec<Mp4EncodedSample>,
     ) -> Vec<(VideoFrameType, Vec<u8>)> {
         let (tx, rx) = std::sync::mpsc::channel();
-        let callback =
+        let mut callback =
             VideoEncoderEncodedImageCallback::new_with_handler(Box::new(RecordingHandler { tx }));
         assert_eq!(
-            encoder.register_encode_complete_callback(Some(callback.as_ref())),
+            encoder.register_encode_complete_callback(Some(callback.as_mut())),
             VideoCodecStatus::Ok
         );
         for (i, sample) in samples.into_iter().enumerate() {
@@ -3187,11 +3187,11 @@ mod tests {
         key8.playback_serial = 8;
 
         let (tx, rx) = std::sync::mpsc::channel();
-        let callback =
+        let mut callback =
             VideoEncoderEncodedImageCallback::new_with_handler(Box::new(RecordingHandler { tx }));
         let mut encoder = Mp4PassthroughEncoder::new();
         assert_eq!(
-            encoder.register_encode_complete_callback(Some(callback.as_ref())),
+            encoder.register_encode_complete_callback(Some(callback.as_mut())),
             VideoCodecStatus::Ok
         );
         encode_passthrough_sample(&mut encoder, key0, 0);

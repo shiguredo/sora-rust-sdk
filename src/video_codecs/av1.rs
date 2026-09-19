@@ -379,7 +379,7 @@ pub(super) fn validate_av1_track(
 
 // -----------------------------------------------------------------
 // 固定 libwebrtc の AV1 コード source audit
-// (m154.8037.1.1 / commit c2b761bb73f0b2ced096274abb415f6c7559a28b)
+// (m154.8037.1.2 / commit c2b761bb73f0b2ced096274abb415f6c7559a28b)
 //
 // 依存 `shiguredo_webrtc` の libwebrtc を更新した場合は、以下 file / function の
 // 挙動を再検証し、本コメントを更新すること。RTP packetization と SDP profile 判定を
@@ -479,7 +479,7 @@ pub(super) fn parse_av1_sdp_field(
 /// bitstream 実値を上書きしない)。
 pub(super) fn resolve_av1_incoming(
     required: &SdpVideoFormat,
-    mut incoming: SdpVideoFormatRef<'_>,
+    incoming: SdpVideoFormatRef<'_>,
 ) -> Option<SdpVideoFormat> {
     // codec 名の一致 (AV1)
     let name = incoming.name().ok()?;
@@ -488,7 +488,7 @@ pub(super) fn resolve_av1_incoming(
     }
 
     let incoming_params: std::collections::HashMap<String, String> =
-        incoming.parameters_mut().iter().collect();
+        incoming.parameters().iter().collect();
     let incoming_profile = parse_av1_sdp_field(&incoming_params, "profile", 0, 2)?;
     let incoming_level = parse_av1_sdp_field(&incoming_params, "level-idx", 5, 31)?;
     let incoming_tier = parse_av1_sdp_field(&incoming_params, "tier", 0, 1)?;

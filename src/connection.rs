@@ -1738,7 +1738,7 @@ impl SoraConnection {
             if server_entry.urls_len() == 0 {
                 continue;
             }
-            config.servers().push(&server_entry);
+            config.servers_mut().push(&server_entry);
         }
         pc.set_configuration(&config)?;
         Ok(())

@@ -216,7 +216,7 @@ const H264_PROFILE_PATTERNS: &[H264ProfilePattern] = &[
 ///   `kProfilePatterns` に一致しない profile / constraint の組み合わせは
 ///   required と incoming が byte-for-byte 一致しても unsupported とする
 ///
-/// 根拠: 固定 libwebrtc (m154.8037.1.1 / commit c2b761bb73f0b2ced096274abb415f6c7559a28b) の
+/// 根拠: 固定 libwebrtc (m154.8037.1.2 / commit c2b761bb73f0b2ced096274abb415f6c7559a28b) の
 /// `api/video_codecs/h264_profile_level_id.cc` の `ParseH264ProfileLevelId` /
 /// `kProfilePatterns` / `H264IsSameProfile`。
 /// 同ファイルは m152 (commit 6f37672d358475cd17544121a12494da454d85fb) のものと同一であり、
@@ -286,7 +286,7 @@ pub(super) fn parse_profile_level_id(plid: H264ProfileLevelId) -> Option<H264Pro
 /// required へ置き換えない。
 pub(super) fn resolve_h264_incoming(
     required: &SdpVideoFormat,
-    mut incoming: SdpVideoFormatRef<'_>,
+    incoming: SdpVideoFormatRef<'_>,
 ) -> Option<SdpVideoFormat> {
     let name = incoming.name().ok()?;
     if VideoCodecType::try_from(name.as_str()).ok()? != VideoCodecType::H264 {
@@ -294,7 +294,7 @@ pub(super) fn resolve_h264_incoming(
     }
 
     let incoming_params: std::collections::HashMap<String, String> =
-        incoming.parameters_mut().iter().collect();
+        incoming.parameters().iter().collect();
     if incoming_params
         .get("packetization-mode")
         .map(String::as_str)

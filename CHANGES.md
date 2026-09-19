@@ -51,6 +51,11 @@
   - @voluntas
 - [UPDATE] shiguredo_mp4 を 2026.4.0 から 2026.5.0 に更新する
   - @sile
+- [UPDATE] shiguredo_webrtc を 0.154.0 から 0.154.1-canary.0 に更新する
+  - libwebrtc を m154.8037.1.1 から m154.8037.1.2 に更新する
+  - 借用型 `XxxRef` が読み取り専用になり、書き換え用の `XxxRefMut` が追加されたことに追随する
+  - `AudioDeviceModuleHandler` が `&mut self` と `AudioTransportPtr` を受け取るようになったことに追随する
+  - @melpon
 - [FIX] MP4 パススルーで encode 前に sample が欠落した場合、後続の delta sample を送信しないようにする
   - capturer は再生順を示す `playback_serial` を付与し、encoder は値の不連続を検出した場合、次のキーフレームまで待つ
   - 再生位置は変更せず、送信再開までの時間は入力 MP4 のキーフレーム間隔に依存する

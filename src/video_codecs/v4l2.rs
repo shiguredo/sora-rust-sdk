@@ -20,7 +20,7 @@ use shiguredo_webrtc::{
     VideoCodecRef, VideoCodecStatus, VideoCodecType, VideoDecoder,
     VideoDecoderDecodedImageCallbackPtr, VideoDecoderDecoderInfo, VideoDecoderHandler,
     VideoDecoderSettingsRef, VideoEncoder, VideoEncoderEncodedImageCallbackPtr,
-    VideoEncoderEncodedImageCallbackRef, VideoEncoderEncodedImageCallbackResultError,
+    VideoEncoderEncodedImageCallbackRefMut, VideoEncoderEncodedImageCallbackResultError,
     VideoEncoderEncoderInfo, VideoEncoderHandler, VideoEncoderRateControlParametersRef,
     VideoEncoderSettingsRef, VideoFrame, VideoFrameRef, VideoFrameType, VideoFrameTypeVectorRef,
     i420_copy, rtc_log_error, rtc_log_warning,
@@ -717,14 +717,14 @@ impl VideoEncoderHandler for V4l2VideoEncoder {
 
     fn register_encode_complete_callback(
         &mut self,
-        callback: Option<VideoEncoderEncodedImageCallbackRef<'_>>,
+        callback: Option<VideoEncoderEncodedImageCallbackRefMut<'_>>,
     ) -> VideoCodecStatus {
         let mut shared_state = self
             .shared_state
             .lock()
             .expect("shared_state should not be poisoned");
         shared_state.callback = callback
-            .map(|callback| unsafe { VideoEncoderEncodedImageCallbackPtr::from_ref(callback) });
+            .map(|callback| unsafe { VideoEncoderEncodedImageCallbackPtr::from_mut(&callback) });
         VideoCodecStatus::Ok
     }
 
@@ -831,7 +831,7 @@ fn handle_v4l2_decode_frame(
         return;
     };
 
-    let decoded_frame = match build_i420_frame(
+    let mut decoded_frame = match build_i420_frame(
         frame_data,
         resolution.width,
         resolution.height,
@@ -856,7 +856,7 @@ fn handle_v4l2_decode_frame(
         return;
     };
     unsafe {
-        callback.decoded(decoded_frame.as_ref());
+        callback.decoded(decoded_frame.as_mut());
     }
 }
 
