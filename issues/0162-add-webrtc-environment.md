@@ -1,7 +1,7 @@
 # SoraConnectionContextConfig に libwebrtc の Environment を指定できるようにする
 
 - Created: 2026-09-19
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-20
 - Branch: feature/add-webrtc-environment
 - Polished: {YYYY-MM-DD}
 
@@ -103,3 +103,27 @@ Sora から rid 単位で届く PLI に対して要求されたレイヤーの�
     テスト本体で検証する
 - per-SSRC のキーフレーム生成というフィールドトライアル自体の効果は libwebrtc 内部のため
   本 issue のテスト対象外とする
+
+## 解決方法
+
+- `src/connection_context.rs`
+  - `SoraConnectionContextConfig` に `environment: Option<Environment>` を追加した。`Default` は `None`
+  - `SoraConnectionContext::new_with_config` で、指定された `Environment` を `AudioDeviceModule::new` と
+    `PeerConnectionFactoryDependencies::set_env` の両方に渡すようにした。`None` の場合は
+    `Environment::new()` を使う
+  - `SoraConnectionContext` は `Environment` を保持しない。`PeerConnectionFactory` が `env_` を、
+    `AudioDeviceModule` が `AudioDeviceBuffer` をそれぞれ値で保持し、同じ実体を参照カウントで
+    共有するため、SDK 側で保持する必要がない
+  - テスト方針の単体テストは、`SoraConnectionContext` が `Environment` を保持しなくなったため
+    作成していない。フィールドトライアルがエンコーダー生成まで届くことは E2E テストで検証する
+- `e2e-tests/src/environment_recorder.rs` / `e2e-tests/tests/environment.rs`
+  - `InternalVideoCodecCapability` に委譲しつつ `create_video_encoder` に渡された `EnvironmentRef` を
+    `EnvironmentRef::to_owned` でコピーして `mpsc` のチャネルへ送る `VideoCodecCapability` を追加した
+  - フィールドトライアル付きの `Environment` を指定したコンテキストで Sora に接続し、記録した
+    `Environment` で `field_trials().is_enabled("WebRTC-Video-PerSsrcKeyframes")` が true になることを
+    確認する E2E テストを追加した
+  - `create_video_encoder` は libwebrtc のスレッドから呼ばれるため、その場で assert せず送るだけにし、
+    検証はテスト本体で行う
+- `skills/sora-rust-sdk/SKILL.md` に `environment` の説明とフィールドトライアルの設定例を追記した
+- `CHANGES.md` の `## develop` に `[ADD]` を追記した
+- shiguredo_webrtc を 0.154.1-canary.0 から 0.154.1-canary.1 に更新した
