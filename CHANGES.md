@@ -25,6 +25,9 @@
 - [CHANGE] `VideoCodecPreference::has_implementation` の引数を実値から参照に変更する
   - 呼び出し側が `VideoCodecImplementation` を clone せずに判定できるように `&VideoCodecImplementation` を受ける
   - @melpon
+- [ADD] `SoraConnectionContextConfig` に `environment` を追加する
+  - libwebrtc の `Environment` を指定できる
+  - @melpon
 - [ADD] AudioEncoder / AudioDecoder をユーザー側でカスタマイズ可能にするための音声コーデックフレームワークを追加する
   - `AudioCodecCapability` trait (`src/audio_codec_capability.rs`) を追加する
   - `AudioCodecImplementation` (`src/audio_codec_capability.rs`) を追加する
@@ -55,6 +58,8 @@
   - libwebrtc を m154.8037.1.1 から m154.8037.1.2 に更新する
   - 借用型 `XxxRef` が読み取り専用になり、書き換え用の `XxxRefMut` が追加されたことに追随する
   - `AudioDeviceModuleHandler` が `&mut self` と `AudioTransportPtr` を受け取るようになったことに追随する
+  - @melpon
+- [UPDATE] shiguredo_webrtc を 0.154.1-canary.0 から 0.154.1-canary.1 に更新する
   - @melpon
 - [FIX] MP4 パススルーで encode 前に sample が欠落した場合、後続の delta sample を送信しないようにする
   - capturer は再生順を示す `playback_serial` を付与し、encoder は値の不連続を検出した場合、次のキーフレームまで待つ

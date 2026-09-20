@@ -52,10 +52,28 @@ WebRTC SFU Sora のクライアントを Rust で実装するための SDK。シ
 | 型 | 説明 | 主要メソッド |
 |----|------|-------------|
 | `SoraConnectionContext` | `PeerConnectionFactory` と内部スレッド (network / signaling) をまとめて保持。プロセス全体で 1 つ作って `Arc` で共有する | `new() -> Result<Arc<Self>>`, `new_with_config(SoraConnectionContextConfig) -> Result<Arc<Self>>`, `create_audio_source() -> Result<AudioTrackSource>`, `create_audio_track(&AudioTrackSource) -> Result<AudioTrack>`, `create_video_track(&VideoTrackSource) -> Result<VideoTrack>` |
-| `SoraConnectionContextConfig` | コンテキストの設定 (フィールド: `adm_config`, `video_codec_preference`, `video_codec_capabilities`, `audio_codec_preference`, `audio_codec_capabilities`) | `Default::default()` (Internal / InternalApple / InternalAudio capabilities を自動登録) |
+| `SoraConnectionContextConfig` | コンテキストの設定 (フィールド: `adm_config`, `environment`, `video_codec_preference`, `video_codec_capabilities`, `audio_codec_preference`, `audio_codec_capabilities`) | `Default::default()` (Internal / InternalApple / InternalAudio capabilities を自動登録) |
 | `AdmConfig` | AudioDeviceModule の選択 | `NoAudioDevice` (既定、Dummy ADM), `UseBuiltIn` (OS 標準), `UseExternal(shiguredo_webrtc::AudioDeviceModule)` |
 
 `AudioTrackSource` はコンテキストから生成する。`VideoTrackSource` は `shiguredo_webrtc` 側 (`FakeVideoCapturer` / `AdaptedVideoTrackSource`) または本クレートの `Mp4VideoCapturer` / `LibcameraVideoCapturer` から生成する。
+
+`SoraConnectionContextConfig::environment` に指定した `Environment` は、AudioDeviceModule と `PeerConnectionFactory` で使う `Environment` として共有される。`None` (既定) の場合は SDK が `Environment::new()` で生成したものを使う。
+
+```rust
+use shiguredo_webrtc::{EnvironmentFactory, FieldTrials};
+use sora_sdk::{SoraConnectionContext, SoraConnectionContextConfig};
+
+// フィールドトライアルを有効にした Environment を使う
+let mut environment_factory = EnvironmentFactory::new();
+environment_factory.set_field_trials(
+    FieldTrials::new("WebRTC-Video-PerSsrcKeyframes/Enabled/")?,
+);
+let config = SoraConnectionContextConfig {
+    environment: Some(environment_factory.create()),
+    ..Default::default()
+};
+let context = SoraConnectionContext::new_with_config(config)?;
+```
 
 ### 接続ビルダー
 
