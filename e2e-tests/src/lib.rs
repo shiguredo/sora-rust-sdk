@@ -746,10 +746,12 @@ pub fn has_simulcast_rids(stats_json: &JsonString, expected: &[&str]) -> bool {
     expected.is_subset(&actual)
 }
 
+pub mod environment_recorder;
 pub mod fake_audio_device_module;
 pub mod fake_video_capturer;
 pub mod stats;
 pub mod test_connection;
+pub use environment_recorder::recording_video_codec_capability;
 pub use fake_audio_device_module::{FakeAudioDeviceModule, FakeAudioDeviceModuleConfig};
 pub use fake_video_capturer::{FakeVideoCapturer, FakeVideoCapturerConfig};
 
