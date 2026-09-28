@@ -165,14 +165,11 @@ pub enum Error {
         source: shiguredo_webrtc::Error,
     },
     /// degradation preference の SetParameters が失敗した。内部エラーとして [`shiguredo_webrtc::Error`] を保持する。
-    ///
-    /// 初回ネゴシエーションでは video sender が値を保持して SetParameters が成功するため、
-    /// media channel への適用の失敗はこのエラーでは検出できない。
     DegradationPreferenceSetParametersFailed {
         /// 発生した WebRTC エラー。
         source: shiguredo_webrtc::Error,
     },
-    /// libwebrtc が解釈できない degradation preference が指定された。
+    /// 未知の degradation preference が指定された。
     UnknownDegradationPreference {
         /// 指定された未知の値。
         value: i32,
