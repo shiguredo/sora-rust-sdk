@@ -22,6 +22,7 @@ pub(crate) struct Args {
     pub(crate) ignore_disconnect_websocket: Option<bool>,
     pub(crate) simulcast: Option<bool>,
     pub(crate) degradation_preference: Option<DegradationPreference>,
+    pub(crate) adaptive_ptime: Option<bool>,
     pub(crate) insecure: bool,
     pub(crate) client_cert: Option<String>,
     pub(crate) client_key: Option<String>,
@@ -61,6 +62,7 @@ impl Default for Args {
             ignore_disconnect_websocket: None,
             simulcast: None,
             degradation_preference: None,
+            adaptive_ptime: None,
             insecure: false,
             client_cert: None,
             client_key: None,
@@ -358,6 +360,15 @@ pub(crate) fn parse_args(mut args: noargs::RawArgs) -> Result<Args> {
             ),
         })?;
 
+    let adaptive_ptime: Option<bool> = noargs::opt("adaptive-ptime")
+        .doc("音声の適応的パケット化時間 (adaptivePtime) を有効にする (true/false)")
+        .take(&mut args)
+        .present_and_then(|o| match o.value() {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            _ => Err("adaptive-ptime は true または false で指定してください"),
+        })?;
+
     let insecure = noargs::flag("insecure")
         .doc("サーバー証明書の検証をスキップする")
         .take(&mut args)
@@ -483,6 +494,7 @@ pub(crate) fn parse_args(mut args: noargs::RawArgs) -> Result<Args> {
         ignore_disconnect_websocket,
         simulcast,
         degradation_preference,
+        adaptive_ptime,
         insecure,
         client_cert,
         client_key,

@@ -492,6 +492,57 @@ fn parse_args_rejects_unknown_degradation_preference() {
 }
 
 #[test]
+fn parse_args_accepts_adaptive_ptime() {
+    // CLI の文字列が true / false へ対応することを確認する。
+    for (value, expected) in [("true", true), ("false", false)] {
+        let raw_args = make_raw_args(&[
+            "sumomo",
+            "--signaling-url",
+            "wss://example.com/signaling",
+            "--channel-id",
+            "test-channel",
+            "--role",
+            "sendonly",
+            "--adaptive-ptime",
+            value,
+        ]);
+        let args = crate::args::parse_args(raw_args).expect("adaptive-ptime の解析に失敗しました");
+        assert_eq!(
+            args.adaptive_ptime,
+            Some(expected),
+            "CLI の {value} は {expected} に対応するはずです"
+        );
+    }
+}
+
+#[test]
+fn parse_args_rejects_invalid_adaptive_ptime() {
+    // true / false 以外の値は受け付けない。
+    let raw_args = make_raw_args(&[
+        "sumomo",
+        "--signaling-url",
+        "wss://example.com/signaling",
+        "--channel-id",
+        "test-channel",
+        "--role",
+        "sendonly",
+        "--adaptive-ptime",
+        "enabled",
+    ]);
+    let result = crate::args::parse_args(raw_args);
+    assert!(
+        result.is_err(),
+        "true / false 以外の adaptive-ptime は失敗するはずです"
+    );
+    let err = result.err().expect("エラーは必ず存在するはずです");
+    assert!(
+        err.to_string()
+            .contains("adaptive-ptime は true または false"),
+        "エラーメッセージに指定可能な値が含まれるはずです: {err}"
+    );
+}
+
+#[test]
 fn validate_args_rejects_client_cert_without_client_key() {
     let mut args = test_args(VideoCodecImplementationSelections::Auto, None);
     // エラーが期待メッセージと完全一致することを検証する。
