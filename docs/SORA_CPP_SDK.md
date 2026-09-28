@@ -208,6 +208,6 @@ pub async fn send_rpc_request(
 | WebSocket 閉じるタイムアウト | o | o | デフォルト 3 秒 |
 | DataChannel シグナリングタイムアウト | o | 未実装 | C++ SDK でも未使用 |
 | 切断待機タイムアウト | o | o | デフォルト 5 秒 |
-| degradation_preference | o | 未実装 | |
+| degradation_preference | o | o | Rust SDK は `SoraConnectionBuilder::degradation_preference` で指定する |
 | cpu_adaptation | o | 未実装 | |
 | disable_signaling_url_randomization | o | 未実装 | 複数 URL のランダム化無効化 |
