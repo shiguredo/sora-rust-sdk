@@ -1,7 +1,7 @@
 # DegradationPreference を設定できるようにする
 
 - Created: 2026-08-25
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-28
 - Branch: feature/add-degradation-preference
 - Polished: 2026-09-04
 
@@ -45,3 +45,22 @@ Sora C++ SDK は接続時に映像の DegradationPreference （負荷時の映�
 - `examples/sumomo/src/args.rs` / `examples/sumomo/src/main.rs`（CLI オプションの追加）
 - `docs/SORA_CPP_SDK.md` / `docs/SUMOMO.md`（機能対応表の更新）
 - `CHANGES.md`
+
+## 解決方法
+
+- `src/connection.rs`
+  - `SoraConnectionBuilder` に `degradation_preference` を追加した。引数は `shiguredo_webrtc::DegradationPreference` を値で受け取り、内部では `Option<DegradationPreference>` で保持する。未設定 (`None`) の場合は何も設定しない
+  - `SoraConnection::apply_degradation_preference` で video sender の `RtpParameters` に値を設定して `SetParameters` する。未設定の場合と video sender が無い場合 (`recvonly`、音声のみの送信) は何もせずに成功する
+  - `handle_offer` の `apply_simulcast_encodings` の直後で呼び、初回 offer と re-offer のどちらでも再適用する。初回ネゴシエーションでは video sender の SSRC が未確定であり、libwebrtc は値を sender 内に保持して `set_local_description` で SSRC が確定した時点で media channel へ適用する
+  - シグナリングメッセージ (`OutgoingMessage::Connect`) には含めない
+- `src/error.rs`
+  - `DegradationPreferenceSetParametersFailed` と `UnknownDegradationPreference` を追加した
+  - `shiguredo_webrtc::DegradationPreference::Unknown` は libwebrtc が解釈できない値であるため、送信の有無に依らずエラーにする
+- `examples/sumomo/src/args.rs` / `examples/sumomo/src/main.rs` / `examples/sumomo/src/tests.rs`
+  - `--degradation-preference` を追加した。CLI 文字列は `shiguredo_webrtc` の variant 名に揃え (`maintain_framerate_and_resolution` / `maintain_framerate` / `maintain_resolution` / `balanced`)、libwebrtc の削除予定エイリアスに対応する `disabled` は受け付けない
+- `e2e-tests/src/test_connection.rs` / `e2e-tests/tests/degradation_preference.rs`
+  - 実 Sora へ接続して映像の送信が継続することと、`recvonly` ではスキップされて接続できることを確認する E2E テストを追加した
+- テスト方針
+  - 単体テストは `src/connection.rs` の `#[cfg(test)]` に追加した。実 libwebrtc の `PeerConnection` で offer SDP を生成して `handle_offer` へ渡すため、サーバーもモックも使わずにネゴシエーションまでを検証できる
+  - answer の映像 m 行が SSRC を持つことを assert し、`GetParameters` が sender 内に保持された値ではなく media channel の値を返す状態で検証する
+- `docs/SORA_CPP_SDK.md` / `docs/SUMOMO.md` の機能対応表、`skills/sora-rust-sdk/SKILL.md` の接続オプションとエラー型、`CHANGES.md` の `## develop` の `[ADD]` を更新した
