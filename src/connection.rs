@@ -15,8 +15,8 @@ use shiguredo_http11::{Request, ResponseDecoder, auth::BasicAuth, uri::Uri};
 use shiguredo_webrtc::{
     AudioTrack, CreateSessionDescriptionObserver, CreateSessionDescriptionObserverHandler,
     CxxString, DataChannel, DataChannelObserver, DataChannelObserverHandler, DataChannelState,
-    FrameTransformer, FrameTransformerHandler, IceCandidateRef, IceServer, MediaStreamTrack,
-    PeerConnection, PeerConnectionDependencies, PeerConnectionObserver,
+    DegradationPreference, FrameTransformer, FrameTransformerHandler, IceCandidateRef, IceServer,
+    MediaStreamTrack, PeerConnection, PeerConnectionDependencies, PeerConnectionObserver,
     PeerConnectionObserverHandler, PeerConnectionOfferAnswerOptions,
     PeerConnectionRtcConfiguration, PeerConnectionState, RTCStatsReport, Resolution, RtcError,
     RtpEncodingParameters, RtpEncodingParametersVector, RtpReceiver, RtpSender, RtpTransceiver,
@@ -83,6 +83,8 @@ pub struct SoraConnectionBuilder {
     sender_audio_track: Option<AudioTrack>,
     sender_video_transform: Option<Box<dyn FrameTransformerHandler + Send>>,
     receiver_video_transform: Option<Box<dyn FrameTransformerHandler + Send>>,
+    /// 送信映像の負荷時の品質制御の優先度。
+    degradation_preference: Option<DegradationPreference>,
 
     // connect 時の設定
     client_id: Option<String>,
@@ -130,6 +132,7 @@ impl SoraConnectionBuilder {
             sender_audio_track: None,
             sender_video_transform: None,
             receiver_video_transform: None,
+            degradation_preference: None,
             client_id: None,
             bundle_id: None,
             metadata: None,
@@ -200,6 +203,21 @@ impl SoraConnectionBuilder {
         transform: Box<dyn FrameTransformerHandler + Send>,
     ) -> Self {
         self.receiver_video_transform = Some(transform);
+        self
+    }
+
+    /// 送信する映像の負荷時の品質制御の優先度を設定する。
+    ///
+    /// [DegradationPreference::MaintainFramerateAndResolution] は品質制御を行わず、
+    /// [DegradationPreference::MaintainFramerate] はフレームレートを保って解像度を下げ、
+    /// [DegradationPreference::MaintainResolution] は解像度を保ってフレームレートを下げ、
+    /// [DegradationPreference::Balanced] は両方を調整する。
+    /// 指定しない場合は libwebrtc の既定に任せる。
+    ///
+    /// 未知の値 ([DegradationPreference::Unknown]) は
+    /// ネゴシエーション時に [Error::UnknownDegradationPreference] を返す。
+    pub fn degradation_preference(mut self, value: DegradationPreference) -> Self {
+        self.degradation_preference = Some(value);
         self
     }
 
@@ -1699,6 +1717,29 @@ impl SoraConnection {
         Ok(())
     }
 
+    /// video sender の RTP パラメータに degradation preference を反映する。
+    fn apply_degradation_preference(&mut self) -> Result<()> {
+        let Some(preference) = self.config.degradation_preference else {
+            return Ok(());
+        };
+
+        // Unknown は libwebrtc が解釈できない値なのでエラーにする
+        if let DegradationPreference::Unknown(value) = preference {
+            return Err(Error::UnknownDegradationPreference { value });
+        }
+
+        let Some(sender) = self.video_sender.as_mut() else {
+            return Ok(());
+        };
+
+        let mut parameters = sender.get_parameters();
+        parameters.set_degradation_preference(Some(preference));
+        sender
+            .set_parameters(&parameters)
+            .map_err(|source| Error::DegradationPreferenceSetParametersFailed { source })?;
+        Ok(())
+    }
+
     fn configure_ice_server_urls(
         server_entry: &mut IceServer,
         urls: &[String],
@@ -1799,6 +1840,8 @@ impl SoraConnection {
         if self.offer_simulcast && !self.simulcast_encodings.is_empty() {
             self.apply_simulcast_encodings()?;
         }
+
+        self.apply_degradation_preference()?;
 
         let (ans_tx, mut ans_rx) = mpsc::unbounded_channel::<Result<String>>();
 
@@ -4468,6 +4511,203 @@ mod tests {
         )
         .build()
         .expect("SoraConnection の生成に失敗しました")
+    }
+
+    /// degradation preference の反映に関するテスト。
+    ///
+    /// 実サーバーを必要としないため、実 libwebrtc の PeerConnection で offer を生成し、
+    /// それを handle_offer へ渡すことでネゴシエーションまでを検証する。
+    mod degradation_preference {
+        use shiguredo_webrtc::AdaptedVideoTrackSource;
+
+        use super::super::*;
+        use super::RecordingHandler;
+
+        /// 実映像トラックを設定した接続を構築するテスト用ヘルパー。
+        ///
+        /// トラックを送信するかどうかは role に従うため、映像を送信しない role では使われない。
+        /// 戻り値の [AdaptedVideoTrackSource] はトラックの供給元であり、
+        /// 破棄するとトラックが機能しなくなるため、呼び出し側で保持する。
+        fn build_video_test_connection(
+            role: Role,
+            degradation_preference: Option<DegradationPreference>,
+        ) -> (
+            SoraConnection,
+            SoraConnectionHandle,
+            AdaptedVideoTrackSource,
+        ) {
+            let context =
+                SoraConnectionContext::new().expect("SoraConnectionContext の作成に失敗しました");
+            let source = AdaptedVideoTrackSource::new();
+            let track = context
+                .create_video_track(&source.cast_to_video_track_source())
+                .expect("映像トラックの作成に失敗しました");
+
+            let mut builder = SoraConnection::builder(
+                context,
+                vec!["wss://example.com/signaling".to_string()],
+                "test-channel".to_string(),
+                role,
+                RecordingHandler::default(),
+            )
+            .sender_video_track(track);
+            if let Some(preference) = degradation_preference {
+                builder = builder.degradation_preference(preference);
+            }
+
+            let (connection, handle) = builder
+                .build()
+                .expect("SoraConnection の生成に失敗しました");
+            (connection, handle, source)
+        }
+
+        /// 送信トラックを追加した接続で offer SDP を生成するテスト用ヘルパー。
+        ///
+        /// offer に映像の m 行を含めるために sender を先に用意する。
+        async fn create_local_offer_sdp(connection: &mut SoraConnection) -> String {
+            connection
+                .add_sender_tracks()
+                .expect("送信トラックの追加に失敗しました");
+
+            // offer の生成可否だけを扱うため、crate::error::Result ではなく
+            // 失敗理由を String で運ぶ。
+            struct OfferObsHandler {
+                tx: mpsc::UnboundedSender<std::result::Result<String, String>>,
+            }
+
+            impl CreateSessionDescriptionObserverHandler for OfferObsHandler {
+                fn on_success(&mut self, desc: SessionDescription) {
+                    let _ = self.tx.send(desc.to_string().map_err(|e| e.to_string()));
+                }
+
+                fn on_failure(&mut self, error: RtcError) {
+                    let reason = error.message().unwrap_or_else(|_| "unknown".to_string());
+                    let _ = self.tx.send(Err(reason));
+                }
+            }
+
+            let (tx, mut rx) = mpsc::unbounded_channel::<std::result::Result<String, String>>();
+            let mut observer =
+                CreateSessionDescriptionObserver::new_with_handler(Box::new(OfferObsHandler {
+                    tx,
+                }));
+            let options = PeerConnectionOfferAnswerOptions::new();
+            connection.pc.create_offer(&mut observer, &options);
+
+            let result = tokio::time::timeout(SDP_OPERATION_TIMEOUT, rx.recv())
+                .await
+                .expect("offer の生成がタイムアウトしました")
+                .expect("offer の生成結果を受信できませんでした");
+            result.expect("offer の生成に失敗しました")
+        }
+
+        #[tokio::test]
+        async fn degradation_preference_is_applied_to_video_sender() {
+            // 送信ありの role では、指定した値が video sender の RTP パラメータへ反映される。
+            let (mut offerer, _offer_handle, _offer_source) =
+                build_video_test_connection(Role::SendOnly, None);
+            let offer_sdp = create_local_offer_sdp(&mut offerer).await;
+
+            for preference in [
+                DegradationPreference::MaintainFramerateAndResolution,
+                DegradationPreference::MaintainFramerate,
+                DegradationPreference::MaintainResolution,
+                DegradationPreference::Balanced,
+            ] {
+                let (mut connection, _handle, _source) =
+                    build_video_test_connection(Role::SendOnly, Some(preference));
+                let answer_sdp = connection
+                    .handle_offer(&offer_sdp, &[])
+                    .await
+                    .expect("offer の処理に失敗しました");
+
+                // answer の映像 m 行が送信可能でないと、設定した値は sender 内に保持されるだけで
+                // media channel へは適用されない。値が適用された状態から読み出せることを
+                // 確認するため、answer が独自の SSRC を持つこと (送信可能であること) を前提にする。
+                assert!(
+                    answer_sdp.contains("a=ssrc:"),
+                    "映像を送信する answer には SSRC が必要です"
+                );
+
+                let sender = connection
+                    .video_sender
+                    .as_ref()
+                    .expect("映像を送信する role では video sender が必要です");
+                assert_eq!(
+                    sender.get_parameters().degradation_preference(),
+                    Some(preference),
+                    "video sender の RtpParameters に反映される必要があります: {preference:?}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn degradation_preference_is_not_set_when_unset() {
+            // 未設定の場合は libwebrtc の既定に任せるため、値が設定されない。
+            let (mut offerer, _offer_handle, _offer_source) =
+                build_video_test_connection(Role::SendOnly, None);
+            let offer_sdp = create_local_offer_sdp(&mut offerer).await;
+
+            let (mut connection, _handle, _source) =
+                build_video_test_connection(Role::SendOnly, None);
+            connection
+                .handle_offer(&offer_sdp, &[])
+                .await
+                .expect("offer の処理に失敗しました");
+
+            let sender = connection
+                .video_sender
+                .as_ref()
+                .expect("映像を送信する role では video sender が必要です");
+            assert_eq!(
+                sender.get_parameters().degradation_preference(),
+                None,
+                "未設定時は degradation preference を設定しない必要があります"
+            );
+        }
+
+        #[tokio::test]
+        async fn degradation_preference_is_skipped_without_video_sender() {
+            // recvonly は video sender を持たないため、値を設定してもスキップして接続できる。
+            let (mut offerer, _offer_handle, _offer_source) =
+                build_video_test_connection(Role::SendOnly, None);
+            let offer_sdp = create_local_offer_sdp(&mut offerer).await;
+
+            let (mut connection, _handle, _source) =
+                build_video_test_connection(Role::RecvOnly, Some(DegradationPreference::Balanced));
+            let answer_sdp = connection
+                .handle_offer(&offer_sdp, &[])
+                .await
+                .expect("video sender が無い場合も接続できる必要があります");
+
+            assert!(
+                !answer_sdp.is_empty(),
+                "answer SDP が生成される必要があります"
+            );
+            assert!(
+                connection.video_sender.is_none(),
+                "recvonly では video sender を作らない必要があります"
+            );
+        }
+
+        #[tokio::test]
+        async fn unknown_degradation_preference_is_rejected() {
+            // libwebrtc が解釈できない値は、そのまま渡さずエラーにする。
+            let (mut offerer, _offer_handle, _offer_source) =
+                build_video_test_connection(Role::SendOnly, None);
+            let offer_sdp = create_local_offer_sdp(&mut offerer).await;
+
+            let (mut connection, _handle, _source) = build_video_test_connection(
+                Role::SendOnly,
+                Some(DegradationPreference::Unknown(42)),
+            );
+            let result = connection.handle_offer(&offer_sdp, &[]).await;
+
+            assert!(
+                matches!(result, Err(Error::UnknownDegradationPreference { value }) if value == 42),
+                "未知の degradation preference はエラーになる必要があります: {result:?}"
+            );
+        }
     }
 
     /// callback の呼び出しを記録するテスト用ハンドラ。

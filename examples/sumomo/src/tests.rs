@@ -1,4 +1,5 @@
 use super::*;
+use shiguredo_webrtc::DegradationPreference;
 use sora_sdk::{CodecDirection, Role};
 
 /// fixture MP4 から一時ファイル経由で `Mp4SampleReader` を作る。
@@ -404,6 +405,90 @@ fn parse_args_accepts_libcamera_native_flag() {
         crate::args::parse_args(raw_args).expect("libcamera-native フラグの解析に失敗しました");
     assert!(args.use_libcamera);
     assert!(args.use_libcamera_native);
+}
+
+#[test]
+fn parse_args_accepts_degradation_preference() {
+    // CLI の文字列が DegradationPreference の variant へ対応することを確認する。
+    for (value, expected) in [
+        (
+            "maintain_framerate_and_resolution",
+            DegradationPreference::MaintainFramerateAndResolution,
+        ),
+        (
+            "maintain_framerate",
+            DegradationPreference::MaintainFramerate,
+        ),
+        (
+            "maintain_resolution",
+            DegradationPreference::MaintainResolution,
+        ),
+        ("balanced", DegradationPreference::Balanced),
+    ] {
+        let raw_args = make_raw_args(&[
+            "sumomo",
+            "--signaling-url",
+            "wss://example.com/signaling",
+            "--channel-id",
+            "test-channel",
+            "--role",
+            "sendonly",
+            "--degradation-preference",
+            value,
+        ]);
+        let args =
+            crate::args::parse_args(raw_args).expect("degradation-preference の解析に失敗しました");
+        assert_eq!(
+            args.degradation_preference,
+            Some(expected),
+            "CLI の {value} は {expected:?} に対応するはずです"
+        );
+    }
+}
+
+#[test]
+fn parse_args_rejects_deprecated_degradation_preference() {
+    // libwebrtc の削除予定エイリアス名は受け付けない。
+    let raw_args = make_raw_args(&[
+        "sumomo",
+        "--signaling-url",
+        "wss://example.com/signaling",
+        "--channel-id",
+        "test-channel",
+        "--role",
+        "sendonly",
+        "--degradation-preference",
+        "disabled",
+    ]);
+    assert!(
+        crate::args::parse_args(raw_args).is_err(),
+        "削除予定の disabled は失敗するはずです"
+    );
+}
+
+#[test]
+fn parse_args_rejects_unknown_degradation_preference() {
+    let raw_args = make_raw_args(&[
+        "sumomo",
+        "--signaling-url",
+        "wss://example.com/signaling",
+        "--channel-id",
+        "test-channel",
+        "--role",
+        "sendonly",
+        "--degradation-preference",
+        "unknown",
+    ]);
+    let result = crate::args::parse_args(raw_args);
+    assert!(
+        result.is_err(),
+        "未対応の degradation preference は失敗するはずです"
+    );
+    let err = result.err().expect("エラーは必ず存在するはずです");
+    assert!(
+        err.to_string().contains("degradation-preference は"),
+        "エラーメッセージに指定可能な値が含まれるはずです: {err}"
+    );
 }
 
 #[test]

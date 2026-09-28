@@ -102,7 +102,7 @@ sumomo は [WebRTC Native Client Momo](https://github.com/shiguredo/momo) の so
 | `--turn-tls-insecure` | 未実装 | o | |
 | `--turn-tls-ca-cert` | 未実装 | o | |
 | `--proxy-url` / `--proxy-username` / `--proxy-password` | o | 未実装 | SDK 側は対応済みだが sumomo に未公開 |
-| `--degradation-preference` | o | 未実装 | |
+| `--degradation-preference` | o | o | 品質制御の無効化は C++ SDK が `disabled` / Rust SDK が `maintain_framerate_and_resolution` で指定する |
 | `--cpu-adaptation` | o | 未実装 | |
 
 ## その他

@@ -3,7 +3,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use shiguredo_webrtc::{AudioTrack, FrameTransformerHandler, IceServer, VideoTrack};
+use shiguredo_webrtc::{
+    AudioTrack, DegradationPreference, FrameTransformerHandler, IceServer, VideoTrack,
+};
 use sora_sdk::{
     Audio, ConnectDataChannel, ForwardingFilter, JsonString, ProxyInfo, Result, Role,
     RpcRequestOptions, RpcResponse, SignalingDirection, SignalingType, SoraConnection,
@@ -218,6 +220,11 @@ impl SoraTestConnectionBuilder {
 
     pub fn simulcast_request_rid(mut self, value: String) -> Self {
         self.inner = self.inner.simulcast_request_rid(value);
+        self
+    }
+
+    pub fn degradation_preference(mut self, value: DegradationPreference) -> Self {
+        self.inner = self.inner.degradation_preference(value);
         self
     }
 

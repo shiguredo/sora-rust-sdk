@@ -119,6 +119,7 @@ let context = SoraConnectionContext::new_with_config(config)?;
 
 | メソッド | 引数 | 説明 |
 |----------|------|------|
+| `degradation_preference` | `shiguredo_webrtc::DegradationPreference` | 送信映像の負荷時の品質制御の優先度 (未指定時は libwebrtc の既定) |
 | `client_id` | `String` | クライアント ID |
 | `bundle_id` | `String` | バンドル ID |
 | `metadata` | `JsonString` | 認証用メタデータ |
@@ -606,7 +607,7 @@ if let Some(url) = handle.selected_signaling_url().await? {
 | プロキシ | `ProxyUrlUnsupportedScheme`, `ProxyUrlUserinfoNotSupported`, `ProxyUrlFragmentNotAllowed`, `ProxyUrlMissingHost`, `ProxyUrlPathNotAllowed`, `ProxyUrlQueryNotAllowed`, `ProxyConnectDecode`, `ProxyConnectEncode`, `ProxyConnectResponseMissing`, `ProxyConnectStatusNotSuccessful`, `ProxyConnectTimeout`, `ProxyAuth` |
 | ネットワーク | `DnsResolve`, `NoResolvedAddress`, `TcpConnectTimeout`, `TcpConnect`, `TlsConfig`, `InvalidServerName`, `TlsConnectTimeout`, `TlsConnect`, `Websocket`, `Io`, `ProxyConnectUnexpectedTrailingData` |
 | シグナリング | `SignalingUrlsEmpty`, `AllSignalingUrlsFailed { errors }`, `UnsupportedMessageType`, `JsonParse` |
-| WebRTC | `Webrtc`, `SetRemoteDescriptionTimeout`, `SetRemoteDescriptionResponseMissing`, `SetRemoteDescriptionFailed`, `AnswerTimeout`, `AnswerResponseMissing`, `AnswerFailed`, `SetLocalDescriptionTimeout`, `SetLocalDescriptionResponseMissing`, `SetLocalDescriptionFailed`, `SimulcastVideoSenderMissing`, `SimulcastSetParametersFailed`, `CandidateNotSupported` |
+| WebRTC | `Webrtc`, `SetRemoteDescriptionTimeout`, `SetRemoteDescriptionResponseMissing`, `SetRemoteDescriptionFailed`, `AnswerTimeout`, `AnswerResponseMissing`, `AnswerFailed`, `SetLocalDescriptionTimeout`, `SetLocalDescriptionResponseMissing`, `SetLocalDescriptionFailed`, `SimulcastVideoSenderMissing`, `SimulcastSetParametersFailed`, `DegradationPreferenceSetParametersFailed`, `UnknownDegradationPreference { value }`, `CandidateNotSupported` |
 | DataChannel / RPC | `DataChannelMissing`, `DataChannelSendFailed`, `Utf8DecodeFailed`, `RpcTimeout`, `RpcProtocolViolation { id }`, `InvalidDataChannelLabel`, `Redirected` |
 | TLS 証明書 | `TurnTlsCaCert`, `ClientCertParse`, `ClientKeyParse`, `CaCertParse`, `ClientCertKeyIncomplete` |
 | コーデック | `InvalidVideoCodecCapability`, `InvalidVideoCodecPreference`, `InvalidAudioCodecCapability`, `InvalidAudioCodecPreference` |

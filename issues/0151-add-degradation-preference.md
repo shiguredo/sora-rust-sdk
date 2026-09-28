@@ -23,8 +23,8 @@ Sora C++ SDK は接続時に映像の DegradationPreference （負荷時の映�
 - 適用条件は「ビルダーに値が設定済み」かつ「`video_sender` が存在する」場合のみとする。`recvonly` や送信映像なし、未設定の場合はスキップし、エラーにしない
 - 初回 offer と re-offer を区別せず、`handle_offer` が呼ばれるたびに同じ条件で再適用する。`SetParameters` 失敗時の扱いは `apply_simulcast_encodings` に準じる
 - シグナリングメッセージ (`OutgoingMessage::Connect`) には含めないクライアント側設定とする
-- `examples/sumomo` に `--degradation-preference` オプションを追加する。CLI 文字列と variant の対応は次のとおりとし、`Unknown` は CLI から指定できない
-  - `disabled` → `MaintainFramerateAndResolution`
+- `examples/sumomo` に `--degradation-preference` オプションを追加する。CLI 文字列と variant の対応は次のとおりとし、`Unknown` は CLI から指定できない。CLI 文字列は `shiguredo_webrtc` の variant 名に揃え、libwebrtc の削除予定エイリアス (`DISABLED`) に対応する `disabled` は受け付けない
+  - `maintain_framerate_and_resolution` → `MaintainFramerateAndResolution`
   - `maintain_framerate` → `MaintainFramerate`
   - `maintain_resolution` → `MaintainResolution`
   - `balanced` → `Balanced`

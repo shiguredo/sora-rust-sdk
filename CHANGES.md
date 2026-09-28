@@ -48,6 +48,11 @@
   - `--input-mp4` で H.264 を送るとき、avcC 由来の `profile_level_id` を connect に載せる
   - Sora offer と bitstream の不一致による reject を防ぐ
   - @voluntas
+- [ADD] `SoraConnectionBuilder` に `degradation_preference` を追加する
+  - `shiguredo_webrtc::DegradationPreference` で送信映像の負荷時の品質制御の優先度を指定できる
+  - ネゴシエーションのたびに video sender の RTP パラメータへ反映する。映像を送信しない role では設定しない
+  - sumomo に `--degradation-preference` を追加する (`maintain_framerate_and_resolution` / `maintain_framerate` / `maintain_resolution` / `balanced`)
+  - @melpon
 - [UPDATE] shiguredo_webrtc を 0.152.1-canary.2 から 0.154.0 に更新する
   - libwebrtc を m152 から m154 に更新する
   - 固定 libwebrtc の AV1 / H.264 source audit を m154 の commit で再検証する

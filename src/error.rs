@@ -164,6 +164,19 @@ pub enum Error {
         /// 発生した WebRTC エラー。
         source: shiguredo_webrtc::Error,
     },
+    /// degradation preference の SetParameters が失敗した。内部エラーとして [`shiguredo_webrtc::Error`] を保持する。
+    ///
+    /// 初回ネゴシエーションでは video sender が値を保持して SetParameters が成功するため、
+    /// media channel への適用の失敗はこのエラーでは検出できない。
+    DegradationPreferenceSetParametersFailed {
+        /// 発生した WebRTC エラー。
+        source: shiguredo_webrtc::Error,
+    },
+    /// libwebrtc が解釈できない degradation preference が指定された。
+    UnknownDegradationPreference {
+        /// 指定された未知の値。
+        value: i32,
+    },
     /// 指定されたラベルの DataChannel が存在しない。
     DataChannelMissing {
         /// 見つからなかった DataChannel のラベル名。
@@ -448,6 +461,15 @@ impl std::fmt::Display for Error {
             Error::SimulcastSetParametersFailed { source } => {
                 write!(f, "simulcast の SetParameters が失敗しました: {source}")
             }
+            Error::DegradationPreferenceSetParametersFailed { source } => {
+                write!(
+                    f,
+                    "degradation preference の SetParameters が失敗しました: {source}"
+                )
+            }
+            Error::UnknownDegradationPreference { value } => {
+                write!(f, "不明な degradation preference です: {value}")
+            }
             Error::DataChannelMissing { label } => {
                 write!(f, "DataChannel がありません: {label}")
             }
@@ -576,6 +598,7 @@ impl std::error::Error for Error {
             #[cfg(all(feature = "vpl", target_os = "linux"))]
             Error::Vpl { source } => Some(source),
             Error::SimulcastSetParametersFailed { source } => Some(source),
+            Error::DegradationPreferenceSetParametersFailed { source } => Some(source),
             Error::Utf8DecodeFailed(err) => Some(err),
             Error::CommandResponseMissing { source, .. } => Some(source),
             #[cfg(feature = "v4l2")]
