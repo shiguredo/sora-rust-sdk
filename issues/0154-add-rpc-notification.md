@@ -1,7 +1,7 @@
 # 受信用 RPC 通知を追加する
 
 - Created: 2026-09-04
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-28
 - Branch: feature/add-rpc-notification
 - Polished: {YYYY-MM-DD}
 
@@ -36,3 +36,16 @@
 - `src/connection.rs` (`rpc` ラベル分岐の中継処理の追加)
 - `docs/SORA_CPP_SDK.md` (RPC 表の更新)
 - `CHANGES.md`
+
+## 解決方法
+
+Sora の RPC 機能の一次資料を確認した結果、本 issue が前提とする「サーバー起点の RPC 到達 (要求や通知)」は Sora の仕様に存在しないため、対応不要として closed にする。
+
+- Sora ドキュメントの RPC 機能は、JSON-RPC 2.0 over DataChannel で一部の HTTP API を「クライアントから直接呼び出す」機能と定義している。型定義とシーケンス図もクライアントからの Request と Sora からの Success / Error Response のみで構成され、Notification の説明も「Sora 側がレスポンスを返さない」である。develop 版ドキュメントと、RPC 機能を追加した Sora 2025.2.0 のリリースノートも同じ内容である
+- `rpc` ラベルに届く正当なメッセージは `SoraConnectionHandle::send_rpc_request` が送ったリクエストへの応答だけである。`SoraConnection::handle_data_channel_message` の `rpc` ラベル分岐が `RpcResponse::parse` の結果を `pending_rpc_responses` と突き合わせて呼び出し元へ返しており、受信用のコールバックを追加しても中継するメッセージが存在しない
+- 突き合わせできない到達として残るのは、未知の id、信頼できる id がない応答、UTF-8 / JSON 構文エラー、相関できない protocol violation、timeout 後の遅延応答であり、いずれも要求や通知ではない
+- 他の SDK も同じ前提である。iOS SDK は受信した request / notification を「SDK から request / notification を送り、response を Sora から受け取る一方通行の通信が前提」であるため処理せずエラーにする。C++ SDK の `OnRpc` は、JSON-RPC メッセージの組み立てと id の突き合わせをアプリケーションが行う設計で応答をアプリへ渡すコールバックであり、サーバー起点の到達を中継するものではない
+- 仮にサーバー起点の要求が届くようになっても、本 issue の設計では機能しない。JSON-RPC 2.0 の要求には同じ id を持つ応答が必要だが、`send_rpc_request` は `method` が必須で id を SDK が採番し、`send_message` は `rpc` ラベルへの送信を拒否するため、応答を送る手段がない
+- `SoraConnectionEventHandler` へのメソッド追加自体は破壊的変更ではないが、存在しない到達のために公開 API を増やす理由がない
+
+Sora の RPC 機能が双方向になった場合は、受信を中継するコールバックだけでなく、要求へ応答を返す API と実機で検証する手段をセットで検討する。
