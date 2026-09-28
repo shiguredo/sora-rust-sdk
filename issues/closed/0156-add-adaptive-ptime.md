@@ -1,7 +1,7 @@
 # adaptivePtime を SDK オプションで音声トラックに適用する
 
 - Created: 2026-09-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-09-28
 - Branch: feature/add-adaptive-ptime
 - Polished: {YYYY-MM-DD}
 
@@ -53,3 +53,22 @@ adaptivePtime は W3C の `RTCRtpEncodingParameters.adaptivePtime` に対応す�
 
 - 送信ありの role で `adaptive_ptime(true)` を設定した場合に audio sender の `RtpParameters` の encoding に反映され、未設定 / `recvonly` 時は従来どおり接続できることをテストで確認する
 - 実際の libwebrtc の getter API を利用して適用結果を検証する
+
+## 解決方法
+
+- `src/connection.rs`
+  - `SoraConnectionBuilder` に `adaptive_ptime` を追加した。内部では `Option<bool>` で保持し、未設定 (`None`) の場合は何も設定しない
+  - `SoraConnection` に `audio_sender` を追加して `add_sender_tracks` で保持し、`apply_adaptive_ptime` で audio sender の `RtpParameters` の各 encoding に `set_adaptive_ptime` して `SetParameters` する。`shiguredo_webrtc` の `RtpEncodingParametersVector::get_mut` で複製した encodings を直接書き換える
+  - 適用は `handle_offer` の `set_local_description` 成功後に行う。audio sender が encodings を持つのは offer の m 行から作られた transceiver に SSRC が確定した後であり、`create_answer` の前では `GetParameters` が空の encodings を返して設定対象が無いため
+  - audio sender が無い場合 (`recvonly`、音声トラック未設定) と encodings が空の場合 (音声を送信していない) は何もせずに成功する
+- `src/signaling_types.rs`
+  - `SimulcastEncodingConfig::adaptive_ptime` と offer の `adaptivePtime` のパースを削除し、`apply_simulcast_encodings` の video sender への適用を削除した
+- `src/error.rs`
+  - `AdaptivePtimeSetParametersFailed` を追加した
+- `examples/sumomo/src/args.rs` / `examples/sumomo/src/main.rs` / `examples/sumomo/src/tests.rs`
+  - `--adaptive-ptime` (`true` / `false`) を追加した
+- `src/connection.rs` の `#[cfg(test)]` / `e2e-tests/src/test_connection.rs` / `e2e-tests/tests/adaptive_ptime.rs`
+  - 実 libwebrtc の PeerConnection で offer を生成し、audio sender の encoding へ反映されること、未設定 / `recvonly` / simulcast 適用時に video sender へ設定されないこと、re-offer で再適用されることを単体テストで確認する
+  - 実 Sora へ接続し、adaptive ptime を有効にしても音声の送信が継続することと、`recvonly` ではスキップされて接続できることを E2E テストで確認する
+- `docs/SORA_CPP_SDK.md` / `docs/SUMOMO.md` / `skills/sora-rust-sdk/SKILL.md` の機能対応表とエラー一覧、`CHANGES.md` の `## develop` を更新した
+- `shiguredo_webrtc` を 0.154.1-canary.2 に更新した (`RtpEncodingParametersVector::get_mut` の追加に追随)

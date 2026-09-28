@@ -423,6 +423,9 @@ fn build_connection_builder(
     if let Some(degradation_preference) = args.degradation_preference {
         builder = builder.degradation_preference(degradation_preference);
     }
+    if let Some(adaptive_ptime) = args.adaptive_ptime {
+        builder = builder.adaptive_ptime(adaptive_ptime);
+    }
     builder = builder.insecure(args.insecure);
     if let (Some(cert), Some(key)) = (args.client_cert.clone(), args.client_key.clone()) {
         builder = builder.client_cert(cert, key);

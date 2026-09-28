@@ -53,6 +53,11 @@
   - ネゴシエーションのたびに video sender の RTP パラメータへ反映する。映像を送信しない role では設定しない
   - sumomo に `--degradation-preference` を追加する (`maintain_framerate_and_resolution` / `maintain_framerate` / `maintain_resolution` / `balanced`)
   - @melpon
+- [ADD] `SoraConnectionBuilder` に `adaptive_ptime` を追加する
+  - 音声の適応的パケット化時間 (adaptivePtime) を指定できる
+  - ネゴシエーションのたびに audio sender の RTP パラメータへ反映する。音声を送信しない role では設定しない
+  - sumomo に `--adaptive-ptime` を追加する (true / false)
+  - @melpon
 - [UPDATE] shiguredo_webrtc を 0.152.1-canary.2 から 0.154.0 に更新する
   - libwebrtc を m152 から m154 に更新する
   - 固定 libwebrtc の AV1 / H.264 source audit を m154 の commit で再検証する
@@ -65,6 +70,9 @@
   - `AudioDeviceModuleHandler` が `&mut self` と `AudioTransportPtr` を受け取るようになったことに追随する
   - @melpon
 - [UPDATE] shiguredo_webrtc を 0.154.1-canary.0 から 0.154.1-canary.1 に更新する
+  - @melpon
+- [UPDATE] shiguredo_webrtc を 0.154.1-canary.1 から 0.154.1-canary.2 に更新する
+  - `RtpEncodingParametersVector::get_mut` が追加されたことに追随する
   - @melpon
 - [FIX] MP4 パススルーで encode 前に sample が欠落した場合、後続の delta sample を送信しないようにする
   - capturer は再生順を示す `playback_serial` を付与し、encoder は値の不連続を検出した場合、次のキーフレームまで待つ
