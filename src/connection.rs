@@ -85,6 +85,8 @@ pub struct SoraConnectionBuilder {
     receiver_video_transform: Option<Box<dyn FrameTransformerHandler + Send>>,
     /// 送信映像の負荷時の品質制御の優先度。
     degradation_preference: Option<DegradationPreference>,
+    /// 送信音声の適応的パケット化時間 (adaptivePtime)。
+    adaptive_ptime: Option<bool>,
 
     // connect 時の設定
     client_id: Option<String>,
@@ -133,6 +135,7 @@ impl SoraConnectionBuilder {
             sender_video_transform: None,
             receiver_video_transform: None,
             degradation_preference: None,
+            adaptive_ptime: None,
             client_id: None,
             bundle_id: None,
             metadata: None,
@@ -218,6 +221,15 @@ impl SoraConnectionBuilder {
     /// ネゴシエーション時に [Error::UnknownDegradationPreference] を返す。
     pub fn degradation_preference(mut self, value: DegradationPreference) -> Self {
         self.degradation_preference = Some(value);
+        self
+    }
+
+    /// 送信する音声の適応的パケット化時間 (adaptivePtime) を設定する。
+    ///
+    /// true にすると、音声のパケット化時間がネットワークの状況に応じて変化する。
+    /// 指定しない場合は libwebrtc の既定に任せる。
+    pub fn adaptive_ptime(mut self, value: bool) -> Self {
+        self.adaptive_ptime = Some(value);
         self
     }
 
@@ -630,6 +642,7 @@ pub struct SoraConnection {
     offer_simulcast: bool,
     simulcast_encodings: Vec<SimulcastEncodingConfig>,
     video_sender: Option<RtpSender>,
+    audio_sender: Option<RtpSender>,
     sender_video_frame_transformer: Option<FrameTransformer>,
     receiver_video_frame_transformer: Option<FrameTransformer>,
     command_rx: mpsc::UnboundedReceiver<SoraConnectionCommand>,
@@ -894,6 +907,7 @@ impl SoraConnection {
             offer_simulcast: false,
             simulcast_encodings: Vec::new(),
             video_sender: None,
+            audio_sender: None,
             sender_video_frame_transformer: None,
             receiver_video_frame_transformer: None,
             command_rx,
@@ -1660,7 +1674,7 @@ impl SoraConnection {
         }
         if let Some(track) = self.config.sender_audio_track.take() {
             let media_track = track.cast_to_media_stream_track();
-            let _ = self.add_sender_media_track(&media_track)?;
+            self.audio_sender = Some(self.add_sender_media_track(&media_track)?);
         }
         Ok(())
     }
@@ -1695,9 +1709,6 @@ impl SoraConnection {
             encoding.set_max_framerate(cfg.max_framerate);
             if let Some(active) = cfg.active {
                 encoding.set_active(active);
-            }
-            if let Some(adaptive_ptime) = cfg.adaptive_ptime {
-                encoding.set_adaptive_ptime(adaptive_ptime);
             }
             encoding.set_scalability_mode(cfg.scalability_mode.as_deref());
             if let Some(v) = &cfg.scale_resolution_down_to {
@@ -1737,6 +1748,42 @@ impl SoraConnection {
         sender
             .set_parameters(&parameters)
             .map_err(|source| Error::DegradationPreferenceSetParametersFailed { source })?;
+        Ok(())
+    }
+
+    /// audio sender の RTP パラメータに adaptive ptime を反映する。
+    ///
+    /// adaptive ptime は音声の voice engine だけが参照するため、video sender には設定しない。
+    fn apply_adaptive_ptime(&mut self) -> Result<()> {
+        let Some(adaptive_ptime) = self.config.adaptive_ptime else {
+            return Ok(());
+        };
+
+        let Some(sender) = self.audio_sender.as_mut() else {
+            return Ok(());
+        };
+
+        let mut parameters = sender.get_parameters();
+        // encodings() はベクタの複製を返すため、書き換えた結果を set_encodings で戻す。
+        let mut encodings = parameters.encodings();
+        if encodings.is_empty() {
+            // audio sender の encodings はローカル description を適用して SSRC が確定するまで空になっている
+            // この場合はこの接続で音声を送信していないため、設定できる対象が無いものとして接続を継続する。
+            return Ok(());
+        }
+
+        for i in 0..encodings.len() {
+            // index は encodings の長さの範囲内であるため、必ず取得できる。
+            let mut encoding = encodings
+                .get_mut(i)
+                .expect("index must be within encodings length");
+            encoding.set_adaptive_ptime(adaptive_ptime);
+        }
+
+        parameters.set_encodings(&encodings);
+        sender
+            .set_parameters(&parameters)
+            .map_err(|source| Error::AdaptivePtimeSetParametersFailed { source })?;
         Ok(())
     }
 
@@ -1892,6 +1939,8 @@ impl SoraConnection {
         if let Some(err) = loc_res {
             return Err(Error::SetLocalDescriptionFailed { reason: err });
         }
+
+        self.apply_adaptive_ptime()?;
 
         Ok(answer_sdp)
     }
@@ -4513,6 +4562,44 @@ mod tests {
         .expect("SoraConnection の生成に失敗しました")
     }
 
+    /// 送信トラックを追加した接続で offer SDP を生成するテスト用ヘルパー。
+    ///
+    /// offer に音声・映像の m 行を含めるために sender を先に用意する。
+    async fn create_local_offer_sdp(connection: &mut SoraConnection) -> String {
+        connection
+            .add_sender_tracks()
+            .expect("送信トラックの追加に失敗しました");
+
+        // offer の生成可否だけを扱うため、crate::error::Result ではなく
+        // 失敗理由を String で運ぶ。
+        struct OfferObsHandler {
+            tx: mpsc::UnboundedSender<std::result::Result<String, String>>,
+        }
+
+        impl CreateSessionDescriptionObserverHandler for OfferObsHandler {
+            fn on_success(&mut self, desc: SessionDescription) {
+                let _ = self.tx.send(desc.to_string().map_err(|e| e.to_string()));
+            }
+
+            fn on_failure(&mut self, error: RtcError) {
+                let reason = error.message().unwrap_or_else(|_| "unknown".to_string());
+                let _ = self.tx.send(Err(reason));
+            }
+        }
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<std::result::Result<String, String>>();
+        let mut observer =
+            CreateSessionDescriptionObserver::new_with_handler(Box::new(OfferObsHandler { tx }));
+        let options = PeerConnectionOfferAnswerOptions::new();
+        connection.pc.create_offer(&mut observer, &options);
+
+        let result = tokio::time::timeout(SDP_OPERATION_TIMEOUT, rx.recv())
+            .await
+            .expect("offer の生成がタイムアウトしました")
+            .expect("offer の生成結果を受信できませんでした");
+        result.expect("offer の生成に失敗しました")
+    }
+
     /// degradation preference の反映に関するテスト。
     ///
     /// 実サーバーを必要としないため、実 libwebrtc の PeerConnection で offer を生成し、
@@ -4521,7 +4608,7 @@ mod tests {
         use shiguredo_webrtc::AdaptedVideoTrackSource;
 
         use super::super::*;
-        use super::RecordingHandler;
+        use super::{RecordingHandler, create_local_offer_sdp};
 
         /// 実映像トラックを設定した接続を構築するテスト用ヘルパー。
         ///
@@ -4559,46 +4646,6 @@ mod tests {
                 .build()
                 .expect("SoraConnection の生成に失敗しました");
             (connection, handle, source)
-        }
-
-        /// 送信トラックを追加した接続で offer SDP を生成するテスト用ヘルパー。
-        ///
-        /// offer に映像の m 行を含めるために sender を先に用意する。
-        async fn create_local_offer_sdp(connection: &mut SoraConnection) -> String {
-            connection
-                .add_sender_tracks()
-                .expect("送信トラックの追加に失敗しました");
-
-            // offer の生成可否だけを扱うため、crate::error::Result ではなく
-            // 失敗理由を String で運ぶ。
-            struct OfferObsHandler {
-                tx: mpsc::UnboundedSender<std::result::Result<String, String>>,
-            }
-
-            impl CreateSessionDescriptionObserverHandler for OfferObsHandler {
-                fn on_success(&mut self, desc: SessionDescription) {
-                    let _ = self.tx.send(desc.to_string().map_err(|e| e.to_string()));
-                }
-
-                fn on_failure(&mut self, error: RtcError) {
-                    let reason = error.message().unwrap_or_else(|_| "unknown".to_string());
-                    let _ = self.tx.send(Err(reason));
-                }
-            }
-
-            let (tx, mut rx) = mpsc::unbounded_channel::<std::result::Result<String, String>>();
-            let mut observer =
-                CreateSessionDescriptionObserver::new_with_handler(Box::new(OfferObsHandler {
-                    tx,
-                }));
-            let options = PeerConnectionOfferAnswerOptions::new();
-            connection.pc.create_offer(&mut observer, &options);
-
-            let result = tokio::time::timeout(SDP_OPERATION_TIMEOUT, rx.recv())
-                .await
-                .expect("offer の生成がタイムアウトしました")
-                .expect("offer の生成結果を受信できませんでした");
-            result.expect("offer の生成に失敗しました")
         }
 
         #[tokio::test]
@@ -4706,6 +4753,322 @@ mod tests {
             assert!(
                 matches!(result, Err(Error::UnknownDegradationPreference { value }) if value == 42),
                 "未知の degradation preference はエラーになる必要があります: {result:?}"
+            );
+        }
+    }
+
+    /// adaptive ptime の反映に関するテスト。
+    ///
+    /// 実サーバーを必要としないため、実 libwebrtc の PeerConnection で offer を生成し、
+    /// それを handle_offer へ渡すことでネゴシエーションまでを検証する。
+    mod adaptive_ptime {
+        use shiguredo_webrtc::{AdaptedVideoTrackSource, AudioTrackSource};
+
+        use super::super::*;
+        use super::{RecordingHandler, create_local_offer_sdp};
+
+        /// テスト用の接続が送信に使うトラックの供給元。
+        ///
+        /// 供給元を破棄するとトラックが機能しなくなるため、接続と一緒に保持する。
+        struct TrackSources {
+            _audio: AudioTrackSource,
+            _video: Option<AdaptedVideoTrackSource>,
+        }
+
+        /// 実音声トラック (と必要なら実映像トラック) を設定した接続を構築するテスト用ヘルパー。
+        ///
+        /// トラックを送信するかどうかは role に従うため、送信しない role では使われない。
+        fn build_test_connection(
+            role: Role,
+            adaptive_ptime: Option<bool>,
+            with_video: bool,
+        ) -> (SoraConnection, SoraConnectionHandle, TrackSources) {
+            let context =
+                SoraConnectionContext::new().expect("SoraConnectionContext の作成に失敗しました");
+            let audio_source = context
+                .create_audio_source()
+                .expect("音声ソースの作成に失敗しました");
+            let audio_track = context
+                .create_audio_track(&audio_source)
+                .expect("音声トラックの作成に失敗しました");
+            let video_source = with_video.then(AdaptedVideoTrackSource::new);
+            let video_track = video_source.as_ref().map(|source| {
+                context
+                    .create_video_track(&source.cast_to_video_track_source())
+                    .expect("映像トラックの作成に失敗しました")
+            });
+
+            let mut builder = SoraConnection::builder(
+                context,
+                vec!["wss://example.com/signaling".to_string()],
+                "test-channel".to_string(),
+                role,
+                RecordingHandler::default(),
+            )
+            .sender_audio_track(audio_track);
+            if let Some(track) = video_track {
+                builder = builder.sender_video_track(track);
+            }
+            if let Some(adaptive_ptime) = adaptive_ptime {
+                builder = builder.adaptive_ptime(adaptive_ptime);
+            }
+
+            let (connection, handle) = builder
+                .build()
+                .expect("SoraConnection の生成に失敗しました");
+            (
+                connection,
+                handle,
+                TrackSources {
+                    _audio: audio_source,
+                    _video: video_source,
+                },
+            )
+        }
+
+        /// sender の先頭の encoding の adaptive ptime を返すテスト用ヘルパー。
+        ///
+        /// 音声と、simulcast を適用しない映像の encoding は 1 つだけなので、先頭だけを検証する。
+        fn first_encoding_adaptive_ptime(sender: &RtpSender) -> bool {
+            let parameters = sender.get_parameters();
+            let encodings = parameters.encodings();
+            let encoding = encodings.get(0).expect("sender には encoding が必要です");
+            encoding.adaptive_ptime()
+        }
+
+        #[tokio::test]
+        async fn adaptive_ptime_is_applied_to_audio_sender() {
+            // 送信ありの role では、指定した値が audio sender の RTP パラメータへ反映される。
+            let (mut offerer, _offer_handle, _offer_sources) =
+                build_test_connection(Role::SendOnly, None, false);
+            let offer_sdp = create_local_offer_sdp(&mut offerer).await;
+
+            for adaptive_ptime in [true, false] {
+                let (mut connection, _handle, _sources) =
+                    build_test_connection(Role::SendOnly, Some(adaptive_ptime), false);
+                let answer_sdp = connection
+                    .handle_offer(&offer_sdp, &[])
+                    .await
+                    .expect("offer の処理に失敗しました");
+
+                // answer の音声 m 行が送信可能でないと、設定した値は sender 内に保持されるだけで
+                // media channel へは適用されない。値が適用された状態から読み出せることを
+                // 確認するため、answer が独自の SSRC を持つこと (送信可能であること) を前提にする。
+                assert!(
+                    answer_sdp.contains("a=ssrc:"),
+                    "音声を送信する answer には SSRC が必要です"
+                );
+
+                let sender = connection
+                    .audio_sender
+                    .as_ref()
+                    .expect("音声を送信する role では audio sender が必要です");
+                assert_eq!(
+                    first_encoding_adaptive_ptime(sender),
+                    adaptive_ptime,
+                    "audio sender の RtpParameters に反映される必要があります"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn adaptive_ptime_is_not_set_when_unset() {
+            // 未設定の場合は libwebrtc の既定に任せるため、値が設定されない。
+            let (mut offerer, _offer_handle, _offer_sources) =
+                build_test_connection(Role::SendOnly, None, false);
+            let offer_sdp = create_local_offer_sdp(&mut offerer).await;
+
+            let (mut connection, _handle, _sources) =
+                build_test_connection(Role::SendOnly, None, false);
+            connection
+                .handle_offer(&offer_sdp, &[])
+                .await
+                .expect("offer の処理に失敗しました");
+
+            let sender = connection
+                .audio_sender
+                .as_ref()
+                .expect("音声を送信する role では audio sender が必要です");
+            assert!(
+                !first_encoding_adaptive_ptime(sender),
+                "未設定時は adaptive ptime を設定しない必要があります"
+            );
+        }
+
+        #[tokio::test]
+        async fn adaptive_ptime_is_skipped_without_audio_sender() {
+            // recvonly は audio sender を持たないため、値を設定してもスキップして接続できる。
+            let (mut offerer, _offer_handle, _offer_sources) =
+                build_test_connection(Role::SendOnly, None, false);
+            let offer_sdp = create_local_offer_sdp(&mut offerer).await;
+
+            let (mut connection, _handle, _sources) =
+                build_test_connection(Role::RecvOnly, Some(true), false);
+            let answer_sdp = connection
+                .handle_offer(&offer_sdp, &[])
+                .await
+                .expect("audio sender が無い場合も接続できる必要があります");
+
+            assert!(
+                !answer_sdp.is_empty(),
+                "answer SDP が生成される必要があります"
+            );
+            assert!(
+                connection.audio_sender.is_none(),
+                "recvonly では audio sender を作らない必要があります"
+            );
+        }
+
+        /// offer SDP の映像 m 行に simulcast の rid を追加するテスト用ヘルパー。
+        ///
+        /// 映像の送信を求める offer では、Sora が `a=rid` と `a=simulcast:recv` を含める。
+        fn add_simulcast_rids_to_offer(sdp: &str, rids: &[&str]) -> String {
+            let mut lines = Vec::new();
+            for line in sdp.lines() {
+                lines.push(line.to_string());
+                if line.starts_with("m=video ") {
+                    for rid in rids {
+                        lines.push(format!("a=rid:{rid} recv"));
+                    }
+                    lines.push(format!("a=simulcast:recv {}", rids.join(";")));
+                }
+            }
+            lines.join("\r\n") + "\r\n"
+        }
+
+        /// offer の `encodings` に対応する simulcast の設定を組み立てるテスト用ヘルパー。
+        fn simulcast_encodings(rids: &[&str]) -> Vec<SimulcastEncodingConfig> {
+            rids.iter()
+                .map(|rid| SimulcastEncodingConfig {
+                    rid: (*rid).to_string(),
+                    max_bitrate: None,
+                    min_bitrate: None,
+                    scale_resolution_down_by: None,
+                    max_framerate: None,
+                    active: None,
+                    scalability_mode: None,
+                    scale_resolution_down_to: None,
+                })
+                .collect()
+        }
+
+        #[tokio::test]
+        async fn adaptive_ptime_is_not_applied_to_simulcast_video_encodings() {
+            // 送信する映像に simulcast の encoding を適用する場合も、adaptive ptime は設定しない。
+            // adaptive ptime を参照するのは音声の voice engine だけであり、
+            // video sender へ設定しても実効しない。
+            let (mut offerer, _offer_handle, _offer_sources) =
+                build_test_connection(Role::SendOnly, None, true);
+            let offer_sdp = create_local_offer_sdp(&mut offerer).await;
+            let offer_sdp = add_simulcast_rids_to_offer(&offer_sdp, &["r0", "r1"]);
+
+            let (mut connection, _handle, _sources) =
+                build_test_connection(Role::SendRecv, Some(true), true);
+            connection.offer_simulcast = true;
+            connection.simulcast_encodings = simulcast_encodings(&["r0", "r1"]);
+            let answer_sdp = connection
+                .handle_offer(&offer_sdp, &[])
+                .await
+                .expect("offer の処理に失敗しました");
+
+            // simulcast の encoding が video sender に適用されていることを前提にする。
+            assert!(
+                answer_sdp.contains("a=simulcast:send r0;r1"),
+                "video sender の encoding が answer に反映される必要があります"
+            );
+
+            let video_sender = connection
+                .video_sender
+                .as_ref()
+                .expect("映像を送信する role では video sender が必要です");
+            let parameters = video_sender.get_parameters();
+            let encodings = parameters.encodings();
+            assert_eq!(
+                encodings.len(),
+                2,
+                "simulcast の encoding が video sender に適用される必要があります"
+            );
+            for i in 0..encodings.len() {
+                let encoding = encodings
+                    .get(i)
+                    .expect("index は encoding の長さの範囲内である必要があります");
+                assert!(
+                    !encoding.adaptive_ptime(),
+                    "video sender の encoding {i} には adaptive ptime を設定しない必要があります"
+                );
+            }
+
+            let audio_sender = connection
+                .audio_sender
+                .as_ref()
+                .expect("音声を送信する role では audio sender が必要です");
+            assert!(
+                first_encoding_adaptive_ptime(audio_sender),
+                "audio sender には adaptive ptime を設定する必要があります"
+            );
+        }
+
+        #[tokio::test]
+        async fn adaptive_ptime_is_reapplied_on_reoffer() {
+            // re-offer でも初回と同じ条件で再適用し、適用済みの値が維持される。
+            let (mut first_offerer, _first_handle, _first_sources) =
+                build_test_connection(Role::SendOnly, None, false);
+            let first_offer_sdp = create_local_offer_sdp(&mut first_offerer).await;
+            let (mut second_offerer, _second_handle, _second_sources) =
+                build_test_connection(Role::SendOnly, None, false);
+            let second_offer_sdp = create_local_offer_sdp(&mut second_offerer).await;
+
+            let (mut connection, _handle, _sources) =
+                build_test_connection(Role::SendOnly, Some(true), false);
+            connection
+                .handle_offer(&first_offer_sdp, &[])
+                .await
+                .expect("offer の処理に失敗しました");
+            connection
+                .handle_offer(&second_offer_sdp, &[])
+                .await
+                .expect("re-offer の処理に失敗しました");
+
+            let sender = connection
+                .audio_sender
+                .as_ref()
+                .expect("音声を送信する role では audio sender が必要です");
+            assert!(
+                first_encoding_adaptive_ptime(sender),
+                "re-offer 後も adaptive ptime が設定されている必要があります"
+            );
+        }
+
+        #[tokio::test]
+        async fn adaptive_ptime_is_not_applied_to_video_sender() {
+            // adaptive ptime は音声の voice engine だけが参照するため、映像には設定しない。
+            let (mut offerer, _offer_handle, _offer_sources) =
+                build_test_connection(Role::SendOnly, None, true);
+            let offer_sdp = create_local_offer_sdp(&mut offerer).await;
+
+            let (mut connection, _handle, _sources) =
+                build_test_connection(Role::SendRecv, Some(true), true);
+            connection
+                .handle_offer(&offer_sdp, &[])
+                .await
+                .expect("offer の処理に失敗しました");
+
+            let audio_sender = connection
+                .audio_sender
+                .as_ref()
+                .expect("音声を送信する role では audio sender が必要です");
+            assert!(
+                first_encoding_adaptive_ptime(audio_sender),
+                "audio sender には adaptive ptime を設定する必要があります"
+            );
+
+            let video_sender = connection
+                .video_sender
+                .as_ref()
+                .expect("映像を送信する role では video sender が必要です");
+            assert!(
+                !first_encoding_adaptive_ptime(video_sender),
+                "video sender には adaptive ptime を設定しない必要があります"
             );
         }
     }

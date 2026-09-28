@@ -228,6 +228,11 @@ impl SoraTestConnectionBuilder {
         self
     }
 
+    pub fn adaptive_ptime(mut self, value: bool) -> Self {
+        self.inner = self.inner.adaptive_ptime(value);
+        self
+    }
+
     pub fn spotlight(mut self, value: bool) -> Self {
         self.inner = self.inner.spotlight(value);
         self

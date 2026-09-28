@@ -174,6 +174,11 @@ pub enum Error {
         /// 指定された未知の値。
         value: i32,
     },
+    /// adaptive ptime の SetParameters が失敗した。内部エラーとして [`shiguredo_webrtc::Error`] を保持する。
+    AdaptivePtimeSetParametersFailed {
+        /// 発生した WebRTC エラー。
+        source: shiguredo_webrtc::Error,
+    },
     /// 指定されたラベルの DataChannel が存在しない。
     DataChannelMissing {
         /// 見つからなかった DataChannel のラベル名。
@@ -467,6 +472,12 @@ impl std::fmt::Display for Error {
             Error::UnknownDegradationPreference { value } => {
                 write!(f, "不明な degradation preference です: {value}")
             }
+            Error::AdaptivePtimeSetParametersFailed { source } => {
+                write!(
+                    f,
+                    "adaptive ptime の SetParameters が失敗しました: {source}"
+                )
+            }
             Error::DataChannelMissing { label } => {
                 write!(f, "DataChannel がありません: {label}")
             }
@@ -596,6 +607,7 @@ impl std::error::Error for Error {
             Error::Vpl { source } => Some(source),
             Error::SimulcastSetParametersFailed { source } => Some(source),
             Error::DegradationPreferenceSetParametersFailed { source } => Some(source),
+            Error::AdaptivePtimeSetParametersFailed { source } => Some(source),
             Error::Utf8DecodeFailed(err) => Some(err),
             Error::CommandResponseMissing { source, .. } => Some(source),
             #[cfg(feature = "v4l2")]

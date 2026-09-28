@@ -37,7 +37,6 @@ pub(crate) struct SimulcastEncodingConfig {
     pub(crate) scale_resolution_down_by: Option<f64>,
     pub(crate) max_framerate: Option<f64>,
     pub(crate) active: Option<bool>,
-    pub(crate) adaptive_ptime: Option<bool>,
     pub(crate) scalability_mode: Option<String>,
     pub(crate) scale_resolution_down_to: Option<SimulcastScaleResolutionDownToConfig>,
 }
@@ -289,11 +288,6 @@ impl<'text, 'raw> TryFrom<RawJsonValue<'text, 'raw>> for SimulcastEncodingConfig
             .optional()
             .map(|v| v.try_into())
             .transpose()?;
-        let adaptive_ptime = value
-            .to_member("adaptivePtime")?
-            .optional()
-            .map(|v| v.try_into())
-            .transpose()?;
         let scalability_mode = value
             .to_member("scalabilityMode")?
             .optional()
@@ -311,7 +305,6 @@ impl<'text, 'raw> TryFrom<RawJsonValue<'text, 'raw>> for SimulcastEncodingConfig
             scale_resolution_down_by,
             max_framerate,
             active,
-            adaptive_ptime,
             scalability_mode,
             scale_resolution_down_to,
         })
