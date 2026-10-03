@@ -99,6 +99,13 @@
 - [UPDATE] SoraConnectionContext の worker thread に network thread を使う
   - 専用 worker thread の生成を削除し、`PeerConnectionFactoryDependencies::set_worker_thread` に network thread を渡す
   - @melpon
+- [UPDATE] Rust toolchain を 1.94 に固定し、e2e-tests の rust-version を 1.94 にする
+  - e2e-tests が利用する `raden` が MSRV 1.94 を要求するため
+  - 公開クレートの MSRV 1.93 は CI の msrv ジョブで検証する
+  - @voluntas
+- [UPDATE] PBT を proptest から noprop に移行する
+  - `pbt/` の依存と `ParsedProxyInfo` のプロパティテストを noprop の Runner API に置き換える
+  - @voluntas
 
 ## 2026.1.0
 

@@ -6,5 +6,7 @@ rust-version = "1.93"
 publish = false
 
 [dev-dependencies]
-proptest.workspace = true
+# Property-Based Testing フレームワーク
+noprop = "0.2"
+# テスト対象の SDK 本体
 sora_sdk.workspace = true
