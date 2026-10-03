@@ -1,3 +1,7 @@
 [toolchain]
-channel = "stable"
+# 公開クレートの MSRV は Cargo.toml の rust-version (1.93) だが、
+# e2e-tests が利用する raden が 1.94 を要求するため、
+# workspace 全体がビルドできる 1.94 に固定する。
+# MSRV 1.93 は CI の msrv ジョブで検証する。
+channel = "1.94"
 components = ["rustfmt", "clippy"]
