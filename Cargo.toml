@@ -50,8 +50,6 @@ libc = "0.2"
 noflate = "0.1"
 # シグナリングメッセージ等の JSON パース・生成
 nojson = "0.3"
-# Property-Based Testing フレームワーク
-proptest = "1.11"
 # OS 標準のルート証明書ストアによるサーバー証明書検証
 rustls-platform-verifier = "0.7"
 # SDK 全体の非同期処理を支える非同期ランタイム
