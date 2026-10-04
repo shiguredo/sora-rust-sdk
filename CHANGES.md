@@ -74,6 +74,9 @@
 - [UPDATE] shiguredo_webrtc を 0.154.1-canary.1 から 0.154.1-canary.2 に更新する
   - `RtpEncodingParametersVector::get_mut` が追加されたことに追随する
   - @melpon
+- [UPDATE] shiguredo_webrtc を 0.154.1-canary.2 から 0.154.1-canary.3 に更新する
+  - libwebrtc を m154.8037.1.2 から m154.8037.3.0 に更新する
+  - @voluntas
 - [FIX] MP4 パススルーで encode 前に sample が欠落した場合、後続の delta sample を送信しないようにする
   - capturer は再生順を示す `playback_serial` を付与し、encoder は値の不連続を検出した場合、次のキーフレームまで待つ
   - 再生位置は変更せず、送信再開までの時間は入力 MP4 のキーフレーム間隔に依存する
