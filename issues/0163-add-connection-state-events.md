@@ -1,7 +1,7 @@
 # 接続状態の変化イベントを追加する
 
 - Created: 2026-10-04
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-05
 - Branch: feature/add-connection-state-events
 - Polished: {YYYY-MM-DD}
 
@@ -37,3 +37,14 @@
 - `src/connection_event_handler.rs` の `SoraConnectionEventHandler`
 - `src/connection.rs` の `SoraConnection` (状態遷移の通知)
 - `skills/sora-rust-sdk/SKILL.md` (イベント一覧の更新)
+
+## 解決方法
+
+この issue は扱わないことにした。接続の状態変化を 1 つのイベント API にまとめていたが、観測 (状態変化の通知) と判断 (接続の終了条件と切断理由) を分ける必要があったため、目的ごとに分割して別 issue に移した。
+
+- 接続の確立を表すイベントは追加しない。接続の確立は WebRTC の状態変化から分かる
+- 切断は必ず `run` の終了として観測されるため、切断用のコールバックは追加せず、`run` の戻り値で理由を返す
+- WebRTC の状態変化の通知は別 issue で扱う
+- 接続を終了する条件と切断理由は別 issue で扱う
+
+notify の `event_type` の文字列比較をコアに移す案は採用しない。`event_type` の値は Sora の仕様で固定されているため比較自体が壊れやすいわけではなく、コアに移しても新しい情報は増えない。
