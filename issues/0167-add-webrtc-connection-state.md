@@ -1,7 +1,7 @@
 # WebRTC の接続状態 (PeerConnection / ICE / SignalingState) を通知できるようにする
 
 - Created: 2026-10-04
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-05
 - Branch: feature/add-webrtc-connection-state
 - Polished: {YYYY-MM-DD}
 
@@ -51,3 +51,12 @@ Sora 接続の確立・切断のイベント (別 issue) とは別に、WebRTC �
 - `src/connection.rs` の `PcObserverHandler` (コールバックの実装) と `SoraConnection`
 - shiguredo_webrtc の `PeerConnectionObserverHandler` / C ラッパー (SignalingState の公開。webrtc-rs 側)
 - `skills/sora-rust-sdk/SKILL.md` (イベント一覧の更新)
+
+## 解決方法
+
+この issue は扱わないことにした。WebRTC の状態変化の通知と、その状態に応じた接続の終了を 1 つの issue に混ぜていたため、目的ごとに分割して別 issue に移した。
+
+- WebRTC の状態変化の通知 (PeerConnection / ICE / ICE gathering / SignalingState) は別 issue で扱う
+- 接続確立後に PeerConnection が失敗した場合の接続の終了は別 issue で扱う
+
+SignalingState は webrtc-rs が公開していないため、webrtc-rs の issue を起票して対応する。sora-rust-sdk 側の通知はその対応後になる。
