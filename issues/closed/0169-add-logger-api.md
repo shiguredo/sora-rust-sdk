@@ -1,7 +1,7 @@
 # ロガー API を追加する
 
 - Created: 2026-10-05
-- Completed: 2026-10-05
+- Completed: {YYYY-MM-DD}
 - Branch: feature/add-logger-api
 - Polished: {YYYY-MM-DD}
 
@@ -64,3 +64,15 @@ sora_sdk と libwebrtc のログを利用側から取得できるようにする
 - 「公開 API に shiguredo_webrtc の型は出さない」は現行慣行と異なる。`SoraConnectionEventHandler::on_track` は `shiguredo_webrtc::RtpTransceiver` を直接受けるなど、公開 API に `shiguredo_webrtc` の型が多数出ている。
 
 以上より、この issue が解決を目指していた問題は現行実装ですでに解消可能か、前提が成立しないものであり、対応は不要と判断した。
+
+## reopened にした理由
+
+closed 時の判断は、本 issue が求めるものを取り違えている。実装は行われておらず、問題は解消していない。
+
+closed 時の「解決方法」は `shiguredo_webrtc::log` が既に公開されていること、example と zakuro-rs がそれを直接呼んでいること、各言語 SDK が現状 sora-rust-sdk 経由でログを取っていないことを根拠に、sora_sdk へのロガー API 追加を不要とした。これは下層でできることを、上層の公開 API が不要であることの証拠にしている。
+
+本 issue の目的は、sora_sdk の公開 API としてログレベル指定とログ sink 登録を持つことである。example が `shiguredo_webrtc::log` を直接叩いているのは、その API が無いことの証拠であり、不要であることの証拠ではない。各言語 SDK が今まだ sora-rust-sdk を使っていないことも、このクレート側の API を closed にする理由にならない。issue は各言語への橋渡しを範囲外と既に書いている。
+
+「公開 API に shiguredo_webrtc の型は出さない」が `RtpTransceiver` などの現行漏洩と矛盾する、という補足も、メディアオブジェクトの型漏洩とログ設定のラッパーは別問題であり、本 issue を閉じる根拠にならない。
+
+したがって、目的・完了条件は起票時のまま有効であり、reopened にする。
