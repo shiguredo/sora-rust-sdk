@@ -1182,7 +1182,18 @@ impl SoraConnection {
                             rtc_log_info!("Registered DataChannel '{}'", label);
                             handler.on_data_channel(&label);
                             self.register_data_channel(channel, &event_tx);
-                            self.handle_data_channel_state(&mut *handler, &label, &mut opened_data_channels, &mut use_data_channel_signaling, switched_received);
+                            if matches!(
+                                self.handle_data_channel_state(
+                                    &mut *handler,
+                                    &label,
+                                    &mut opened_data_channels,
+                                    &mut use_data_channel_signaling,
+                                    switched_received,
+                                ),
+                                DataChannelStateResult::Terminate
+                            ) {
+                                break 'run_loop;
+                            }
                         }
                         SoraEvent::RpcTimeout { id } => {
                             if let Some(mut pending) = self.pending_rpc_responses.remove(&id) {
@@ -1190,7 +1201,18 @@ impl SoraConnection {
                             }
                         }
                         SoraEvent::DataChannelStateChange(label) => {
-                            self.handle_data_channel_state(&mut *handler, &label, &mut opened_data_channels, &mut use_data_channel_signaling, switched_received);
+                            if matches!(
+                                self.handle_data_channel_state(
+                                    &mut *handler,
+                                    &label,
+                                    &mut opened_data_channels,
+                                    &mut use_data_channel_signaling,
+                                    switched_received,
+                                ),
+                                DataChannelStateResult::Terminate
+                            ) {
+                                break 'run_loop;
+                            }
                         }
                         // このイベントを受信したら WebSocket メッセージを送信する
                         // 送信時のエラーはログだけ出して無視する
@@ -2009,6 +2031,13 @@ impl SoraConnection {
         }
     }
 
+    /// DataChannel の状態遷移を処理し、接続を終了すべきかを返す。
+    ///
+    /// Open への遷移では `opened_data_channels` に記録して `on_data_channel_open` を通知し、
+    /// 全 DataChannel が Open なら DataChannel シグナリングへ切り替える。
+    /// 開いていた DataChannel が Closed へ遷移した場合は `on_data_channel_close` を通知して
+    /// [DataChannelStateResult::Terminate] を返す。
+    /// それ以外の状態遷移では通知も切り替えも行わず [DataChannelStateResult::Continue] を返す。
     fn handle_data_channel_state(
         &self,
         handler: &mut dyn SoraConnectionEventHandler,
@@ -2016,7 +2045,7 @@ impl SoraConnection {
         opened_data_channels: &mut HashSet<String>,
         use_data_channel_signaling: &mut bool,
         switched_received: bool,
-    ) {
+    ) -> DataChannelStateResult {
         if is_data_channel_open(&self.data_channels, label) && !opened_data_channels.contains(label)
         {
             rtc_log_info!("DataChannel '{}' opened", label);
@@ -2031,8 +2060,15 @@ impl SoraConnection {
             {
                 *use_data_channel_signaling = true;
             }
+            DataChannelStateResult::Continue
         } else if should_notify_close(&self.data_channels, opened_data_channels, label) {
             notify_data_channel_closed(handler, opened_data_channels, label);
+            // 開いていた DataChannel が閉じると、そのラベルを使う機能
+            // (シグナリング・統計・RPC・利用者メッセージ) は復帰できない。
+            // 一部の DataChannel だけが閉じた接続は健全ではないため接続全体を終了する。
+            DataChannelStateResult::Terminate
+        } else {
+            DataChannelStateResult::Continue
         }
     }
 
@@ -2350,6 +2386,15 @@ enum HandleDataChannelMessageResult {
         /// Sora が通知した Close reason。
         reason: String,
     },
+}
+
+/// DataChannel の状態遷移を処理した結果、接続を終了するかどうかを表す。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DataChannelStateResult {
+    /// 接続を継続する。
+    Continue,
+    /// 開いていた DataChannel が閉じたため接続を終了する。
+    Terminate,
 }
 
 /// DataChannel シグナリングへの切替 readiness を判定する pure なヘルパー。
@@ -4294,6 +4339,157 @@ mod tests {
         assert!(
             !should_notify_close(&connection.data_channels, &opened, "#chat"),
             "opened_data_channels に含まれない label は remove してはなりません"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_data_channel_state_terminates_when_signaling_channel_closed() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_compressed_data_channel(&mut connection, "signaling");
+        let mut handler = RecordingHandler::default();
+        let mut opened = opened_labels(&["signaling"]);
+
+        // 接続中に signaling label が Closed になった状況を作る。
+        connection.data_channels["signaling"].channel.close();
+        wait_data_channel_closed(&mut connection, "signaling").await;
+
+        let mut use_data_channel_signaling = false;
+        let result = connection.handle_data_channel_state(
+            &mut handler,
+            "signaling",
+            &mut opened,
+            &mut use_data_channel_signaling,
+            true,
+        );
+
+        // シグナリング経路が閉じたら接続を終了し、close 通知は 1 回だけ行う。
+        assert_eq!(
+            result,
+            DataChannelStateResult::Terminate,
+            "開いていた signaling label が閉じたら接続を終了する必要があります"
+        );
+        assert_eq!(
+            handler.data_channel_close_count, 1,
+            "close 通知は 1 回だけ行う必要があります"
+        );
+        assert_eq!(
+            handler.data_channel_close_labels,
+            vec!["signaling".to_string()],
+            "close 通知の label が一致する必要があります"
+        );
+        assert!(
+            opened.is_empty(),
+            "close 通知後は opened から除去される必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_data_channel_state_terminates_when_user_defined_channel_closed() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_compressed_data_channel(&mut connection, "#chat");
+        let mut handler = RecordingHandler::default();
+        let mut opened = opened_labels(&["#chat"]);
+
+        // 接続中に # プレフィックスの label が Closed になった状況を作る。
+        connection.data_channels["#chat"].channel.close();
+        wait_data_channel_closed(&mut connection, "#chat").await;
+
+        let mut use_data_channel_signaling = false;
+        let result = connection.handle_data_channel_state(
+            &mut handler,
+            "#chat",
+            &mut opened,
+            &mut use_data_channel_signaling,
+            true,
+        );
+
+        // SDK 内部ラベル以外が閉じた場合も接続を終了する。
+        assert_eq!(
+            result,
+            DataChannelStateResult::Terminate,
+            "開いていたユーザー定義 label が閉じたら接続を終了する必要があります"
+        );
+        assert_eq!(
+            handler.data_channel_close_count, 1,
+            "close 通知は 1 回だけ行う必要があります"
+        );
+        assert_eq!(
+            handler.data_channel_close_labels,
+            vec!["#chat".to_string()],
+            "close 通知の label が一致する必要があります"
+        );
+        assert!(
+            opened.is_empty(),
+            "close 通知後は opened から除去される必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_data_channel_state_continues_when_channel_not_closed() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_compressed_data_channel(&mut connection, "signaling");
+        let mut handler = RecordingHandler::default();
+        let mut opened = opened_labels(&["signaling"]);
+
+        // register 直後の DataChannel は Closed ではない
+        // (テスト環境では Connecting) ため、状態遷移を処理しても終了しない。
+        let mut use_data_channel_signaling = false;
+        let result = connection.handle_data_channel_state(
+            &mut handler,
+            "signaling",
+            &mut opened,
+            &mut use_data_channel_signaling,
+            false,
+        );
+
+        assert_eq!(
+            result,
+            DataChannelStateResult::Continue,
+            "Closed 以外の状態では接続を終了してはなりません"
+        );
+        assert_eq!(
+            handler.data_channel_close_count, 0,
+            "Closed 以外の状態では close 通知を行ってはなりません"
+        );
+        assert!(
+            opened.contains("signaling"),
+            "Closed 以外の状態では opened から除去してはなりません"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_data_channel_state_continues_when_closed_label_not_opened() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_compressed_data_channel(&mut connection, "#chat");
+        let mut handler = RecordingHandler::default();
+        // #chat は Open を観測していないため opened には含まれない。
+        let mut opened = opened_labels(&["signaling"]);
+
+        // #chat を Closed にしても、Open を観測していない label は接続終了の対象にしない。
+        connection.data_channels["#chat"].channel.close();
+        wait_data_channel_closed(&mut connection, "#chat").await;
+
+        let mut use_data_channel_signaling = false;
+        let result = connection.handle_data_channel_state(
+            &mut handler,
+            "#chat",
+            &mut opened,
+            &mut use_data_channel_signaling,
+            true,
+        );
+
+        assert_eq!(
+            result,
+            DataChannelStateResult::Continue,
+            "opened に含まれない label が閉じても接続を終了してはなりません"
+        );
+        assert_eq!(
+            handler.data_channel_close_count, 0,
+            "opened に含まれない label では close 通知を行ってはなりません"
+        );
+        assert!(
+            opened.contains("signaling"),
+            "opened に含まれない label の close では既存の opened を変更してはなりません"
         );
     }
 

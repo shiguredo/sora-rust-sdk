@@ -96,6 +96,9 @@
   - sample entry 一貫性検証の比較対象に `avcC` box 全体と抽出後の profile-level-id を含める
   - ISO/IEC 14496-15 に違反するが実在する chroma 拡張欠落の `avcC` は mp4-rs と同様に受理し、再エンコード不能のため `avcc_box` は `None` として扱う
   - @sile
+- [FIX] 接続中に Offer の `data_channels` に含まれる DataChannel が閉じた場合に接続を終了する
+  - `signaling` 以外の内部ラベルと `#` プレフィックスのユーザー定義ラベルも対象にする
+  - @melpon
 
 ### misc
 
