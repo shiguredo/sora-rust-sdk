@@ -1,7 +1,7 @@
 # DataChannel が閉じられたら接続を終了する
 
 - Created: 2026-10-05
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-05
 - Branch: feature/fix-disconnect-on-datachannel-close
 - Polished: {YYYY-MM-DD}
 
@@ -52,3 +52,16 @@ DataChannel シグナリングと `ignore_disconnect_websocket=true` を組み�
 
 - `src/connection.rs` の `SoraConnection::handle_data_channel_state` と `run`
 - `skills/sora-rust-sdk/SKILL.md` (終了条件の記述)
+
+## 解決方法
+
+`SoraConnection::handle_data_channel_state` が `DataChannelStateResult` を返すようにした。
+Offer の `data_channels` に含まれ Open を観測した DataChannel が Closed へ遷移したら `on_data_channel_close` を通知して `Terminate` を返し、`SoraEvent::DataChannelStateChange` と `SoraEvent::DataChannelRegister` の処理で `run` のループを抜けて接続を終了する。
+一部の DataChannel だけが閉じた場合も、そのラベルを使うシグナリング・統計・RPC・利用者メッセージは復帰できないため接続全体を終了する。
+
+クライアント起点の切断・サーバーの `close` メッセージ・redirect はそれぞれの経路が `run` のループを抜けるため、終了処理は二重に走らない。
+`opened_data_channels` からラベルを除去してから通知するため、`on_data_channel_close` の二重通知も起きない。
+終了時の切断理由を型付きで返す対応は別 issue で扱う。
+
+`signaling` が閉じた場合、`#` プレフィックスのユーザー定義ラベルが閉じた場合、`Closed` 以外の状態、Open を観測していないラベルの閉鎖の 4 通りを単体テストで検証した。
+`skills/sora-rust-sdk/SKILL.md` に終了条件を、`CHANGES.md` に変更履歴を追記した。
