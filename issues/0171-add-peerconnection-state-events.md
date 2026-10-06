@@ -1,7 +1,7 @@
 # PeerConnection / ICE / ICE gathering / SignalingState の状態変化をイベントで通知する
 
 - Created: 2026-10-05
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-06
 - Branch: feature/add-peerconnection-state-events
 - Polished: {YYYY-MM-DD}
 
@@ -40,3 +40,22 @@ SignalingState は webrtc-rs が公開していない。C ラッパーの `peer_
 - `src/connection.rs` の `PcObserverHandler` と `run`
 - `skills/sora-rust-sdk/SKILL.md` (イベント一覧の更新)
 - `SignalingState` と `on_signaling_change` の公開は webrtc-rs 側で対応する
+
+## 解決方法
+
+- `src/connection_event_handler.rs`
+  - `SoraConnectionEventHandler` に `on_signaling_state_change` / `on_connection_state_change` / `on_ice_connection_state_change` / `on_ice_gathering_state_change` を追加した
+  - メソッド名は W3C の WebRTC のイベントハンドラ名 (`signalingstatechange` / `connectionstatechange` / `iceconnectionstatechange` / `icegatheringstatechange`) に揃えた
+  - 状態の型は `shiguredo_webrtc` の `SignalingState` / `PeerConnectionState` / `IceConnectionState` / `IceGatheringState` をそのまま使う (re-export しない)
+- `src/connection.rs`
+  - `PcObserverHandler` に `on_signaling_change` / `on_standardized_ice_connection_change` / `on_ice_gathering_change` を実装し、`SoraEvent` の `SignalingChange` / `IceConnectionChange` / `IceGatheringChange` として送るようにした。既存の `on_connection_change` も `ConnectionChange` として送るようにした
+  - `run` のイベント処理から上記 4 つのコールバックを呼ぶようにした。`run` の終了条件は変えていない
+  - 既存の `on_connection_change` のログ出力は残した
+  - 状態変化の通知に使うチャネルは `PcObserverHandler` と `DcObsHandler` で用途ごとに分けず、それぞれ `event_tx` 1 つにまとめた
+- `src/connection.rs` の `#[cfg(test)]`
+  - 実 libwebrtc の PeerConnection で offer を適用し、`SignalingState` の `HaveLocalOffer` と `Closed`、`IceGatheringState` の `Gathering` と `Complete` が通知されることを確認する
+  - PeerConnection を 2 つ用意して loopback で接続し、candidate メッセージとして通知された ICE 候補を相互に渡して `IceConnectionState` の `Checking` と `Connected`、`PeerConnectionState` の `Connecting` と `Connected` が通知されることを確認する。テスト用の接続は m 行を持たないため、recvonly の音声 transceiver を追加してから offer を生成する
+- `e2e-tests/src/test_connection.rs` / `e2e-tests/tests/connection_state.rs`
+  - 実 Sora へ接続し、4 つのコールバックが通知されることを確認する
+- `skills/sora-rust-sdk/SKILL.md` のイベント一覧と `CHANGES.md` の `## develop` を更新した
+- `shiguredo_webrtc` を 0.154.1-canary.4 に更新した (`SignalingState` と `on_signaling_change` の追加に追随)
