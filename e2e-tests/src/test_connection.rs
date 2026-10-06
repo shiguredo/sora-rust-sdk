@@ -4,7 +4,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use shiguredo_webrtc::{
-    AudioTrack, DegradationPreference, FrameTransformerHandler, IceServer, VideoTrack,
+    AudioTrack, DegradationPreference, FrameTransformerHandler, IceConnectionState,
+    IceGatheringState, IceServer, PeerConnectionState, SignalingState, VideoTrack,
 };
 use sora_sdk::{
     Audio, ConnectDataChannel, ForwardingFilter, JsonString, ProxyInfo, Result, Role,
@@ -65,6 +66,18 @@ pub enum SoraTestEvent {
     },
     DataChannelClose {
         label: String,
+    },
+    SignalingStateChange {
+        state: SignalingState,
+    },
+    ConnectionStateChange {
+        state: PeerConnectionState,
+    },
+    IceConnectionStateChange {
+        state: IceConnectionState,
+    },
+    IceGatheringStateChange {
+        state: IceGatheringState,
     },
 }
 
@@ -139,6 +152,26 @@ impl SoraConnectionEventHandler for SoraTestEventHandler {
         let _ = self.event_tx.send(SoraTestEvent::DataChannelClose {
             label: label.to_string(),
         });
+    }
+    fn on_signaling_state_change(&mut self, state: SignalingState) {
+        let _ = self
+            .event_tx
+            .send(SoraTestEvent::SignalingStateChange { state });
+    }
+    fn on_connection_state_change(&mut self, state: PeerConnectionState) {
+        let _ = self
+            .event_tx
+            .send(SoraTestEvent::ConnectionStateChange { state });
+    }
+    fn on_ice_connection_state_change(&mut self, state: IceConnectionState) {
+        let _ = self
+            .event_tx
+            .send(SoraTestEvent::IceConnectionStateChange { state });
+    }
+    fn on_ice_gathering_state_change(&mut self, state: IceGatheringState) {
+        let _ = self
+            .event_tx
+            .send(SoraTestEvent::IceGatheringStateChange { state });
     }
 }
 

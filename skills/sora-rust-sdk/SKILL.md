@@ -30,7 +30,7 @@ WebRTC SFU Sora のクライアントを Rust で実装するための SDK。シ
 - 対応 Sora: 2025.2.0 以降
 - 対応プラットフォーム: Ubuntu 22.04 / 24.04 / 26.04 (x86_64, arm64), macOS 15 / 26 (arm64), Windows 11 / Server 2025 (x86_64), Raspberry Pi (Linux, arm64)
 
-`shiguredo_webrtc` クレートが提供する `AudioTrack` / `VideoTrack` / `VideoTrackSource` / `RtpTransceiver` / `RtpReceiver` / `IceServer` 等を直接受け取る公開 API があるため、利用側の `Cargo.toml` に `shiguredo_webrtc` を追加する必要がある。
+`shiguredo_webrtc` クレートが提供する `AudioTrack` / `VideoTrack` / `VideoTrackSource` / `RtpTransceiver` / `RtpReceiver` / `IceServer` / `SignalingState` / `PeerConnectionState` / `IceConnectionState` / `IceGatheringState` 等を直接受け取る公開 API があるため、利用側の `Cargo.toml` に `shiguredo_webrtc` を追加する必要がある。
 
 ## Cargo features
 
@@ -100,6 +100,10 @@ let context = SoraConnectionContext::new_with_config(config)?;
 | `on_push` | `fn on_push(&mut self, text: &str)` | push メッセージ受信時 |
 | `on_track` | `fn on_track(&mut self, transceiver: RtpTransceiver)` | トラック追加時 |
 | `on_remove_track` | `fn on_remove_track(&mut self, receiver: RtpReceiver)` | トラック削除時 |
+| `on_signaling_state_change` | `fn on_signaling_state_change(&mut self, state: SignalingState)` | ネゴシエーション状態変化時 |
+| `on_connection_state_change` | `fn on_connection_state_change(&mut self, state: PeerConnectionState)` | PeerConnection 接続状態変化時 |
+| `on_ice_connection_state_change` | `fn on_ice_connection_state_change(&mut self, state: IceConnectionState)` | ICE 接続状態変化時 |
+| `on_ice_gathering_state_change` | `fn on_ice_gathering_state_change(&mut self, state: IceGatheringState)` | ICE 候補収集状態変化時 |
 | `on_switched` | `fn on_switched(&mut self)` | DataChannel シグナリングに切り替わった時 |
 | `on_websocket_close` | `fn on_websocket_close(&mut self, code: Option<u16>, reason: &str)` | WebSocket 切断時 |
 | `on_message` | `fn on_message(&mut self, label: &str, data: &[u8])` | `#` プレフィックス DataChannel 受信時 |

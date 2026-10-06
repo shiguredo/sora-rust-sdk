@@ -15,15 +15,15 @@ use shiguredo_http11::{Request, ResponseDecoder, auth::BasicAuth, uri::Uri};
 use shiguredo_webrtc::{
     AudioTrack, CreateSessionDescriptionObserver, CreateSessionDescriptionObserverHandler,
     CxxString, DataChannel, DataChannelObserver, DataChannelObserverHandler, DataChannelState,
-    DegradationPreference, FrameTransformer, FrameTransformerHandler, IceCandidateRef, IceServer,
-    MediaStreamTrack, PeerConnection, PeerConnectionDependencies, PeerConnectionObserver,
-    PeerConnectionObserverHandler, PeerConnectionOfferAnswerOptions,
-    PeerConnectionRtcConfiguration, PeerConnectionState, RTCStatsReport, Resolution, RtcError,
-    RtpEncodingParameters, RtpEncodingParametersVector, RtpReceiver, RtpSender, RtpTransceiver,
-    SSLCertChainRef, SSLCertificateVerifier, SSLCertificateVerifierHandler, SdpType,
-    SessionDescription, SetLocalDescriptionObserver, SetLocalDescriptionObserverHandler,
-    SetRemoteDescriptionObserver, SetRemoteDescriptionObserverHandler, StringVector, TlsCertPolicy,
-    VideoTrack,
+    DegradationPreference, FrameTransformer, FrameTransformerHandler, IceCandidateRef,
+    IceConnectionState, IceGatheringState, IceServer, MediaStreamTrack, PeerConnection,
+    PeerConnectionDependencies, PeerConnectionObserver, PeerConnectionObserverHandler,
+    PeerConnectionOfferAnswerOptions, PeerConnectionRtcConfiguration, PeerConnectionState,
+    RTCStatsReport, Resolution, RtcError, RtpEncodingParameters, RtpEncodingParametersVector,
+    RtpReceiver, RtpSender, RtpTransceiver, SSLCertChainRef, SSLCertificateVerifier,
+    SSLCertificateVerifierHandler, SdpType, SessionDescription, SetLocalDescriptionObserver,
+    SetLocalDescriptionObserverHandler, SetRemoteDescriptionObserver,
+    SetRemoteDescriptionObserverHandler, SignalingState, StringVector, TlsCertPolicy, VideoTrack,
 };
 use shiguredo_websocket::{
     ClientConnectionOptions, CloseCode, ConnectionEvent, ConnectionOutput, ConnectionState,
@@ -677,6 +677,10 @@ impl Drop for PendingRpcRequest {
 enum SoraEvent {
     Track(RtpTransceiver),
     RemoveTrack(RtpReceiver),
+    SignalingChange(SignalingState),
+    ConnectionChange(PeerConnectionState),
+    IceConnectionChange(IceConnectionState),
+    IceGatheringChange(IceGatheringState),
     SignalingMessage(String),
     DataChannelMessage { label: String, data: Vec<u8> },
     DataChannelRegister(DataChannel),
@@ -817,53 +821,55 @@ impl SoraConnection {
         let (event_tx, event_rx) = mpsc::unbounded_channel::<SoraEvent>();
         let pc_factory = config.context.factory();
         let connection_context = config.context.connection_context();
-        let event_tx_for_candidate = event_tx.clone();
-        let event_tx_for_channel = event_tx.clone();
-        let event_tx_for_track = event_tx.clone();
         struct PcObserverHandler {
-            event_tx_for_track: mpsc::UnboundedSender<SoraEvent>,
-            event_tx_for_candidate: mpsc::UnboundedSender<SoraEvent>,
-            event_tx_for_channel: mpsc::UnboundedSender<SoraEvent>,
+            event_tx: mpsc::UnboundedSender<SoraEvent>,
         }
 
         impl PeerConnectionObserverHandler for PcObserverHandler {
+            fn on_signaling_change(&mut self, new_state: SignalingState) {
+                let _ = self.event_tx.send(SoraEvent::SignalingChange(new_state));
+            }
+
             fn on_connection_change(&mut self, new_state: PeerConnectionState) {
                 rtc_log_info!("PeerConnection state: {:?}", new_state);
+                let _ = self.event_tx.send(SoraEvent::ConnectionChange(new_state));
+            }
+
+            fn on_standardized_ice_connection_change(&mut self, new_state: IceConnectionState) {
+                let _ = self
+                    .event_tx
+                    .send(SoraEvent::IceConnectionChange(new_state));
+            }
+
+            fn on_ice_gathering_change(&mut self, new_state: IceGatheringState) {
+                let _ = self.event_tx.send(SoraEvent::IceGatheringChange(new_state));
             }
 
             fn on_track(&mut self, transceiver: RtpTransceiver) {
-                let _ = self.event_tx_for_track.send(SoraEvent::Track(transceiver));
+                let _ = self.event_tx.send(SoraEvent::Track(transceiver));
             }
 
             fn on_remove_track(&mut self, receiver: RtpReceiver) {
-                let _ = self
-                    .event_tx_for_track
-                    .send(SoraEvent::RemoveTrack(receiver));
+                let _ = self.event_tx.send(SoraEvent::RemoveTrack(receiver));
             }
 
             fn on_ice_candidate(&mut self, candidate: IceCandidateRef<'_>) {
                 if let Ok(message) = candidate.to_string() {
                     let candidate_message = OutgoingMessage::new_candidate(&message);
-                    let _ = self
-                        .event_tx_for_candidate
-                        .send(SoraEvent::SignalingMessage(
-                            Json(candidate_message).to_string(),
-                        ));
+                    let _ = self.event_tx.send(SoraEvent::SignalingMessage(
+                        Json(candidate_message).to_string(),
+                    ));
                 }
             }
 
             fn on_data_channel(&mut self, channel: DataChannel) {
                 // DataChannel を登録するためにメインループに送信
-                let _ = self
-                    .event_tx_for_channel
-                    .send(SoraEvent::DataChannelRegister(channel));
+                let _ = self.event_tx.send(SoraEvent::DataChannelRegister(channel));
             }
         }
 
         let observer = PeerConnectionObserver::new_with_handler(Box::new(PcObserverHandler {
-            event_tx_for_track,
-            event_tx_for_candidate,
-            event_tx_for_channel,
+            event_tx: event_tx.clone(),
         }));
 
         let mut deps = PeerConnectionDependencies::new(&observer);
@@ -1178,6 +1184,18 @@ impl SoraConnection {
                         }
                         SoraEvent::RemoveTrack(receiver) => {
                             handler.on_remove_track(receiver);
+                        }
+                        SoraEvent::SignalingChange(state) => {
+                            handler.on_signaling_state_change(state);
+                        }
+                        SoraEvent::ConnectionChange(state) => {
+                            handler.on_connection_state_change(state);
+                        }
+                        SoraEvent::IceConnectionChange(state) => {
+                            handler.on_ice_connection_state_change(state);
+                        }
+                        SoraEvent::IceGatheringChange(state) => {
+                            handler.on_ice_gathering_state_change(state);
                         }
                         SoraEvent::DataChannelRegister(channel) => {
                             let Ok(label) = channel.label() else {
@@ -1990,41 +2008,29 @@ impl SoraConnection {
         let config = self.data_channel_configs.iter().find(|c| c.label == label);
         let compress = config.is_some_and(|c| c.compress);
 
-        let event_tx_for_observer = event_tx.clone();
-        let event_tx_for_message = event_tx.clone();
-        let label_for_state = label.clone();
-        let label_for_message = label.clone();
         struct DcObsHandler {
-            label_for_state: String,
-            label_for_message: String,
-            event_tx_for_observer: mpsc::UnboundedSender<SoraEvent>,
-            event_tx_for_message: mpsc::UnboundedSender<SoraEvent>,
+            label: String,
+            event_tx: mpsc::UnboundedSender<SoraEvent>,
         }
 
         impl DataChannelObserverHandler for DcObsHandler {
             fn on_state_change(&mut self) {
                 let _ = self
-                    .event_tx_for_observer
-                    .send(SoraEvent::DataChannelStateChange(
-                        self.label_for_state.clone(),
-                    ));
+                    .event_tx
+                    .send(SoraEvent::DataChannelStateChange(self.label.clone()));
             }
 
             fn on_message(&mut self, data: &[u8], _is_binary: bool) {
-                let _ = self
-                    .event_tx_for_message
-                    .send(SoraEvent::DataChannelMessage {
-                        label: self.label_for_message.clone(),
-                        data: data.to_vec(),
-                    });
+                let _ = self.event_tx.send(SoraEvent::DataChannelMessage {
+                    label: self.label.clone(),
+                    data: data.to_vec(),
+                });
             }
         }
 
         let observer = DataChannelObserver::new_with_handler(Box::new(DcObsHandler {
-            label_for_state,
-            label_for_message,
-            event_tx_for_observer,
-            event_tx_for_message,
+            label: label.clone(),
+            event_tx: event_tx.clone(),
         }));
         channel.register_observer(&observer);
 
@@ -3454,6 +3460,7 @@ async fn close_websocket_handshake<R: RandomSource>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shiguredo_webrtc::{IceCandidate, MediaType, RtpTransceiverDirection, RtpTransceiverInit};
 
     fn proxy_info_with_url(url: String) -> ProxyInfo {
         ProxyInfo {
@@ -6126,6 +6133,294 @@ mod tests {
             matches!(rx1.try_recv(), Err(oneshot::error::TryRecvError::Empty))
                 && matches!(rx2.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
             "破棄された response は response channel を完了しない必要があります"
+        );
+    }
+
+    /// 状態変化の通知が届くまでの待ち時間。
+    const STATE_CHANGE_TIMEOUT: Duration = Duration::from_secs(15);
+
+    /// 2 つの PeerConnection が接続状態になるまでの待ち時間。
+    const LOOPBACK_TIMEOUT: Duration = Duration::from_secs(15);
+
+    /// 状態変化の通知を比較するためのテスト用の値。
+    ///
+    /// [SoraEvent] は `PartialEq` を実装していないため、
+    /// 状態変化の通知だけを取り出して検証できる形にする。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ObservedStateChange {
+        Signaling(SignalingState),
+        Connection(PeerConnectionState),
+        IceConnection(IceConnectionState),
+        IceGathering(IceGatheringState),
+    }
+
+    /// [SoraEvent] から状態変化の通知だけを取り出す。
+    fn observed_state_change(event: &SoraEvent) -> Option<ObservedStateChange> {
+        match event {
+            SoraEvent::SignalingChange(state) => Some(ObservedStateChange::Signaling(*state)),
+            SoraEvent::ConnectionChange(state) => Some(ObservedStateChange::Connection(*state)),
+            SoraEvent::IceConnectionChange(state) => {
+                Some(ObservedStateChange::IceConnection(*state))
+            }
+            SoraEvent::IceGatheringChange(state) => Some(ObservedStateChange::IceGathering(*state)),
+            _ => None,
+        }
+    }
+
+    /// `targets` の状態変化がすべて届くか、[STATE_CHANGE_TIMEOUT] を過ぎるまで収集する。
+    ///
+    /// 候補などの状態変化以外のイベントは読み捨てる。
+    async fn collect_state_changes(
+        connection: &mut SoraConnection,
+        targets: &[ObservedStateChange],
+    ) -> Vec<ObservedStateChange> {
+        let deadline = tokio::time::Instant::now() + STATE_CHANGE_TIMEOUT;
+        let mut observed = Vec::new();
+        while !targets.iter().all(|target| observed.contains(target)) {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remaining, connection.event_rx.recv()).await {
+                Ok(Some(event)) => {
+                    if let Some(state) = observed_state_change(&event) {
+                        observed.push(state);
+                    }
+                }
+                // event_rx がクローズされた場合も、それ以上は収集できないため終了する。
+                Ok(None) | Err(_) => break,
+            }
+        }
+        observed
+    }
+
+    /// m 行を持つ SDP を作るために recvonly の音声 transceiver を追加する。
+    ///
+    /// m 行が 1 つも無い SDP では ICE の候補収集が行われないため、
+    /// ICE の状態変化を確認するテストでは事前にこれを呼ぶ。
+    fn add_recvonly_audio_transceiver(connection: &mut SoraConnection) {
+        let mut init = RtpTransceiverInit::new();
+        init.set_direction(RtpTransceiverDirection::RecvOnly);
+        connection
+            .pc
+            .add_transceiver(MediaType::Audio, &init)
+            .expect("transceiver の追加に失敗しました");
+    }
+
+    /// local description を設定し、完了するまで待つ。
+    async fn set_local_description(connection: &mut SoraConnection, sdp_type: SdpType, sdp: &str) {
+        let (tx, mut rx) = mpsc::unbounded_channel::<Option<String>>();
+        let observer = SetLocalDescriptionObserver::new_with_handler(Box::new(
+            SetDescriptionObserverHandler { tx },
+        ));
+        let description = SessionDescription::new(sdp_type, sdp)
+            .expect("SessionDescription の生成に失敗しました");
+        connection.pc.set_local_description(description, &observer);
+        let result = tokio::time::timeout(SDP_OPERATION_TIMEOUT, rx.recv())
+            .await
+            .expect("set_local_description がタイムアウトしました")
+            .expect("set_local_description の結果を受信できませんでした");
+        assert!(
+            result.is_none(),
+            "set_local_description が失敗しました: {result:?}"
+        );
+    }
+
+    /// remote description を設定し、完了するまで待つ。
+    async fn set_remote_description(connection: &mut SoraConnection, sdp_type: SdpType, sdp: &str) {
+        let (tx, mut rx) = mpsc::unbounded_channel::<Option<String>>();
+        let observer = SetRemoteDescriptionObserver::new_with_handler(Box::new(
+            SetDescriptionObserverHandler { tx },
+        ));
+        let description = SessionDescription::new(sdp_type, sdp)
+            .expect("SessionDescription の生成に失敗しました");
+        connection.pc.set_remote_description(description, &observer);
+        let result = tokio::time::timeout(SDP_OPERATION_TIMEOUT, rx.recv())
+            .await
+            .expect("set_remote_description がタイムアウトしました")
+            .expect("set_remote_description の結果を受信できませんでした");
+        assert!(
+            result.is_none(),
+            "set_remote_description が失敗しました: {result:?}"
+        );
+    }
+
+    /// Sora の candidate メッセージから ICE 候補を取り出す。
+    ///
+    /// Sora の candidate メッセージには sdpMid と sdpMLineIndex が含まれないため、
+    /// m 行が 1 つだけの SDP を扱うこのテストでは "0" と 0 に固定する。
+    fn parse_candidate_message(text: &str) -> Option<(String, i32, String)> {
+        let key = "\"candidate\":\"";
+        let start = text.find(key)? + key.len();
+        let rest = &text[start..];
+        let end = rest.find('"')?;
+        Some(("0".to_string(), 0, rest[..end].to_string()))
+    }
+
+    /// `from` のイベントを 1 つ処理する。
+    ///
+    /// ICE 候補は `to` に渡し、状態変化は `states` に記録する。
+    /// イベントが届かなかった場合と候補以外のシグナリングメッセージは読み捨てる。
+    async fn pump_event(
+        from: &mut SoraConnection,
+        to: &mut SoraConnection,
+        states: &mut Vec<ObservedStateChange>,
+    ) {
+        // 候補が届かずに待ち続けないよう、短い間隔で両方向を交互に処理する。
+        let Ok(Some(event)) =
+            tokio::time::timeout(Duration::from_millis(10), from.event_rx.recv()).await
+        else {
+            return;
+        };
+        if let SoraEvent::SignalingMessage(text) = &event {
+            if let Some((mid, index, candidate)) = parse_candidate_message(text) {
+                let candidate = IceCandidate::new(&mid, index, &candidate)
+                    .expect("ICE 候補の生成に失敗しました");
+                to.pc
+                    .add_ice_candidate(&candidate)
+                    .expect("ICE 候補の追加に失敗しました");
+            }
+            return;
+        }
+        if let Some(state) = observed_state_change(&event) {
+            states.push(state);
+        }
+    }
+
+    /// 2 つの PeerConnection のあいだで ICE 候補を交換しながら状態変化を収集する。
+    ///
+    /// `client` が Connected になるか、[LOOPBACK_TIMEOUT] を過ぎるまで継続する。
+    async fn exchange_candidates_until_connected(
+        server: &mut SoraConnection,
+        client: &mut SoraConnection,
+    ) -> (Vec<ObservedStateChange>, Vec<ObservedStateChange>) {
+        let deadline = tokio::time::Instant::now() + LOOPBACK_TIMEOUT;
+        let mut server_states = Vec::new();
+        let mut client_states = Vec::new();
+        loop {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "PeerConnection が接続状態になりませんでした: server={server_states:?}, client={client_states:?}"
+            );
+            pump_event(server, client, &mut server_states).await;
+            pump_event(client, server, &mut client_states).await;
+            if client_states.contains(&ObservedStateChange::Connection(
+                PeerConnectionState::Connected,
+            )) {
+                break;
+            }
+        }
+        (server_states, client_states)
+    }
+
+    /// local description の設定と close で signaling state が変化することを確認する。
+    #[tokio::test]
+    async fn pc_observer_notifies_signaling_state_change() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        add_recvonly_audio_transceiver(&mut connection);
+        let offer_sdp = create_local_offer_sdp(&mut connection).await;
+
+        // offer を適用すると HaveLocalOffer、close すると Closed に遷移する。
+        set_local_description(&mut connection, SdpType::Offer, &offer_sdp).await;
+        connection.pc.close();
+
+        let observed = collect_state_changes(
+            &mut connection,
+            &[
+                ObservedStateChange::Signaling(SignalingState::HaveLocalOffer),
+                ObservedStateChange::Signaling(SignalingState::Closed),
+            ],
+        )
+        .await;
+        assert!(
+            observed.contains(&ObservedStateChange::Signaling(
+                SignalingState::HaveLocalOffer
+            )),
+            "offer の適用で signaling state が HaveLocalOffer になる必要があります: {observed:?}"
+        );
+        assert!(
+            observed.contains(&ObservedStateChange::Signaling(SignalingState::Closed)),
+            "close で signaling state が Closed になる必要があります: {observed:?}"
+        );
+    }
+
+    /// 候補収集の状態が変化することを確認する。
+    #[tokio::test]
+    async fn pc_observer_notifies_ice_gathering_state_change() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        add_recvonly_audio_transceiver(&mut connection);
+        let offer_sdp = create_local_offer_sdp(&mut connection).await;
+
+        // offer を適用すると候補収集が始まり、収集が終わると Complete に遷移する。
+        set_local_description(&mut connection, SdpType::Offer, &offer_sdp).await;
+
+        let observed = collect_state_changes(
+            &mut connection,
+            &[
+                ObservedStateChange::IceGathering(IceGatheringState::Gathering),
+                ObservedStateChange::IceGathering(IceGatheringState::Complete),
+            ],
+        )
+        .await;
+        assert!(
+            observed.contains(&ObservedStateChange::IceGathering(
+                IceGatheringState::Gathering
+            )),
+            "候補収集の開始で ice gathering state が Gathering になる必要があります: {observed:?}"
+        );
+        assert!(
+            observed.contains(&ObservedStateChange::IceGathering(
+                IceGatheringState::Complete
+            )),
+            "候補収集の完了で ice gathering state が Complete になる必要があります: {observed:?}"
+        );
+    }
+
+    /// 2 つの PeerConnection を loopback で接続し、接続状態の変化を確認する。
+    ///
+    /// Sora サーバーを利用せずに接続状態まで遷移させるため、server 側で offer を、
+    /// client 側で answer を作り、相互の ICE 候補は candidate メッセージとして
+    /// 通知されたものを渡し合う。
+    #[tokio::test]
+    async fn pc_observer_notifies_connection_and_ice_connection_state_change() {
+        let (mut server, _server_handle) = build_test_connection(RecordingHandler::default());
+        let (mut client, _client_handle) = build_test_connection(RecordingHandler::default());
+
+        add_recvonly_audio_transceiver(&mut server);
+        let offer_sdp = create_local_offer_sdp(&mut server).await;
+        set_local_description(&mut server, SdpType::Offer, &offer_sdp).await;
+
+        let answer_sdp = client
+            .handle_offer(&offer_sdp, &[])
+            .await
+            .expect("offer の処理に失敗しました");
+        set_remote_description(&mut server, SdpType::Answer, &answer_sdp).await;
+
+        let (server_states, client_states) =
+            exchange_candidates_until_connected(&mut server, &mut client).await;
+        assert!(
+            client_states.contains(&ObservedStateChange::IceConnection(
+                IceConnectionState::Checking
+            )),
+            "ICE の接続確認の開始で ice connection state が Checking になる必要があります: client={client_states:?}, server={server_states:?}"
+        );
+        assert!(
+            client_states.contains(&ObservedStateChange::Connection(
+                PeerConnectionState::Connecting
+            )),
+            "ICE の接続確認の開始で connection state が Connecting になる必要があります: client={client_states:?}, server={server_states:?}"
+        );
+        assert!(
+            client_states.contains(&ObservedStateChange::IceConnection(
+                IceConnectionState::Connected
+            )),
+            "ICE の接続の確立で ice connection state が Connected になる必要があります: client={client_states:?}, server={server_states:?}"
+        );
+        assert!(
+            client_states.contains(&ObservedStateChange::Connection(
+                PeerConnectionState::Connected
+            )),
+            "ICE と DTLS の接続の確立で connection state が Connected になる必要があります: client={client_states:?}, server={server_states:?}"
         );
     }
 }
