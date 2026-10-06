@@ -58,6 +58,11 @@
   - ネゴシエーションのたびに audio sender の RTP パラメータへ反映する。音声を送信しない role では設定しない
   - sumomo に `--adaptive-ptime` を追加する (true / false)
   - @melpon
+- [ADD] `SoraConnectionEventHandler` に WebRTC の状態変化のコールバックを追加する
+  - PeerConnection / ICE / ICE gathering / ネゴシエーション (SignalingState) の状態変化を型付きで受け取れる
+  - メソッドは `on_connection_state_change` / `on_ice_connection_state_change` / `on_ice_gathering_state_change` / `on_signaling_state_change`
+  - 状態の型は `shiguredo_webrtc` の `SignalingState` / `PeerConnectionState` / `IceConnectionState` / `IceGatheringState` をそのまま使う
+  - @melpon
 - [UPDATE] shiguredo_webrtc を 0.152.1-canary.2 から 0.154.0 に更新する
   - libwebrtc を m152 から m154 に更新する
   - 固定 libwebrtc の AV1 / H.264 source audit を m154 の commit で再検証する
@@ -77,6 +82,9 @@
 - [UPDATE] shiguredo_webrtc を 0.154.1-canary.2 から 0.154.1-canary.3 に更新する
   - libwebrtc を m154.8037.1.2 から m154.8037.3.0 に更新する
   - @voluntas
+- [UPDATE] shiguredo_webrtc を 0.154.1-canary.3 から 0.154.1-canary.4 に更新する
+  - `SignalingState` と `PeerConnectionObserverHandler::on_signaling_change` が追加されたことに追随する
+  - @melpon
 - [FIX] MP4 パススルーで encode 前に sample が欠落した場合、後続の delta sample を送信しないようにする
   - capturer は再生順を示す `playback_serial` を付与し、encoder は値の不連続を検出した場合、次のキーフレームまで待つ
   - 再生位置は変更せず、送信再開までの時間は入力 MP4 のキーフレーム間隔に依存する

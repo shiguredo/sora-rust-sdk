@@ -1209,9 +1209,9 @@ dependencies = [
 
 [[package]]
 name = "shiguredo_webrtc"
-version = "0.154.1-canary.3"
+version = "0.154.1-canary.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36e5d4ad4c68d49ea94a325a3c63e00b9e065b94f7947ad130c33fd635c3139c"
+checksum = "c5f66e91b9066c9d6fb8a8a1767cf2963036236220577e98946fc219a95e478e"
 dependencies = [
  "bindgen",
  "nojson",
