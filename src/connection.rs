@@ -437,9 +437,8 @@ impl SoraConnectionBuilder {
 
     /// 接続確立後に PeerConnection が `Disconnected` のままであることを許容する時間を設定する。
     ///
-    /// 接続確立後、この時間を超えても `Disconnected` のままの場合は接続を終了する。
+    /// この時間を超えても `Disconnected` のままの場合は接続を終了する。
     /// `Connected` または `Connecting` へ戻ると経過はリセットされる。
-    /// `Disconnected` は一時的な切断で復旧し得るため、既定値は 10 秒とする。
     pub fn disconnected_grace_period(mut self, value: Duration) -> Self {
         self.disconnected_grace_period = value;
         self
@@ -692,10 +691,9 @@ enum SoraEvent {
     RemoveTrack(RtpReceiver),
     SignalingChange(SignalingState),
     ConnectionChange(PeerConnectionState),
-    /// 接続確立後に PeerConnection が `Disconnected` になったまま
-    /// 猶予時間が経過したことを知らせる。
+    /// 猶予タイマーが満了したことを知らせる。
     PeerConnectionDisconnectedTimeout {
-        /// 猶予タイマーの世代。キャンセル済みのタイマーの発火を判別するために使う。
+        /// 猶予タイマーに払い出した世代。
         generation: u64,
     },
     IceConnectionChange(IceConnectionState),
@@ -1224,26 +1222,14 @@ impl SoraConnection {
                         }
                         SoraEvent::ConnectionChange(state) => {
                             handler.on_connection_state_change(state);
-                            match media_path.observe(state) {
-                                MediaPathAction::None => {}
-                                MediaPathAction::StartGraceTimer { generation } => {
-                                    rtc_log_info!(
-                                        "PeerConnection disconnected; waiting {:?} for recovery",
-                                        disconnected_grace_period
-                                    );
-                                    spawn_disconnected_grace_timer(
-                                        &event_tx,
-                                        generation,
-                                        disconnected_grace_period,
-                                    );
-                                }
-                                MediaPathAction::Terminate => {
-                                    rtc_log_info!(
-                                        "PeerConnection failed; terminating connection"
-                                    );
-                                    terminated_without_disconnect = true;
-                                    break 'run_loop;
-                                }
+                            if handle_media_path_state(
+                                &mut media_path,
+                                state,
+                                &event_tx,
+                                disconnected_grace_period,
+                            ) {
+                                terminated_without_disconnect = true;
+                                break 'run_loop;
                             }
                         }
                         SoraEvent::PeerConnectionDisconnectedTimeout { generation } => {
@@ -1616,7 +1602,23 @@ impl SoraConnection {
 
                 // 旧セッションの event_rx に滞留したイベントをドレインする。
                 // クリア後の data_channels に旧チャネルが再登録されるのを防ぐ。
-                while self.event_rx.try_recv().is_ok() {}
+                // ただし ConnectionChange は PeerConnection の現在の状態を表しており、
+                // redirect 後も同じ PeerConnection を使い続けるため、
+                // メディア経路の監視へは反映する。
+                while let Ok(event) = self.event_rx.try_recv() {
+                    let SoraEvent::ConnectionChange(state) = event else {
+                        continue;
+                    };
+                    if handle_media_path_state(
+                        &mut media_path,
+                        state,
+                        &event_tx,
+                        disconnected_grace_period,
+                    ) {
+                        terminated_without_disconnect = true;
+                        break 'run_loop;
+                    }
+                }
 
                 // 古い WebSocket をクローズする
                 if ws.state() == ConnectionState::Connected {
@@ -2678,7 +2680,7 @@ enum MediaPathAction {
     None,
     /// `Disconnected` のままであることを許容する猶予タイマーを開始する。
     StartGraceTimer {
-        /// 開始するタイマーの世代。発火したイベントの照合に使う。
+        /// 開始するタイマーに払い出す世代。
         generation: u64,
     },
     /// メディア経路が復旧しないため接続を終了する。
@@ -2693,12 +2695,10 @@ struct MediaPathMonitor {
     /// WebSocket のクローズとして通知するため、これが false の間は
     /// 状態変化では接続を終了しない。
     connected: bool,
-    /// 開始した猶予タイマーの世代。
-    ///
-    /// タイマーを開始するたびに進め、猶予が不要になった状態変化でも進める。
-    /// 再切断を経て新しいタイマーが動いている間に古いタイマーが発火しても、
-    /// 世代の照合で無効と分かるようにするためである。
+    /// 猶予タイマーに払い出す世代。開始のたびに進め、同じ値を再利用しない。
     generation: u64,
+    /// 稼働中の猶予タイマーの世代。猶予が不要になったら `None` に戻す。
+    grace_timer_generation: Option<u64>,
 }
 
 impl MediaPathMonitor {
@@ -2706,6 +2706,7 @@ impl MediaPathMonitor {
         Self {
             connected: false,
             generation: 0,
+            grace_timer_generation: None,
         }
     }
 
@@ -2726,50 +2727,76 @@ impl MediaPathMonitor {
         match state {
             // 接続が回復する可能性があるため、進行中の猶予を無効化する。
             PeerConnectionState::Connected | PeerConnectionState::Connecting => {
-                self.generation += 1;
+                self.grace_timer_generation = None;
                 MediaPathAction::None
             }
             // `Disconnected` は回復し得るため、猶予時間の間だけ終了を待つ。
             PeerConnectionState::Disconnected => {
                 self.generation += 1;
+                self.grace_timer_generation = Some(self.generation);
                 MediaPathAction::StartGraceTimer {
                     generation: self.generation,
                 }
             }
-            // `Failed` は復旧しない終端状態である。
-            PeerConnectionState::Failed => {
-                self.generation += 1;
-                MediaPathAction::Terminate
-            }
-            _ => MediaPathAction::None,
+            // `Failed` は復旧しない終端状態であるため、即座に終了する。
+            PeerConnectionState::Failed => MediaPathAction::Terminate,
+            // `New` / `Closed` / `Unknown` は接続の終了条件に含めない。
+            PeerConnectionState::New
+            | PeerConnectionState::Closed
+            | PeerConnectionState::Unknown(_) => MediaPathAction::None,
         }
     }
 
     /// 猶予タイマーが `generation` の世代で発火したときに接続を終了すべきかを返す。
     ///
-    /// 接続が回復した場合と再切断した場合には世代が進んでいるため、
-    /// 古い世代のタイマーの発火は無視される。
+    /// `generation` には [MediaPathMonitor::observe] が返した世代だけを渡すこと。
+    /// 猶予が不要になった後に古いタイマーが発火した場合は false を返す。
     fn should_terminate_on_timeout(&self, generation: u64) -> bool {
-        self.generation == generation
+        self.grace_timer_generation == Some(generation)
     }
 }
 
 /// 猶予時間の経過を [SoraEvent::PeerConnectionDisconnectedTimeout] として
 /// メインループへ通知するタイマーを開始する。
-///
-/// メインループがタイマーを保持する代わりにタスクへ委ねることで、
-/// イベントの到着順と状態変化の適用順を一致させる。
-/// 接続が回復した場合は世代が進み、遅れて届いた通知は無視される。
 fn spawn_disconnected_grace_timer(
     event_tx: &mpsc::UnboundedSender<SoraEvent>,
     generation: u64,
     grace_period: Duration,
 ) {
+    // メインループがタイマーを保持する代わりにタスクへ委ねることで、
+    // イベントの到着順と状態変化の適用順を一致させる。
     let event_tx = event_tx.clone();
     tokio::spawn(async move {
         tokio::time::sleep(grace_period).await;
         let _ = event_tx.send(SoraEvent::PeerConnectionDisconnectedTimeout { generation });
     });
+}
+
+/// メディア経路の状態変化を監視状態へ反映し、猶予タイマーに対する操作を行う。
+///
+/// 猶予タイマーの開始が必要な場合はタイマーを開始する。
+/// 接続を終了すべき場合は true を返す。
+fn handle_media_path_state(
+    media_path: &mut MediaPathMonitor,
+    state: PeerConnectionState,
+    event_tx: &mpsc::UnboundedSender<SoraEvent>,
+    grace_period: Duration,
+) -> bool {
+    match media_path.observe(state) {
+        MediaPathAction::None => false,
+        MediaPathAction::StartGraceTimer { generation } => {
+            rtc_log_info!(
+                "PeerConnection disconnected; waiting {:?} for recovery",
+                grace_period
+            );
+            spawn_disconnected_grace_timer(event_tx, generation, grace_period);
+            false
+        }
+        MediaPathAction::Terminate => {
+            rtc_log_info!("PeerConnection failed; terminating connection");
+            true
+        }
+    }
 }
 
 /// `command_rx` を閉じ、残っているコマンドを処理する。
@@ -4815,6 +4842,59 @@ mod tests {
         assert!(
             !monitor.should_terminate_on_timeout(generation),
             "再切断後は古い世代の猶予タイマーを無視する必要があります"
+        );
+    }
+
+    /// 猶予タイマーを開始していない世代では接続を終了しないことを検証する。
+    #[test]
+    fn media_path_ignores_unissued_generation() {
+        let mut monitor = MediaPathMonitor::new();
+        monitor.observe(PeerConnectionState::Connected);
+
+        // 猶予タイマーを開始していないため、まだどの世代も有効ではない。
+        assert!(
+            !monitor.should_terminate_on_timeout(0),
+            "猶予タイマーを開始していない状態で接続を終了してはなりません"
+        );
+        assert!(
+            !monitor.should_terminate_on_timeout(1),
+            "猶予タイマーに払い出していない世代で接続を終了してはなりません"
+        );
+    }
+
+    /// 猶予タイマーが猶予時間の経過後に世代付きの通知を 1 件だけ送ることを検証する。
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn spawn_disconnected_grace_timer_sends_event_after_grace_period() {
+        let grace_period = Duration::from_secs(10);
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SoraEvent>();
+        spawn_disconnected_grace_timer(&event_tx, 7, grace_period);
+
+        // 猶予時間の直前までは通知されない。
+        // 仮想時刻 (start_paused) を使うため CI 負荷で sleep がオーバーシュートしても
+        // 決定論的に検証できる。
+        tokio::time::sleep(grace_period - Duration::from_millis(1)).await;
+        assert!(
+            matches!(event_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "猶予時間が経過する前に通知が届いています"
+        );
+
+        // 猶予時間が経過すると、開始した世代の通知が届く。
+        let event = tokio::time::timeout(grace_period, event_rx.recv())
+            .await
+            .expect("猶予時間が経過しても通知が届きませんでした")
+            .expect("通知の受信に失敗しました");
+        assert!(
+            matches!(
+                event,
+                SoraEvent::PeerConnectionDisconnectedTimeout { generation: 7 }
+            ),
+            "通知の世代が開始した世代と一致しません"
+        );
+
+        // 通知は 1 件だけ届く。
+        assert!(
+            matches!(event_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "猶予タイマーの通知が 2 件以上届いています"
         );
     }
 
