@@ -111,6 +111,8 @@ pub struct SoraConnectionBuilder {
     websocket_connection_timeout: Duration,
     websocket_close_timeout: Duration,
     disconnect_wait_timeout: Duration,
+    /// 接続確立後に PeerConnection が Disconnected のままであることを許容する時間。
+    disconnected_grace_period: Duration,
     tls_config: TlsConfig,
     user_agent: Option<String>,
     // 他の保持オブジェクトより最後に破棄する必要がある。
@@ -158,6 +160,7 @@ impl SoraConnectionBuilder {
             websocket_connection_timeout: Duration::from_secs(30),
             websocket_close_timeout: Duration::from_secs(3),
             disconnect_wait_timeout: Duration::from_secs(5),
+            disconnected_grace_period: Duration::from_secs(10),
             tls_config: TlsConfig::default(),
             user_agent: None,
             context,
@@ -432,6 +435,16 @@ impl SoraConnectionBuilder {
         self
     }
 
+    /// 接続確立後に PeerConnection が `Disconnected` のままであることを許容する時間を設定する。
+    ///
+    /// 接続確立後、この時間を超えても `Disconnected` のままの場合は接続を終了する。
+    /// `Connected` または `Connecting` へ戻ると経過はリセットされる。
+    /// `Disconnected` は一時的な切断で復旧し得るため、既定値は 10 秒とする。
+    pub fn disconnected_grace_period(mut self, value: Duration) -> Self {
+        self.disconnected_grace_period = value;
+        self
+    }
+
     /// シグナリング用 WebSocket（WSS）接続時のサーバー証明書検証を
     /// スキップするかどうかを指定する。
     ///
@@ -679,15 +692,29 @@ enum SoraEvent {
     RemoveTrack(RtpReceiver),
     SignalingChange(SignalingState),
     ConnectionChange(PeerConnectionState),
+    /// 接続確立後に PeerConnection が `Disconnected` になったまま
+    /// 猶予時間が経過したことを知らせる。
+    PeerConnectionDisconnectedTimeout {
+        /// 猶予タイマーの世代。キャンセル済みのタイマーの発火を判別するために使う。
+        generation: u64,
+    },
     IceConnectionChange(IceConnectionState),
     IceGatheringChange(IceGatheringState),
     SignalingMessage(String),
-    DataChannelMessage { label: String, data: Vec<u8> },
+    DataChannelMessage {
+        label: String,
+        data: Vec<u8>,
+    },
     DataChannelRegister(DataChannel),
     DataChannelStateChange(String),
     SendWebSocketMessage(String),
-    SendDataChannelMessage { label: String, message: String },
-    RpcTimeout { id: u64 },
+    SendDataChannelMessage {
+        label: String,
+        message: String,
+    },
+    RpcTimeout {
+        id: u64,
+    },
 }
 
 pub(crate) enum SoraConnectionCommand {
@@ -935,6 +962,10 @@ impl SoraConnection {
     ///
     /// シグナリング接続を確立し、WebRTC ネゴシエーションを処理し、受信メッセージを処理する。
     /// 接続が終了するまでブロックするため、別の非同期タスクで呼び出すこと。
+    ///
+    /// 接続確立後に PeerConnection が `Failed` になった場合は即座に終了する。
+    /// `Disconnected` のまま [SoraConnectionBuilder::disconnected_grace_period] を
+    /// 超えた場合も終了する。
     pub async fn run(mut self) -> Result<()> {
         let signaling_urls = self.config.signaling_urls.clone();
         let channel_id = self.config.channel_id.clone();
@@ -985,6 +1016,7 @@ impl SoraConnection {
         let websocket_connection_timeout = self.config.websocket_connection_timeout;
         let websocket_close_timeout = self.config.websocket_close_timeout;
         let disconnect_wait_timeout = self.config.disconnect_wait_timeout;
+        let disconnected_grace_period = self.config.disconnected_grace_period;
         let user_agent = self
             .config
             .user_agent
@@ -1051,10 +1083,12 @@ impl SoraConnection {
         // ユーザーが切断を要求している以上、終了処理の WebSocket close handshake で
         // 発生する I/O エラーは warning に落として run の Ok(()) を覆さないために使う。
         let mut user_initiated_disconnect = false;
-        // DataChannel が Closed になったことによる終了かどうか。
-        // この経路はサーバーへ切断要求を送っていないため、残りの DataChannel の
-        // close を待たずに close 通知を行って終了するために使う。
-        let mut data_channel_terminated = false;
+        // サーバーへ切断要求を送らずに接続を終了したかどうか。
+        // DataChannel が Closed になった場合と、接続確立後にメディア経路が死んだ場合が該当する。
+        // これらの経路では残りの DataChannel の close を待たずに close 通知を行って終了するために使う。
+        let mut terminated_without_disconnect = false;
+        // 接続確立後のメディア経路 (ICE / DTLS) の死活を監視する状態。
+        let mut media_path = MediaPathMonitor::new();
 
         'run_loop: loop {
             // 期限切れの値を sleep_until で持つと即 Ready になりビジーループしてしまうため、
@@ -1190,6 +1224,38 @@ impl SoraConnection {
                         }
                         SoraEvent::ConnectionChange(state) => {
                             handler.on_connection_state_change(state);
+                            match media_path.observe(state) {
+                                MediaPathAction::None => {}
+                                MediaPathAction::StartGraceTimer { generation } => {
+                                    rtc_log_info!(
+                                        "PeerConnection disconnected; waiting {:?} for recovery",
+                                        disconnected_grace_period
+                                    );
+                                    spawn_disconnected_grace_timer(
+                                        &event_tx,
+                                        generation,
+                                        disconnected_grace_period,
+                                    );
+                                }
+                                MediaPathAction::Terminate => {
+                                    rtc_log_info!(
+                                        "PeerConnection failed; terminating connection"
+                                    );
+                                    terminated_without_disconnect = true;
+                                    break 'run_loop;
+                                }
+                            }
+                        }
+                        SoraEvent::PeerConnectionDisconnectedTimeout { generation } => {
+                            // 猶予時間を過ぎても Connected / Connecting へ戻らない場合は、
+                            // メディア経路が復旧しないとみなして接続を終了する。
+                            if media_path.should_terminate_on_timeout(generation) {
+                                rtc_log_info!(
+                                    "PeerConnection did not recover from disconnected; terminating connection"
+                                );
+                                terminated_without_disconnect = true;
+                                break 'run_loop;
+                            }
                         }
                         SoraEvent::IceConnectionChange(state) => {
                             handler.on_ice_connection_state_change(state);
@@ -1214,7 +1280,7 @@ impl SoraConnection {
                                 ),
                                 DataChannelStateResult::Terminate
                             ) {
-                                data_channel_terminated = true;
+                                terminated_without_disconnect = true;
                                 break 'run_loop;
                             }
                         }
@@ -1234,7 +1300,7 @@ impl SoraConnection {
                                 ),
                                 DataChannelStateResult::Terminate
                             ) {
-                                data_channel_terminated = true;
+                                terminated_without_disconnect = true;
                                 break 'run_loop;
                             }
                         }
@@ -1654,9 +1720,9 @@ impl SoraConnection {
         )
         .await;
 
-        if data_channel_terminated {
-            // DataChannel が Closed になったことによる終了では、サーバーへ切断要求を送っておらず
-            // 残りの DataChannel が閉じる保証も無いため、待機せずに close 通知を行って終了する。
+        if terminated_without_disconnect {
+            // サーバーへ切断要求を送らずに終了した場合は、残りの DataChannel が
+            // 閉じる保証も無いため、待機せずに close 通知を行って終了する。
             notify_close_for_remaining(&mut *handler, &mut opened_data_channels);
         } else if use_data_channel_signaling && !opened_data_channels.is_empty() {
             // DataChannel シグナリングを利用している場合は、
@@ -2603,6 +2669,107 @@ async fn wait_data_channels_close(
             return DataChannelCloseWaitResult::AllChannelsClosed;
         }
     }
+}
+
+/// メディア経路の状態変化に応じてメインループが行う操作を表す。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MediaPathAction {
+    /// 猶予タイマーに対する操作は不要。
+    None,
+    /// `Disconnected` のままであることを許容する猶予タイマーを開始する。
+    StartGraceTimer {
+        /// 開始するタイマーの世代。発火したイベントの照合に使う。
+        generation: u64,
+    },
+    /// メディア経路が復旧しないため接続を終了する。
+    Terminate,
+}
+
+/// 接続確立後のメディア経路 (ICE / DTLS) の死活を監視する状態。
+struct MediaPathMonitor {
+    /// PeerConnection が一度でも `Connected` になったかどうか。
+    ///
+    /// 接続確立前の失敗は Sora サーバーの `connection_created_wait_timeout` が
+    /// WebSocket のクローズとして通知するため、これが false の間は
+    /// 状態変化では接続を終了しない。
+    connected: bool,
+    /// 開始した猶予タイマーの世代。
+    ///
+    /// タイマーを開始するたびに進め、猶予が不要になった状態変化でも進める。
+    /// 再切断を経て新しいタイマーが動いている間に古いタイマーが発火しても、
+    /// 世代の照合で無効と分かるようにするためである。
+    generation: u64,
+}
+
+impl MediaPathMonitor {
+    fn new() -> Self {
+        Self {
+            connected: false,
+            generation: 0,
+        }
+    }
+
+    /// PeerConnection の状態変化を監視状態へ反映し、猶予タイマーに対して行う操作を返す。
+    ///
+    /// `Failed` は復旧しない終端状態であるため、接続確立後は [MediaPathAction::Terminate] を返す。
+    /// `Disconnected` は一時的な切断で復旧し得るため、接続確立後は
+    /// [MediaPathAction::StartGraceTimer] を返す。`Connected` と `Connecting` は
+    /// 進行中の猶予を無効化する。接続確立前の状態変化では何もしない。
+    fn observe(&mut self, state: PeerConnectionState) -> MediaPathAction {
+        if state == PeerConnectionState::Connected {
+            self.connected = true;
+        }
+        if !self.connected {
+            return MediaPathAction::None;
+        }
+
+        match state {
+            // 接続が回復する可能性があるため、進行中の猶予を無効化する。
+            PeerConnectionState::Connected | PeerConnectionState::Connecting => {
+                self.generation += 1;
+                MediaPathAction::None
+            }
+            // `Disconnected` は回復し得るため、猶予時間の間だけ終了を待つ。
+            PeerConnectionState::Disconnected => {
+                self.generation += 1;
+                MediaPathAction::StartGraceTimer {
+                    generation: self.generation,
+                }
+            }
+            // `Failed` は復旧しない終端状態である。
+            PeerConnectionState::Failed => {
+                self.generation += 1;
+                MediaPathAction::Terminate
+            }
+            _ => MediaPathAction::None,
+        }
+    }
+
+    /// 猶予タイマーが `generation` の世代で発火したときに接続を終了すべきかを返す。
+    ///
+    /// 接続が回復した場合と再切断した場合には世代が進んでいるため、
+    /// 古い世代のタイマーの発火は無視される。
+    fn should_terminate_on_timeout(&self, generation: u64) -> bool {
+        self.generation == generation
+    }
+}
+
+/// 猶予時間の経過を [SoraEvent::PeerConnectionDisconnectedTimeout] として
+/// メインループへ通知するタイマーを開始する。
+///
+/// メインループがタイマーを保持する代わりにタスクへ委ねることで、
+/// イベントの到着順と状態変化の適用順を一致させる。
+/// 接続が回復した場合は世代が進み、遅れて届いた通知は無視される。
+fn spawn_disconnected_grace_timer(
+    event_tx: &mpsc::UnboundedSender<SoraEvent>,
+    generation: u64,
+    grace_period: Duration,
+) {
+    let event_tx = event_tx.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(grace_period).await;
+        let _ = event_tx.send(SoraEvent::PeerConnectionDisconnectedTimeout { generation });
+    });
 }
 
 /// `command_rx` を閉じ、残っているコマンドを処理する。
@@ -4526,6 +4693,128 @@ mod tests {
         assert!(
             opened.contains("signaling"),
             "opened に含まれない label の close では既存の opened を変更してはなりません"
+        );
+    }
+
+    /// 接続確立前のメディア経路の状態変化では何もしないことを検証する。
+    ///
+    /// 接続確立前の失敗は Sora サーバーの接続タイムアウトが WebSocket の
+    /// クローズとして通知するため、SDK 側からは終了しない。
+    #[test]
+    fn media_path_ignores_state_change_before_connected() {
+        let mut monitor = MediaPathMonitor::new();
+
+        assert_eq!(
+            monitor.observe(PeerConnectionState::Connecting),
+            MediaPathAction::None,
+            "接続確立前の Connecting では接続を終了してはなりません"
+        );
+        assert_eq!(
+            monitor.observe(PeerConnectionState::Disconnected),
+            MediaPathAction::None,
+            "接続確立前の Disconnected では猶予タイマーを開始してはなりません"
+        );
+        assert_eq!(
+            monitor.observe(PeerConnectionState::Failed),
+            MediaPathAction::None,
+            "接続確立前の Failed では接続を終了してはなりません"
+        );
+    }
+
+    /// 接続確立後の Failed で即座に接続を終了することを検証する。
+    #[test]
+    fn media_path_terminates_on_failed_after_connected() {
+        let mut monitor = MediaPathMonitor::new();
+        monitor.observe(PeerConnectionState::Connected);
+
+        assert_eq!(
+            monitor.observe(PeerConnectionState::Failed),
+            MediaPathAction::Terminate,
+            "接続確立後の Failed では接続を終了する必要があります"
+        );
+    }
+
+    /// 接続確立後の Disconnected で猶予タイマーを開始し、
+    /// 猶予時間の経過で接続を終了することを検証する。
+    #[test]
+    fn media_path_starts_grace_timer_on_disconnected_after_connected() {
+        let mut monitor = MediaPathMonitor::new();
+        monitor.observe(PeerConnectionState::Connected);
+
+        let MediaPathAction::StartGraceTimer { generation } =
+            monitor.observe(PeerConnectionState::Disconnected)
+        else {
+            panic!("接続確立後の Disconnected では猶予タイマーを開始する必要があります");
+        };
+
+        assert!(
+            monitor.should_terminate_on_timeout(generation),
+            "猶予タイマーの発火では接続を終了する必要があります"
+        );
+    }
+
+    /// Disconnected から Connected へ復帰したら接続を維持することを検証する。
+    #[test]
+    fn media_path_keeps_connection_when_recovered_to_connected() {
+        let mut monitor = MediaPathMonitor::new();
+        monitor.observe(PeerConnectionState::Connected);
+        let MediaPathAction::StartGraceTimer { generation } =
+            monitor.observe(PeerConnectionState::Disconnected)
+        else {
+            panic!("接続確立後の Disconnected では猶予タイマーを開始する必要があります");
+        };
+
+        assert_eq!(
+            monitor.observe(PeerConnectionState::Connected),
+            MediaPathAction::None,
+            "Connected への復帰では接続を終了してはなりません"
+        );
+        assert!(
+            !monitor.should_terminate_on_timeout(generation),
+            "Connected へ復帰した後に古い猶予タイマーが発火しても接続を終了してはなりません"
+        );
+    }
+
+    /// Disconnected から Connecting へ遷移したら猶予を取り消し、
+    /// 再び Disconnected になったら新しい猶予タイマーを開始することを検証する。
+    #[test]
+    fn media_path_restarts_grace_timer_on_reconnect_after_connecting() {
+        let mut monitor = MediaPathMonitor::new();
+        monitor.observe(PeerConnectionState::Connected);
+        let MediaPathAction::StartGraceTimer { generation } =
+            monitor.observe(PeerConnectionState::Disconnected)
+        else {
+            panic!("接続確立後の Disconnected では猶予タイマーを開始する必要があります");
+        };
+
+        // 再ネゴシエーション (ICE 再起動) は Connecting を経由する。
+        assert_eq!(
+            monitor.observe(PeerConnectionState::Connecting),
+            MediaPathAction::None,
+            "Connecting への遷移では接続を終了してはなりません"
+        );
+        assert!(
+            !monitor.should_terminate_on_timeout(generation),
+            "Connecting へ遷移した後に古い猶予タイマーが発火しても接続を終了してはなりません"
+        );
+
+        let MediaPathAction::StartGraceTimer {
+            generation: new_generation,
+        } = monitor.observe(PeerConnectionState::Disconnected)
+        else {
+            panic!("再び Disconnected になったら新しい猶予タイマーを開始する必要があります");
+        };
+        assert_ne!(
+            generation, new_generation,
+            "再切断では新しい世代の猶予タイマーを開始する必要があります"
+        );
+        assert!(
+            monitor.should_terminate_on_timeout(new_generation),
+            "再切断後の猶予タイマーの発火では接続を終了する必要があります"
+        );
+        assert!(
+            !monitor.should_terminate_on_timeout(generation),
+            "再切断後は古い世代の猶予タイマーを無視する必要があります"
         );
     }
 

@@ -63,6 +63,10 @@
   - メソッドは `on_connection_state_change` / `on_ice_connection_state_change` / `on_ice_gathering_state_change` / `on_signaling_state_change`
   - 状態の型は `shiguredo_webrtc` の `SignalingState` / `PeerConnectionState` / `IceConnectionState` / `IceGatheringState` をそのまま使う
   - @melpon
+- [ADD] `SoraConnectionBuilder` に `disconnected_grace_period` を追加する
+  - 接続確立後に PeerConnection が `Disconnected` のままであることを許容する時間を指定できる
+  - 既定値は 10 秒で、`Connected` または `Connecting` へ戻ると経過はリセットされる
+  - @melpon
 - [UPDATE] shiguredo_webrtc を 0.152.1-canary.2 から 0.154.0 に更新する
   - libwebrtc を m152 から m154 に更新する
   - 固定 libwebrtc の AV1 / H.264 source audit を m154 の commit で再検証する
@@ -106,6 +110,11 @@
   - @sile
 - [FIX] 接続中に Offer の `data_channels` に含まれる DataChannel が閉じた場合に接続を終了する
   - `signaling` 以外の内部ラベルと `#` プレフィックスのユーザー定義ラベルも対象にする
+  - @melpon
+- [FIX] 接続確立後に PeerConnection のメディア経路が死んだ場合に接続を終了する
+  - `PeerConnectionState` が `Failed` になった場合は即座に、`Disconnected` のまま `disconnected_grace_period` を超えた場合も終了する
+  - `Connected` または `Connecting` へ戻った場合は接続を維持する
+  - 接続確立前の失敗は Sora サーバーの接続タイムアウトに任せる
   - @melpon
 
 ### misc

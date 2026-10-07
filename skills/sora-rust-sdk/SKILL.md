@@ -150,6 +150,7 @@ let context = SoraConnectionContext::new_with_config(config)?;
 | `websocket_connection_timeout` | 30 秒 | WebSocket 接続タイムアウト |
 | `websocket_close_timeout` | 3 秒 | WebSocket クローズ待機タイムアウト |
 | `disconnect_wait_timeout` | 5 秒 | 切断完了待機タイムアウト |
+| `disconnected_grace_period` | 10 秒 | 接続確立後に PeerConnection が `Disconnected` のままであることを許容する時間 |
 
 #### TLS / TURN-TLS / プロキシ
 
@@ -183,7 +184,7 @@ WebSocket TLS は PEM、TURN-TLS は DER である点に注意。
 
 ### 接続実行
 
-`SoraConnection::run(self) -> Result<()>` は `async fn` で、接続が終了するまでブロックする。通常は `tokio::spawn` で別タスクに渡し、`SoraConnectionHandle` で外部から `disconnect()` を呼び出す。Offer の `data_channels` に含まれる DataChannel が接続中に閉じた場合も接続を終了する。
+`SoraConnection::run(self) -> Result<()>` は `async fn` で、接続が終了するまでブロックする。通常は `tokio::spawn` で別タスクに渡し、`SoraConnectionHandle` で外部から `disconnect()` を呼び出す。Offer の `data_channels` に含まれる DataChannel が接続中に閉じた場合も接続を終了する。接続確立後に `PeerConnectionState` が `Failed` になった場合と、`Disconnected` のまま `disconnected_grace_period` を超えた場合も接続を終了する。
 
 ## 接続設定の型
 
@@ -644,6 +645,9 @@ if let Some(url) = handle.selected_signaling_url().await? {
   他のラベルで受信した Close は接続終了として扱わない。
 - **DataChannel の Close による終了**: Offer の `data_channels` に含まれる DataChannel が接続中に閉じると接続を終了する。
   対象は `signaling` / `stats` などの SDK 内部ラベルと `#` プレフィックスのユーザー定義ラベルのすべてで、一部だけが閉じた場合も接続全体を終了する。
+- **PeerConnection の失敗による終了**: 接続確立後に `PeerConnectionState` が `Failed` になると即座に接続を終了する。
+  `Disconnected` は回復し得るため、`Disconnected` のまま `disconnected_grace_period` (既定 10 秒) を超えた場合に終了する。`Connected` または `Connecting` へ戻ると猶予はリセットされる。
+  接続確立前の失敗は Sora サーバーの接続タイムアウトが WebSocket のクローズとして通知するため、SDK 側では終了しない。
 - **MP4 入力は映像専用**: 音声トラックは無視する。
   B フレームなどの非ゼロ composition time offset を含む映像は受理しない。
 - **ロギングは `shiguredo_webrtc` の `rtc_log_*` マクロ**: SDK 内のログは libwebrtc 側 (`rtc_log_verbose!` / `rtc_log_info!` / `rtc_log_warning!` / `rtc_log_error!`) に流れる。`log` / `tracing` クレートには依存していない。
