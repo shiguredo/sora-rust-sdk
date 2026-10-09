@@ -1,7 +1,7 @@
 # run() の戻り値で切断理由を返す
 
 - Created: 2026-10-05
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-09
 - Branch: feature/change-return-disconnect-reason
 - Polished: {YYYY-MM-DD}
 
@@ -53,3 +53,24 @@
 - `src/connection.rs` の `run` と `DisconnectReason`
 - `src/lib.rs` の例
 - `README.md` と `skills/sora-rust-sdk/SKILL.md`
+
+## 解決方法
+
+`DisconnectReason` を新設し、`SoraConnection::run` の戻り値を `Result<DisconnectReason>` に変更した。`run` のループは終了理由を `Option<DisconnectReason>` で持ち、`set_disconnect_reason` で最初に確定した理由だけを残して、ループを抜けた時点で返す。戻り値に `#[must_use]` は付けていないため `connection.run().await?;` はそのままコンパイルできる。
+
+理由を確定する箇所は次のとおり。
+
+- クライアントからの切断: `SoraConnectionCommand::Disconnect` の処理
+- サーバーの `close`: `IncomingMessageData::Close` の code と reason
+- シグナリングエラー: WebSocket の Close code 4490
+- WebSocket の切断: Close フレームを受信していればその code と reason、受信していなければ code 無し
+- DataChannel の close: 閉じた DataChannel のラベル
+- PeerConnection の失敗: `Failed` になった場合と `Disconnected` のまま猶予期間を超えた場合
+
+設計方針では `run` のループ本体を `Result` を返す内部関数に切り出すとしていたが、ループが共有するローカル変数が多いため、単一の理由変数と各終了経路での設定に置き換えた。`run` の終了条件は変えていない。
+
+Close フレームを伴わない WebSocket の切断では、ソケットが死んでいるため終了処理の close handshake が I/O エラーになる。切断理由が確定済みの場合はこのエラーを警告に落とし、`WebSocketClosed` を返せるようにした。
+
+`e2e-tests/tests/disconnect_reason.rs` を追加し、実 Sora に接続してクライアントからの切断 (WebSocket シグナリングと DataChannel シグナリング)、server Close、シグナリングエラー、Close フレームを伴わない WebSocket の切断で、返る理由を確認している。既存の E2E テストでも期待する理由を確認するようにした。テスト用の TCP プロキシは `e2e-tests/src/proxy.rs` に切り出した。
+
+DataChannelClosed と PeerConnectionFailed は、実接続で確定的に再現する手段が無いため専用のテストを追加していない。
