@@ -131,17 +131,16 @@ async fn disconnect_reason_is_server_close_on_disconnect_channel_api() {
 
 /// シグナリングエラーで Sora が WebSocket を Close code 4490 で閉じたときの理由を確認する。
 ///
-/// `spotlight` を指定せずに `spotlight_focus_rid` を指定すると、
-/// Sora はシグナリングエラーとして WebSocket を 4490 で閉じる。
+/// `channel_id` を空文字列にすると、Sora は connect メッセージを不正として
+/// シグナリングエラー (`INVALID-MESSAGE`) を返し、WebSocket を 4490 で閉じる。
 #[tokio::test]
 async fn disconnect_reason_is_signaling_error() {
     load_env();
 
     let urls = signaling_urls().expect("TEST_SIGNALING_URLS が必要");
-    let channel_id = generate_channel_id();
     let context = SoraConnectionContext::new().expect("コンテキスト作成失敗");
-    let mut builder = SoraTestConnection::builder(context, urls, channel_id, Role::RecvOnly)
-        .spotlight_focus_rid("nonexistent-rid".to_string());
+    // 空の channel_id で connect メッセージを不正にして、Sora に 4490 で閉じさせる。
+    let mut builder = SoraTestConnection::builder(context, urls, String::new(), Role::RecvOnly);
     if let Some(token) = secret_key() {
         builder = builder.metadata(build_metadata_with_access_token(&token));
     }
