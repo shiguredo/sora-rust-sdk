@@ -1162,9 +1162,13 @@ async fn shutdown_connection_times_out() {
     // run() を開始せず、完了しない run_handle を渡す。
     // connection を保持したまま (drop しない) なので command channel は開いたまま。
     // run() が command_rx を poll しないため disconnect の ack が返らず timeout する。
+    // 到達しない Ok の値は、run_handle の出力型を `Result<DisconnectReason>` に
+    // 合わせるためだけに必要。
     let run_handle = tokio::spawn(async {
         std::future::pending::<()>().await;
-        Ok::<(), sora_sdk::Error>(())
+        Ok::<sora_sdk::DisconnectReason, sora_sdk::Error>(
+            sora_sdk::DisconnectReason::ClientDisconnect,
+        )
     });
     let _keep_connection = connection;
 

@@ -25,6 +25,10 @@
 - [CHANGE] `VideoCodecPreference::has_implementation` の引数を実値から参照に変更する
   - 呼び出し側が `VideoCodecImplementation` を clone せずに判定できるように `&VideoCodecImplementation` を受ける
   - @melpon
+- [CHANGE] `SoraConnection::run` の戻り値を `Result<DisconnectReason>` に変更する
+  - 接続が終了した理由を型付きで取得できる
+  - `DisconnectReason` はクライアントからの切断、サーバーの `close`、シグナリングエラー、WebSocket の切断、DataChannel の close、PeerConnection の失敗を区別する
+  - @melpon
 - [ADD] `SoraConnectionContextConfig` に `environment` を追加する
   - libwebrtc の `Environment` を指定できる
   - @melpon

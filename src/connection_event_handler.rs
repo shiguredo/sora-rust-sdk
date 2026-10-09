@@ -88,6 +88,9 @@ pub trait SoraConnectionEventHandler: Send {
     ///
     /// 第一引数はクローズコード（`Some(u16)`）または `None`（正常クローズ以外）、
     /// 第二引数はクローズ理由の文字列。
+    ///
+    /// 接続終了の理由は [SoraConnection::run](crate::SoraConnection::run) の
+    /// 戻り値で受け取ること。このコールバックは WebSocket レベルの切断だけを通知する。
     fn on_websocket_close(&mut self, _code: Option<u16>, _reason: &str) {}
 
     /// `#` プレフィックス付きのユーザー定義 DataChannel ラベル経由で

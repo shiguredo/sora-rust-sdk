@@ -307,6 +307,22 @@ let selected = handle.selected_signaling_url().await?;
 let connected = handle.connected_signaling_url().await?;
 ```
 
+### 切断理由の取得
+
+`SoraConnection::run()` は接続が終了した理由を `DisconnectReason` として返します。
+
+| 理由 | 内容 |
+|------|------|
+| `DisconnectReason::ClientDisconnect` | `disconnect()` による切断 |
+| `DisconnectReason::ServerClose { code, reason }` | Sora からの `close` メッセージによる終了 |
+| `DisconnectReason::SignalingError { reason }` | シグナリングエラー (WebSocket Close code 4490) による終了 |
+| `DisconnectReason::WebSocketClosed { code, reason }` | WebSocket の切断による終了 |
+| `DisconnectReason::DataChannelClosed { label }` | DataChannel が閉じられたことによる終了 |
+| `DisconnectReason::PeerConnectionFailed` | 接続確立後の PeerConnection の失敗による終了 |
+
+`run()` が `Err` で終了した場合と、`run()` の future を破棄または abort した場合は、切断理由を取得できません。
+`on_websocket_close` は WebSocket レベルの切断だけを通知するため、接続全体の終了理由としては `run()` の戻り値を使います。
+
 ### メッセージ受信
 
 `SoraConnectionEventHandler::on_message` メソッドをオーバーライドすることで、`#` プレフィックス付きラベルのユーザー定義 DataChannel からメッセージを受信できます。

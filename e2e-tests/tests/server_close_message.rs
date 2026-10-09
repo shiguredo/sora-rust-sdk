@@ -6,7 +6,7 @@ use e2e_tests::{
     disconnect_channel, generate_channel_id, load_env, signaling_urls,
 };
 use nojson::RawJson;
-use sora_sdk::{SignalingDirection, SignalingType};
+use sora_sdk::{DisconnectReason, SignalingDirection, SignalingType};
 
 // run task の終了待機はこの値 + websocket_close_timeout + 1 秒で判定する。
 // Sora 側から DataChannel が閉じられるのに十分な時間を確保する。
@@ -142,7 +142,8 @@ async fn assert_data_channel_close_notified_exactly_once(connection: &mut SoraTe
 ///
 /// WebSocket が接続中の状態で server Close を受信した場合、
 /// DataChannel の終了待機後に WebSocket close handshake を実行して
-/// `disconnect_wait_timeout + websocket_close_timeout + 1 秒` 以内に `Ok(())` を返す。
+/// `disconnect_wait_timeout + websocket_close_timeout + 1 秒` 以内に
+/// `Ok(DisconnectReason::ServerClose { .. })` を返す。
 #[tokio::test]
 async fn server_close_message_terminates_run_while_websocket_connected() {
     load_env();
@@ -189,16 +190,20 @@ async fn server_close_message_terminates_run_while_websocket_connected() {
     wait_for_close_signaling_message(&mut connection).await;
     assert_close_message_notified_once(&mut connection).await;
 
-    // server Close は terminal event のため、run が Ok(()) で終了する。
-    let run_result = connection
+    // server Close は terminal event のため、run が切断理由 ServerClose を返して終了する。
+    let reason = connection
         .wait_for_run_finished(
             DISCONNECT_WAIT_TIMEOUT + WEBSOCKET_CLOSE_TIMEOUT + Duration::from_secs(1),
         )
-        .await;
-    assert!(
-        run_result.is_ok(),
-        "run task は Ok(()) で終了する必要があります: {:?}",
-        run_result
+        .await
+        .expect("run task は Ok で終了する必要があります");
+    assert_eq!(
+        reason,
+        DisconnectReason::ServerClose {
+            code: 1000,
+            reason: "DISCONNECTED-API".to_string(),
+        },
+        "server Close の理由は close メッセージが通知した code と reason になる必要があります"
     );
 
     // Sora は切断時に WebSocket Close フレームを送信するため、on_websocket_close は
@@ -212,7 +217,7 @@ async fn server_close_message_terminates_run_while_websocket_connected() {
 /// server Close で run が正常終了することを確認する。
 ///
 /// WebSocket がすでに閉じた状態の場合、`disconnect_wait_timeout + 1 秒` 以内に
-/// `Ok(())` を返す。
+/// `Ok(DisconnectReason::ServerClose { .. })` を返す。
 #[tokio::test]
 async fn server_close_message_terminates_run_after_websocket_closed() {
     load_env();
@@ -253,14 +258,19 @@ async fn server_close_message_terminates_run_after_websocket_closed() {
     wait_for_close_signaling_message(&mut connection).await;
     assert_close_message_notified_once(&mut connection).await;
 
-    // WebSocket は切断済みのため close handshake は実行されず、run が Ok(()) で終了する。
-    let run_result = connection
+    // WebSocket は切断済みのため close handshake は実行されず、
+    // run が切断理由 ServerClose を返して終了する。
+    let reason = connection
         .wait_for_run_finished(DISCONNECT_WAIT_TIMEOUT + Duration::from_secs(1))
-        .await;
-    assert!(
-        run_result.is_ok(),
-        "run task は Ok(()) で終了する必要があります: {:?}",
-        run_result
+        .await
+        .expect("run task は Ok で終了する必要があります");
+    assert_eq!(
+        reason,
+        DisconnectReason::ServerClose {
+            code: 1000,
+            reason: "DISCONNECTED-API".to_string(),
+        },
+        "server Close の理由は close メッセージが通知した code と reason になる必要があります"
     );
 
     // SDK が自分で WebSocket を閉じた時点で on_websocket_close は 1 回通知される。

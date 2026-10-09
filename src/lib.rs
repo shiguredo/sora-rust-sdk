@@ -16,7 +16,7 @@
 //! # 基本的な使い方
 //!
 //! ```no_run
-//! use sora_sdk::{Result, SoraConnection, SoraConnectionContext, SoraConnectionEventHandler, Role};
+//! use sora_sdk::{DisconnectReason, Result, SoraConnection, SoraConnectionContext, SoraConnectionEventHandler, Role};
 //!
 //! struct MyEventHandler;
 //!
@@ -47,7 +47,12 @@
 //!     let run_result = run_task
 //!         .await
 //!         .map_err(|_| std::io::Error::other("run task panicked"))?;
-//!     run_result?;
+//!
+//!     // run() は接続が終了した理由を返す。
+//!     match run_result? {
+//!         DisconnectReason::ClientDisconnect => println!("disconnected by client"),
+//!         reason => println!("disconnected: {reason:?}"),
+//!     }
 //!     Ok(())
 //! }
 //! ```
@@ -84,7 +89,7 @@ pub use crate::audio_codec_preference::{
 pub use crate::audio_codecs::internal::InternalAudioCodecCapability;
 pub use crate::codec_direction::CodecDirection;
 pub use crate::connection::{
-    ParsedProxyInfo, SoraConnection, SoraConnectionBuilder, SoraConnectionHandle,
+    DisconnectReason, ParsedProxyInfo, SoraConnection, SoraConnectionBuilder, SoraConnectionHandle,
 };
 pub use crate::connection_context::{
     AdmConfig, SoraConnectionContext, SoraConnectionContextConfig,

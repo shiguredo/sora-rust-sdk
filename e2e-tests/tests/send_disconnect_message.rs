@@ -6,7 +6,7 @@ use e2e_tests::{
     signaling_urls,
 };
 use nojson::RawJson;
-use sora_sdk::{Role, SignalingDirection, SignalingType, SoraConnectionContext};
+use sora_sdk::{DisconnectReason, Role, SignalingDirection, SignalingType, SoraConnectionContext};
 
 // disconnect_wait_timeout は実到達検証の close 待機窓 (1 秒差) を広く取るため 10 秒にする。
 // 通常系はサーバーが速やかにチャネルを閉じるため実行時間には影響しない。
@@ -105,18 +105,19 @@ async fn test_disconnect_message_is_sent_via_datachannel() {
             "disconnect 送信後に signaling DataChannel が閉じられませんでした (サーバーに disconnect が到達していない可能性)",
         );
 
-    // disconnect 送信後の DataChannel クローズ待機と後始末を経て run が Ok(()) で終了する。
+    // disconnect 送信後の DataChannel クローズ待機と後始末を経て run が終了する。
     // クローズ待機 (最大 disconnect_wait_timeout) と WebSocket close handshake
     // (最大 websocket_close_timeout) が直列に走るため、両方の予算に 1 秒の余裕を足す。
-    let run_result = connection
+    let reason = connection
         .wait_for_run_finished(
             DISCONNECT_WAIT_TIMEOUT + WEBSOCKET_CLOSE_TIMEOUT + Duration::from_secs(1),
         )
-        .await;
-    assert!(
-        run_result.is_ok(),
-        "run task は Ok(()) で終了する必要があります: {:?}",
-        run_result
+        .await
+        .expect("run task は Ok で終了する必要があります");
+    assert_eq!(
+        reason,
+        DisconnectReason::ClientDisconnect,
+        "クライアントからの切断の理由は ClientDisconnect になる必要があります"
     );
 }
 
@@ -159,13 +160,14 @@ async fn test_disconnect_message_is_sent_via_websocket() {
         .await
         .expect("WebSocket 経由の disconnect メッセージが送信されませんでした");
 
-    // WebSocket close handshake と後始末を経て run が Ok(()) で終了する。
-    let run_result = connection
+    // WebSocket close handshake と後始末を経て run が終了する。
+    let reason = connection
         .wait_for_run_finished(WEBSOCKET_CLOSE_TIMEOUT + Duration::from_secs(1))
-        .await;
-    assert!(
-        run_result.is_ok(),
-        "run task は Ok(()) で終了する必要があります: {:?}",
-        run_result
+        .await
+        .expect("run task は Ok で終了する必要があります");
+    assert_eq!(
+        reason,
+        DisconnectReason::ClientDisconnect,
+        "クライアントからの切断の理由は ClientDisconnect になる必要があります"
     );
 }
