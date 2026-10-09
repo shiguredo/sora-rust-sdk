@@ -16,7 +16,7 @@
 //! # 基本的な使い方
 //!
 //! ```no_run
-//! use sora_sdk::{Result, SoraConnection, SoraConnectionContext, SoraConnectionEventHandler, Role};
+//! use sora_sdk::{DisconnectReason, Result, SoraConnection, SoraConnectionContext, SoraConnectionEventHandler, Role};
 //!
 //! struct MyEventHandler;
 //!
@@ -47,13 +47,23 @@
 //!     let run_result = run_task
 //!         .await
 //!         .map_err(|_| std::io::Error::other("run task panicked"))?;
-//!     run_result?;
+//!
+//!     // run() は接続が終了した理由を返す。
+//!     match run_result? {
+//!         DisconnectReason::ClientDisconnect => println!("disconnected by client"),
+//!         reason => println!("disconnected: {reason:?}"),
+//!     }
 //!     Ok(())
 //! }
 //! ```
 //!
 //! [Sora]: https://sora.shiguredo.jp/
 #![warn(missing_docs)]
+mod audio_codec;
+mod audio_codec_capability;
+mod audio_codec_preference;
+mod audio_codecs;
+mod codec_direction;
 mod connection;
 mod connection_context;
 mod connection_event_handler;
@@ -72,8 +82,14 @@ mod video_codec_preference;
 mod video_codecs;
 mod zlib;
 
+pub use crate::audio_codec_capability::{AudioCodecCapability, AudioCodecImplementation};
+pub use crate::audio_codec_preference::{
+    AudioCodecPreference, AudioPreferenceCodec, validate_audio_codec_preference,
+};
+pub use crate::audio_codecs::internal::InternalAudioCodecCapability;
+pub use crate::codec_direction::CodecDirection;
 pub use crate::connection::{
-    ParsedProxyInfo, SoraConnection, SoraConnectionBuilder, SoraConnectionHandle,
+    DisconnectReason, ParsedProxyInfo, SoraConnection, SoraConnectionBuilder, SoraConnectionHandle,
 };
 pub use crate::connection_context::{
     AdmConfig, SoraConnectionContext, SoraConnectionContextConfig,
@@ -91,12 +107,9 @@ pub use crate::types::{
     VideoAV1Params, VideoCodecType, VideoH264Params, VideoH265Params, VideoVP9Params,
 };
 pub use crate::video_codec::{
-    AlignmentEncoderAdapter, SimulcastCapabilityHelper, SoraVideoDecoderFactory,
-    SoraVideoEncoderFactory, codec_type_from_format,
+    AlignmentEncoderAdapter, SimulcastCapabilityHelper, codec_type_from_format,
 };
-pub use crate::video_codec_capability::{
-    CodecDirection, VideoCodecCapability, VideoCodecImplementation,
-};
+pub use crate::video_codec_capability::{VideoCodecCapability, VideoCodecImplementation};
 pub use crate::video_codec_preference::{
     PreferenceCodec, VideoCodecPreference, validate_video_codec_preference,
 };

@@ -103,6 +103,7 @@ fn build_context_config(
             adm_config,
             video_codec_preference: VideoCodecPreference::default(),
             video_codec_capabilities: Vec::new(),
+            ..Default::default()
         },
     };
 
@@ -255,18 +256,50 @@ fn prepare_mp4_state(args: &Args) -> Result<Option<Mp4SampleReader>> {
     }
 }
 
+/// MP4 パススルー時に、connect へ載せる H.264 パラメータをファイル実値から作る。
+///
+/// Sora は offerer のため、offer の `profile-level-id` と bitstream 実値が合わないと
+/// クライアント側の SDP answer で video m-line が reject される。
+/// `--input-mp4` で H.264 を送る場合は、avcC 由来の `profile-level-id` を
+/// `h264_params` として connect に載せる（Sora 側で `signaling_h264_params` が必要）。
+/// H.264 以外では `None` を返す。H.264 なのに format / `profile-level-id` が無い場合は
+/// reader / capability の不変条件破壊なのでパニックする。
+fn h264_params_from_mp4_passthrough(reader: &Mp4SampleReader) -> Option<sora_sdk::VideoH264Params> {
+    if reader.codec_type() != VideoCodecType::H264 {
+        return None;
+    }
+    let mut format = reader
+        .passthrough_capability()
+        .get_supported_formats(CodecDirection::Encoder)
+        .into_iter()
+        .next()
+        .expect("BUG: H.264 passthrough must advertise an encoder format");
+    let plid = format
+        .parameters_mut()
+        .iter()
+        .find_map(|(key, value)| (key == "profile-level-id").then_some(value))
+        .expect("BUG: H.264 passthrough format must advertise profile-level-id");
+    Some(sora_sdk::VideoH264Params {
+        profile_level_id: Some(plid),
+        b_frame: None,
+    })
+}
+
 /// [VideoCodecType] からシグナリング用の [sora_sdk::Video] を生成する。
 ///
-/// [VideoCodecType::Generic] や [VideoCodecType::Unknown] の場合はエラーになる
+/// [VideoCodecType::Generic] や [VideoCodecType::Unknown] の場合はエラーになる。
+/// `h264_params` は H.264 のときだけ connect の `h264_params` として載せる。
+/// 非 H.264 では無視する。
 fn video_from_codec_type(
     codec_type: VideoCodecType,
     bit_rate: Option<u32>,
+    h264_params: Option<sora_sdk::VideoH264Params>,
 ) -> Result<sora_sdk::Video> {
     match codec_type {
         VideoCodecType::Vp8 => Ok(sora_sdk::Video::new_vp8(bit_rate)),
         VideoCodecType::Vp9 => Ok(sora_sdk::Video::new_vp9(bit_rate, None)),
         VideoCodecType::Av1 => Ok(sora_sdk::Video::new_av1(bit_rate, None)),
-        VideoCodecType::H264 => Ok(sora_sdk::Video::new_h264(bit_rate, None)),
+        VideoCodecType::H264 => Ok(sora_sdk::Video::new_h264(bit_rate, h264_params)),
         VideoCodecType::H265 => Ok(sora_sdk::Video::new_h265(bit_rate, None)),
         VideoCodecType::Generic | VideoCodecType::Unknown(_) => {
             Err(io::Error::other(format!("unsupported video codec type: {codec_type:?}")).into())
@@ -277,21 +310,44 @@ fn video_from_codec_type(
 fn apply_video_options(
     mut builder: SoraConnectionBuilder,
     args: &Args,
-    mp4_codec_type: Option<VideoCodecType>,
+    mp4_reader: Option<&Mp4SampleReader>,
 ) -> Result<SoraConnectionBuilder> {
     // MP4 使用時は MP4 から検出した実際のコーデックを使う (--video-codec-type とは併用不可)。
     // ただし、受信専用 (RecvOnly) では MP4 のコーデックを利用せず、--video-codec-type に従う。
     // `--input-mp4` は送信専用のオプションであるため、RecvOnly 時の `video` の設定へ波及させない。
+    let mp4_codec_type = mp4_reader.map(|reader| reader.codec_type());
     let video_codec_type = if args.role.wants_send() {
         mp4_codec_type.or(args.video_codec_type)
     } else {
         args.video_codec_type
     };
+    // connect にコーデック付き Video を載せるときだけ h264_params を補完する。
+    // `--video false` では計算もしない（誤って "filling connect" ログを出さない）。
+    let will_set_codec_video = match args.video {
+        Some(false) => false,
+        Some(true) | None => video_codec_type.is_some(),
+    };
+    let h264_params = if args.role.wants_send() && will_set_codec_video {
+        let params = mp4_reader.and_then(h264_params_from_mp4_passthrough);
+        if let Some(ref params) = params
+            && let Some(ref plid) = params.profile_level_id
+        {
+            rtc_log_info!(
+                "MP4 passthrough: filling connect h264_params.profile_level_id={}",
+                plid
+            );
+        }
+        params
+    } else {
+        None
+    };
 
     if let Some(video) = args.video {
         if video {
             let video_setting = match video_codec_type {
-                Some(codec_type) => video_from_codec_type(codec_type, args.video_bit_rate)?,
+                Some(codec_type) => {
+                    video_from_codec_type(codec_type, args.video_bit_rate, h264_params)?
+                }
                 None => sora_sdk::Video::new_bool(true),
             };
             builder = builder.video(video_setting);
@@ -299,7 +355,11 @@ fn apply_video_options(
             builder = builder.video(sora_sdk::Video::new_bool(false));
         }
     } else if let Some(codec_type) = video_codec_type {
-        builder = builder.video(video_from_codec_type(codec_type, args.video_bit_rate)?);
+        builder = builder.video(video_from_codec_type(
+            codec_type,
+            args.video_bit_rate,
+            h264_params,
+        )?);
     }
     Ok(builder)
 }
@@ -333,7 +393,7 @@ fn build_connection_builder(
     context: Arc<SoraConnectionContext>,
     args: &Args,
     event_tx: mpsc::UnboundedSender<AppEvent>,
-    mp4_codec_type: Option<VideoCodecType>,
+    mp4_reader: Option<&Mp4SampleReader>,
 ) -> Result<SoraConnectionBuilder> {
     let mut builder = SoraConnection::builder(
         context,
@@ -350,7 +410,7 @@ fn build_connection_builder(
     if let Some(audio) = args.audio {
         builder = builder.audio(sora_sdk::Audio::new_bool(audio));
     }
-    builder = apply_video_options(builder, args, mp4_codec_type)?;
+    builder = apply_video_options(builder, args, mp4_reader)?;
     if let Some(data_channel_signaling) = args.data_channel_signaling {
         builder = builder.data_channel_signaling(data_channel_signaling);
     }
@@ -359,6 +419,12 @@ fn build_connection_builder(
     }
     if let Some(simulcast) = args.simulcast {
         builder = builder.simulcast(simulcast);
+    }
+    if let Some(degradation_preference) = args.degradation_preference {
+        builder = builder.degradation_preference(degradation_preference);
+    }
+    if let Some(adaptive_ptime) = args.adaptive_ptime {
+        builder = builder.adaptive_ptime(adaptive_ptime);
     }
     builder = builder.insecure(args.insecure);
     if let (Some(cert), Some(key)) = (args.client_cert.clone(), args.client_key.clone()) {
@@ -476,7 +542,7 @@ fn handle_on_track_event<F>(
         }
     };
 
-    let mut video_track = track.cast_to_video_track();
+    let video_track = track.cast_to_video_track();
     if let Some(old_entry) = tracks.remove(&track_id) {
         if !replace_existing {
             tracks.insert(track_id, old_entry);
@@ -513,7 +579,7 @@ fn handle_on_remove_track_event(
         rtc_log_warning!("Non-video track removed: kind={}", kind);
         return;
     }
-    let mut video_track = track.cast_to_video_track();
+    let video_track = track.cast_to_video_track();
     if let Some(entry) = tracks.remove(&track_id) {
         video_track.remove_sink(&entry.sink);
     }
@@ -531,7 +597,7 @@ fn build_and_run_connection(
     event_tx: mpsc::UnboundedSender<AppEvent>,
 ) -> Result<(
     SoraConnectionHandle,
-    tokio::task::JoinHandle<sora_sdk::Result<()>>,
+    tokio::task::JoinHandle<sora_sdk::Result<sora_sdk::DisconnectReason>>,
 )> {
     // 送信ロールかつ音声が有効で、--audio-input-device が指定された場合は SumomoAdm を使用する。
     #[cfg(feature = "media-device")]
@@ -544,7 +610,6 @@ fn build_and_run_connection(
 
     // --input-mp4 が指定されている場合は MP4 を読み込んでパススルーの準備をする
     let mp4_state = prepare_mp4_state(args)?;
-    let mp4_codec_type = mp4_state.as_ref().map(|reader| reader.codec_type());
 
     #[cfg(feature = "media-device")]
     let adm_config = if let Some(external_adm) = &external_adm {
@@ -571,7 +636,7 @@ fn build_and_run_connection(
         if let Some(ref device_id) = args.audio_input_device {
             let state = external_adm
                 .as_ref()
-                .expect("BUG: external_adm が None です")
+                .expect("BUG: external_adm must not be None")
                 .state();
             let mut capturer = AudioDeviceCapturer::new(Some(device_id.clone()), state)?;
             capturer.start()?;
@@ -584,7 +649,7 @@ fn build_and_run_connection(
         None
     };
 
-    let builder = build_connection_builder(context.clone(), args, event_tx, mp4_codec_type)?;
+    let builder = build_connection_builder(context.clone(), args, event_tx, mp4_state.as_ref())?;
     let (builder, video_capturer) = attach_sender_tracks(builder, &context, args, mp4_state)?;
 
     let (connection, handle) = builder.build()?;
@@ -600,27 +665,34 @@ fn build_and_run_connection(
 
 /// connection を終了する。
 ///
-/// `run()` が先に完了している場合は disconnect を送らず、その結果を返す。
+/// `run()` が先に完了している場合は disconnect を送らず、切断理由をログに出力して終了する。
 /// それ以外は disconnect command を送って `run()` の完了を、`deadline` の
 /// 内側で待つ。`run()` は別タスクで動いているため、disconnect を先に await しても
 /// command が処理されて deadlock しない。
 async fn shutdown_connection(
     handle: SoraConnectionHandle,
-    run_handle: tokio::task::JoinHandle<sora_sdk::Result<()>>,
+    run_handle: tokio::task::JoinHandle<sora_sdk::Result<sora_sdk::DisconnectReason>>,
     deadline: tokio::time::Instant,
 ) -> Result<()> {
     if run_handle.is_finished() {
         let result = run_handle.await.map_err(|_| AppError::WorkerPanic)?;
-        return result.map_err(AppError::Sora);
+        log_disconnect_reason(result.map_err(AppError::Sora)?);
+        return Ok(());
     }
 
     tokio::time::timeout_at(deadline, async {
         handle.disconnect().await?;
         let result = run_handle.await.map_err(|_| AppError::WorkerPanic)?;
-        result.map_err(AppError::Sora)
+        log_disconnect_reason(result.map_err(AppError::Sora)?);
+        Ok(())
     })
     .await
     .map_err(|_| AppError::ConnectionShutdownTimeout)?
+}
+
+/// 接続終了の理由をログに出力する。
+fn log_disconnect_reason(reason: sora_sdk::DisconnectReason) {
+    rtc_log_info!("Connection closed: reason={:?}", reason);
 }
 
 /// duration が指定されている場合はタイマーを設定する。
@@ -641,9 +713,12 @@ async fn main() -> Result<()> {
         return run_video_codec_list(&args);
     }
 
-    log::log_to_debug(log::Severity::Info);
-    log::enable_timestamps();
-    log::enable_threads();
+    // ログの設定は最初のログ出力前に行う必要がある。
+    let mut log_config = log::LoggingConfig::new();
+    log_config.set_debug_severity(log::Severity::Info);
+    log_config.set_log_timestamp(true);
+    log_config.set_log_thread(true);
+    log::initialize_logging(log_config);
 
     validate_args(&args)?;
 
@@ -682,7 +757,7 @@ async fn main() -> Result<()> {
                 // server 起因で run() が先に完了した場合も shutdown_connection が結果を返す。
                 break;
             }
-            _ = async { duration_sleep.as_mut().as_pin_mut().expect("duration_sleep は Some である必要があります").await }, if duration_sleep.is_some() && renderer_error.is_none() => {
+            _ = async { duration_sleep.as_mut().as_pin_mut().expect("BUG: duration_sleep must be Some when this branch is taken").await }, if duration_sleep.is_some() && renderer_error.is_none() => {
                 rtc_log_info!("Specified duration elapsed, disconnecting");
                 break;
             }

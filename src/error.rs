@@ -164,6 +164,21 @@ pub enum Error {
         /// 発生した WebRTC エラー。
         source: shiguredo_webrtc::Error,
     },
+    /// degradation preference の SetParameters が失敗した。内部エラーとして [`shiguredo_webrtc::Error`] を保持する。
+    DegradationPreferenceSetParametersFailed {
+        /// 発生した WebRTC エラー。
+        source: shiguredo_webrtc::Error,
+    },
+    /// 未知の degradation preference が指定された。
+    UnknownDegradationPreference {
+        /// 指定された未知の値。
+        value: i32,
+    },
+    /// adaptive ptime の SetParameters が失敗した。内部エラーとして [`shiguredo_webrtc::Error`] を保持する。
+    AdaptivePtimeSetParametersFailed {
+        /// 発生した WebRTC エラー。
+        source: shiguredo_webrtc::Error,
+    },
     /// 指定されたラベルの DataChannel が存在しない。
     DataChannelMissing {
         /// 見つからなかった DataChannel のラベル名。
@@ -213,6 +228,16 @@ pub enum Error {
     },
     /// ビデオコーデックの preference 指定が不正。
     InvalidVideoCodecPreference {
+        /// 失敗理由。
+        reason: String,
+    },
+    /// 音声コーデックの capability 指定が不正。
+    InvalidAudioCodecCapability {
+        /// 失敗理由。
+        reason: String,
+    },
+    /// 音声コーデックの preference 指定が不正。
+    InvalidAudioCodecPreference {
         /// 失敗理由。
         reason: String,
     },
@@ -438,6 +463,21 @@ impl std::fmt::Display for Error {
             Error::SimulcastSetParametersFailed { source } => {
                 write!(f, "simulcast の SetParameters が失敗しました: {source}")
             }
+            Error::DegradationPreferenceSetParametersFailed { source } => {
+                write!(
+                    f,
+                    "degradation preference の SetParameters が失敗しました: {source}"
+                )
+            }
+            Error::UnknownDegradationPreference { value } => {
+                write!(f, "不明な degradation preference です: {value}")
+            }
+            Error::AdaptivePtimeSetParametersFailed { source } => {
+                write!(
+                    f,
+                    "adaptive ptime の SetParameters が失敗しました: {source}"
+                )
+            }
             Error::DataChannelMissing { label } => {
                 write!(f, "DataChannel がありません: {label}")
             }
@@ -470,6 +510,12 @@ impl std::fmt::Display for Error {
             }
             Error::InvalidVideoCodecPreference { reason } => {
                 write!(f, "VideoCodecPreference が不正です: {reason}")
+            }
+            Error::InvalidAudioCodecCapability { reason } => {
+                write!(f, "AudioCodecCapability が不正です: {reason}")
+            }
+            Error::InvalidAudioCodecPreference { reason } => {
+                write!(f, "AudioCodecPreference が不正です: {reason}")
             }
             #[cfg(feature = "libcamera")]
             Error::LibcameraMessage { message } => write!(f, "libcamera エラー: {message}"),
@@ -560,6 +606,8 @@ impl std::error::Error for Error {
             #[cfg(all(feature = "vpl", target_os = "linux"))]
             Error::Vpl { source } => Some(source),
             Error::SimulcastSetParametersFailed { source } => Some(source),
+            Error::DegradationPreferenceSetParametersFailed { source } => Some(source),
+            Error::AdaptivePtimeSetParametersFailed { source } => Some(source),
             Error::Utf8DecodeFailed(err) => Some(err),
             Error::CommandResponseMissing { source, .. } => Some(source),
             #[cfg(feature = "v4l2")]

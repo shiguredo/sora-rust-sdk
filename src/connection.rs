@@ -15,14 +15,15 @@ use shiguredo_http11::{Request, ResponseDecoder, auth::BasicAuth, uri::Uri};
 use shiguredo_webrtc::{
     AudioTrack, CreateSessionDescriptionObserver, CreateSessionDescriptionObserverHandler,
     CxxString, DataChannel, DataChannelObserver, DataChannelObserverHandler, DataChannelState,
-    IceCandidateRef, IceServer, MediaStreamTrack, PeerConnection, PeerConnectionDependencies,
-    PeerConnectionObserver, PeerConnectionObserverHandler, PeerConnectionOfferAnswerOptions,
-    PeerConnectionRtcConfiguration, PeerConnectionState, RTCStatsReport, Resolution, RtcError,
-    RtpEncodingParameters, RtpEncodingParametersVector, RtpReceiver, RtpSender, RtpTransceiver,
-    SSLCertChainRef, SSLCertificateVerifier, SSLCertificateVerifierHandler, SdpType,
-    SessionDescription, SetLocalDescriptionObserver, SetLocalDescriptionObserverHandler,
-    SetRemoteDescriptionObserver, SetRemoteDescriptionObserverHandler, StringVector, TlsCertPolicy,
-    VideoTrack,
+    DegradationPreference, FrameTransformer, FrameTransformerHandler, IceCandidateRef,
+    IceConnectionState, IceGatheringState, IceServer, MediaStreamTrack, PeerConnection,
+    PeerConnectionDependencies, PeerConnectionObserver, PeerConnectionObserverHandler,
+    PeerConnectionOfferAnswerOptions, PeerConnectionRtcConfiguration, PeerConnectionState,
+    RTCStatsReport, Resolution, RtcError, RtpEncodingParameters, RtpEncodingParametersVector,
+    RtpReceiver, RtpSender, RtpTransceiver, SSLCertChainRef, SSLCertificateVerifier,
+    SSLCertificateVerifierHandler, SdpType, SessionDescription, SetLocalDescriptionObserver,
+    SetLocalDescriptionObserverHandler, SetRemoteDescriptionObserver,
+    SetRemoteDescriptionObserverHandler, SignalingState, StringVector, TlsCertPolicy, VideoTrack,
 };
 use shiguredo_websocket::{
     ClientConnectionOptions, CloseCode, ConnectionEvent, ConnectionOutput, ConnectionState,
@@ -80,6 +81,12 @@ pub struct SoraConnectionBuilder {
     event_handler: Option<Box<dyn SoraConnectionEventHandler + Send>>,
     sender_video_track: Option<VideoTrack>,
     sender_audio_track: Option<AudioTrack>,
+    sender_video_transform: Option<Box<dyn FrameTransformerHandler + Send>>,
+    receiver_video_transform: Option<Box<dyn FrameTransformerHandler + Send>>,
+    /// 送信映像の負荷時の品質制御の優先度。
+    degradation_preference: Option<DegradationPreference>,
+    /// 送信音声の適応的パケット化時間 (adaptivePtime)。
+    adaptive_ptime: Option<bool>,
 
     // connect 時の設定
     client_id: Option<String>,
@@ -104,6 +111,8 @@ pub struct SoraConnectionBuilder {
     websocket_connection_timeout: Duration,
     websocket_close_timeout: Duration,
     disconnect_wait_timeout: Duration,
+    /// 接続確立後に PeerConnection が Disconnected のままであることを許容する時間。
+    disconnected_grace_period: Duration,
     tls_config: TlsConfig,
     user_agent: Option<String>,
     // 他の保持オブジェクトより最後に破棄する必要がある。
@@ -125,6 +134,10 @@ impl SoraConnectionBuilder {
             event_handler: Some(event_handler),
             sender_video_track: None,
             sender_audio_track: None,
+            sender_video_transform: None,
+            receiver_video_transform: None,
+            degradation_preference: None,
+            adaptive_ptime: None,
             client_id: None,
             bundle_id: None,
             metadata: None,
@@ -147,6 +160,7 @@ impl SoraConnectionBuilder {
             websocket_connection_timeout: Duration::from_secs(30),
             websocket_close_timeout: Duration::from_secs(3),
             disconnect_wait_timeout: Duration::from_secs(5),
+            disconnected_grace_period: Duration::from_secs(10),
             tls_config: TlsConfig::default(),
             user_agent: None,
             context,
@@ -168,6 +182,57 @@ impl SoraConnectionBuilder {
     /// [AudioTrack] を渡す。
     pub fn sender_audio_track(mut self, track: AudioTrack) -> Self {
         self.sender_audio_track = Some(track);
+        self
+    }
+
+    /// 送信する映像のエンコード済みフレーム変換を設定する。
+    ///
+    /// [FrameTransformerHandler] を実装した型のインスタンスを渡すと、
+    /// エンコーダーとパケタイザーの間でエンコード済みフレームを加工できる。
+    /// 音声トラックには適用されない。
+    pub fn sender_video_transform(
+        mut self,
+        transform: Box<dyn FrameTransformerHandler + Send>,
+    ) -> Self {
+        self.sender_video_transform = Some(transform);
+        self
+    }
+
+    /// 受信する映像のエンコード済みフレーム変換を設定する。
+    ///
+    /// [FrameTransformerHandler] を実装した型のインスタンスを渡すと、
+    /// デパケタイザーとデコーダーの間でエンコード済みフレームを加工できる。
+    /// 適用対象は全ての受信ビデオトラックで、渡された 1 つの transform を共有する。
+    /// 音声トラックには適用されない。
+    pub fn receiver_video_transform(
+        mut self,
+        transform: Box<dyn FrameTransformerHandler + Send>,
+    ) -> Self {
+        self.receiver_video_transform = Some(transform);
+        self
+    }
+
+    /// 送信する映像の負荷時の品質制御の優先度を設定する。
+    ///
+    /// [DegradationPreference::MaintainFramerateAndResolution] は品質制御を行わず、
+    /// [DegradationPreference::MaintainFramerate] はフレームレートを保って解像度を下げ、
+    /// [DegradationPreference::MaintainResolution] は解像度を保ってフレームレートを下げ、
+    /// [DegradationPreference::Balanced] は両方を調整する。
+    /// 指定しない場合は libwebrtc の既定に任せる。
+    ///
+    /// 未知の値 ([DegradationPreference::Unknown]) は
+    /// ネゴシエーション時に [Error::UnknownDegradationPreference] を返す。
+    pub fn degradation_preference(mut self, value: DegradationPreference) -> Self {
+        self.degradation_preference = Some(value);
+        self
+    }
+
+    /// 送信する音声の適応的パケット化時間 (adaptivePtime) を設定する。
+    ///
+    /// true にすると、音声のパケット化時間がネットワークの状況に応じて変化する。
+    /// 指定しない場合は libwebrtc の既定に任せる。
+    pub fn adaptive_ptime(mut self, value: bool) -> Self {
+        self.adaptive_ptime = Some(value);
         self
     }
 
@@ -370,6 +435,15 @@ impl SoraConnectionBuilder {
         self
     }
 
+    /// 接続確立後に PeerConnection が `Disconnected` のままであることを許容する時間を設定する。
+    ///
+    /// この時間を超えても `Disconnected` のままの場合は接続を終了する。
+    /// `Connected` または `Connecting` へ戻ると経過はリセットされる。
+    pub fn disconnected_grace_period(mut self, value: Duration) -> Self {
+        self.disconnected_grace_period = value;
+        self
+    }
+
     /// シグナリング用 WebSocket（WSS）接続時のサーバー証明書検証を
     /// スキップするかどうかを指定する。
     ///
@@ -435,6 +509,48 @@ impl SoraConnectionBuilder {
     pub fn build(self) -> Result<(SoraConnection, SoraConnectionHandle)> {
         SoraConnection::new(self)
     }
+}
+
+/// [SoraConnection::run] が接続終了時に返す切断理由。
+///
+/// 接続終了の理由の正本はこの型であり、[SoraConnectionEventHandler::on_websocket_close] は
+/// WebSocket レベルの切断だけを通知する。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DisconnectReason {
+    /// クライアントからの切断。
+    ///
+    /// [SoraConnectionHandle::disconnect] による切断要求で終了した場合を表す。
+    ClientDisconnect,
+    /// Sora サーバーからの `close` メッセージによる終了。
+    ServerClose {
+        /// `close` メッセージの `code`。
+        code: u16,
+        /// `close` メッセージの `reason`。
+        reason: String,
+    },
+    /// シグナリングエラーによる終了。
+    ///
+    /// Sora サーバーはシグナリングの失敗を WebSocket の Close code 4490 で通知する。
+    SignalingError {
+        /// Sora サーバーが通知した Close reason。
+        reason: String,
+    },
+    /// WebSocket の切断による終了。
+    ///
+    /// 相手から Close フレームを受信した場合はその code と reason を保持する。
+    WebSocketClosed {
+        /// 相手から受信した Close code。Close フレームを受信していない場合は `None`。
+        code: Option<u16>,
+        /// 相手から受信した Close reason。Close フレームを受信していない場合は空文字列。
+        reason: String,
+    },
+    /// DataChannel が閉じられたことによる終了。
+    DataChannelClosed {
+        /// 閉じられた DataChannel のラベル。
+        label: String,
+    },
+    /// 接続確立後の PeerConnection の失敗による終了。
+    PeerConnectionFailed,
 }
 
 /// 外部から SoraConnection を制御するためのハンドル。
@@ -580,6 +696,9 @@ pub struct SoraConnection {
     offer_simulcast: bool,
     simulcast_encodings: Vec<SimulcastEncodingConfig>,
     video_sender: Option<RtpSender>,
+    audio_sender: Option<RtpSender>,
+    sender_video_frame_transformer: Option<FrameTransformer>,
+    receiver_video_frame_transformer: Option<FrameTransformer>,
     command_rx: mpsc::UnboundedReceiver<SoraConnectionCommand>,
     event_tx: mpsc::UnboundedSender<SoraEvent>,
     event_rx: mpsc::UnboundedReceiver<SoraEvent>,
@@ -612,13 +731,30 @@ impl Drop for PendingRpcRequest {
 enum SoraEvent {
     Track(RtpTransceiver),
     RemoveTrack(RtpReceiver),
+    SignalingChange(SignalingState),
+    ConnectionChange(PeerConnectionState),
+    /// 猶予タイマーが満了したことを知らせる。
+    PeerConnectionDisconnectedTimeout {
+        /// 猶予タイマーに払い出した世代。
+        generation: u64,
+    },
+    IceConnectionChange(IceConnectionState),
+    IceGatheringChange(IceGatheringState),
     SignalingMessage(String),
-    DataChannelMessage { label: String, data: Vec<u8> },
+    DataChannelMessage {
+        label: String,
+        data: Vec<u8>,
+    },
     DataChannelRegister(DataChannel),
     DataChannelStateChange(String),
     SendWebSocketMessage(String),
-    SendDataChannelMessage { label: String, message: String },
-    RpcTimeout { id: u64 },
+    SendDataChannelMessage {
+        label: String,
+        message: String,
+    },
+    RpcTimeout {
+        id: u64,
+    },
 }
 
 pub(crate) enum SoraConnectionCommand {
@@ -752,53 +888,55 @@ impl SoraConnection {
         let (event_tx, event_rx) = mpsc::unbounded_channel::<SoraEvent>();
         let pc_factory = config.context.factory();
         let connection_context = config.context.connection_context();
-        let event_tx_for_candidate = event_tx.clone();
-        let event_tx_for_channel = event_tx.clone();
-        let event_tx_for_track = event_tx.clone();
         struct PcObserverHandler {
-            event_tx_for_track: mpsc::UnboundedSender<SoraEvent>,
-            event_tx_for_candidate: mpsc::UnboundedSender<SoraEvent>,
-            event_tx_for_channel: mpsc::UnboundedSender<SoraEvent>,
+            event_tx: mpsc::UnboundedSender<SoraEvent>,
         }
 
         impl PeerConnectionObserverHandler for PcObserverHandler {
+            fn on_signaling_change(&mut self, new_state: SignalingState) {
+                let _ = self.event_tx.send(SoraEvent::SignalingChange(new_state));
+            }
+
             fn on_connection_change(&mut self, new_state: PeerConnectionState) {
                 rtc_log_info!("PeerConnection state: {:?}", new_state);
+                let _ = self.event_tx.send(SoraEvent::ConnectionChange(new_state));
+            }
+
+            fn on_standardized_ice_connection_change(&mut self, new_state: IceConnectionState) {
+                let _ = self
+                    .event_tx
+                    .send(SoraEvent::IceConnectionChange(new_state));
+            }
+
+            fn on_ice_gathering_change(&mut self, new_state: IceGatheringState) {
+                let _ = self.event_tx.send(SoraEvent::IceGatheringChange(new_state));
             }
 
             fn on_track(&mut self, transceiver: RtpTransceiver) {
-                let _ = self.event_tx_for_track.send(SoraEvent::Track(transceiver));
+                let _ = self.event_tx.send(SoraEvent::Track(transceiver));
             }
 
             fn on_remove_track(&mut self, receiver: RtpReceiver) {
-                let _ = self
-                    .event_tx_for_track
-                    .send(SoraEvent::RemoveTrack(receiver));
+                let _ = self.event_tx.send(SoraEvent::RemoveTrack(receiver));
             }
 
             fn on_ice_candidate(&mut self, candidate: IceCandidateRef<'_>) {
                 if let Ok(message) = candidate.to_string() {
                     let candidate_message = OutgoingMessage::new_candidate(&message);
-                    let _ = self
-                        .event_tx_for_candidate
-                        .send(SoraEvent::SignalingMessage(
-                            Json(candidate_message).to_string(),
-                        ));
+                    let _ = self.event_tx.send(SoraEvent::SignalingMessage(
+                        Json(candidate_message).to_string(),
+                    ));
                 }
             }
 
             fn on_data_channel(&mut self, channel: DataChannel) {
                 // DataChannel を登録するためにメインループに送信
-                let _ = self
-                    .event_tx_for_channel
-                    .send(SoraEvent::DataChannelRegister(channel));
+                let _ = self.event_tx.send(SoraEvent::DataChannelRegister(channel));
             }
         }
 
         let observer = PeerConnectionObserver::new_with_handler(Box::new(PcObserverHandler {
-            event_tx_for_track,
-            event_tx_for_candidate,
-            event_tx_for_channel,
+            event_tx: event_tx.clone(),
         }));
 
         let mut deps = PeerConnectionDependencies::new(&observer);
@@ -833,8 +971,8 @@ impl SoraConnection {
                 proxy.user_agent(),
             );
         }
-        let mut rtc_config = PeerConnectionRtcConfiguration::new();
-        let pc = PeerConnection::create(pc_factory, &mut rtc_config, &mut deps)?;
+        let rtc_config = PeerConnectionRtcConfiguration::new();
+        let pc = PeerConnection::create(pc_factory, &rtc_config, deps)?;
 
         let connection = Self {
             data_channels: HashMap::new(),
@@ -842,6 +980,9 @@ impl SoraConnection {
             offer_simulcast: false,
             simulcast_encodings: Vec::new(),
             video_sender: None,
+            audio_sender: None,
+            sender_video_frame_transformer: None,
+            receiver_video_frame_transformer: None,
             command_rx,
             event_tx,
             event_rx,
@@ -861,7 +1002,15 @@ impl SoraConnection {
     ///
     /// シグナリング接続を確立し、WebRTC ネゴシエーションを処理し、受信メッセージを処理する。
     /// 接続が終了するまでブロックするため、別の非同期タスクで呼び出すこと。
-    pub async fn run(mut self) -> Result<()> {
+    ///
+    /// 接続が終了すると、その理由を [DisconnectReason] として返す。
+    /// 接続が異常終了した場合は `Err` を返す。この future を破棄または abort した場合は、
+    /// 切断理由を取得できない。
+    ///
+    /// 接続確立後に PeerConnection が `Failed` になった場合は即座に終了する。
+    /// `Disconnected` のまま [SoraConnectionBuilder::disconnected_grace_period] を
+    /// 超えた場合も終了する。
+    pub async fn run(mut self) -> Result<DisconnectReason> {
         let signaling_urls = self.config.signaling_urls.clone();
         let channel_id = self.config.channel_id.clone();
         let role = self.config.role;
@@ -911,6 +1060,7 @@ impl SoraConnection {
         let websocket_connection_timeout = self.config.websocket_connection_timeout;
         let websocket_close_timeout = self.config.websocket_close_timeout;
         let disconnect_wait_timeout = self.config.disconnect_wait_timeout;
+        let disconnected_grace_period = self.config.disconnected_grace_period;
         let user_agent = self
             .config
             .user_agent
@@ -951,7 +1101,7 @@ impl SoraConnection {
         let mut ws = WebSocketClientConnection::new(options, secure_random.clone());
         ws.connect()?;
         if flush_ws_output(&mut ws, &mut stream, &mut timers).await? {
-            return Ok(());
+            return Ok(websocket_closed_without_close_frame());
         }
 
         let mut redirect_location: Option<String> = None;
@@ -975,8 +1125,20 @@ impl SoraConnection {
         let mut server_close_received = false;
         // ユーザー主導の切断 (SoraConnectionCommand::Disconnect) による終了かどうか。
         // ユーザーが切断を要求している以上、終了処理の WebSocket close handshake で
-        // 発生する I/O エラーは warning に落として run の Ok(()) を覆さないために使う。
+        // 発生する I/O エラーは warning に落として run を Err にしないために使う。
         let mut user_initiated_disconnect = false;
+        // サーバーへ切断要求を送らずに接続を終了したかどうか。
+        // DataChannel が Closed になった場合と、接続確立後にメディア経路が死んだ場合が該当する。
+        // これらの経路では残りの DataChannel の close を待たずに close 通知を行って終了するために使う。
+        let mut terminated_without_disconnect = false;
+        // 接続確立後のメディア経路 (ICE / DTLS) の死活を監視する状態。
+        let mut media_path = MediaPathMonitor::new();
+        // WebSocket の Close フレームで受信した code と reason。
+        // run ループは Close フレームの受信時ではなく、ソケットが閉じたことを検知した時に
+        // 抜けるため、その時に切断理由として使えるよう閉じるまで保持する。
+        let mut websocket_close_frame: Option<(Option<u16>, String)> = None;
+        // 接続終了の理由。run の終了時に 1 回だけ返す。
+        let mut disconnect_reason: Option<DisconnectReason> = None;
 
         'run_loop: loop {
             // 期限切れの値を sleep_until で持つと即 Ready になりビジーループしてしまうため、
@@ -1024,6 +1186,10 @@ impl SoraConnection {
                             continue;
                         } else {
                             rtc_log_info!("Connection closed");
+                            set_disconnect_reason(
+                                &mut disconnect_reason,
+                                websocket_closed_without_close_frame(),
+                            );
                             break;
                         }
                     } else {
@@ -1069,6 +1235,10 @@ impl SoraConnection {
                                         reason
                                     );
                                     server_close_received = true;
+                                    set_disconnect_reason(
+                                        &mut disconnect_reason,
+                                        DisconnectReason::ServerClose { code, reason },
+                                    );
                                     // server Close は接続全体の終了通知であり、
                                     // 同一 iteration で終了処理へ移行する。
                                     // それ以降の redirect、WebSocket flush、command、
@@ -1078,10 +1248,74 @@ impl SoraConnection {
                             }
                         }
                         SoraEvent::Track(transceiver) => {
+                            // receiver_video_transform が設定されている、または既に
+                            // 共有の receiver transform を作成済みの場合のみ適用する。
+                            let receiver_transform_enabled =
+                                self.config.receiver_video_transform.is_some()
+                                    || self.receiver_video_frame_transformer.is_some();
+                            if receiver_transform_enabled {
+                                let mut receiver = transceiver.receiver();
+                                if matches!(receiver.track().kind().as_deref(), Ok("video")) {
+                                    if self.receiver_video_frame_transformer.is_none() {
+                                        let handler = self
+                                            .config
+                                            .receiver_video_transform
+                                            .take()
+                                            .expect("BUG: receiver_video_transform must be set when transform is enabled");
+                                        self.receiver_video_frame_transformer =
+                                            Some(FrameTransformer::new_with_handler(handler));
+                                    }
+                                    let transformer = self
+                                        .receiver_video_frame_transformer
+                                        .as_ref()
+                                        .expect("BUG: receiver_video_frame_transformer must be Some right after assignment");
+                                    receiver.set_frame_transformer(transformer);
+                                }
+                            }
                             handler.on_track(transceiver);
                         }
                         SoraEvent::RemoveTrack(receiver) => {
                             handler.on_remove_track(receiver);
+                        }
+                        SoraEvent::SignalingChange(state) => {
+                            handler.on_signaling_state_change(state);
+                        }
+                        SoraEvent::ConnectionChange(state) => {
+                            handler.on_connection_state_change(state);
+                            if handle_media_path_state(
+                                &mut media_path,
+                                state,
+                                &event_tx,
+                                disconnected_grace_period,
+                            ) {
+                                set_disconnect_reason(
+                                    &mut disconnect_reason,
+                                    DisconnectReason::PeerConnectionFailed,
+                                );
+                                terminated_without_disconnect = true;
+                                break 'run_loop;
+                            }
+                        }
+                        SoraEvent::PeerConnectionDisconnectedTimeout { generation } => {
+                            // 猶予時間を過ぎても Connected / Connecting へ戻らない場合は、
+                            // メディア経路が復旧しないとみなして接続を終了する。
+                            if media_path.should_terminate_on_timeout(generation) {
+                                rtc_log_info!(
+                                    "PeerConnection did not recover from disconnected; terminating connection"
+                                );
+                                set_disconnect_reason(
+                                    &mut disconnect_reason,
+                                    DisconnectReason::PeerConnectionFailed,
+                                );
+                                terminated_without_disconnect = true;
+                                break 'run_loop;
+                            }
+                        }
+                        SoraEvent::IceConnectionChange(state) => {
+                            handler.on_ice_connection_state_change(state);
+                        }
+                        SoraEvent::IceGatheringChange(state) => {
+                            handler.on_ice_gathering_state_change(state);
                         }
                         SoraEvent::DataChannelRegister(channel) => {
                             let Ok(label) = channel.label() else {
@@ -1090,7 +1324,23 @@ impl SoraConnection {
                             rtc_log_info!("Registered DataChannel '{}'", label);
                             handler.on_data_channel(&label);
                             self.register_data_channel(channel, &event_tx);
-                            self.handle_data_channel_state(&mut *handler, &label, &mut opened_data_channels, &mut use_data_channel_signaling, switched_received);
+                            if matches!(
+                                self.handle_data_channel_state(
+                                    &mut *handler,
+                                    &label,
+                                    &mut opened_data_channels,
+                                    &mut use_data_channel_signaling,
+                                    switched_received,
+                                ),
+                                DataChannelStateResult::Terminate
+                            ) {
+                                set_disconnect_reason(
+                                    &mut disconnect_reason,
+                                    DisconnectReason::DataChannelClosed { label },
+                                );
+                                terminated_without_disconnect = true;
+                                break 'run_loop;
+                            }
                         }
                         SoraEvent::RpcTimeout { id } => {
                             if let Some(mut pending) = self.pending_rpc_responses.remove(&id) {
@@ -1098,7 +1348,23 @@ impl SoraConnection {
                             }
                         }
                         SoraEvent::DataChannelStateChange(label) => {
-                            self.handle_data_channel_state(&mut *handler, &label, &mut opened_data_channels, &mut use_data_channel_signaling, switched_received);
+                            if matches!(
+                                self.handle_data_channel_state(
+                                    &mut *handler,
+                                    &label,
+                                    &mut opened_data_channels,
+                                    &mut use_data_channel_signaling,
+                                    switched_received,
+                                ),
+                                DataChannelStateResult::Terminate
+                            ) {
+                                set_disconnect_reason(
+                                    &mut disconnect_reason,
+                                    DisconnectReason::DataChannelClosed { label },
+                                );
+                                terminated_without_disconnect = true;
+                                break 'run_loop;
+                            }
                         }
                         // このイベントを受信したら WebSocket メッセージを送信する
                         // 送信時のエラーはログだけ出して無視する
@@ -1151,6 +1417,10 @@ impl SoraConnection {
                                 opened_data_channels.clear();
                             }
                             let _ = ack_tx.send(());
+                            set_disconnect_reason(
+                                &mut disconnect_reason,
+                                DisconnectReason::ClientDisconnect,
+                            );
                             break;
                         }
                         SoraConnectionCommand::GetStats(stats_response_tx) => {
@@ -1351,8 +1621,15 @@ impl SoraConnection {
                                     redirect_location = Some(location);
                                     break;
                                 }
-                                IncomingMessageData::Close { .. } => {
+                                IncomingMessageData::Close { code, reason } => {
                                     rtc_log_info!("Disconnected from Sora server");
+                                    // close メッセージでは run ループを終了せず、理由だけを確定させる。
+                                    // WebSocket シグナリングでは、この後に Sora が送る Close フレーム
+                                    // (またはソケットの切断) を検知して run ループが終了する。
+                                    set_disconnect_reason(
+                                        &mut disconnect_reason,
+                                        DisconnectReason::ServerClose { code, reason },
+                                    );
                                     break;
                                 }
                             }
@@ -1371,7 +1648,9 @@ impl SoraConnection {
                         }
                         ConnectionEvent::Close { code, reason } => {
                             rtc_log_info!("[WebSocket] Received Close: {:?} {}", code, reason);
-                            handler.on_websocket_close(code.map(|c| c.0), &reason);
+                            let code = code.map(|c| c.0);
+                            handler.on_websocket_close(code, &reason);
+                            websocket_close_frame = Some((code, reason));
                             break;
                         }
                         ConnectionEvent::StateChanged(state) => {
@@ -1386,12 +1665,14 @@ impl SoraConnection {
 
             // redirect メッセージを受信した場合、新しい WebSocket に再接続する
             if let Some(location) = redirect_location.take() {
-                // セッション状態をリセットする。
-                // 旧接続の状態が redirect 先に持ち越されると、
-                // switched フラグや DataChannel 状態が不整合を起こす。
+                // セッション状態をリセットする。旧接続の状態が redirect 先に持ち越されると、
+                // switched フラグや DataChannel 状態が不整合を起こす。また、旧接続で受信した
+                // Close フレームが残っていると、redirect 先の接続が終了したときの理由に
+                // 使われてしまう。
                 switched_received = false;
                 switched_ignore_disconnect_websocket = false;
                 use_data_channel_signaling = false;
+                websocket_close_frame = None;
 
                 // 古い DataChannel の close 通知をユーザーに送る。
                 // クリア前に通知することでハンドラが確実に呼ばれる。
@@ -1412,7 +1693,27 @@ impl SoraConnection {
 
                 // 旧セッションの event_rx に滞留したイベントをドレインする。
                 // クリア後の data_channels に旧チャネルが再登録されるのを防ぐ。
-                while self.event_rx.try_recv().is_ok() {}
+                // ただし ConnectionChange は PeerConnection の現在の状態を表しており、
+                // redirect 後も同じ PeerConnection を使い続けるため、
+                // メディア経路の監視へは反映する。
+                while let Ok(event) = self.event_rx.try_recv() {
+                    let SoraEvent::ConnectionChange(state) = event else {
+                        continue;
+                    };
+                    if handle_media_path_state(
+                        &mut media_path,
+                        state,
+                        &event_tx,
+                        disconnected_grace_period,
+                    ) {
+                        set_disconnect_reason(
+                            &mut disconnect_reason,
+                            DisconnectReason::PeerConnectionFailed,
+                        );
+                        terminated_without_disconnect = true;
+                        break 'run_loop;
+                    }
+                }
 
                 // 古い WebSocket をクローズする
                 if ws.state() == ConnectionState::Connected {
@@ -1454,6 +1755,10 @@ impl SoraConnection {
                 websocket_closed = false;
                 redirect = true;
                 if flush_ws_output(&mut ws, &mut stream, &mut timers).await? {
+                    set_disconnect_reason(
+                        &mut disconnect_reason,
+                        websocket_closed_without_close_frame(),
+                    );
                     break;
                 }
                 continue;
@@ -1503,6 +1808,15 @@ impl SoraConnection {
                         websocket_closed = true;
                         continue;
                     } else {
+                        // 保持していた Close フレームがあればそれを理由に使い、無ければ
+                        // Close フレームを伴わない切断として扱う。
+                        let reason = match websocket_close_frame.take() {
+                            Some((code, reason)) => {
+                                disconnect_reason_from_websocket_close(code, &reason)
+                            }
+                            None => websocket_closed_without_close_frame(),
+                        };
+                        set_disconnect_reason(&mut disconnect_reason, reason);
                         break;
                     }
                 }
@@ -1516,9 +1830,13 @@ impl SoraConnection {
         )
         .await;
 
-        // DataChannel シグナリングを利用している場合は、
-        // disconnect_wait_timeout を上限にクローズ完了を待機する。
-        if use_data_channel_signaling && !opened_data_channels.is_empty() {
+        if terminated_without_disconnect {
+            // サーバーへ切断要求を送らずに終了した場合は、残りの DataChannel が
+            // 閉じる保証も無いため、待機せずに close 通知を行って終了する。
+            notify_close_for_remaining(&mut *handler, &mut opened_data_channels);
+        } else if use_data_channel_signaling && !opened_data_channels.is_empty() {
+            // DataChannel シグナリングを利用している場合は、
+            // disconnect_wait_timeout を上限にクローズ完了を待機する。
             let deadline = tokio::time::Instant::now() + disconnect_wait_timeout;
             // .await を超える値を渡す場合は Send である必要があるが、&data_channels は
             // Send でないためエラーになるので、self.data_channels で所有権ごと渡す。
@@ -1546,11 +1864,14 @@ impl SoraConnection {
         // 死んだソケットへの I/O が失敗し、ユーザー主導の正常切断にもかかわらず
         // run() が Err を返してしまうため、close handshake をスキップする。
         if !websocket_closed {
-            // close handshake 中の I/O エラーを吸収すべき終了経路を合成して渡す。
-            // ignore 構成とユーザー主導の切断は「接続を終了する意思が確定している」
-            // 点で共通するため、まとめて 1 つの吸収条件にする。server_close_received
-            // も吸収条件に含まれるが、close handshake 中に受信した WebSocket Close
-            // フレームで on_websocket_close を通知する判定にも使うため別引数のままにする。
+            // close handshake 中の I/O エラーを吸収する条件を渡す。
+            // - ignore 構成とユーザー主導の切断: 切断とサーバー側の RST が同時に起きると
+            //   websocket_closed が立つ前に close handshake へ入り、死んだソケットへの
+            //   書き込みが失敗しうる
+            // - Close フレームを伴わない WebSocket の切断: ソケットが既に死んでいる
+            // server_close_received も吸収条件に含まれるが、close handshake 中に受信した
+            // WebSocket Close フレームで on_websocket_close を通知する判定にも使うため、
+            // 別引数のままにする。
             close_websocket_handshake(
                 &mut ws,
                 &mut stream,
@@ -1558,25 +1879,37 @@ impl SoraConnection {
                 &mut *handler,
                 server_close_received,
                 (switched_ignore_disconnect_websocket && use_data_channel_signaling)
-                    || user_initiated_disconnect,
+                    || user_initiated_disconnect
+                    || matches!(
+                        disconnect_reason.as_ref(),
+                        Some(DisconnectReason::WebSocketClosed { code: None, .. })
+                    ),
                 websocket_close_timeout,
             )
             .await?;
         }
 
         rtc_log_info!("Shutting down");
-        Ok(())
+        // ループを抜けるすべての経路で理由を確定させているため、ここで None にはならない。
+        Ok(disconnect_reason
+            .expect("BUG: disconnect reason must be set before leaving the run loop"))
     }
 
     fn add_sender_tracks(&mut self) -> Result<()> {
         if let Some(track) = self.config.sender_video_track.take() {
             let media_track = track.cast_to_media_stream_track();
-            let sender = self.add_sender_media_track(&media_track)?;
+            let mut sender = self.add_sender_media_track(&media_track)?;
+            if let Some(handler) = self.config.sender_video_transform.take() {
+                // add_track 直後に設定することで最初のフレームから変換を適用する。
+                let transformer = FrameTransformer::new_with_handler(handler);
+                sender.set_frame_transformer(&transformer);
+                self.sender_video_frame_transformer = Some(transformer);
+            }
             self.video_sender = Some(sender);
         }
         if let Some(track) = self.config.sender_audio_track.take() {
             let media_track = track.cast_to_media_stream_track();
-            let _ = self.add_sender_media_track(&media_track)?;
+            self.audio_sender = Some(self.add_sender_media_track(&media_track)?);
         }
         Ok(())
     }
@@ -1612,9 +1945,6 @@ impl SoraConnection {
             if let Some(active) = cfg.active {
                 encoding.set_active(active);
             }
-            if let Some(adaptive_ptime) = cfg.adaptive_ptime {
-                encoding.set_adaptive_ptime(adaptive_ptime);
-            }
             encoding.set_scalability_mode(cfg.scalability_mode.as_deref());
             if let Some(v) = &cfg.scale_resolution_down_to {
                 let mut resolution = Resolution::new();
@@ -1630,6 +1960,65 @@ impl SoraConnection {
         sender
             .set_parameters(&parameters)
             .map_err(|source| Error::SimulcastSetParametersFailed { source })?;
+        Ok(())
+    }
+
+    /// video sender の RTP パラメータに degradation preference を反映する。
+    fn apply_degradation_preference(&mut self) -> Result<()> {
+        let Some(preference) = self.config.degradation_preference else {
+            return Ok(());
+        };
+
+        // Unknown は libwebrtc が解釈できない値なのでエラーにする
+        if let DegradationPreference::Unknown(value) = preference {
+            return Err(Error::UnknownDegradationPreference { value });
+        }
+
+        let Some(sender) = self.video_sender.as_mut() else {
+            return Ok(());
+        };
+
+        let mut parameters = sender.get_parameters();
+        parameters.set_degradation_preference(Some(preference));
+        sender
+            .set_parameters(&parameters)
+            .map_err(|source| Error::DegradationPreferenceSetParametersFailed { source })?;
+        Ok(())
+    }
+
+    /// audio sender の RTP パラメータに adaptive ptime を反映する。
+    ///
+    /// adaptive ptime は音声の voice engine だけが参照するため、video sender には設定しない。
+    fn apply_adaptive_ptime(&mut self) -> Result<()> {
+        let Some(adaptive_ptime) = self.config.adaptive_ptime else {
+            return Ok(());
+        };
+
+        let Some(sender) = self.audio_sender.as_mut() else {
+            return Ok(());
+        };
+
+        let mut parameters = sender.get_parameters();
+        // encodings() はベクタの複製を返すため、書き換えた結果を set_encodings で戻す。
+        let mut encodings = parameters.encodings();
+        if encodings.is_empty() {
+            // audio sender の encodings はローカル description を適用して SSRC が確定するまで空になっている
+            // この場合はこの接続で音声を送信していないため、設定できる対象が無いものとして接続を継続する。
+            return Ok(());
+        }
+
+        for i in 0..encodings.len() {
+            // index は encodings の長さの範囲内であるため、必ず取得できる。
+            let mut encoding = encodings
+                .get_mut(i)
+                .expect("index must be within encodings length");
+            encoding.set_adaptive_ptime(adaptive_ptime);
+        }
+
+        parameters.set_encodings(&encodings);
+        sender
+            .set_parameters(&parameters)
+            .map_err(|source| Error::AdaptivePtimeSetParametersFailed { source })?;
         Ok(())
     }
 
@@ -1672,9 +2061,9 @@ impl SoraConnection {
             if server_entry.urls_len() == 0 {
                 continue;
             }
-            config.servers().push(&server_entry);
+            config.servers_mut().push(&server_entry);
         }
-        pc.set_configuration(&mut config)?;
+        pc.set_configuration(&config)?;
         Ok(())
     }
 
@@ -1734,6 +2123,8 @@ impl SoraConnection {
             self.apply_simulcast_encodings()?;
         }
 
+        self.apply_degradation_preference()?;
+
         let (ans_tx, mut ans_rx) = mpsc::unbounded_channel::<Result<String>>();
 
         struct AnsObsHandler {
@@ -1759,8 +2150,8 @@ impl SoraConnection {
 
         {
             let pc = &self.pc;
-            let mut opts = PeerConnectionOfferAnswerOptions::new();
-            pc.create_answer(&mut ans_obs, &mut opts);
+            let opts = PeerConnectionOfferAnswerOptions::new();
+            pc.create_answer(&mut ans_obs, &opts);
         }
         let answer_sdp = tokio::time::timeout(SDP_OPERATION_TIMEOUT, ans_rx.recv())
             .await
@@ -1784,12 +2175,14 @@ impl SoraConnection {
             return Err(Error::SetLocalDescriptionFailed { reason: err });
         }
 
+        self.apply_adaptive_ptime()?;
+
         Ok(answer_sdp)
     }
 
     fn register_data_channel(
         &mut self,
-        mut channel: DataChannel,
+        channel: DataChannel,
         event_tx: &mpsc::UnboundedSender<SoraEvent>,
     ) {
         let Ok(label) = channel.label() else {
@@ -1800,41 +2193,29 @@ impl SoraConnection {
         let config = self.data_channel_configs.iter().find(|c| c.label == label);
         let compress = config.is_some_and(|c| c.compress);
 
-        let event_tx_for_observer = event_tx.clone();
-        let event_tx_for_message = event_tx.clone();
-        let label_for_state = label.clone();
-        let label_for_message = label.clone();
         struct DcObsHandler {
-            label_for_state: String,
-            label_for_message: String,
-            event_tx_for_observer: mpsc::UnboundedSender<SoraEvent>,
-            event_tx_for_message: mpsc::UnboundedSender<SoraEvent>,
+            label: String,
+            event_tx: mpsc::UnboundedSender<SoraEvent>,
         }
 
         impl DataChannelObserverHandler for DcObsHandler {
             fn on_state_change(&mut self) {
                 let _ = self
-                    .event_tx_for_observer
-                    .send(SoraEvent::DataChannelStateChange(
-                        self.label_for_state.clone(),
-                    ));
+                    .event_tx
+                    .send(SoraEvent::DataChannelStateChange(self.label.clone()));
             }
 
             fn on_message(&mut self, data: &[u8], _is_binary: bool) {
-                let _ = self
-                    .event_tx_for_message
-                    .send(SoraEvent::DataChannelMessage {
-                        label: self.label_for_message.clone(),
-                        data: data.to_vec(),
-                    });
+                let _ = self.event_tx.send(SoraEvent::DataChannelMessage {
+                    label: self.label.clone(),
+                    data: data.to_vec(),
+                });
             }
         }
 
         let observer = DataChannelObserver::new_with_handler(Box::new(DcObsHandler {
-            label_for_state,
-            label_for_message,
-            event_tx_for_observer,
-            event_tx_for_message,
+            label: label.clone(),
+            event_tx: event_tx.clone(),
         }));
         channel.register_observer(&observer);
 
@@ -1851,6 +2232,13 @@ impl SoraConnection {
         }
     }
 
+    /// DataChannel の状態遷移を処理し、接続を終了すべきかを返す。
+    ///
+    /// Open への遷移では `opened_data_channels` に記録して `on_data_channel_open` を通知し、
+    /// 全 DataChannel が Open なら DataChannel シグナリングへ切り替える。
+    /// 開いていた DataChannel が Closed へ遷移した場合は `on_data_channel_close` を通知して
+    /// [DataChannelStateResult::Terminate] を返す。
+    /// それ以外の状態遷移では通知も切り替えも行わず [DataChannelStateResult::Continue] を返す。
     fn handle_data_channel_state(
         &self,
         handler: &mut dyn SoraConnectionEventHandler,
@@ -1858,7 +2246,7 @@ impl SoraConnection {
         opened_data_channels: &mut HashSet<String>,
         use_data_channel_signaling: &mut bool,
         switched_received: bool,
-    ) {
+    ) -> DataChannelStateResult {
         if is_data_channel_open(&self.data_channels, label) && !opened_data_channels.contains(label)
         {
             rtc_log_info!("DataChannel '{}' opened", label);
@@ -1873,8 +2261,16 @@ impl SoraConnection {
             {
                 *use_data_channel_signaling = true;
             }
+            DataChannelStateResult::Continue
         } else if should_notify_close(&self.data_channels, opened_data_channels, label) {
             notify_data_channel_closed(handler, opened_data_channels, label);
+            // 開いていた DataChannel が閉じると、そのラベルを使う機能
+            // (シグナリング・統計・RPC・利用者メッセージ) は復帰できない。
+            // 一部の DataChannel だけが閉じた接続は健全ではないため接続全体を終了する。
+            rtc_log_info!("DataChannel '{}' was closed; terminating connection", label);
+            DataChannelStateResult::Terminate
+        } else {
+            DataChannelStateResult::Continue
         }
     }
 
@@ -2194,6 +2590,15 @@ enum HandleDataChannelMessageResult {
     },
 }
 
+/// DataChannel の状態遷移を処理した結果、接続を終了するかどうかを表す。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DataChannelStateResult {
+    /// 接続を継続する。
+    Continue,
+    /// 開いていた DataChannel が閉じたため接続を終了する。
+    Terminate,
+}
+
 /// DataChannel シグナリングへの切替 readiness を判定する pure なヘルパー。
 ///
 /// 次の 3 条件をすべて満たしたときだけ true を返す:
@@ -2245,6 +2650,38 @@ fn resolve_ws_disconnect_delay_start(
         None
     } else {
         ws_disconnect_delay_start.or(Some(now))
+    }
+}
+
+/// Sora がシグナリングの失敗を通知する WebSocket Close code。
+const SIGNALING_ERROR_CLOSE_CODE: u16 = 4490;
+
+/// 接続終了の理由を、まだ確定していない場合だけ設定する。
+fn set_disconnect_reason(reason: &mut Option<DisconnectReason>, value: DisconnectReason) {
+    // WebSocket レベルの切断は他の終了要因の結果としても発生するため、
+    // すでに確定している理由を後から上書きしない。
+    reason.get_or_insert(value);
+}
+
+/// Close フレームを伴わない WebSocket の切断を表す理由を返す。
+fn websocket_closed_without_close_frame() -> DisconnectReason {
+    DisconnectReason::WebSocketClosed {
+        code: None,
+        reason: String::new(),
+    }
+}
+
+/// WebSocket の Close フレームで受信した code と reason から切断理由を求める。
+fn disconnect_reason_from_websocket_close(code: Option<u16>, reason: &str) -> DisconnectReason {
+    if code == Some(SIGNALING_ERROR_CLOSE_CODE) {
+        DisconnectReason::SignalingError {
+            reason: reason.to_string(),
+        }
+    } else {
+        DisconnectReason::WebSocketClosed {
+            code,
+            reason: reason.to_string(),
+        }
     }
 }
 
@@ -2381,6 +2818,132 @@ async fn wait_data_channels_close(
 
         if opened_data_channels.is_empty() {
             return DataChannelCloseWaitResult::AllChannelsClosed;
+        }
+    }
+}
+
+/// メディア経路の状態変化に応じてメインループが行う操作を表す。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MediaPathAction {
+    /// 猶予タイマーに対する操作は不要。
+    None,
+    /// `Disconnected` のままであることを許容する猶予タイマーを開始する。
+    StartGraceTimer {
+        /// 開始するタイマーに払い出す世代。
+        generation: u64,
+    },
+    /// メディア経路が復旧しないため接続を終了する。
+    Terminate,
+}
+
+/// 接続確立後のメディア経路 (ICE / DTLS) の死活を監視する状態。
+struct MediaPathMonitor {
+    /// PeerConnection が一度でも `Connected` になったかどうか。
+    ///
+    /// 接続確立前の失敗は Sora サーバーの `connection_created_wait_timeout` が
+    /// WebSocket のクローズとして通知するため、これが false の間は
+    /// 状態変化では接続を終了しない。
+    connected: bool,
+    /// 猶予タイマーに払い出す世代。開始のたびに進め、同じ値を再利用しない。
+    generation: u64,
+    /// 稼働中の猶予タイマーの世代。猶予が不要になったら `None` に戻す。
+    grace_timer_generation: Option<u64>,
+}
+
+impl MediaPathMonitor {
+    fn new() -> Self {
+        Self {
+            connected: false,
+            generation: 0,
+            grace_timer_generation: None,
+        }
+    }
+
+    /// PeerConnection の状態変化を監視状態へ反映し、猶予タイマーに対して行う操作を返す。
+    ///
+    /// `Failed` は復旧しない終端状態であるため、接続確立後は [MediaPathAction::Terminate] を返す。
+    /// `Disconnected` は一時的な切断で復旧し得るため、接続確立後は
+    /// [MediaPathAction::StartGraceTimer] を返す。`Connected` と `Connecting` は
+    /// 進行中の猶予を無効化する。接続確立前の状態変化では何もしない。
+    fn observe(&mut self, state: PeerConnectionState) -> MediaPathAction {
+        if state == PeerConnectionState::Connected {
+            self.connected = true;
+        }
+        if !self.connected {
+            return MediaPathAction::None;
+        }
+
+        match state {
+            // 接続が回復する可能性があるため、進行中の猶予を無効化する。
+            PeerConnectionState::Connected | PeerConnectionState::Connecting => {
+                self.grace_timer_generation = None;
+                MediaPathAction::None
+            }
+            // `Disconnected` は回復し得るため、猶予時間の間だけ終了を待つ。
+            PeerConnectionState::Disconnected => {
+                self.generation += 1;
+                self.grace_timer_generation = Some(self.generation);
+                MediaPathAction::StartGraceTimer {
+                    generation: self.generation,
+                }
+            }
+            // `Failed` は復旧しない終端状態であるため、即座に終了する。
+            PeerConnectionState::Failed => MediaPathAction::Terminate,
+            // `New` / `Closed` / `Unknown` は接続の終了条件に含めない。
+            PeerConnectionState::New
+            | PeerConnectionState::Closed
+            | PeerConnectionState::Unknown(_) => MediaPathAction::None,
+        }
+    }
+
+    /// 猶予タイマーが `generation` の世代で発火したときに接続を終了すべきかを返す。
+    ///
+    /// `generation` には [MediaPathMonitor::observe] が返した世代だけを渡すこと。
+    /// 猶予が不要になった後に古いタイマーが発火した場合は false を返す。
+    fn should_terminate_on_timeout(&self, generation: u64) -> bool {
+        self.grace_timer_generation == Some(generation)
+    }
+}
+
+/// 猶予時間の経過を [SoraEvent::PeerConnectionDisconnectedTimeout] として
+/// メインループへ通知するタイマーを開始する。
+fn spawn_disconnected_grace_timer(
+    event_tx: &mpsc::UnboundedSender<SoraEvent>,
+    generation: u64,
+    grace_period: Duration,
+) {
+    // メインループがタイマーを保持する代わりにタスクへ委ねることで、
+    // イベントの到着順と状態変化の適用順を一致させる。
+    let event_tx = event_tx.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(grace_period).await;
+        let _ = event_tx.send(SoraEvent::PeerConnectionDisconnectedTimeout { generation });
+    });
+}
+
+/// メディア経路の状態変化を監視状態へ反映し、猶予タイマーに対する操作を行う。
+///
+/// 猶予タイマーの開始が必要な場合はタイマーを開始する。
+/// 接続を終了すべき場合は true を返す。
+fn handle_media_path_state(
+    media_path: &mut MediaPathMonitor,
+    state: PeerConnectionState,
+    event_tx: &mpsc::UnboundedSender<SoraEvent>,
+    grace_period: Duration,
+) -> bool {
+    match media_path.observe(state) {
+        MediaPathAction::None => false,
+        MediaPathAction::StartGraceTimer { generation } => {
+            rtc_log_info!(
+                "PeerConnection disconnected; waiting {:?} for recovery",
+                grace_period
+            );
+            spawn_disconnected_grace_timer(event_tx, generation, grace_period);
+            false
+        }
+        MediaPathAction::Terminate => {
+            rtc_log_info!("PeerConnection failed; terminating connection");
+            true
         }
     }
 }
@@ -3166,12 +3729,11 @@ async fn flush_ws_output<R: RandomSource>(
 ///
 /// 引数:
 /// - `server_close_received`: DataChannel 経由の server Close による終了かどうか。
-///   相手からの Close フレームを `handler.on_websocket_close` で通知するかの判定と、
-///   I/O エラーを警告に落とすかの判定に使う。
-/// - `absorb_close_handshake_errors`: close handshake 中の I/O エラーを警告に落として
-///   `Ok(())` を返すべきかどうか。呼び出し元が
-///   `(switched_ignore_disconnect_websocket && use_data_channel_signaling) ||
-///   user_initiated_disconnect` の結果を渡す。
+///   相手からの Close フレームを `handler.on_websocket_close` で通知するかの判定に使う。
+/// - `absorb_close_handshake_errors`: 接続の終了が確定していて、ソケットが既に
+///   死んでいる可能性がある経路かどうか。呼び出し元が、ignore 構成で DataChannel
+///   シグナリングに切り替えた後、ユーザー主導の切断、Close フレームを伴わない
+///   WebSocket の切断で `true` を渡す。
 async fn close_websocket_handshake<R: RandomSource>(
     ws: &mut WebSocketClientConnection<R>,
     stream: &mut ClientStream,
@@ -3182,13 +3744,6 @@ async fn close_websocket_handshake<R: RandomSource>(
     websocket_close_timeout: Duration,
 ) -> Result<()> {
     if ws.state() == ConnectionState::Connected {
-        // server Close は server_close_received で終了経路が確定しているため、
-        // この後始末で発生するエラーは無視してよい。
-        // ignore 構成とユーザー主導の切断は、切断とサーバー側の RST が同時に
-        // 起きた場合に websocket_closed が立つ前に close handshake へ入り、
-        // 死んだソケットへの書き込みが失敗することがある。
-        // いずれも接続を終了する意思が確定しているため、close handshake の失敗は
-        // warning に落として run の Ok(()) を覆さない。
         let close_result = tokio::time::timeout(websocket_close_timeout, async {
             ws.close(CloseCode::NORMAL, "shutdown")?;
             loop {
@@ -3240,6 +3795,7 @@ async fn close_websocket_handshake<R: RandomSource>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shiguredo_webrtc::{IceCandidate, MediaType, RtpTransceiverDirection, RtpTransceiverInit};
 
     fn proxy_info_with_url(url: String) -> ProxyInfo {
         ProxyInfo {
@@ -3907,6 +4463,79 @@ mod tests {
         }
     }
 
+    #[test]
+    fn websocket_close_with_signaling_error_code_is_signaling_error() {
+        assert_eq!(
+            disconnect_reason_from_websocket_close(Some(4490), "INTERNAL-ERROR"),
+            DisconnectReason::SignalingError {
+                reason: "INTERNAL-ERROR".to_string(),
+            },
+            "Close code 4490 はシグナリングエラーとして扱う"
+        );
+    }
+
+    #[test]
+    fn websocket_close_with_other_code_is_websocket_closed() {
+        for code in [1000, 1001, 4000] {
+            assert_eq!(
+                disconnect_reason_from_websocket_close(Some(code), "bye"),
+                DisconnectReason::WebSocketClosed {
+                    code: Some(code),
+                    reason: "bye".to_string(),
+                },
+                "code={code} は WebSocket レベルの切断として扱う"
+            );
+        }
+    }
+
+    #[test]
+    fn websocket_close_without_code_is_websocket_closed_without_code() {
+        assert_eq!(
+            disconnect_reason_from_websocket_close(None, ""),
+            websocket_closed_without_close_frame(),
+            "Close code が無い場合は Close フレームを伴わない切断として扱う"
+        );
+    }
+
+    #[test]
+    fn websocket_closed_without_close_frame_has_no_code_and_empty_reason() {
+        assert_eq!(
+            websocket_closed_without_close_frame(),
+            DisconnectReason::WebSocketClosed {
+                code: None,
+                reason: String::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn set_disconnect_reason_sets_reason_when_unset() {
+        let mut reason = None;
+        set_disconnect_reason(&mut reason, DisconnectReason::ClientDisconnect);
+        assert_eq!(reason, Some(DisconnectReason::ClientDisconnect));
+    }
+
+    #[test]
+    fn set_disconnect_reason_keeps_first_reason() {
+        let mut reason = None;
+        set_disconnect_reason(
+            &mut reason,
+            DisconnectReason::ServerClose {
+                code: 1000,
+                reason: "DISCONNECTED-API".to_string(),
+            },
+        );
+        set_disconnect_reason(&mut reason, websocket_closed_without_close_frame());
+        assert_eq!(
+            reason,
+            Some(DisconnectReason::ServerClose {
+                code: 1000,
+                reason: "DISCONNECTED-API".to_string(),
+            }),
+            "先に確定した理由を後から来た WebSocket の切断で上書きしない"
+        );
+    }
+
     fn data_channel_config(labels: &[&str]) -> Vec<DataChannelConfig> {
         labels
             .iter()
@@ -4136,6 +4765,350 @@ mod tests {
         assert!(
             !should_notify_close(&connection.data_channels, &opened, "#chat"),
             "opened_data_channels に含まれない label は remove してはなりません"
+        );
+    }
+
+    /// 開いていた DataChannel が Closed になったときに接続終了を返すことを検証する。
+    ///
+    /// label によって判定が変わらないことを確かめるため、内部ラベルとユーザー定義ラベルの
+    /// 両方から呼ぶ。
+    async fn assert_terminates_when_opened_channel_closed(label: &str) {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_compressed_data_channel(&mut connection, label);
+        let mut handler = RecordingHandler::default();
+        let mut opened = opened_labels(&[label]);
+
+        // 接続中に label が Closed になった状況を作る。
+        connection.data_channels[label].channel.close();
+        wait_data_channel_closed(&mut connection, label).await;
+
+        let mut use_data_channel_signaling = false;
+        let result = connection.handle_data_channel_state(
+            &mut handler,
+            label,
+            &mut opened,
+            &mut use_data_channel_signaling,
+            true,
+        );
+
+        assert_eq!(
+            result,
+            DataChannelStateResult::Terminate,
+            "開いていた label '{label}' が Closed になったら接続を終了する必要があります"
+        );
+        assert_eq!(
+            handler.data_channel_close_count, 1,
+            "label '{label}' の close 通知は 1 回だけ行う必要があります"
+        );
+        assert_eq!(
+            handler.data_channel_close_labels,
+            vec![label.to_string()],
+            "close 通知の label が一致する必要があります"
+        );
+        assert!(
+            opened.is_empty(),
+            "close 通知後は opened から除去される必要があります"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_data_channel_state_terminates_when_signaling_channel_closed() {
+        assert_terminates_when_opened_channel_closed("signaling").await;
+    }
+
+    #[tokio::test]
+    async fn handle_data_channel_state_terminates_when_user_defined_channel_closed() {
+        assert_terminates_when_opened_channel_closed("#chat").await;
+    }
+
+    /// 複数の DataChannel が Open のうち 1 つだけが Closed になった場合の検証。
+    ///
+    /// 閉じていないラベルは opened_data_channels に残り、DataChannel シグナリングの
+    /// 状態も変わらないこと (終了フェーズで残りの close を待たない前提) を確認する。
+    #[tokio::test]
+    async fn handle_data_channel_state_terminates_when_one_of_multiple_channels_closed() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_compressed_data_channel(&mut connection, "signaling");
+        register_compressed_data_channel(&mut connection, "#chat");
+        let mut handler = RecordingHandler::default();
+        let mut opened = opened_labels(&["signaling", "#chat"]);
+
+        // 2 つのうち #chat だけが Closed になった状況を作る。
+        connection.data_channels["#chat"].channel.close();
+        wait_data_channel_closed(&mut connection, "#chat").await;
+
+        let mut use_data_channel_signaling = true;
+        let result = connection.handle_data_channel_state(
+            &mut handler,
+            "#chat",
+            &mut opened,
+            &mut use_data_channel_signaling,
+            true,
+        );
+
+        assert_eq!(
+            result,
+            DataChannelStateResult::Terminate,
+            "複数 Open のうち 1 つが Closed になったら接続を終了する必要があります"
+        );
+        assert_eq!(
+            handler.data_channel_close_count, 1,
+            "close 通知は閉じたラベルに 1 回だけ行う必要があります"
+        );
+        assert_eq!(
+            handler.data_channel_close_labels,
+            vec!["#chat".to_string()],
+            "close 通知の label が一致する必要があります"
+        );
+        assert!(
+            opened.contains("signaling"),
+            "閉じていない label は opened から除去してはなりません"
+        );
+        assert!(
+            use_data_channel_signaling,
+            "接続終了を返しても DataChannel シグナリングの状態は変更してはなりません"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_data_channel_state_continues_when_channel_not_closed() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_compressed_data_channel(&mut connection, "signaling");
+        let mut handler = RecordingHandler::default();
+        let mut opened = opened_labels(&["signaling"]);
+
+        // Closed 以外の状態では Continue を返し、close 通知も行わない。
+        let mut use_data_channel_signaling = false;
+        let result = connection.handle_data_channel_state(
+            &mut handler,
+            "signaling",
+            &mut opened,
+            &mut use_data_channel_signaling,
+            false,
+        );
+
+        assert_eq!(
+            result,
+            DataChannelStateResult::Continue,
+            "Closed 以外の状態では接続を終了してはなりません"
+        );
+        assert_eq!(
+            handler.data_channel_close_count, 0,
+            "Closed 以外の状態では close 通知を行ってはなりません"
+        );
+        assert!(
+            opened.contains("signaling"),
+            "Closed 以外の状態では opened から除去してはなりません"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_data_channel_state_continues_when_closed_label_not_opened() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        register_compressed_data_channel(&mut connection, "#chat");
+        let mut handler = RecordingHandler::default();
+        let mut opened = opened_labels(&["signaling"]);
+
+        // Open を観測していない label を Closed にしても接続終了の対象にしない。
+        connection.data_channels["#chat"].channel.close();
+        wait_data_channel_closed(&mut connection, "#chat").await;
+
+        let mut use_data_channel_signaling = false;
+        let result = connection.handle_data_channel_state(
+            &mut handler,
+            "#chat",
+            &mut opened,
+            &mut use_data_channel_signaling,
+            true,
+        );
+
+        assert_eq!(
+            result,
+            DataChannelStateResult::Continue,
+            "opened に含まれない label が閉じても接続を終了してはなりません"
+        );
+        assert_eq!(
+            handler.data_channel_close_count, 0,
+            "opened に含まれない label では close 通知を行ってはなりません"
+        );
+        assert!(
+            opened.contains("signaling"),
+            "opened に含まれない label の close では既存の opened を変更してはなりません"
+        );
+    }
+
+    /// 接続確立前のメディア経路の状態変化では何もしないことを検証する。
+    ///
+    /// 接続確立前の失敗は Sora サーバーの接続タイムアウトが WebSocket の
+    /// クローズとして通知するため、SDK 側からは終了しない。
+    #[test]
+    fn media_path_ignores_state_change_before_connected() {
+        let mut monitor = MediaPathMonitor::new();
+
+        assert_eq!(
+            monitor.observe(PeerConnectionState::Connecting),
+            MediaPathAction::None,
+            "接続確立前の Connecting では接続を終了してはなりません"
+        );
+        assert_eq!(
+            monitor.observe(PeerConnectionState::Disconnected),
+            MediaPathAction::None,
+            "接続確立前の Disconnected では猶予タイマーを開始してはなりません"
+        );
+        assert_eq!(
+            monitor.observe(PeerConnectionState::Failed),
+            MediaPathAction::None,
+            "接続確立前の Failed では接続を終了してはなりません"
+        );
+    }
+
+    /// 接続確立後の Failed で即座に接続を終了することを検証する。
+    #[test]
+    fn media_path_terminates_on_failed_after_connected() {
+        let mut monitor = MediaPathMonitor::new();
+        monitor.observe(PeerConnectionState::Connected);
+
+        assert_eq!(
+            monitor.observe(PeerConnectionState::Failed),
+            MediaPathAction::Terminate,
+            "接続確立後の Failed では接続を終了する必要があります"
+        );
+    }
+
+    /// 接続確立後の Disconnected で猶予タイマーを開始し、
+    /// 猶予時間の経過で接続を終了することを検証する。
+    #[test]
+    fn media_path_starts_grace_timer_on_disconnected_after_connected() {
+        let mut monitor = MediaPathMonitor::new();
+        monitor.observe(PeerConnectionState::Connected);
+
+        let MediaPathAction::StartGraceTimer { generation } =
+            monitor.observe(PeerConnectionState::Disconnected)
+        else {
+            panic!("接続確立後の Disconnected では猶予タイマーを開始する必要があります");
+        };
+
+        assert!(
+            monitor.should_terminate_on_timeout(generation),
+            "猶予タイマーの発火では接続を終了する必要があります"
+        );
+    }
+
+    /// Disconnected から Connected へ復帰したら接続を維持することを検証する。
+    #[test]
+    fn media_path_keeps_connection_when_recovered_to_connected() {
+        let mut monitor = MediaPathMonitor::new();
+        monitor.observe(PeerConnectionState::Connected);
+        let MediaPathAction::StartGraceTimer { generation } =
+            monitor.observe(PeerConnectionState::Disconnected)
+        else {
+            panic!("接続確立後の Disconnected では猶予タイマーを開始する必要があります");
+        };
+
+        assert_eq!(
+            monitor.observe(PeerConnectionState::Connected),
+            MediaPathAction::None,
+            "Connected への復帰では接続を終了してはなりません"
+        );
+        assert!(
+            !monitor.should_terminate_on_timeout(generation),
+            "Connected へ復帰した後に古い猶予タイマーが発火しても接続を終了してはなりません"
+        );
+    }
+
+    /// Disconnected から Connecting へ遷移したら猶予を取り消し、
+    /// 再び Disconnected になったら新しい猶予タイマーを開始することを検証する。
+    #[test]
+    fn media_path_restarts_grace_timer_on_reconnect_after_connecting() {
+        let mut monitor = MediaPathMonitor::new();
+        monitor.observe(PeerConnectionState::Connected);
+        let MediaPathAction::StartGraceTimer { generation } =
+            monitor.observe(PeerConnectionState::Disconnected)
+        else {
+            panic!("接続確立後の Disconnected では猶予タイマーを開始する必要があります");
+        };
+
+        // 再ネゴシエーション (ICE 再起動) は Connecting を経由する。
+        assert_eq!(
+            monitor.observe(PeerConnectionState::Connecting),
+            MediaPathAction::None,
+            "Connecting への遷移では接続を終了してはなりません"
+        );
+        assert!(
+            !monitor.should_terminate_on_timeout(generation),
+            "Connecting へ遷移した後に古い猶予タイマーが発火しても接続を終了してはなりません"
+        );
+
+        let MediaPathAction::StartGraceTimer {
+            generation: new_generation,
+        } = monitor.observe(PeerConnectionState::Disconnected)
+        else {
+            panic!("再び Disconnected になったら新しい猶予タイマーを開始する必要があります");
+        };
+        assert_ne!(
+            generation, new_generation,
+            "再切断では新しい世代の猶予タイマーを開始する必要があります"
+        );
+        assert!(
+            monitor.should_terminate_on_timeout(new_generation),
+            "再切断後の猶予タイマーの発火では接続を終了する必要があります"
+        );
+        assert!(
+            !monitor.should_terminate_on_timeout(generation),
+            "再切断後は古い世代の猶予タイマーを無視する必要があります"
+        );
+    }
+
+    /// 猶予タイマーを開始していない世代では接続を終了しないことを検証する。
+    #[test]
+    fn media_path_ignores_unissued_generation() {
+        let mut monitor = MediaPathMonitor::new();
+        monitor.observe(PeerConnectionState::Connected);
+
+        // 猶予タイマーを開始していないため、まだどの世代も有効ではない。
+        assert!(
+            !monitor.should_terminate_on_timeout(0),
+            "猶予タイマーを開始していない状態で接続を終了してはなりません"
+        );
+        assert!(
+            !monitor.should_terminate_on_timeout(1),
+            "猶予タイマーに払い出していない世代で接続を終了してはなりません"
+        );
+    }
+
+    /// 猶予タイマーが猶予時間の経過後に世代付きの通知を 1 件だけ送ることを検証する。
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn spawn_disconnected_grace_timer_sends_event_after_grace_period() {
+        let grace_period = Duration::from_secs(10);
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SoraEvent>();
+        spawn_disconnected_grace_timer(&event_tx, 7, grace_period);
+
+        // 猶予時間の直前までは通知されない。
+        // 仮想時刻 (start_paused) を使うため CI 負荷で sleep がオーバーシュートしても
+        // 決定論的に検証できる。
+        tokio::time::sleep(grace_period - Duration::from_millis(1)).await;
+        assert!(
+            matches!(event_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "猶予時間が経過する前に通知が届いています"
+        );
+
+        // 猶予時間が経過すると、開始した世代の通知が届く。
+        let event = tokio::time::timeout(grace_period, event_rx.recv())
+            .await
+            .expect("猶予時間が経過しても通知が届きませんでした")
+            .expect("通知の受信に失敗しました");
+        assert!(
+            matches!(
+                event,
+                SoraEvent::PeerConnectionDisconnectedTimeout { generation: 7 }
+            ),
+            "通知の世代が開始した世代と一致しません"
+        );
+
+        // 通知は 1 件だけ届く。
+        assert!(
+            matches!(event_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "猶予タイマーの通知が 2 件以上届いています"
         );
     }
 
@@ -4404,6 +5377,517 @@ mod tests {
         .expect("SoraConnection の生成に失敗しました")
     }
 
+    /// 送信トラックを追加した接続で offer SDP を生成するテスト用ヘルパー。
+    ///
+    /// offer に音声・映像の m 行を含めるために sender を先に用意する。
+    async fn create_local_offer_sdp(connection: &mut SoraConnection) -> String {
+        connection
+            .add_sender_tracks()
+            .expect("送信トラックの追加に失敗しました");
+
+        // offer の生成可否だけを扱うため、crate::error::Result ではなく
+        // 失敗理由を String で運ぶ。
+        struct OfferObsHandler {
+            tx: mpsc::UnboundedSender<std::result::Result<String, String>>,
+        }
+
+        impl CreateSessionDescriptionObserverHandler for OfferObsHandler {
+            fn on_success(&mut self, desc: SessionDescription) {
+                let _ = self.tx.send(desc.to_string().map_err(|e| e.to_string()));
+            }
+
+            fn on_failure(&mut self, error: RtcError) {
+                let reason = error.message().unwrap_or_else(|_| "unknown".to_string());
+                let _ = self.tx.send(Err(reason));
+            }
+        }
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<std::result::Result<String, String>>();
+        let mut observer =
+            CreateSessionDescriptionObserver::new_with_handler(Box::new(OfferObsHandler { tx }));
+        let options = PeerConnectionOfferAnswerOptions::new();
+        connection.pc.create_offer(&mut observer, &options);
+
+        let result = tokio::time::timeout(SDP_OPERATION_TIMEOUT, rx.recv())
+            .await
+            .expect("offer の生成がタイムアウトしました")
+            .expect("offer の生成結果を受信できませんでした");
+        result.expect("offer の生成に失敗しました")
+    }
+
+    /// degradation preference の反映に関するテスト。
+    ///
+    /// 実サーバーを必要としないため、実 libwebrtc の PeerConnection で offer を生成し、
+    /// それを handle_offer へ渡すことでネゴシエーションまでを検証する。
+    mod degradation_preference {
+        use shiguredo_webrtc::AdaptedVideoTrackSource;
+
+        use super::super::*;
+        use super::{RecordingHandler, create_local_offer_sdp};
+
+        /// 実映像トラックを設定した接続を構築するテスト用ヘルパー。
+        ///
+        /// トラックを送信するかどうかは role に従うため、映像を送信しない role では使われない。
+        /// 戻り値の [AdaptedVideoTrackSource] はトラックの供給元であり、
+        /// 破棄するとトラックが機能しなくなるため、呼び出し側で保持する。
+        fn build_video_test_connection(
+            role: Role,
+            degradation_preference: Option<DegradationPreference>,
+        ) -> (
+            SoraConnection,
+            SoraConnectionHandle,
+            AdaptedVideoTrackSource,
+        ) {
+            let context =
+                SoraConnectionContext::new().expect("SoraConnectionContext の作成に失敗しました");
+            let source = AdaptedVideoTrackSource::new();
+            let track = context
+                .create_video_track(&source.cast_to_video_track_source())
+                .expect("映像トラックの作成に失敗しました");
+
+            let mut builder = SoraConnection::builder(
+                context,
+                vec!["wss://example.com/signaling".to_string()],
+                "test-channel".to_string(),
+                role,
+                RecordingHandler::default(),
+            )
+            .sender_video_track(track);
+            if let Some(preference) = degradation_preference {
+                builder = builder.degradation_preference(preference);
+            }
+
+            let (connection, handle) = builder
+                .build()
+                .expect("SoraConnection の生成に失敗しました");
+            (connection, handle, source)
+        }
+
+        #[tokio::test]
+        async fn degradation_preference_is_applied_to_video_sender() {
+            // 送信ありの role では、指定した値が video sender の RTP パラメータへ反映される。
+            let (mut offerer, _offer_handle, _offer_source) =
+                build_video_test_connection(Role::SendOnly, None);
+            let offer_sdp = create_local_offer_sdp(&mut offerer).await;
+
+            for preference in [
+                DegradationPreference::MaintainFramerateAndResolution,
+                DegradationPreference::MaintainFramerate,
+                DegradationPreference::MaintainResolution,
+                DegradationPreference::Balanced,
+            ] {
+                let (mut connection, _handle, _source) =
+                    build_video_test_connection(Role::SendOnly, Some(preference));
+                let answer_sdp = connection
+                    .handle_offer(&offer_sdp, &[])
+                    .await
+                    .expect("offer の処理に失敗しました");
+
+                // answer の映像 m 行が送信可能でないと、設定した値は sender 内に保持されるだけで
+                // media channel へは適用されない。値が適用された状態から読み出せることを
+                // 確認するため、answer が独自の SSRC を持つこと (送信可能であること) を前提にする。
+                assert!(
+                    answer_sdp.contains("a=ssrc:"),
+                    "映像を送信する answer には SSRC が必要です"
+                );
+
+                let sender = connection
+                    .video_sender
+                    .as_ref()
+                    .expect("映像を送信する role では video sender が必要です");
+                assert_eq!(
+                    sender.get_parameters().degradation_preference(),
+                    Some(preference),
+                    "video sender の RtpParameters に反映される必要があります: {preference:?}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn degradation_preference_is_not_set_when_unset() {
+            // 未設定の場合は libwebrtc の既定に任せるため、値が設定されない。
+            let (mut offerer, _offer_handle, _offer_source) =
+                build_video_test_connection(Role::SendOnly, None);
+            let offer_sdp = create_local_offer_sdp(&mut offerer).await;
+
+            let (mut connection, _handle, _source) =
+                build_video_test_connection(Role::SendOnly, None);
+            connection
+                .handle_offer(&offer_sdp, &[])
+                .await
+                .expect("offer の処理に失敗しました");
+
+            let sender = connection
+                .video_sender
+                .as_ref()
+                .expect("映像を送信する role では video sender が必要です");
+            assert_eq!(
+                sender.get_parameters().degradation_preference(),
+                None,
+                "未設定時は degradation preference を設定しない必要があります"
+            );
+        }
+
+        #[tokio::test]
+        async fn degradation_preference_is_skipped_without_video_sender() {
+            // recvonly は video sender を持たないため、値を設定してもスキップして接続できる。
+            let (mut offerer, _offer_handle, _offer_source) =
+                build_video_test_connection(Role::SendOnly, None);
+            let offer_sdp = create_local_offer_sdp(&mut offerer).await;
+
+            let (mut connection, _handle, _source) =
+                build_video_test_connection(Role::RecvOnly, Some(DegradationPreference::Balanced));
+            let answer_sdp = connection
+                .handle_offer(&offer_sdp, &[])
+                .await
+                .expect("video sender が無い場合も接続できる必要があります");
+
+            assert!(
+                !answer_sdp.is_empty(),
+                "answer SDP が生成される必要があります"
+            );
+            assert!(
+                connection.video_sender.is_none(),
+                "recvonly では video sender を作らない必要があります"
+            );
+        }
+
+        #[tokio::test]
+        async fn unknown_degradation_preference_is_rejected() {
+            // libwebrtc が解釈できない値は、そのまま渡さずエラーにする。
+            let (mut offerer, _offer_handle, _offer_source) =
+                build_video_test_connection(Role::SendOnly, None);
+            let offer_sdp = create_local_offer_sdp(&mut offerer).await;
+
+            let (mut connection, _handle, _source) = build_video_test_connection(
+                Role::SendOnly,
+                Some(DegradationPreference::Unknown(42)),
+            );
+            let result = connection.handle_offer(&offer_sdp, &[]).await;
+
+            assert!(
+                matches!(result, Err(Error::UnknownDegradationPreference { value }) if value == 42),
+                "未知の degradation preference はエラーになる必要があります: {result:?}"
+            );
+        }
+    }
+
+    /// adaptive ptime の反映に関するテスト。
+    ///
+    /// 実サーバーを必要としないため、実 libwebrtc の PeerConnection で offer を生成し、
+    /// それを handle_offer へ渡すことでネゴシエーションまでを検証する。
+    mod adaptive_ptime {
+        use shiguredo_webrtc::{AdaptedVideoTrackSource, AudioTrackSource};
+
+        use super::super::*;
+        use super::{RecordingHandler, create_local_offer_sdp};
+
+        /// テスト用の接続が送信に使うトラックの供給元。
+        ///
+        /// 供給元を破棄するとトラックが機能しなくなるため、接続と一緒に保持する。
+        struct TrackSources {
+            _audio: AudioTrackSource,
+            _video: Option<AdaptedVideoTrackSource>,
+        }
+
+        /// 実音声トラック (と必要なら実映像トラック) を設定した接続を構築するテスト用ヘルパー。
+        ///
+        /// トラックを送信するかどうかは role に従うため、送信しない role では使われない。
+        fn build_test_connection(
+            role: Role,
+            adaptive_ptime: Option<bool>,
+            with_video: bool,
+        ) -> (SoraConnection, SoraConnectionHandle, TrackSources) {
+            let context =
+                SoraConnectionContext::new().expect("SoraConnectionContext の作成に失敗しました");
+            let audio_source = context
+                .create_audio_source()
+                .expect("音声ソースの作成に失敗しました");
+            let audio_track = context
+                .create_audio_track(&audio_source)
+                .expect("音声トラックの作成に失敗しました");
+            let video_source = with_video.then(AdaptedVideoTrackSource::new);
+            let video_track = video_source.as_ref().map(|source| {
+                context
+                    .create_video_track(&source.cast_to_video_track_source())
+                    .expect("映像トラックの作成に失敗しました")
+            });
+
+            let mut builder = SoraConnection::builder(
+                context,
+                vec!["wss://example.com/signaling".to_string()],
+                "test-channel".to_string(),
+                role,
+                RecordingHandler::default(),
+            )
+            .sender_audio_track(audio_track);
+            if let Some(track) = video_track {
+                builder = builder.sender_video_track(track);
+            }
+            if let Some(adaptive_ptime) = adaptive_ptime {
+                builder = builder.adaptive_ptime(adaptive_ptime);
+            }
+
+            let (connection, handle) = builder
+                .build()
+                .expect("SoraConnection の生成に失敗しました");
+            (
+                connection,
+                handle,
+                TrackSources {
+                    _audio: audio_source,
+                    _video: video_source,
+                },
+            )
+        }
+
+        /// sender の先頭の encoding の adaptive ptime を返すテスト用ヘルパー。
+        ///
+        /// 音声と、simulcast を適用しない映像の encoding は 1 つだけなので、先頭だけを検証する。
+        fn first_encoding_adaptive_ptime(sender: &RtpSender) -> bool {
+            let parameters = sender.get_parameters();
+            let encodings = parameters.encodings();
+            let encoding = encodings.get(0).expect("sender には encoding が必要です");
+            encoding.adaptive_ptime()
+        }
+
+        #[tokio::test]
+        async fn adaptive_ptime_is_applied_to_audio_sender() {
+            // 送信ありの role では、指定した値が audio sender の RTP パラメータへ反映される。
+            let (mut offerer, _offer_handle, _offer_sources) =
+                build_test_connection(Role::SendOnly, None, false);
+            let offer_sdp = create_local_offer_sdp(&mut offerer).await;
+
+            for adaptive_ptime in [true, false] {
+                let (mut connection, _handle, _sources) =
+                    build_test_connection(Role::SendOnly, Some(adaptive_ptime), false);
+                let answer_sdp = connection
+                    .handle_offer(&offer_sdp, &[])
+                    .await
+                    .expect("offer の処理に失敗しました");
+
+                // answer の音声 m 行が送信可能でないと、設定した値は sender 内に保持されるだけで
+                // media channel へは適用されない。値が適用された状態から読み出せることを
+                // 確認するため、answer が独自の SSRC を持つこと (送信可能であること) を前提にする。
+                assert!(
+                    answer_sdp.contains("a=ssrc:"),
+                    "音声を送信する answer には SSRC が必要です"
+                );
+
+                let sender = connection
+                    .audio_sender
+                    .as_ref()
+                    .expect("音声を送信する role では audio sender が必要です");
+                assert_eq!(
+                    first_encoding_adaptive_ptime(sender),
+                    adaptive_ptime,
+                    "audio sender の RtpParameters に反映される必要があります"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn adaptive_ptime_is_not_set_when_unset() {
+            // 未設定の場合は libwebrtc の既定に任せるため、値が設定されない。
+            let (mut offerer, _offer_handle, _offer_sources) =
+                build_test_connection(Role::SendOnly, None, false);
+            let offer_sdp = create_local_offer_sdp(&mut offerer).await;
+
+            let (mut connection, _handle, _sources) =
+                build_test_connection(Role::SendOnly, None, false);
+            connection
+                .handle_offer(&offer_sdp, &[])
+                .await
+                .expect("offer の処理に失敗しました");
+
+            let sender = connection
+                .audio_sender
+                .as_ref()
+                .expect("音声を送信する role では audio sender が必要です");
+            assert!(
+                !first_encoding_adaptive_ptime(sender),
+                "未設定時は adaptive ptime を設定しない必要があります"
+            );
+        }
+
+        #[tokio::test]
+        async fn adaptive_ptime_is_skipped_without_audio_sender() {
+            // recvonly は audio sender を持たないため、値を設定してもスキップして接続できる。
+            let (mut offerer, _offer_handle, _offer_sources) =
+                build_test_connection(Role::SendOnly, None, false);
+            let offer_sdp = create_local_offer_sdp(&mut offerer).await;
+
+            let (mut connection, _handle, _sources) =
+                build_test_connection(Role::RecvOnly, Some(true), false);
+            let answer_sdp = connection
+                .handle_offer(&offer_sdp, &[])
+                .await
+                .expect("audio sender が無い場合も接続できる必要があります");
+
+            assert!(
+                !answer_sdp.is_empty(),
+                "answer SDP が生成される必要があります"
+            );
+            assert!(
+                connection.audio_sender.is_none(),
+                "recvonly では audio sender を作らない必要があります"
+            );
+        }
+
+        /// offer SDP の映像 m 行に simulcast の rid を追加するテスト用ヘルパー。
+        ///
+        /// 映像の送信を求める offer では、Sora が `a=rid` と `a=simulcast:recv` を含める。
+        fn add_simulcast_rids_to_offer(sdp: &str, rids: &[&str]) -> String {
+            let mut lines = Vec::new();
+            for line in sdp.lines() {
+                lines.push(line.to_string());
+                if line.starts_with("m=video ") {
+                    for rid in rids {
+                        lines.push(format!("a=rid:{rid} recv"));
+                    }
+                    lines.push(format!("a=simulcast:recv {}", rids.join(";")));
+                }
+            }
+            lines.join("\r\n") + "\r\n"
+        }
+
+        /// offer の `encodings` に対応する simulcast の設定を組み立てるテスト用ヘルパー。
+        fn simulcast_encodings(rids: &[&str]) -> Vec<SimulcastEncodingConfig> {
+            rids.iter()
+                .map(|rid| SimulcastEncodingConfig {
+                    rid: (*rid).to_string(),
+                    max_bitrate: None,
+                    min_bitrate: None,
+                    scale_resolution_down_by: None,
+                    max_framerate: None,
+                    active: None,
+                    scalability_mode: None,
+                    scale_resolution_down_to: None,
+                })
+                .collect()
+        }
+
+        #[tokio::test]
+        async fn adaptive_ptime_is_not_applied_to_simulcast_video_encodings() {
+            // 送信する映像に simulcast の encoding を適用する場合も、adaptive ptime は設定しない。
+            // adaptive ptime を参照するのは音声の voice engine だけであり、
+            // video sender へ設定しても実効しない。
+            let (mut offerer, _offer_handle, _offer_sources) =
+                build_test_connection(Role::SendOnly, None, true);
+            let offer_sdp = create_local_offer_sdp(&mut offerer).await;
+            let offer_sdp = add_simulcast_rids_to_offer(&offer_sdp, &["r0", "r1"]);
+
+            let (mut connection, _handle, _sources) =
+                build_test_connection(Role::SendRecv, Some(true), true);
+            connection.offer_simulcast = true;
+            connection.simulcast_encodings = simulcast_encodings(&["r0", "r1"]);
+            let answer_sdp = connection
+                .handle_offer(&offer_sdp, &[])
+                .await
+                .expect("offer の処理に失敗しました");
+
+            // simulcast の encoding が video sender に適用されていることを前提にする。
+            assert!(
+                answer_sdp.contains("a=simulcast:send r0;r1"),
+                "video sender の encoding が answer に反映される必要があります"
+            );
+
+            let video_sender = connection
+                .video_sender
+                .as_ref()
+                .expect("映像を送信する role では video sender が必要です");
+            let parameters = video_sender.get_parameters();
+            let encodings = parameters.encodings();
+            assert_eq!(
+                encodings.len(),
+                2,
+                "simulcast の encoding が video sender に適用される必要があります"
+            );
+            for i in 0..encodings.len() {
+                let encoding = encodings
+                    .get(i)
+                    .expect("index は encoding の長さの範囲内である必要があります");
+                assert!(
+                    !encoding.adaptive_ptime(),
+                    "video sender の encoding {i} には adaptive ptime を設定しない必要があります"
+                );
+            }
+
+            let audio_sender = connection
+                .audio_sender
+                .as_ref()
+                .expect("音声を送信する role では audio sender が必要です");
+            assert!(
+                first_encoding_adaptive_ptime(audio_sender),
+                "audio sender には adaptive ptime を設定する必要があります"
+            );
+        }
+
+        #[tokio::test]
+        async fn adaptive_ptime_is_reapplied_on_reoffer() {
+            // re-offer でも初回と同じ条件で再適用し、適用済みの値が維持される。
+            let (mut first_offerer, _first_handle, _first_sources) =
+                build_test_connection(Role::SendOnly, None, false);
+            let first_offer_sdp = create_local_offer_sdp(&mut first_offerer).await;
+            let (mut second_offerer, _second_handle, _second_sources) =
+                build_test_connection(Role::SendOnly, None, false);
+            let second_offer_sdp = create_local_offer_sdp(&mut second_offerer).await;
+
+            let (mut connection, _handle, _sources) =
+                build_test_connection(Role::SendOnly, Some(true), false);
+            connection
+                .handle_offer(&first_offer_sdp, &[])
+                .await
+                .expect("offer の処理に失敗しました");
+            connection
+                .handle_offer(&second_offer_sdp, &[])
+                .await
+                .expect("re-offer の処理に失敗しました");
+
+            let sender = connection
+                .audio_sender
+                .as_ref()
+                .expect("音声を送信する role では audio sender が必要です");
+            assert!(
+                first_encoding_adaptive_ptime(sender),
+                "re-offer 後も adaptive ptime が設定されている必要があります"
+            );
+        }
+
+        #[tokio::test]
+        async fn adaptive_ptime_is_not_applied_to_video_sender() {
+            // adaptive ptime は音声の voice engine だけが参照するため、映像には設定しない。
+            let (mut offerer, _offer_handle, _offer_sources) =
+                build_test_connection(Role::SendOnly, None, true);
+            let offer_sdp = create_local_offer_sdp(&mut offerer).await;
+
+            let (mut connection, _handle, _sources) =
+                build_test_connection(Role::SendRecv, Some(true), true);
+            connection
+                .handle_offer(&offer_sdp, &[])
+                .await
+                .expect("offer の処理に失敗しました");
+
+            let audio_sender = connection
+                .audio_sender
+                .as_ref()
+                .expect("音声を送信する role では audio sender が必要です");
+            assert!(
+                first_encoding_adaptive_ptime(audio_sender),
+                "audio sender には adaptive ptime を設定する必要があります"
+            );
+
+            let video_sender = connection
+                .video_sender
+                .as_ref()
+                .expect("映像を送信する role では video sender が必要です");
+            assert!(
+                !first_encoding_adaptive_ptime(video_sender),
+                "video sender には adaptive ptime を設定しない必要があります"
+            );
+        }
+    }
+
     /// callback の呼び出しを記録するテスト用ハンドラ。
     #[derive(Default)]
     struct RecordingHandler {
@@ -4467,10 +5951,10 @@ mod tests {
     /// compress 有効の DataChannel を実 PeerConnection 経由で登録するテスト用ヘルパー。
     fn register_compressed_data_channel(connection: &mut SoraConnection, label: &str) {
         register_data_channel_config(connection, label);
-        let mut init = DataChannelInit::new();
+        let init = DataChannelInit::new();
         let channel = connection
             .pc
-            .create_data_channel(label, &mut init)
+            .create_data_channel(label, &init)
             .expect("DataChannel の生成に失敗しました");
         let event_tx = connection.event_tx.clone();
         connection.register_data_channel(channel, &event_tx);
@@ -5232,6 +6716,294 @@ mod tests {
             matches!(rx1.try_recv(), Err(oneshot::error::TryRecvError::Empty))
                 && matches!(rx2.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
             "破棄された response は response channel を完了しない必要があります"
+        );
+    }
+
+    /// 状態変化の通知が届くまでの待ち時間。
+    const STATE_CHANGE_TIMEOUT: Duration = Duration::from_secs(15);
+
+    /// 2 つの PeerConnection が接続状態になるまでの待ち時間。
+    const LOOPBACK_TIMEOUT: Duration = Duration::from_secs(15);
+
+    /// 状態変化の通知を比較するためのテスト用の値。
+    ///
+    /// [SoraEvent] は `PartialEq` を実装していないため、
+    /// 状態変化の通知だけを取り出して検証できる形にする。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ObservedStateChange {
+        Signaling(SignalingState),
+        Connection(PeerConnectionState),
+        IceConnection(IceConnectionState),
+        IceGathering(IceGatheringState),
+    }
+
+    /// [SoraEvent] から状態変化の通知だけを取り出す。
+    fn observed_state_change(event: &SoraEvent) -> Option<ObservedStateChange> {
+        match event {
+            SoraEvent::SignalingChange(state) => Some(ObservedStateChange::Signaling(*state)),
+            SoraEvent::ConnectionChange(state) => Some(ObservedStateChange::Connection(*state)),
+            SoraEvent::IceConnectionChange(state) => {
+                Some(ObservedStateChange::IceConnection(*state))
+            }
+            SoraEvent::IceGatheringChange(state) => Some(ObservedStateChange::IceGathering(*state)),
+            _ => None,
+        }
+    }
+
+    /// `targets` の状態変化がすべて届くか、[STATE_CHANGE_TIMEOUT] を過ぎるまで収集する。
+    ///
+    /// 候補などの状態変化以外のイベントは読み捨てる。
+    async fn collect_state_changes(
+        connection: &mut SoraConnection,
+        targets: &[ObservedStateChange],
+    ) -> Vec<ObservedStateChange> {
+        let deadline = tokio::time::Instant::now() + STATE_CHANGE_TIMEOUT;
+        let mut observed = Vec::new();
+        while !targets.iter().all(|target| observed.contains(target)) {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remaining, connection.event_rx.recv()).await {
+                Ok(Some(event)) => {
+                    if let Some(state) = observed_state_change(&event) {
+                        observed.push(state);
+                    }
+                }
+                // event_rx がクローズされた場合も、それ以上は収集できないため終了する。
+                Ok(None) | Err(_) => break,
+            }
+        }
+        observed
+    }
+
+    /// m 行を持つ SDP を作るために recvonly の音声 transceiver を追加する。
+    ///
+    /// m 行が 1 つも無い SDP では ICE の候補収集が行われないため、
+    /// ICE の状態変化を確認するテストでは事前にこれを呼ぶ。
+    fn add_recvonly_audio_transceiver(connection: &mut SoraConnection) {
+        let mut init = RtpTransceiverInit::new();
+        init.set_direction(RtpTransceiverDirection::RecvOnly);
+        connection
+            .pc
+            .add_transceiver(MediaType::Audio, &init)
+            .expect("transceiver の追加に失敗しました");
+    }
+
+    /// local description を設定し、完了するまで待つ。
+    async fn set_local_description(connection: &mut SoraConnection, sdp_type: SdpType, sdp: &str) {
+        let (tx, mut rx) = mpsc::unbounded_channel::<Option<String>>();
+        let observer = SetLocalDescriptionObserver::new_with_handler(Box::new(
+            SetDescriptionObserverHandler { tx },
+        ));
+        let description = SessionDescription::new(sdp_type, sdp)
+            .expect("SessionDescription の生成に失敗しました");
+        connection.pc.set_local_description(description, &observer);
+        let result = tokio::time::timeout(SDP_OPERATION_TIMEOUT, rx.recv())
+            .await
+            .expect("set_local_description がタイムアウトしました")
+            .expect("set_local_description の結果を受信できませんでした");
+        assert!(
+            result.is_none(),
+            "set_local_description が失敗しました: {result:?}"
+        );
+    }
+
+    /// remote description を設定し、完了するまで待つ。
+    async fn set_remote_description(connection: &mut SoraConnection, sdp_type: SdpType, sdp: &str) {
+        let (tx, mut rx) = mpsc::unbounded_channel::<Option<String>>();
+        let observer = SetRemoteDescriptionObserver::new_with_handler(Box::new(
+            SetDescriptionObserverHandler { tx },
+        ));
+        let description = SessionDescription::new(sdp_type, sdp)
+            .expect("SessionDescription の生成に失敗しました");
+        connection.pc.set_remote_description(description, &observer);
+        let result = tokio::time::timeout(SDP_OPERATION_TIMEOUT, rx.recv())
+            .await
+            .expect("set_remote_description がタイムアウトしました")
+            .expect("set_remote_description の結果を受信できませんでした");
+        assert!(
+            result.is_none(),
+            "set_remote_description が失敗しました: {result:?}"
+        );
+    }
+
+    /// Sora の candidate メッセージから ICE 候補を取り出す。
+    ///
+    /// Sora の candidate メッセージには sdpMid と sdpMLineIndex が含まれないため、
+    /// m 行が 1 つだけの SDP を扱うこのテストでは "0" と 0 に固定する。
+    fn parse_candidate_message(text: &str) -> Option<(String, i32, String)> {
+        let key = "\"candidate\":\"";
+        let start = text.find(key)? + key.len();
+        let rest = &text[start..];
+        let end = rest.find('"')?;
+        Some(("0".to_string(), 0, rest[..end].to_string()))
+    }
+
+    /// `from` のイベントを 1 つ処理する。
+    ///
+    /// ICE 候補は `to` に渡し、状態変化は `states` に記録する。
+    /// イベントが届かなかった場合と候補以外のシグナリングメッセージは読み捨てる。
+    async fn pump_event(
+        from: &mut SoraConnection,
+        to: &mut SoraConnection,
+        states: &mut Vec<ObservedStateChange>,
+    ) {
+        // 候補が届かずに待ち続けないよう、短い間隔で両方向を交互に処理する。
+        let Ok(Some(event)) =
+            tokio::time::timeout(Duration::from_millis(10), from.event_rx.recv()).await
+        else {
+            return;
+        };
+        if let SoraEvent::SignalingMessage(text) = &event {
+            if let Some((mid, index, candidate)) = parse_candidate_message(text) {
+                let candidate = IceCandidate::new(&mid, index, &candidate)
+                    .expect("ICE 候補の生成に失敗しました");
+                to.pc
+                    .add_ice_candidate(&candidate)
+                    .expect("ICE 候補の追加に失敗しました");
+            }
+            return;
+        }
+        if let Some(state) = observed_state_change(&event) {
+            states.push(state);
+        }
+    }
+
+    /// 2 つの PeerConnection のあいだで ICE 候補を交換しながら状態変化を収集する。
+    ///
+    /// `client` が Connected になるか、[LOOPBACK_TIMEOUT] を過ぎるまで継続する。
+    async fn exchange_candidates_until_connected(
+        server: &mut SoraConnection,
+        client: &mut SoraConnection,
+    ) -> (Vec<ObservedStateChange>, Vec<ObservedStateChange>) {
+        let deadline = tokio::time::Instant::now() + LOOPBACK_TIMEOUT;
+        let mut server_states = Vec::new();
+        let mut client_states = Vec::new();
+        loop {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "PeerConnection が接続状態になりませんでした: server={server_states:?}, client={client_states:?}"
+            );
+            pump_event(server, client, &mut server_states).await;
+            pump_event(client, server, &mut client_states).await;
+            if client_states.contains(&ObservedStateChange::Connection(
+                PeerConnectionState::Connected,
+            )) {
+                break;
+            }
+        }
+        (server_states, client_states)
+    }
+
+    /// local description の設定と close で signaling state が変化することを確認する。
+    #[tokio::test]
+    async fn pc_observer_notifies_signaling_state_change() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        add_recvonly_audio_transceiver(&mut connection);
+        let offer_sdp = create_local_offer_sdp(&mut connection).await;
+
+        // offer を適用すると HaveLocalOffer、close すると Closed に遷移する。
+        set_local_description(&mut connection, SdpType::Offer, &offer_sdp).await;
+        connection.pc.close();
+
+        let observed = collect_state_changes(
+            &mut connection,
+            &[
+                ObservedStateChange::Signaling(SignalingState::HaveLocalOffer),
+                ObservedStateChange::Signaling(SignalingState::Closed),
+            ],
+        )
+        .await;
+        assert!(
+            observed.contains(&ObservedStateChange::Signaling(
+                SignalingState::HaveLocalOffer
+            )),
+            "offer の適用で signaling state が HaveLocalOffer になる必要があります: {observed:?}"
+        );
+        assert!(
+            observed.contains(&ObservedStateChange::Signaling(SignalingState::Closed)),
+            "close で signaling state が Closed になる必要があります: {observed:?}"
+        );
+    }
+
+    /// 候補収集の状態が変化することを確認する。
+    #[tokio::test]
+    async fn pc_observer_notifies_ice_gathering_state_change() {
+        let (mut connection, _handle) = build_test_connection(RecordingHandler::default());
+        add_recvonly_audio_transceiver(&mut connection);
+        let offer_sdp = create_local_offer_sdp(&mut connection).await;
+
+        // offer を適用すると候補収集が始まり、収集が終わると Complete に遷移する。
+        set_local_description(&mut connection, SdpType::Offer, &offer_sdp).await;
+
+        let observed = collect_state_changes(
+            &mut connection,
+            &[
+                ObservedStateChange::IceGathering(IceGatheringState::Gathering),
+                ObservedStateChange::IceGathering(IceGatheringState::Complete),
+            ],
+        )
+        .await;
+        assert!(
+            observed.contains(&ObservedStateChange::IceGathering(
+                IceGatheringState::Gathering
+            )),
+            "候補収集の開始で ice gathering state が Gathering になる必要があります: {observed:?}"
+        );
+        assert!(
+            observed.contains(&ObservedStateChange::IceGathering(
+                IceGatheringState::Complete
+            )),
+            "候補収集の完了で ice gathering state が Complete になる必要があります: {observed:?}"
+        );
+    }
+
+    /// 2 つの PeerConnection を loopback で接続し、接続状態の変化を確認する。
+    ///
+    /// Sora サーバーを利用せずに接続状態まで遷移させるため、server 側で offer を、
+    /// client 側で answer を作り、相互の ICE 候補は candidate メッセージとして
+    /// 通知されたものを渡し合う。
+    #[tokio::test]
+    async fn pc_observer_notifies_connection_and_ice_connection_state_change() {
+        let (mut server, _server_handle) = build_test_connection(RecordingHandler::default());
+        let (mut client, _client_handle) = build_test_connection(RecordingHandler::default());
+
+        add_recvonly_audio_transceiver(&mut server);
+        let offer_sdp = create_local_offer_sdp(&mut server).await;
+        set_local_description(&mut server, SdpType::Offer, &offer_sdp).await;
+
+        let answer_sdp = client
+            .handle_offer(&offer_sdp, &[])
+            .await
+            .expect("offer の処理に失敗しました");
+        set_remote_description(&mut server, SdpType::Answer, &answer_sdp).await;
+
+        let (server_states, client_states) =
+            exchange_candidates_until_connected(&mut server, &mut client).await;
+        assert!(
+            client_states.contains(&ObservedStateChange::IceConnection(
+                IceConnectionState::Checking
+            )),
+            "ICE の接続確認の開始で ice connection state が Checking になる必要があります: client={client_states:?}, server={server_states:?}"
+        );
+        assert!(
+            client_states.contains(&ObservedStateChange::Connection(
+                PeerConnectionState::Connecting
+            )),
+            "ICE の接続確認の開始で connection state が Connecting になる必要があります: client={client_states:?}, server={server_states:?}"
+        );
+        assert!(
+            client_states.contains(&ObservedStateChange::IceConnection(
+                IceConnectionState::Connected
+            )),
+            "ICE の接続の確立で ice connection state が Connected になる必要があります: client={client_states:?}, server={server_states:?}"
+        );
+        assert!(
+            client_states.contains(&ObservedStateChange::Connection(
+                PeerConnectionState::Connected
+            )),
+            "ICE と DTLS の接続の確立で connection state が Connected になる必要があります: client={client_states:?}, server={server_states:?}"
         );
     }
 }

@@ -1,7 +1,7 @@
 //! SoraConnectionEventHandler トレイトのデフォルト実装の単体テスト。
 use sora_sdk::{Role, SoraConnection, SoraConnectionContext, SoraConnectionEventHandler};
 
-/// 全 12 メソッドのデフォルト実装を確認するための空の struct。
+/// 全 16 メソッドのデフォルト実装を確認するための空の struct。
 struct EmptyHandler;
 
 impl SoraConnectionEventHandler for EmptyHandler {}
@@ -29,6 +29,12 @@ fn default_implementation_has_noop_for_all_methods() {
     );
     handler.on_notify("{}");
     handler.on_push("{}");
+
+    // WebRTC の状態変化は shiguredo_webrtc の列挙型をそのまま受け取る
+    handler.on_signaling_state_change(shiguredo_webrtc::SignalingState::Stable);
+    handler.on_connection_state_change(shiguredo_webrtc::PeerConnectionState::New);
+    handler.on_ice_connection_state_change(shiguredo_webrtc::IceConnectionState::New);
+    handler.on_ice_gathering_state_change(shiguredo_webrtc::IceGatheringState::New);
 
     // RtpTransceiver と RtpReceiver は SoraConnectionContext がないと生成できないため、
     // デフォルト実装の呼び出し結果だけを検証する。

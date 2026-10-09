@@ -187,3 +187,12 @@ Opus packet を無変換で送信できる 2-a と 2-b が有力だが、現時�
 - `testdata/`（Opus 音声を含む実 MP4 fixture）
 - `README.md` / `docs/INPUT_MP4.md`
 - `CHANGES.md`
+
+## pending にした理由
+
+対応量が想定より大きく、いま着手しないため後回しとする。
+
+- 方式 1（再エンコード）でも demux・デコード・ADM 分離・共有再生時計・CLI 排他など変更範囲が広い
+- 方式 2-a / 2-b（無変換）は webrtc-rs の FrameTransformer / カスタム AudioEncoder と前提 issue（音声コーデック capability）まで必要で、さらに大きい
+- 映像パススルーは既に動作しており、音声対応の優先度は相対的に低い
+- 負荷試験向けの MP4 音声は zakuro-rs 側で別途検討する

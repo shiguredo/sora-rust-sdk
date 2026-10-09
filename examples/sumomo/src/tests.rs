@@ -1,15 +1,12 @@
 use super::*;
+use shiguredo_webrtc::DegradationPreference;
 use sora_sdk::{CodecDirection, Role};
 
-/// H.264 の fixture MP4 から `Mp4PassthroughVideoCodecCapability` を取り出す。
+/// fixture MP4 から一時ファイル経由で `Mp4SampleReader` を作る。
 ///
-/// build_context_config 系のテストは capability 構築だけを検証するので、reader も
-/// 一時ファイルも呼び出し側に残す必要がない。helper 内で capability を生成したあと
-/// 一時ファイルを削除し、capability だけを返す（capability はファイル I/O を持たない）。
-/// なお reader は関数末尾で drop されるため、Unix では open 中のファイルを
+/// 呼び出し側が一時ファイルを削除する。Unix では reader が open 中でも
 /// 削除できる挙動に依存している（既存の mp4 テスト群と同じ流儀）。
-fn h264_capability_from_fixture(tag: &str) -> Mp4PassthroughVideoCodecCapability {
-    let fixture: &[u8] = include_bytes!("../../../testdata/red-320x320-h264.mp4");
+fn mp4_reader_from_fixture(fixture: &[u8], tag: &str) -> (Mp4SampleReader, std::path::PathBuf) {
     let tmp_name = format!(
         "sumomo-mp4-{}-{}-{}.mp4",
         tag,
@@ -22,7 +19,19 @@ fn h264_capability_from_fixture(tag: &str) -> Mp4PassthroughVideoCodecCapability
     let path = std::env::temp_dir().join(tmp_name);
     std::fs::write(&path, fixture).expect("一時 fixture の書き込みに失敗しました");
     let reader = Mp4SampleReader::new(&path).expect("fixture MP4 のパースに失敗しました");
+    (reader, path)
+}
+
+/// H.264 の fixture MP4 から `Mp4PassthroughVideoCodecCapability` を取り出す。
+///
+/// build_context_config 系のテストは capability 構築だけを検証するので、reader も
+/// 一時ファイルも呼び出し側に残す必要がない。helper 内で capability を生成したあと
+/// 一時ファイルを削除し、capability だけを返す（capability はファイル I/O を持たない）。
+fn h264_capability_from_fixture(tag: &str) -> Mp4PassthroughVideoCodecCapability {
+    let fixture: &[u8] = include_bytes!("../../../testdata/red-320x320-h264.mp4");
+    let (reader, path) = mp4_reader_from_fixture(fixture, tag);
     let capability = reader.passthrough_capability();
+    drop(reader);
     let _ = std::fs::remove_file(&path);
     capability
 }
@@ -234,27 +243,27 @@ fn validate_args_rejects_mp4_with_video_codec_type() {
 fn video_from_codec_type_builds_codec_specific_video() {
     let bit_rate = Some(30000);
     assert_eq!(
-        video_from_codec_type(shiguredo_webrtc::VideoCodecType::Vp8, bit_rate)
+        video_from_codec_type(shiguredo_webrtc::VideoCodecType::Vp8, bit_rate, None)
             .expect("vp8 は Video を生成できるはずです"),
         sora_sdk::Video::new_vp8(bit_rate)
     );
     assert_eq!(
-        video_from_codec_type(shiguredo_webrtc::VideoCodecType::Vp9, bit_rate)
+        video_from_codec_type(shiguredo_webrtc::VideoCodecType::Vp9, bit_rate, None)
             .expect("vp9 は Video を生成できるはずです"),
         sora_sdk::Video::new_vp9(bit_rate, None)
     );
     assert_eq!(
-        video_from_codec_type(shiguredo_webrtc::VideoCodecType::Av1, bit_rate)
+        video_from_codec_type(shiguredo_webrtc::VideoCodecType::Av1, bit_rate, None)
             .expect("av1 は Video を生成できるはずです"),
         sora_sdk::Video::new_av1(bit_rate, None)
     );
     assert_eq!(
-        video_from_codec_type(shiguredo_webrtc::VideoCodecType::H264, bit_rate)
+        video_from_codec_type(shiguredo_webrtc::VideoCodecType::H264, bit_rate, None)
             .expect("h264 は Video を生成できるはずです"),
         sora_sdk::Video::new_h264(bit_rate, None)
     );
     assert_eq!(
-        video_from_codec_type(shiguredo_webrtc::VideoCodecType::H265, bit_rate)
+        video_from_codec_type(shiguredo_webrtc::VideoCodecType::H265, bit_rate, None)
             .expect("h265 は Video を生成できるはずです"),
         sora_sdk::Video::new_h265(bit_rate, None)
     );
@@ -262,20 +271,67 @@ fn video_from_codec_type_builds_codec_specific_video() {
 
 #[test]
 fn video_from_codec_type_rejects_unknown_codec() {
-    let err = video_from_codec_type(shiguredo_webrtc::VideoCodecType::Generic, None)
+    let err = video_from_codec_type(shiguredo_webrtc::VideoCodecType::Generic, None, None)
         .expect_err("Generic はエラーになるはずです");
     let message = err.to_string();
     assert!(
         message.contains("unsupported video codec type"),
         "エラーメッセージが期待と異なります: {message}"
     );
-    let err = video_from_codec_type(shiguredo_webrtc::VideoCodecType::Unknown(0), None)
+    let err = video_from_codec_type(shiguredo_webrtc::VideoCodecType::Unknown(0), None, None)
         .expect_err("Unknown はエラーになるはずです");
     let message = err.to_string();
     assert!(
         message.contains("unsupported video codec type"),
         "エラーメッセージが期待と異なります: {message}"
     );
+}
+
+#[test]
+fn h264_params_from_mp4_passthrough_fills_profile_level_id() {
+    // fixture は High Profile Level 2.1 (profile-level-id=640015)。
+    let fixture: &[u8] = include_bytes!("../../../testdata/red-320x320-h264.mp4");
+    let (reader, path) = mp4_reader_from_fixture(fixture, "fills-h264-plid");
+    let params = h264_params_from_mp4_passthrough(&reader)
+        .expect("H.264 fixture では h264_params が補完されるはずです");
+    assert_eq!(
+        params.profile_level_id.as_deref(),
+        Some("640015"),
+        "High Profile fixture の profile_level_id が載るはずです"
+    );
+    assert_eq!(params.b_frame, None, "b_frame は自動補完しないはずです");
+
+    // video_from_codec_type 経由でも connect JSON に含まれることを確認する。
+    let video = video_from_codec_type(
+        shiguredo_webrtc::VideoCodecType::H264,
+        Some(30000),
+        Some(params),
+    )
+    .expect("h264 Video を生成できるはずです");
+    let json = nojson::Json(&video).to_string();
+    assert!(
+        json.contains("\"h264_params\"") && json.contains("\"profile_level_id\":\"640015\""),
+        "connect 用 Video JSON に h264_params.profile_level_id が含まれるべき: {json}"
+    );
+    drop(reader);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn h264_params_from_mp4_passthrough_returns_none_for_av1() {
+    let fixture: &[u8] = include_bytes!("../../../testdata/red-320x320-av1.mp4");
+    let (reader, path) = mp4_reader_from_fixture(fixture, "no-h264-params-for-av1");
+    assert_eq!(
+        reader.codec_type(),
+        shiguredo_webrtc::VideoCodecType::Av1,
+        "AV1 fixture を使うはずです"
+    );
+    assert!(
+        h264_params_from_mp4_passthrough(&reader).is_none(),
+        "AV1 では h264_params を補完してはならない"
+    );
+    drop(reader);
+    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -349,6 +405,141 @@ fn parse_args_accepts_libcamera_native_flag() {
         crate::args::parse_args(raw_args).expect("libcamera-native フラグの解析に失敗しました");
     assert!(args.use_libcamera);
     assert!(args.use_libcamera_native);
+}
+
+#[test]
+fn parse_args_accepts_degradation_preference() {
+    // CLI の文字列が DegradationPreference の variant へ対応することを確認する。
+    for (value, expected) in [
+        (
+            "maintain_framerate_and_resolution",
+            DegradationPreference::MaintainFramerateAndResolution,
+        ),
+        (
+            "maintain_framerate",
+            DegradationPreference::MaintainFramerate,
+        ),
+        (
+            "maintain_resolution",
+            DegradationPreference::MaintainResolution,
+        ),
+        ("balanced", DegradationPreference::Balanced),
+    ] {
+        let raw_args = make_raw_args(&[
+            "sumomo",
+            "--signaling-url",
+            "wss://example.com/signaling",
+            "--channel-id",
+            "test-channel",
+            "--role",
+            "sendonly",
+            "--degradation-preference",
+            value,
+        ]);
+        let args =
+            crate::args::parse_args(raw_args).expect("degradation-preference の解析に失敗しました");
+        assert_eq!(
+            args.degradation_preference,
+            Some(expected),
+            "CLI の {value} は {expected:?} に対応するはずです"
+        );
+    }
+}
+
+#[test]
+fn parse_args_rejects_deprecated_degradation_preference() {
+    // libwebrtc の削除予定エイリアス名は受け付けない。
+    let raw_args = make_raw_args(&[
+        "sumomo",
+        "--signaling-url",
+        "wss://example.com/signaling",
+        "--channel-id",
+        "test-channel",
+        "--role",
+        "sendonly",
+        "--degradation-preference",
+        "disabled",
+    ]);
+    assert!(
+        crate::args::parse_args(raw_args).is_err(),
+        "削除予定の disabled は失敗するはずです"
+    );
+}
+
+#[test]
+fn parse_args_rejects_unknown_degradation_preference() {
+    let raw_args = make_raw_args(&[
+        "sumomo",
+        "--signaling-url",
+        "wss://example.com/signaling",
+        "--channel-id",
+        "test-channel",
+        "--role",
+        "sendonly",
+        "--degradation-preference",
+        "unknown",
+    ]);
+    let result = crate::args::parse_args(raw_args);
+    assert!(
+        result.is_err(),
+        "未対応の degradation preference は失敗するはずです"
+    );
+    let err = result.err().expect("エラーは必ず存在するはずです");
+    assert!(
+        err.to_string().contains("degradation-preference は"),
+        "エラーメッセージに指定可能な値が含まれるはずです: {err}"
+    );
+}
+
+#[test]
+fn parse_args_accepts_adaptive_ptime() {
+    // CLI の文字列が true / false へ対応することを確認する。
+    for (value, expected) in [("true", true), ("false", false)] {
+        let raw_args = make_raw_args(&[
+            "sumomo",
+            "--signaling-url",
+            "wss://example.com/signaling",
+            "--channel-id",
+            "test-channel",
+            "--role",
+            "sendonly",
+            "--adaptive-ptime",
+            value,
+        ]);
+        let args = crate::args::parse_args(raw_args).expect("adaptive-ptime の解析に失敗しました");
+        assert_eq!(
+            args.adaptive_ptime,
+            Some(expected),
+            "CLI の {value} は {expected} に対応するはずです"
+        );
+    }
+}
+
+#[test]
+fn parse_args_rejects_invalid_adaptive_ptime() {
+    // true / false 以外の値は受け付けない。
+    let raw_args = make_raw_args(&[
+        "sumomo",
+        "--signaling-url",
+        "wss://example.com/signaling",
+        "--channel-id",
+        "test-channel",
+        "--role",
+        "sendonly",
+        "--adaptive-ptime",
+        "enabled",
+    ]);
+    let result = crate::args::parse_args(raw_args);
+    assert!(
+        result.is_err(),
+        "true / false 以外の adaptive-ptime は失敗するはずです"
+    );
+    let err = result.err().expect("エラーは必ず存在するはずです");
+    assert!(
+        err.to_string()
+            .contains("adaptive-ptime は true または false"),
+        "エラーメッセージに指定可能な値が含まれるはずです: {err}"
+    );
 }
 
 #[test]
@@ -971,9 +1162,13 @@ async fn shutdown_connection_times_out() {
     // run() を開始せず、完了しない run_handle を渡す。
     // connection を保持したまま (drop しない) なので command channel は開いたまま。
     // run() が command_rx を poll しないため disconnect の ack が返らず timeout する。
+    // 到達しない Ok の値は、run_handle の出力型を `Result<DisconnectReason>` に
+    // 合わせるためだけに必要。
     let run_handle = tokio::spawn(async {
         std::future::pending::<()>().await;
-        Ok::<(), sora_sdk::Error>(())
+        Ok::<sora_sdk::DisconnectReason, sora_sdk::Error>(
+            sora_sdk::DisconnectReason::ClientDisconnect,
+        )
     });
     let _keep_connection = connection;
 
@@ -1049,14 +1244,14 @@ fn write_ansi_output_fails_on_readonly_file() {
         std::process::id(),
         "write",
     ));
-    std::fs::write(&path, "test").expect("temp file write failed");
+    std::fs::write(&path, "test").expect("一時ファイルの書き込みに失敗しました");
     let mut perms = std::fs::metadata(&path)
-        .expect("metadata failed")
+        .expect("メタデータの取得に失敗しました")
         .permissions();
     perms.set_readonly(true);
-    std::fs::set_permissions(&path, perms).expect("set readonly failed");
+    std::fs::set_permissions(&path, perms).expect("読み取り専用属性の設定に失敗しました");
 
-    let file = std::fs::File::open(&path).expect("open readonly file failed");
+    let file = std::fs::File::open(&path).expect("読み取り専用ファイルのオープンに失敗しました");
     let mut writer = file;
     let result = ansi_renderer::write_ansi_output(&mut writer, "output");
     assert!(
@@ -1069,15 +1264,15 @@ fn write_ansi_output_fails_on_readonly_file() {
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
-            .expect("restore permissions failed");
+            .expect("権限の復元に失敗しました");
     }
     #[cfg(not(unix))]
     {
         let mut perms = std::fs::metadata(&path)
-            .expect("metadata failed")
+            .expect("メタデータの取得に失敗しました")
             .permissions();
         perms.set_readonly(false);
-        std::fs::set_permissions(&path, perms).expect("unset readonly failed");
+        std::fs::set_permissions(&path, perms).expect("読み取り専用属性の解除に失敗しました");
     }
-    std::fs::remove_file(&path).expect("remove temp file failed");
+    std::fs::remove_file(&path).expect("一時ファイルの削除に失敗しました");
 }

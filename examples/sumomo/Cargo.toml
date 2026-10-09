@@ -13,17 +13,18 @@ shiguredo_audio_device = { version = "2026.3", optional = true }
 shiguredo_video_device = { version = "2026.3", optional = true }
 shiguredo_webrtc.workspace = true
 sora_sdk.workspace = true
-tokio = {
-  workspace = true,
-  features = [
-    "io-util",
-    "macros",
-    "net",
-    "rt-multi-thread",
-    "sync",
-    "time",
-  ]
-}
+
+# MSRV (1.93) の TOML パーサはインラインテーブル内の改行を扱えないためテーブル形式で記述する
+[dependencies.tokio]
+workspace = true
+features = [
+  "io-util",
+  "macros",
+  "net",
+  "rt-multi-thread",
+  "sync",
+  "time",
+]
 
 [dev-dependencies]
 # access_token (JWT) の HMAC-SHA256 署名に利用

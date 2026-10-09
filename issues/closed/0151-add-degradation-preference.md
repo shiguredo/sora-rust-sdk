@@ -1,0 +1,66 @@
+# DegradationPreference を設定できるようにする
+
+- Created: 2026-08-25
+- Completed: 2026-09-28
+- Branch: feature/add-degradation-preference
+- Polished: 2026-09-04
+
+## 目的
+
+Sora C++ SDK は接続時に映像の DegradationPreference （負荷時の映像品質制御の優先度）を設定できるが、Rust SDK では未実装のため、C++ SDK で動作していたユースケースを Rust SDK で再現できない。Rust SDK でも同等の設定を提供する。
+
+## 現状
+
+- `docs/SORA_CPP_SDK.md` の「接続設定」表、`docs/SUMOMO.md` の「接続・セキュリティ」表で `degradation_preference` / `--degradation-preference` は「o | 未実装」に記載されている
+- `SoraConnectionBuilder` (`src/connection.rs`) に `degradation_preference` の設定口が存在しない
+- `shiguredo_webrtc` は対応済み: `RtpParameters::set_degradation_preference` / `degradation_preference` と `DegradationPreference` enum (`MaintainFramerateAndResolution` / `MaintainFramerate` / `MaintainResolution` / `Balanced` / `Unknown`)
+- `Unknown` は整数ペイロード付き (`Unknown(i32)`) であり、unit variant ではない
+
+## 設計方針
+
+- `SoraConnectionBuilder::degradation_preference` を追加する。引数は `shiguredo_webrtc::DegradationPreference` を値で受け取り、内部では `Option<DegradationPreference>` で保持する。未設定 (`None`) の場合は何も設定せず libwebrtc の既定に任せる
+- 適用はネゴシエーション後に行う。`src/connection.rs` の `handle_offer` 内で `set_remote_description` 成功後、`create_answer` 前に、`apply_simulcast_encodings` と同じ区間で video sender の `RtpParameters` に設定して `SetParameters` する
+- 適用条件は「ビルダーに値が設定済み」かつ「`video_sender` が存在する」場合のみとする。`recvonly` や送信映像なし、未設定の場合はスキップし、エラーにしない
+- 初回 offer と re-offer を区別せず、`handle_offer` が呼ばれるたびに同じ条件で再適用する。`SetParameters` 失敗時の扱いは `apply_simulcast_encodings` に準じる
+- シグナリングメッセージ (`OutgoingMessage::Connect`) には含めないクライアント側設定とする
+- `examples/sumomo` に `--degradation-preference` オプションを追加する。CLI 文字列と variant の対応は次のとおりとし、`Unknown` は CLI から指定できない。CLI 文字列は `shiguredo_webrtc` の variant 名に揃え、libwebrtc の削除予定エイリアス (`DISABLED`) に対応する `disabled` は受け付けない
+  - `maintain_framerate_and_resolution` → `MaintainFramerateAndResolution`
+  - `maintain_framerate` → `MaintainFramerate`
+  - `maintain_resolution` → `MaintainResolution`
+  - `balanced` → `Balanced`
+
+## 完了条件
+
+- 送信ありの role で値を設定した場合に video sender の `RtpParameters` へ反映され、未設定時と `recvonly` 時はスキップされて従来どおり接続できることをテストで確認する
+- `sumomo` の `--degradation-preference` で指定した値が設計方針の対応表どおりの variant で反映される
+- `docs/SORA_CPP_SDK.md` / `docs/SUMOMO.md` の機能対応表が更新されている
+- `cargo test --workspace` と `cargo clippy --workspace --all-targets -- -D warnings` が成功する
+- コメントは日本語、ログメッセージは英語、テストの assertion message は日本語で書く
+- モックやスタブは使用しない
+- `CHANGES.md` の develop セクションに `[ADD]` エントリを追記する
+
+## 変更対象
+
+- `src/connection.rs`（`SoraConnectionBuilder` の拡張、反映処理の追加）
+- `examples/sumomo/src/args.rs` / `examples/sumomo/src/main.rs`（CLI オプションの追加）
+- `docs/SORA_CPP_SDK.md` / `docs/SUMOMO.md`（機能対応表の更新）
+- `CHANGES.md`
+
+## 解決方法
+
+- `src/connection.rs`
+  - `SoraConnectionBuilder` に `degradation_preference` を追加した。引数は `shiguredo_webrtc::DegradationPreference` を値で受け取り、内部では `Option<DegradationPreference>` で保持する。未設定 (`None`) の場合は何も設定しない
+  - `SoraConnection::apply_degradation_preference` で video sender の `RtpParameters` に値を設定して `SetParameters` する。未設定の場合と video sender が無い場合 (`recvonly`、音声のみの送信) は何もせずに成功する
+  - `handle_offer` の `apply_simulcast_encodings` の直後で呼び、初回 offer と re-offer のどちらでも再適用する。初回ネゴシエーションでは video sender の SSRC が未確定であり、libwebrtc は値を sender 内に保持して `set_local_description` で SSRC が確定した時点で media channel へ適用する
+  - シグナリングメッセージ (`OutgoingMessage::Connect`) には含めない
+- `src/error.rs`
+  - `DegradationPreferenceSetParametersFailed` と `UnknownDegradationPreference` を追加した
+  - `shiguredo_webrtc::DegradationPreference::Unknown` は libwebrtc が解釈できない値であるため、送信の有無に依らずエラーにする
+- `examples/sumomo/src/args.rs` / `examples/sumomo/src/main.rs` / `examples/sumomo/src/tests.rs`
+  - `--degradation-preference` を追加した。CLI 文字列は `shiguredo_webrtc` の variant 名に揃え (`maintain_framerate_and_resolution` / `maintain_framerate` / `maintain_resolution` / `balanced`)、libwebrtc の削除予定エイリアスに対応する `disabled` は受け付けない
+- `e2e-tests/src/test_connection.rs` / `e2e-tests/tests/degradation_preference.rs`
+  - 実 Sora へ接続して映像の送信が継続することと、`recvonly` ではスキップされて接続できることを確認する E2E テストを追加した
+- テスト方針
+  - 単体テストは `src/connection.rs` の `#[cfg(test)]` に追加した。実 libwebrtc の `PeerConnection` で offer SDP を生成して `handle_offer` へ渡すため、サーバーもモックも使わずにネゴシエーションまでを検証できる
+  - answer の映像 m 行が SSRC を持つことを assert し、`GetParameters` が sender 内に保持された値ではなく media channel の値を返す状態で検証する
+- `docs/SORA_CPP_SDK.md` / `docs/SUMOMO.md` の機能対応表、`skills/sora-rust-sdk/SKILL.md` の接続オプションとエラー型、`CHANGES.md` の `## develop` の `[ADD]` を更新した

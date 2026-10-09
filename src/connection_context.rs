@@ -3,11 +3,15 @@ use std::sync::{Arc, Mutex};
 
 use shiguredo_webrtc::{
     AudioDecoderFactory, AudioDeviceModule, AudioDeviceModuleAudioLayer, AudioEncoderFactory,
-    AudioProcessingBuilder, AudioTrack, AudioTrackSource, ConnectionContext, Environment,
-    PeerConnectionFactory, PeerConnectionFactoryDependencies, RtcEventLogFactory, Thread,
-    VideoDecoderFactory, VideoEncoderFactory, VideoTrack, VideoTrackSource, random_string,
+    AudioOptions, AudioProcessingBuilder, AudioTrack, AudioTrackSource, ConnectionContext,
+    Environment, PeerConnectionFactory, PeerConnectionFactoryDependencies, RtcEventLogFactory,
+    Thread, VideoDecoderFactory, VideoEncoderFactory, VideoTrack, VideoTrackSource, random_string,
 };
 
+use crate::audio_codec::{SoraAudioDecoderFactory, SoraAudioEncoderFactory};
+use crate::audio_codec_capability::AudioCodecCapability;
+use crate::audio_codec_preference::{AudioCodecPreference, validate_audio_codec_preference};
+use crate::audio_codecs::internal::InternalAudioCodecCapability;
 use crate::error::Result;
 use crate::video_codec::{SoraVideoDecoderFactory, SoraVideoEncoderFactory};
 use crate::video_codec_capability::VideoCodecCapability;
@@ -32,6 +36,8 @@ pub enum AdmConfig {
 pub struct SoraConnectionContextConfig {
     /// AudioDeviceModule の設定。デフォルトは [AdmConfig::NoAudioDevice]。
     pub adm_config: AdmConfig,
+    /// コンテキストが使う libwebrtc の [Environment]。デフォルトは `None`。
+    pub environment: Option<Environment>,
     /// コーデックごとに使用する実装を指定する優先設定。
     ///
     /// 各エントリ（[PreferenceCodec](crate::video_codec_preference::PreferenceCodec)）は、
@@ -45,6 +51,17 @@ pub struct SoraConnectionContextConfig {
     /// [Default::default()] では [InternalVideoCodecCapability] が含まれ、
     /// macOS/iOS では `InternalAppleVideoCodecCapability` も追加される。
     pub video_codec_capabilities: Vec<Box<dyn VideoCodecCapability>>,
+    /// 音声コーデックごとに使用する実装を指定する優先設定。
+    ///
+    /// 各エントリ（[AudioPreferenceCodec](crate::audio_codec_preference::AudioPreferenceCodec)）は、
+    /// 特定の方向（エンコード/デコード）とコーデック種別に対して、
+    /// どの [AudioCodecCapability] 実装を使うかを指定する。
+    /// [Default::default()] では [InternalAudioCodecCapability] から自動生成される。
+    pub audio_codec_preference: AudioCodecPreference,
+    /// 音声のエンコーダー/デコーダーを実際に生成する capability 実装のリスト。
+    ///
+    /// [Default::default()] では [InternalAudioCodecCapability] が含まれる。
+    pub audio_codec_capabilities: Vec<Box<dyn AudioCodecCapability>>,
 }
 
 impl Default for SoraConnectionContextConfig {
@@ -69,10 +86,22 @@ impl Default for SoraConnectionContextConfig {
             video_codec_capabilities.push(internal_apple_capability);
         }
 
+        let mut audio_codec_preference = AudioCodecPreference::default();
+        let mut audio_codec_capabilities: Vec<Box<dyn AudioCodecCapability>> = Vec::new();
+        let internal_audio_capability: Box<dyn AudioCodecCapability> =
+            Box::new(InternalAudioCodecCapability::new());
+        audio_codec_preference.merge(&AudioCodecPreference::new_from_capability(
+            internal_audio_capability.as_ref(),
+        ));
+        audio_codec_capabilities.push(internal_audio_capability);
+
         Self {
             adm_config: AdmConfig::default(),
+            environment: None,
             video_codec_preference,
             video_codec_capabilities,
+            audio_codec_preference,
+            audio_codec_capabilities,
         }
     }
 }
@@ -100,10 +129,13 @@ pub struct SoraConnectionContext {
     // したがって connection_context を factory より前に配置し、
     // Rust 側の参照を先に手放すことで、factory 破棄時の signaling スレッド上での
     // 解放が ConnectionContext の最後の C++ 参照になるようにしている。
+    //
+    // また _network / _signaling は factory が内部で参照し続けるため、
+    // factory より後に配置して factory の破棄後に drop されるようにする。
+    // worker thread には network thread を使うため、専用の worker thread は保持しない。
     connection_context: ConnectionContext,
     factory: PeerConnectionFactory,
     _network: Thread,
-    _worker: Thread,
     _signaling: Thread,
 }
 
@@ -119,10 +151,14 @@ impl SoraConnectionContext {
     pub fn new_with_config(config: SoraConnectionContextConfig) -> Result<Arc<Self>> {
         let SoraConnectionContextConfig {
             adm_config,
+            environment,
             video_codec_preference,
             video_codec_capabilities,
+            audio_codec_preference,
+            audio_codec_capabilities,
         } = config;
         validate_video_codec_preference(&video_codec_preference, &video_codec_capabilities)?;
+        validate_audio_codec_preference(&audio_codec_preference, &audio_codec_capabilities)?;
 
         // video_codec_capabilities は WebRTC 内部のエンコーダー/デコーダーファクトリが
         // ワーカースレッド等から並行に参照するため、Mutex で保護する。
@@ -140,38 +176,55 @@ impl SoraConnectionContext {
             SoraVideoDecoderFactory::new(video_codec_preference, shared_video_codec_capabilities),
         ));
 
-        let env = Environment::new();
+        // audio_codec_capabilities は WebRTC 内部のエンコーダー/デコーダーファクトリが
+        // ワーカースレッド等から並行に参照するため、Mutex で保護する。
+        // ロック保持は各 get_supported_encoders / get_supported_decoders / create の
+        // 呼び出し内だけであり、await をまたいだ保持やロック順序の入れ替えは発生しない。
+        let shared_audio_codec_capabilities = Arc::new(Mutex::new(audio_codec_capabilities));
+        let audio_encoder_factory =
+            AudioEncoderFactory::new_with_handler(Box::new(SoraAudioEncoderFactory::new(
+                audio_codec_preference.clone(),
+                shared_audio_codec_capabilities.clone(),
+            )));
+        let audio_decoder_factory = AudioDecoderFactory::new_with_handler(Box::new(
+            SoraAudioDecoderFactory::new(audio_codec_preference, shared_audio_codec_capabilities),
+        ));
+
+        // フィールドトライアルなどの Environment の設定は利用側から受け取る。
+        // 指定が無い場合だけ既定の Environment を生成する。
+        let environment = environment.unwrap_or_else(Environment::new);
         let mut network = Thread::new_with_socket_server();
-        let mut worker = Thread::new();
         let mut signaling = Thread::new();
         network.start();
-        worker.start();
         signaling.start();
 
         let mut deps = PeerConnectionFactoryDependencies::new();
         deps.set_network_thread(&network);
-        deps.set_worker_thread(&worker);
+        // worker thread には network thread を使う
+        deps.set_worker_thread(&network);
         deps.set_signaling_thread(&signaling);
+        // AudioDeviceModule と同じ Environment を PeerConnectionFactory にも渡す。
+        deps.set_env(Some(environment.clone()));
         let event_log = RtcEventLogFactory::new();
         deps.set_event_log_factory(event_log);
         match adm_config {
             AdmConfig::NoAudioDevice => {
-                let adm = AudioDeviceModule::new(&env, AudioDeviceModuleAudioLayer::Dummy)?;
+                let adm = AudioDeviceModule::new(&environment, AudioDeviceModuleAudioLayer::Dummy)?;
                 deps.set_audio_device_module(&adm);
             }
             AdmConfig::UseBuiltIn => {
-                let adm =
-                    AudioDeviceModule::new(&env, AudioDeviceModuleAudioLayer::PlatformDefault)?;
+                let adm = AudioDeviceModule::new(
+                    &environment,
+                    AudioDeviceModuleAudioLayer::PlatformDefault,
+                )?;
                 deps.set_audio_device_module(&adm);
             }
             AdmConfig::UseExternal(external_adm) => {
                 deps.set_audio_device_module(&external_adm);
             }
         };
-        let audio_enc = AudioEncoderFactory::builtin();
-        let audio_dec = AudioDecoderFactory::builtin();
-        deps.set_audio_encoder_factory(&audio_enc);
-        deps.set_audio_decoder_factory(&audio_dec);
+        deps.set_audio_encoder_factory(&audio_encoder_factory);
+        deps.set_audio_decoder_factory(&audio_decoder_factory);
         deps.set_video_encoder_factory(video_encoder_factory);
         deps.set_video_decoder_factory(video_decoder_factory);
         let apb = AudioProcessingBuilder::new_builtin();
@@ -179,19 +232,19 @@ impl SoraConnectionContext {
         deps.enable_media();
 
         let (factory, connection_context) =
-            PeerConnectionFactory::create_modular_with_context(&mut deps)?;
+            PeerConnectionFactory::create_modular_with_context(deps)?;
         Ok(Arc::new(Self {
             factory,
             connection_context,
             _network: network,
-            _worker: worker,
             _signaling: signaling,
         }))
     }
 
     /// AudioTrackSource を作成する。
     pub fn create_audio_source(&self) -> Result<AudioTrackSource> {
-        Ok(self.factory.create_audio_source()?)
+        let options = AudioOptions::new();
+        Ok(self.factory.create_audio_source(&options)?)
     }
 
     /// AudioTrack を作成する。
@@ -221,15 +274,42 @@ unsafe impl Send for SoraConnectionContext {}
 // ref: https://source.chromium.org/chromium/chromium/src/+/main:third_party/webrtc/pc/peer_connection_factory_proxy.h;l=32-59;drc=ef55be496e45889ace33ace4b05094ca19cb499b
 unsafe impl Sync for SoraConnectionContext {}
 
-#[cfg(all(test, any(target_os = "macos", target_os = "ios")))]
+#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::video_codec_capability::CodecDirection;
-    use shiguredo_webrtc::VideoCodecType;
+    use crate::codec_direction::CodecDirection;
+    use shiguredo_webrtc::AudioCodecType;
+
+    #[test]
+    fn default_config_contains_internal_audio_capability() {
+        let config = SoraConnectionContextConfig::default();
+        let internal = config
+            .audio_codec_capabilities
+            .iter()
+            .find(|cap| cap.get_implementation().name() == "internal")
+            .expect("デフォルト構成に内部音声 capability が含まれる必要があります");
+
+        for direction in [CodecDirection::Encoder, CodecDirection::Decoder] {
+            if !internal.is_supported(direction, AudioCodecType::Opus) {
+                continue;
+            }
+            let preference = config
+                .audio_codec_preference
+                .find(direction, AudioCodecType::Opus)
+                .expect("preference エントリは必ず存在する");
+            assert_eq!(
+                preference.implementation().name(),
+                "internal",
+                "internal が {direction:?} Opus で使われなければなりません",
+            );
+        }
+    }
 
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     #[test]
     fn default_config_prefers_internal_apple_for_supported_codecs() {
+        use shiguredo_webrtc::VideoCodecType;
+
         let config = SoraConnectionContextConfig::default();
         let Some(internal_apple_capability) = config
             .video_codec_capabilities

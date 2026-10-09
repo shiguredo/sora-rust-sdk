@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::io;
 
-use shiguredo_webrtc::VideoCodecType;
+use shiguredo_webrtc::{DegradationPreference, VideoCodecType};
 use sora_sdk::Role;
 
 use crate::error::Result;
@@ -21,6 +21,8 @@ pub(crate) struct Args {
     pub(crate) data_channel_signaling: Option<bool>,
     pub(crate) ignore_disconnect_websocket: Option<bool>,
     pub(crate) simulcast: Option<bool>,
+    pub(crate) degradation_preference: Option<DegradationPreference>,
+    pub(crate) adaptive_ptime: Option<bool>,
     pub(crate) insecure: bool,
     pub(crate) client_cert: Option<String>,
     pub(crate) client_key: Option<String>,
@@ -59,6 +61,8 @@ impl Default for Args {
             data_channel_signaling: None,
             ignore_disconnect_websocket: None,
             simulcast: None,
+            degradation_preference: None,
+            adaptive_ptime: None,
             insecure: false,
             client_cert: None,
             client_key: None,
@@ -339,6 +343,32 @@ pub(crate) fn parse_args(mut args: noargs::RawArgs) -> Result<Args> {
             _ => Err("simulcast は true または false で指定してください"),
         })?;
 
+    let degradation_preference: Option<DegradationPreference> = noargs::opt("degradation-preference")
+        .doc(
+            "Degradation preference (maintain_framerate_and_resolution/maintain_framerate/maintain_resolution/balanced)",
+        )
+        .take(&mut args)
+        .present_and_then(|o| match o.value() {
+            "maintain_framerate_and_resolution" => {
+                Ok(DegradationPreference::MaintainFramerateAndResolution)
+            }
+            "maintain_framerate" => Ok(DegradationPreference::MaintainFramerate),
+            "maintain_resolution" => Ok(DegradationPreference::MaintainResolution),
+            "balanced" => Ok(DegradationPreference::Balanced),
+            _ => Err(
+                "degradation-preference は maintain_framerate_and_resolution/maintain_framerate/maintain_resolution/balanced で指定してください",
+            ),
+        })?;
+
+    let adaptive_ptime: Option<bool> = noargs::opt("adaptive-ptime")
+        .doc("音声の適応的パケット化時間 (adaptivePtime) を有効にする (true/false)")
+        .take(&mut args)
+        .present_and_then(|o| match o.value() {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            _ => Err("adaptive-ptime は true または false で指定してください"),
+        })?;
+
     let insecure = noargs::flag("insecure")
         .doc("サーバー証明書の検証をスキップする")
         .take(&mut args)
@@ -463,6 +493,8 @@ pub(crate) fn parse_args(mut args: noargs::RawArgs) -> Result<Args> {
         data_channel_signaling,
         ignore_disconnect_websocket,
         simulcast,
+        degradation_preference,
+        adaptive_ptime,
         insecure,
         client_cert,
         client_key,

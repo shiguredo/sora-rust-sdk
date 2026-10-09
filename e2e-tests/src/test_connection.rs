@@ -1,11 +1,15 @@
 use std::io;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use shiguredo_webrtc::{AudioTrack, IceServer, VideoTrack};
+use shiguredo_webrtc::{
+    AudioTrack, DegradationPreference, FrameTransformerHandler, IceConnectionState,
+    IceGatheringState, IceServer, PeerConnectionState, SignalingState, VideoTrack,
+};
 use sora_sdk::{
-    Audio, ConnectDataChannel, ForwardingFilter, JsonString, ProxyInfo, Result, Role,
-    RpcRequestOptions, RpcResponse, SignalingDirection, SignalingType, SoraConnection,
+    Audio, ConnectDataChannel, DisconnectReason, ForwardingFilter, JsonString, ProxyInfo, Result,
+    Role, RpcRequestOptions, RpcResponse, SignalingDirection, SignalingType, SoraConnection,
     SoraConnectionBuilder, SoraConnectionContext, SoraConnectionEventHandler, SoraConnectionHandle,
     Video,
 };
@@ -14,6 +18,9 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 const STATS_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+// 条件の再判定の間隔。stats と異なりネットワーク往復を伴わないため短くする。
+const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// `SoraTestConnection` が保持するイベントログの要素。
 ///
@@ -59,6 +66,18 @@ pub enum SoraTestEvent {
     },
     DataChannelClose {
         label: String,
+    },
+    SignalingStateChange {
+        state: SignalingState,
+    },
+    ConnectionStateChange {
+        state: PeerConnectionState,
+    },
+    IceConnectionStateChange {
+        state: IceConnectionState,
+    },
+    IceGatheringStateChange {
+        state: IceGatheringState,
     },
 }
 
@@ -134,6 +153,26 @@ impl SoraConnectionEventHandler for SoraTestEventHandler {
             label: label.to_string(),
         });
     }
+    fn on_signaling_state_change(&mut self, state: SignalingState) {
+        let _ = self
+            .event_tx
+            .send(SoraTestEvent::SignalingStateChange { state });
+    }
+    fn on_connection_state_change(&mut self, state: PeerConnectionState) {
+        let _ = self
+            .event_tx
+            .send(SoraTestEvent::ConnectionStateChange { state });
+    }
+    fn on_ice_connection_state_change(&mut self, state: IceConnectionState) {
+        let _ = self
+            .event_tx
+            .send(SoraTestEvent::IceConnectionStateChange { state });
+    }
+    fn on_ice_gathering_state_change(&mut self, state: IceGatheringState) {
+        let _ = self
+            .event_tx
+            .send(SoraTestEvent::IceGatheringStateChange { state });
+    }
 }
 
 /// `SoraConnectionBuilder` をテスト向けに包むビルダー。
@@ -153,6 +192,22 @@ impl SoraTestConnectionBuilder {
 
     pub fn sender_audio_track(mut self, track: AudioTrack) -> Self {
         self.inner = self.inner.sender_audio_track(track);
+        self
+    }
+
+    pub fn sender_video_transform(
+        mut self,
+        transform: Box<dyn FrameTransformerHandler + Send>,
+    ) -> Self {
+        self.inner = self.inner.sender_video_transform(transform);
+        self
+    }
+
+    pub fn receiver_video_transform(
+        mut self,
+        transform: Box<dyn FrameTransformerHandler + Send>,
+    ) -> Self {
+        self.inner = self.inner.receiver_video_transform(transform);
         self
     }
 
@@ -198,6 +253,16 @@ impl SoraTestConnectionBuilder {
 
     pub fn simulcast_request_rid(mut self, value: String) -> Self {
         self.inner = self.inner.simulcast_request_rid(value);
+        self
+    }
+
+    pub fn degradation_preference(mut self, value: DegradationPreference) -> Self {
+        self.inner = self.inner.degradation_preference(value);
+        self
+    }
+
+    pub fn adaptive_ptime(mut self, value: bool) -> Self {
+        self.inner = self.inner.adaptive_ptime(value);
         self
     }
 
@@ -301,6 +366,7 @@ impl SoraTestConnectionBuilder {
             run_task,
             run_task_joined: false,
             run_task_error_message: None,
+            run_disconnect_reason: None,
         })
     }
 }
@@ -317,11 +383,13 @@ pub struct SoraTestConnection {
     handle: SoraConnectionHandle,
     event_rx: UnboundedReceiver<SoraTestEvent>,
     event_log: Vec<SoraTestEvent>,
-    run_task: JoinHandle<Result<()>>,
+    run_task: JoinHandle<Result<DisconnectReason>>,
     /// `run_task` の `JoinHandle` を await 済みかどうか。
     run_task_joined: bool,
     /// `run_task` が `Err` または panic で終了した場合のエラーメッセージ。
     run_task_error_message: Option<String>,
+    /// `run_task` が `Ok` で終了した場合に返された切断理由。
+    run_disconnect_reason: Option<DisconnectReason>,
 }
 
 impl SoraTestConnection {
@@ -372,25 +440,35 @@ impl SoraTestConnection {
     }
 
     /// 切断要求を送信し、`run_task` の終了まで待機する。
+    ///
+    /// クライアントからの切断で終了するため、切断理由は
+    /// [DisconnectReason::ClientDisconnect] になる。それ以外の理由で終了した場合はエラーを返す。
     pub async fn disconnect_and_wait(&mut self, timeout: Duration) -> Result<()> {
-        match self.disconnect().await {
-            Ok(()) => self.wait_for_run_finished(timeout).await,
+        let reason = match self.disconnect().await {
+            Ok(()) => self.wait_for_run_finished(timeout).await?,
             Err(error) => {
                 // disconnect() の失敗は run task の終了のみを意味するため、
                 // 直接結果を読み出して真のエラーを優先表示する。
                 self.store_run_task_error_message().await;
                 match self.run_task_error_message.as_deref() {
-                    Some(message) => Err(io::Error::other(message).into()),
-                    None => Err(error),
+                    Some(message) => return Err(io::Error::other(message).into()),
+                    None => return Err(error),
                 }
             }
+        };
+        if reason != DisconnectReason::ClientDisconnect {
+            return Err(io::Error::other(format!(
+                "クライアントからの切断の理由は ClientDisconnect になる必要があります: {reason:?}"
+            ))
+            .into());
         }
+        Ok(())
     }
 
-    /// `run_task` の終了を待機する。
+    /// `run_task` の終了を待機し、返された切断理由を返す。
     ///
     /// `disconnect()` 後の後始末をテスト側で明示的に完了させるために使う。
-    pub async fn wait_for_run_finished(&mut self, timeout: Duration) -> Result<()> {
+    pub async fn wait_for_run_finished(&mut self, timeout: Duration) -> Result<DisconnectReason> {
         // タイムアウト内に `run_task` の終了を待機して結果を保持する。
         tokio::time::timeout(timeout, self.store_run_task_error_message())
             .await
@@ -400,7 +478,9 @@ impl SoraTestConnection {
         // 保持済みの結果を返す。
         match self.run_task_error_message.as_deref() {
             Some(message) => Err(io::Error::other(message).into()),
-            None => Ok(()),
+            None => Ok(self.run_disconnect_reason.clone().expect(
+                "BUG: run task が Ok で終了した場合は切断理由が保持されている必要があります",
+            )),
         }
     }
 
@@ -663,6 +743,38 @@ impl SoraTestConnection {
         }
     }
 
+    /// `atomic` の値が `predicate` を満たすまで期限付きで待機する。
+    ///
+    /// 条件を満たさないまま `timeout` が経過した場合はエラーを返す。
+    /// 値は別スレッドや別タスクが更新するため、1 回だけ判定すると条件の成立と
+    /// 観測の間に競合が生じる。期限まで繰り返し判定する。
+    /// 値の読み出しは `Relaxed` で行う。
+    pub async fn wait_for_atomic_usize<P>(
+        &self,
+        atomic: &AtomicUsize,
+        predicate: P,
+        timeout: Duration,
+    ) -> Result<()>
+    where
+        P: Fn(usize) -> bool,
+    {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if predicate(atomic.load(Ordering::Relaxed)) {
+                return Ok(());
+            }
+
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return Self::timeout_error();
+            };
+            if remaining.is_zero() {
+                return Self::timeout_error();
+            }
+
+            tokio::time::sleep(WAIT_POLL_INTERVAL.min(remaining)).await;
+        }
+    }
+
     pub async fn wait_video_outbound_packets_sent(&self, timeout: Duration) -> Result<()> {
         self.wait_stats(
             |stats| crate::verify_video_stats_field_positive(stats, "outbound-rtp", "packetsSent"),
@@ -698,7 +810,7 @@ impl SoraTestConnection {
         Err(io::Error::new(io::ErrorKind::TimedOut, "タイムアウトしました").into())
     }
 
-    /// `run_task` の結果を読み出して、エラーメッセージを `self` に保持する。
+    /// `run_task` の結果を読み出して、切断理由またはエラーメッセージを `self` に保持する。
     ///
     /// 初回読み出し時だけ実際に `run_task` の終了を待って結果を保持し、2 回目以降は
     /// 何もしない。`Err` または panic で終了した場合は、そのエラーメッセージを
@@ -708,7 +820,9 @@ impl SoraTestConnection {
             return;
         }
         match (&mut self.run_task).await {
-            Ok(Ok(())) => {}
+            Ok(Ok(reason)) => {
+                self.run_disconnect_reason = Some(reason);
+            }
             Ok(Err(error)) => {
                 self.run_task_error_message = Some(error.to_string());
             }
@@ -723,7 +837,7 @@ impl SoraTestConnection {
     /// `run_task` が終了済みの場合に、エラーメッセージを読み出して返す。
     ///
     /// `run_task` が終了済みなら結果を読み出してからメッセージを返し、
-    /// 未終了なら `None` を返す。終了済みでも `Ok(())` の場合は `None` を返す。
+    /// 未終了なら `None` を返す。終了済みでも `Ok` の場合は `None` を返す。
     async fn read_run_task_error_message(&mut self) -> Option<String> {
         if self.run_task.is_finished() {
             self.store_run_task_error_message().await;

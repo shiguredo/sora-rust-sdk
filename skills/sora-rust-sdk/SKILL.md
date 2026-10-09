@@ -1,6 +1,6 @@
 ---
 name: sora-rust-sdk
-description: 時雨堂の WebRTC SFU Sora 向け Rust クライアント SDK sora_sdk の機能・API リファレンス。SoraConnectionContext / SoraConnection / SoraConnectionHandle による接続管理、Audio / Video 設定、VideoCodecPreference / VideoCodecCapability によるコーデック選択、MP4 無変換送信 (Mp4SampleReader / Mp4VideoCapturer)、DataChannel メッセージング、JSON-RPC 2.0 over DataChannel、TLS / TURN-TLS / HTTP プロキシ設定、複数クライアント同時実行に関する質問時に使用。
+description: 時雨堂の WebRTC SFU Sora 向け Rust クライアント SDK sora_sdk の機能・API リファレンス。SoraConnectionContext / SoraConnection / SoraConnectionHandle による接続管理、Audio / Video 設定、VideoCodecPreference / VideoCodecCapability / AudioCodecPreference / AudioCodecCapability によるコーデック選択、MP4 無変換送信 (Mp4SampleReader / Mp4VideoCapturer)、DataChannel メッセージング、JSON-RPC 2.0 over DataChannel、TLS / TURN-TLS / HTTP プロキシ設定、複数クライアント同時実行に関する質問時に使用。
 ---
 
 # sora_sdk
@@ -12,7 +12,7 @@ WebRTC SFU Sora のクライアントを Rust で実装するための SDK。シ
 - **Sora シグナリング**: WebSocket / DataChannel シグナリング両対応。複数シグナリング URL のレース接続、リダイレクト対応。
 - **複数ロール**: `sendonly` / `recvonly` / `sendrecv` をサポート。
 - **メディア機能**: マルチストリーム、サイマルキャスト、スポットライト、転送フィルター、シグナリング通知。
-- **コーデック**: VP8 / VP9 / AV1 / H.264 / H.265。OpenH264 / Apple VideoToolbox / AMD AMF / NVIDIA Video Codec / Intel VPL / V4L2-M2M のバックエンド統合。
+- **コーデック**: 映像は VP8 / VP9 / AV1 / H.264 / H.265。OpenH264 / Apple VideoToolbox / AMD AMF / NVIDIA Video Codec / Intel VPL / V4L2-M2M のバックエンド統合。音声は libwebrtc 内蔵の Opus / G722 / PCMU / PCMA に対応し、`AudioCodecCapability` でエンコーダー / デコーダーを差し替え可能 (独自 capability を登録すれば ISAC などのコーデックも扱える)。
 - **MP4 無変換送信**: `Mp4PassthroughVideoCodecCapability` で MP4 ファイルの映像トラックをデコード / エンコードを挟まずに Sora へ送信し、音声トラックは無視する。capability は `Mp4SampleReader::passthrough_capability()` から生成する。
 - **DataChannel メッセージング**: `#` プレフィックスのユーザー定義 DataChannel でバイナリ送受信。
 - **JSON-RPC 2.0 over DataChannel**: SDK が id 採番とエンベロープを担当。
@@ -30,7 +30,7 @@ WebRTC SFU Sora のクライアントを Rust で実装するための SDK。シ
 - 対応 Sora: 2025.2.0 以降
 - 対応プラットフォーム: Ubuntu 22.04 / 24.04 / 26.04 (x86_64, arm64), macOS 15 / 26 (arm64), Windows 11 / Server 2025 (x86_64), Raspberry Pi (Linux, arm64)
 
-`shiguredo_webrtc` クレートが提供する `AudioTrack` / `VideoTrack` / `VideoTrackSource` / `RtpTransceiver` / `RtpReceiver` / `IceServer` 等を直接受け取る公開 API があるため、利用側の `Cargo.toml` に `shiguredo_webrtc` を追加する必要がある。
+`shiguredo_webrtc` クレートが提供する `AudioTrack` / `VideoTrack` / `VideoTrackSource` / `RtpTransceiver` / `RtpReceiver` / `IceServer` / `SignalingState` / `PeerConnectionState` / `IceConnectionState` / `IceGatheringState` 等を直接受け取る公開 API があるため、利用側の `Cargo.toml` に `shiguredo_webrtc` を追加する必要がある。
 
 ## Cargo features
 
@@ -51,11 +51,29 @@ WebRTC SFU Sora のクライアントを Rust で実装するための SDK。シ
 
 | 型 | 説明 | 主要メソッド |
 |----|------|-------------|
-| `SoraConnectionContext` | `PeerConnectionFactory` と内部スレッド (network / worker / signaling) をまとめて保持。プロセス全体で 1 つ作って `Arc` で共有する | `new() -> Result<Arc<Self>>`, `new_with_config(SoraConnectionContextConfig) -> Result<Arc<Self>>`, `create_audio_source() -> Result<AudioTrackSource>`, `create_audio_track(&AudioTrackSource) -> Result<AudioTrack>`, `create_video_track(&VideoTrackSource) -> Result<VideoTrack>` |
-| `SoraConnectionContextConfig` | コンテキストの設定 (フィールド: `adm_config`, `video_codec_preference`, `video_codec_capabilities`) | `Default::default()` (Internal / InternalApple capabilities を自動登録) |
+| `SoraConnectionContext` | `PeerConnectionFactory` と内部スレッド (network / signaling) をまとめて保持。プロセス全体で 1 つ作って `Arc` で共有する | `new() -> Result<Arc<Self>>`, `new_with_config(SoraConnectionContextConfig) -> Result<Arc<Self>>`, `create_audio_source() -> Result<AudioTrackSource>`, `create_audio_track(&AudioTrackSource) -> Result<AudioTrack>`, `create_video_track(&VideoTrackSource) -> Result<VideoTrack>` |
+| `SoraConnectionContextConfig` | コンテキストの設定 (フィールド: `adm_config`, `environment`, `video_codec_preference`, `video_codec_capabilities`, `audio_codec_preference`, `audio_codec_capabilities`) | `Default::default()` (Internal / InternalApple / InternalAudio capabilities を自動登録) |
 | `AdmConfig` | AudioDeviceModule の選択 | `NoAudioDevice` (既定、Dummy ADM), `UseBuiltIn` (OS 標準), `UseExternal(shiguredo_webrtc::AudioDeviceModule)` |
 
 `AudioTrackSource` はコンテキストから生成する。`VideoTrackSource` は `shiguredo_webrtc` 側 (`FakeVideoCapturer` / `AdaptedVideoTrackSource`) または本クレートの `Mp4VideoCapturer` / `LibcameraVideoCapturer` から生成する。
+
+`SoraConnectionContextConfig::environment` に指定した `Environment` は、AudioDeviceModule と `PeerConnectionFactory` で使う `Environment` として共有される。`None` (既定) の場合は SDK が `Environment::new()` で生成したものを使う。
+
+```rust
+use shiguredo_webrtc::{EnvironmentFactory, FieldTrials};
+use sora_sdk::{SoraConnectionContext, SoraConnectionContextConfig};
+
+// フィールドトライアルを有効にした Environment を使う
+let mut environment_factory = EnvironmentFactory::new();
+environment_factory.set_field_trials(
+    FieldTrials::new("WebRTC-Video-PerSsrcKeyframes/Enabled/")?,
+);
+let config = SoraConnectionContextConfig {
+    environment: Some(environment_factory.create()),
+    ..Default::default()
+};
+let context = SoraConnectionContext::new_with_config(config)?;
+```
 
 ### 接続ビルダー
 
@@ -82,6 +100,10 @@ WebRTC SFU Sora のクライアントを Rust で実装するための SDK。シ
 | `on_push` | `fn on_push(&mut self, text: &str)` | push メッセージ受信時 |
 | `on_track` | `fn on_track(&mut self, transceiver: RtpTransceiver)` | トラック追加時 |
 | `on_remove_track` | `fn on_remove_track(&mut self, receiver: RtpReceiver)` | トラック削除時 |
+| `on_signaling_state_change` | `fn on_signaling_state_change(&mut self, state: SignalingState)` | ネゴシエーション状態変化時 |
+| `on_connection_state_change` | `fn on_connection_state_change(&mut self, state: PeerConnectionState)` | PeerConnection 接続状態変化時 |
+| `on_ice_connection_state_change` | `fn on_ice_connection_state_change(&mut self, state: IceConnectionState)` | ICE 接続状態変化時 |
+| `on_ice_gathering_state_change` | `fn on_ice_gathering_state_change(&mut self, state: IceGatheringState)` | ICE 候補収集状態変化時 |
 | `on_switched` | `fn on_switched(&mut self)` | DataChannel シグナリングに切り替わった時 |
 | `on_websocket_close` | `fn on_websocket_close(&mut self, code: Option<u16>, reason: &str)` | WebSocket 切断時 |
 | `on_message` | `fn on_message(&mut self, label: &str, data: &[u8])` | `#` プレフィックス DataChannel 受信時 |
@@ -101,6 +123,8 @@ WebRTC SFU Sora のクライアントを Rust で実装するための SDK。シ
 
 | メソッド | 引数 | 説明 |
 |----------|------|------|
+| `degradation_preference` | `shiguredo_webrtc::DegradationPreference` | 送信映像の負荷時の品質制御の優先度 (未指定時は libwebrtc の既定) |
+| `adaptive_ptime` | `bool` | 送信音声の適応的パケット化時間 (adaptivePtime) (未指定時は libwebrtc の既定) |
 | `client_id` | `String` | クライアント ID |
 | `bundle_id` | `String` | バンドル ID |
 | `metadata` | `JsonString` | 認証用メタデータ |
@@ -126,6 +150,7 @@ WebRTC SFU Sora のクライアントを Rust で実装するための SDK。シ
 | `websocket_connection_timeout` | 30 秒 | WebSocket 接続タイムアウト |
 | `websocket_close_timeout` | 3 秒 | WebSocket クローズ待機タイムアウト |
 | `disconnect_wait_timeout` | 5 秒 | 切断完了待機タイムアウト |
+| `disconnected_grace_period` | 10 秒 | 接続確立後に PeerConnection が `Disconnected` のままであることを許容する時間 |
 
 #### TLS / TURN-TLS / プロキシ
 
@@ -159,7 +184,20 @@ WebSocket TLS は PEM、TURN-TLS は DER である点に注意。
 
 ### 接続実行
 
-`SoraConnection::run(self) -> Result<()>` は `async fn` で、接続が終了するまでブロックする。通常は `tokio::spawn` で別タスクに渡し、`SoraConnectionHandle` で外部から `disconnect()` を呼び出す。
+`SoraConnection::run(self) -> Result<DisconnectReason>` は `async fn` で、接続が終了するまでブロックし、終了した理由を返す。通常は `tokio::spawn` で別タスクに渡し、`SoraConnectionHandle` で外部から `disconnect()` を呼び出す。Offer の `data_channels` に含まれる DataChannel が接続中に閉じた場合も接続を終了する。接続確立後に `PeerConnectionState` が `Failed` になった場合と、`Disconnected` のまま `disconnected_grace_period` を超えた場合も接続を終了する。
+
+#### 切断理由 (`DisconnectReason`)
+
+| 理由 | 内容 |
+|------|------|
+| `DisconnectReason::ClientDisconnect` | `disconnect()` による切断 |
+| `DisconnectReason::ServerClose { code, reason }` | Sora からの `close` メッセージによる終了 |
+| `DisconnectReason::SignalingError { reason }` | シグナリングエラー (WebSocket Close code 4490) による終了 |
+| `DisconnectReason::WebSocketClosed { code, reason }` | WebSocket の切断による終了。Close フレームを受信していない場合は `code` が `None`、`reason` が空文字列になる |
+| `DisconnectReason::DataChannelClosed { label }` | DataChannel が閉じられたことによる終了。`label` は閉じた DataChannel のラベル |
+| `DisconnectReason::PeerConnectionFailed` | 接続確立後の PeerConnection の失敗による終了 |
+
+`run()` が `Err` で終了した場合と、`run()` の future を破棄または abort した場合は、切断理由を取得できない。
 
 ## 接続設定の型
 
@@ -219,24 +257,25 @@ H.264 / H.265 の `b_frame: true` は Sora 側の `sora.conf` で対応する設
 
 ## コーデック選択
 
+### 映像コーデック選択
+
 | 型 | 説明 |
 |----|------|
-| `VideoCodecPreference` | コーデック選好。`default()` で空。`new(Vec<PreferenceCodec>)` / `new_from_capability(&dyn VideoCodecCapability)` で生成。`codecs()` / `find(direction, codec_type)` / `find_mut(...)` / `get_or_add(...)` / `has_implementation(impl)` / `merge(&other)` を提供 |
+| `VideoCodecPreference` | コーデック選好。`default()` で空。`new(Vec<PreferenceCodec>)` / `new_from_capability(&dyn VideoCodecCapability)` で生成。`codecs()` / `find(direction, codec_type)` / `find_mut(...)` / `get_or_add(...)` / `has_implementation(&impl)` / `merge(&other)` を提供 |
 | `PreferenceCodec` | preference 内のコーデックエントリ。`new(direction, codec_type, implementation)` で生成。`direction()` / `codec_type()` / `implementation()` / `set_implementation(impl)` を提供 |
 | `VideoCodecCapability` | トレイト (`: Send`)。各バックエンドが実装する。`SoraConnectionContextConfig::video_codec_capabilities` に `Box<dyn VideoCodecCapability>` を積む。必須メソッドは `get_implementation()` と `get_supported_formats(direction)`。デフォルト実装つきメソッドは `is_supported(direction, codec_type)` / `resolve_sdp_format(direction, format)` / `create_video_encoder(env, format) -> Option<VideoEncoder>` / `create_video_decoder(env, format) -> Option<VideoDecoder>` |
 | `VideoCodecImplementation` | 実装識別。`new(name, description)` で生成。`name()` / `description()` を提供 |
-| `CodecDirection` | encoder / decoder の方向。`as_str()` (`"Encoder"` / `"Decoder"`) / `as_label()` (`"encoder"` / `"decoder"`) を提供 |
+| `CodecDirection` | encoder / decoder の方向。音声と映像で共有する。`as_str()` (`"Encoder"` / `"Decoder"`) / `as_label()` (`"encoder"` / `"decoder"`) を提供 |
 | `validate_video_codec_preference(&preference, &[Box<dyn VideoCodecCapability>])` | `new_with_config` 内部でも呼ばれる整合性チェック。可否判定は各 capability の `is_supported` の結果を正とする。preference と capabilities が一致しない場合 `Error::InvalidVideoCodecPreference` |
-| `SoraVideoEncoderFactory` / `SoraVideoDecoderFactory` | 内部で利用される factory (通常はユーザーが直接触らない) |
 | `AlignmentEncoderAdapter` | エンコーダーのアライメント補正アダプター |
 | `SimulcastCapabilityHelper` | `new(primary_factory)` / `new_with_builder(...)` で生成するサイマルキャスト対応ヘルパー。`get_supported_formats()` / `create_video_encoder(...)` を提供 |
 | `codec_type_from_format(&SdpVideoFormatRef)` | フォーマットから `VideoCodecType` を解決 |
 
-### 標準のコーデックバックエンド
+#### 標準の映像コーデックバックエンド
 
 | 型 | feature / 条件 | 生成方法 | 用途 |
 |----|---------------|----------|------|
-| `InternalVideoCodecCapability` | 常時 | `new() -> Self` | libwebrtc 内蔵 (VP8 / VP9 / AV1 など) |
+| `InternalVideoCodecCapability` | 常時 | `new() -> Self` | libwebrtc 内蔵 (VP8 / VP9 / AV1)。H.264 / H.265 は内蔵されておらず、有効にしたバックエンドの capability が担当する |
 | `InternalAppleVideoCodecCapability` | macOS / iOS | `new() -> Option<Self>` | VideoToolbox による H.264 / H.265 |
 | `Mp4PassthroughVideoCodecCapability` | 常時 | `Mp4SampleReader::passthrough_capability() -> Self` | MP4 ファイル無変換送信 (Encoder 方向のみ、デコーダーは提供しない) |
 | `Openh264VideoCodecCapability` | `openh264` | `new(path) -> Result<Self>` | OpenH264 ソフトウェア H.264 |
@@ -247,14 +286,34 @@ H.264 / H.265 の `b_frame: true` は Sora 側の `sora.conf` で対応する設
 
 新しい capability を加えるたびに、対応する `VideoCodecPreference` を `merge` して preference 側にも追加すること。`SoraConnectionContextConfig::default()` は Internal と (macOS/iOS 上では) InternalApple を自動登録する。
 
+### 音声コーデック選択
+
+| 型 | 説明 |
+|----|------|
+| `AudioCodecPreference` | 音声コーデック選好。`default()` で空。`new(Vec<AudioPreferenceCodec>)` / `new_from_capability(&dyn AudioCodecCapability)` で生成。`codecs()` / `find(direction, codec_type)` / `find_mut(...)` / `get_or_add(...)` / `has_implementation(&impl)` / `merge(&other)` を提供 |
+| `AudioPreferenceCodec` | preference 内の音声コーデックエントリ。`new(direction, codec_type, implementation)` で生成。`direction()` / `codec_type()` / `implementation()` / `set_implementation(impl)` を提供 |
+| `AudioCodecCapability` | トレイト (`: Send`)。各バックエンドが実装する。`SoraConnectionContextConfig::audio_codec_capabilities` に `Box<dyn AudioCodecCapability>` を積む。必須メソッドは `get_implementation()` / `get_supported_codec_specs(direction) -> Vec<AudioCodecSpec>` / `query(direction, format) -> Option<AudioCodecInfo>`。デフォルト実装つきメソッドは `is_supported(direction, codec_type)` / `create_audio_encoder(env, format, options) -> Option<AudioEncoder>` / `create_audio_decoder(env, format) -> Option<AudioDecoder>` |
+| `AudioCodecImplementation` | 実装識別。`new(name, description)` で生成。`name()` / `description()` を提供 |
+| `validate_audio_codec_preference(&preference, &[Box<dyn AudioCodecCapability>])` | `new_with_config` 内部でも呼ばれる整合性チェック。可否判定は各 capability の `is_supported` の結果を正とする。同じ方向・コーデック種別の重複、capabilities 内の実装名の重複、capabilities に無い実装、実装が対応しない方向・コーデックを検出する。preference と capabilities が一致しない場合 `Error::InvalidAudioCodecPreference`、実装名が重複する場合 `Error::InvalidAudioCodecCapability` |
+
+`codec_type` は `shiguredo_webrtc::AudioCodecType` を取る。指定できるのは `Opus` / `Isac` / `G722` / `PcmA` / `PcmU` で、SDP コーデック名を持たない `Other` / `Unknown(i32)` を指定すると `Error::InvalidAudioCodecPreference` になる。connect メッセージの音声設定で使う `sora_sdk::AudioCodecType` (`Opus` のみ) とは別の型なので注意すること。
+
+#### 標準の音声コーデックバックエンド
+
+| 型 | feature / 条件 | 生成方法 | 用途 |
+|----|---------------|----------|------|
+| `InternalAudioCodecCapability` | 常時 | `new() -> Self` | libwebrtc 内蔵の音声コーデック (Opus / G722 / PCMU / PCMA)。ISAC は builtin factory に無く、L16 / multi-channel Opus は広告されないため選択対象にならない |
+
+新しい capability を加えるたびに、対応する `AudioCodecPreference` を `merge` して preference 側にも追加すること。`SoraConnectionContextConfig::default()` は `InternalAudioCodecCapability` を自動登録し、そこから `AudioCodecPreference` を生成する。
+
 ## MP4 / libcamera
 
 | 型 | feature / 条件 | 説明 |
 |----|---------------|------|
-| `Mp4SampleReader` | 常時 | MP4 ファイルからサンプルを取得。`new<P: AsRef<Path>>(path)` で構築 (ファイルベース読み込みで全体をメモリに保持しない)。`len()` / `is_empty()` / `codec_type()` / `passthrough_capability()` を提供 |
+| `Mp4SampleReader` | 常時 | MP4 ファイルからサンプルを取得。`new<P: AsRef<Path>>(path)` で構築 (ファイルベース読み込みで全体をメモリに保持しない)。`len()` / `is_empty()` / `codec_type()` / `passthrough_capability()` を提供。`clone()` で安価に共有でき、複数の `Mp4VideoCapturer` 間で同じファイルを同時に読み出せる (demux とファイル I/O は reader 1 つにつき 1 回・1 スレッドに集約) |
 | `Mp4PassthroughVideoCodecCapability` | 常時 | パススルー用 capability。`Mp4SampleReader::passthrough_capability()` からのみ生成できる |
 | `Mp4VideoCapturer` | 常時 | `Mp4VideoCapturer::new(Mp4SampleReader)` で構築し `video_source()` で `VideoTrackSource` を取得。末尾に達すると先頭に戻ってループ再生する |
-| `Mp4Error` | 常時 | MP4 関連のエラー enum (`Io`, `Demux`, `NoVideoTrack`, `NoVideoSamples`, `UnsupportedVideoCodec`, `InvalidNalLengthSize`, `InputPositionOutOfRange`, `InconsistentSampleTable`, `UnsupportedCompositionTimeOffset`, `InconsistentSampleDescription`)。`Error::Mp4 { source }` に包まれて返る |
+| `Mp4Error` | 常時 | MP4 関連のエラー enum (`Io`, `Demux`, `NoVideoTrack`, `NoVideoSamples`, `UnsupportedVideoCodec`, `InvalidNalLengthSize`, `InputPositionOutOfRange`, `InconsistentSampleTable`, `UnsupportedCompositionTimeOffset`, `InconsistentSampleDescription`, `InvalidAv1Track`, `InvalidH264Track`)。track 検証失敗の詳細は Display メッセージに含まれる。`Error::Mp4 { source }` に包まれて返る |
 | `Error::Mp4 { source: Mp4Error }` | 常時 | `Mp4Error` を source として保持する SDK 共通エラー |
 | `LibcameraVideoCapturer` | `libcamera` | libcamera 経由の映像入力 |
 | `LibcameraVideoCapturerBuilder` | `libcamera` | 上記のビルダー |
@@ -266,6 +325,12 @@ MP4 パススルーの入力制約 (いずれも `Mp4SampleReader::new` がエ�
 - 対応映像コーデックは H.264 / H.265 / VP8 / VP9 / AV1
 - 非ゼロの composition time offset (B フレーム) を含む MP4 は拒否 (`Mp4Error::UnsupportedCompositionTimeOffset`)
 - 途中でサンプルエントリー (コーデック・解像度など) が切り替わる MP4 は拒否 (`Mp4Error::InconsistentSampleDescription`)
+- 不正な H.264 トラックを含む MP4 は拒否 (`Mp4Error::InvalidH264Track`)
+- 不正な AV1 トラックを含む MP4 は拒否 (`Mp4Error::InvalidAv1Track`)
+
+同じ `Mp4VideoCapturer` の `video_source()` を複数の PeerConnection の映像 encoder に渡してはならない
+(debug ビルドでは abort する)。PeerConnection ごとに capturer を分け、各 capturer の `video_source()` を
+その接続の encoder に渡すこと。capturer を分けても、1 つの `Mp4SampleReader` は `clone()` して共有できる。
 
 ```rust
 use sora_sdk::{Mp4SampleReader, Mp4VideoCapturer};
@@ -277,9 +342,15 @@ let capability = reader.passthrough_capability();
 // (VideoCodecPreference への merge と video_codec_capabilities への push は
 //  「コーデックバックエンドを明示的に組み立てる」と同じ手順)
 
-let capturer = Mp4VideoCapturer::new(reader)?;
-let video_source = capturer.video_source();
-let video_track = context.create_video_track(&video_source)?;
+// 複数の PeerConnection に送る場合は capturer を分け、各 capturer の
+// video_source() をその接続の encoder に渡す。reader は clone して共有する。
+let capturer1 = Mp4VideoCapturer::new(reader.clone())?;
+let video_source1 = capturer1.video_source();
+let video_track1 = context.create_video_track(&video_source1)?;
+
+let capturer2 = Mp4VideoCapturer::new(reader.clone())?;
+let video_source2 = capturer2.video_source();
+let video_track2 = context.create_video_track(&video_source2)?;
 ```
 
 `LibcameraVideoCapturer::builder()` は `camera_index()` / `width()` / `height()` / `native_frame_output()` / `control()` / `controls()` / `build()` を提供する。生成したキャプチャラーは `start()` / `stop()` / `video_source()` で制御する。
@@ -377,7 +448,9 @@ config.video_codec_capabilities.push(cap);
 let context = SoraConnectionContext::new_with_config(config)?;
 ```
 
-`new_with_config` は内部で `validate_video_codec_preference` を呼び出すため、preference と capabilities の整合が崩れていると `Error::InvalidVideoCodecPreference` を返す。
+`new_with_config` は内部で `validate_video_codec_preference` と `validate_audio_codec_preference` を呼び出すため、preference と capabilities の整合が崩れていると `Error::InvalidVideoCodecPreference` / `Error::InvalidAudioCodecPreference` を返す。
+
+音声も同じ手順で `audio_codec_preference` と `audio_codec_capabilities` を組み立てる。上の例は映像だけを差し替えており、音声は `..Default::default()` のまま `InternalAudioCodecCapability` と、そこから生成した `AudioCodecPreference` が設定される。
 
 ### Audio / Video 設定
 
@@ -553,10 +626,10 @@ if let Some(url) = handle.selected_signaling_url().await? {
 | プロキシ | `ProxyUrlUnsupportedScheme`, `ProxyUrlUserinfoNotSupported`, `ProxyUrlFragmentNotAllowed`, `ProxyUrlMissingHost`, `ProxyUrlPathNotAllowed`, `ProxyUrlQueryNotAllowed`, `ProxyConnectDecode`, `ProxyConnectEncode`, `ProxyConnectResponseMissing`, `ProxyConnectStatusNotSuccessful`, `ProxyConnectTimeout`, `ProxyAuth` |
 | ネットワーク | `DnsResolve`, `NoResolvedAddress`, `TcpConnectTimeout`, `TcpConnect`, `TlsConfig`, `InvalidServerName`, `TlsConnectTimeout`, `TlsConnect`, `Websocket`, `Io`, `ProxyConnectUnexpectedTrailingData` |
 | シグナリング | `SignalingUrlsEmpty`, `AllSignalingUrlsFailed { errors }`, `UnsupportedMessageType`, `JsonParse` |
-| WebRTC | `Webrtc`, `SetRemoteDescriptionTimeout`, `SetRemoteDescriptionResponseMissing`, `SetRemoteDescriptionFailed`, `AnswerTimeout`, `AnswerResponseMissing`, `AnswerFailed`, `SetLocalDescriptionTimeout`, `SetLocalDescriptionResponseMissing`, `SetLocalDescriptionFailed`, `SimulcastVideoSenderMissing`, `SimulcastSetParametersFailed`, `CandidateNotSupported` |
+| WebRTC | `Webrtc`, `SetRemoteDescriptionTimeout`, `SetRemoteDescriptionResponseMissing`, `SetRemoteDescriptionFailed`, `AnswerTimeout`, `AnswerResponseMissing`, `AnswerFailed`, `SetLocalDescriptionTimeout`, `SetLocalDescriptionResponseMissing`, `SetLocalDescriptionFailed`, `SimulcastVideoSenderMissing`, `SimulcastSetParametersFailed`, `DegradationPreferenceSetParametersFailed`, `UnknownDegradationPreference { value }`, `AdaptivePtimeSetParametersFailed`, `CandidateNotSupported` |
 | DataChannel / RPC | `DataChannelMissing`, `DataChannelSendFailed`, `Utf8DecodeFailed`, `RpcTimeout`, `RpcProtocolViolation { id }`, `InvalidDataChannelLabel`, `Redirected` |
 | TLS 証明書 | `TurnTlsCaCert`, `ClientCertParse`, `ClientKeyParse`, `CaCertParse`, `ClientCertKeyIncomplete` |
-| コーデック | `InvalidVideoCodecCapability`, `InvalidVideoCodecPreference` |
+| コーデック | `InvalidVideoCodecCapability`, `InvalidVideoCodecPreference`, `InvalidAudioCodecCapability`, `InvalidAudioCodecPreference` |
 | 内部コマンド | `CommandSendFailed`, `CommandResponseMissing`, `CommandTimeout` |
 | バックエンド固有 (feature 付き) | `Libcamera`, `LibcameraMessage`, `UnknownLibcameraControl`, `Openh264`, `Amf { source }`, `AmfMessage`, `Vpl { source }`, `VplMessage` (後者 2 つは Linux のみ), `NvCodec { source }`, `NvCodecMessage`, `V4l2 { source }`, `V4l2Message` |
 | その他 | `Mp4 { source: Mp4Error }`, `InvalidSystemTime { source }` |
@@ -565,15 +638,18 @@ if let Some(url) = handle.selected_signaling_url().await? {
 
 ## 既知の制限事項・注意点
 
-- **コンテキスト生成は重い**: `SoraConnectionContext::new()` は内部スレッドを 3 本起動するため、プロセスあたり 1 つに集約し `Arc` で共有する。
+- **コンテキスト生成は重い**: `SoraConnectionContext::new()` は内部スレッドを 2 本起動するため、プロセスあたり 1 つに集約し `Arc` で共有する。
 - **`connection.run()` はブロッキング**: 別タスクで実行し、外部制御は `SoraConnectionHandle` (Clone) を介する。
+- **接続終了の理由は `run()` の戻り値**: `on_websocket_close` は WebSocket レベルの切断だけを通知するため、接続全体の終了理由としては使えない。
 - **コールバックを長時間ブロックしない**: 内部タスクから呼ばれるため、重い処理は自分の async タスクへ転送する。
 - **HTTP プロキシは `http://` のみ**: `https://` プロキシ、パス、クエリ、userinfo はサポート外。
 - **TLS 設定の単位の違い**: WebSocket TLS の証明書は PEM、TURN-TLS の CA 証明書は DER。
 - **ハードウェアコーデックは feature + runtime 両方の条件**: feature 有効化だけでなく GPU / ドライバが揃わないと `*Capability::new()` がエラーを返す。
 - **VPL は Linux 専用**: `vpl` feature は Linux 以外の OS ではコンパイルされず、`VplVideoCodecCapability` と `Error::Vpl` 系のバリアントも Linux 限定。
+- **音声コーデックは preference と capabilities の両方を更新する**: `audio_codec_preference` に実装名を書いても `audio_codec_capabilities` にその実装が無いと `Error::InvalidAudioCodecPreference` になる。`Default::default()` は `InternalAudioCodecCapability` から両方を生成する。
+- **`AudioCodecType` は 2 種類ある**: connect メッセージの音声設定は `sora_sdk::AudioCodecType` (`Opus` のみ) を、音声コーデックの preference は `shiguredo_webrtc::AudioCodecType` (`Opus` / `Isac` / `G722` / `PcmA` / `PcmU`) を使う。`shiguredo_webrtc::AudioCodecType` の `Other` / `Unknown(i32)` は SDP コーデック名を持たないため preference には指定できない。
 - **`VideoTrackSource` は本クレートでは作らない**: `shiguredo_webrtc` 側の capturer / source、もしくは本クレートの `Mp4VideoCapturer` / `LibcameraVideoCapturer` から生成する。
-- **MP4 パススルーの入力制約**: B フレーム (非ゼロ composition time offset) を含む MP4 と、途中でサンプルエントリー (コーデック・解像度など) が切り替わる MP4 は `Mp4SampleReader::new()` が拒否する。
+- **MP4 パススルーの入力制約**: B フレーム (非ゼロ composition time offset) を含む MP4、途中でサンプルエントリー (コーデック・解像度など) が切り替わる MP4、不正な H.264 / AV1 トラックを含む MP4 は `Mp4SampleReader::new()` が拒否する。
 - **`send_message` のラベル制約**: SDK 内部用ラベル（`signaling`、`stats`、`push`、`notify`、`rpc`）および `#` プレフィックスのないラベル、Offer 応答の `data_channels` に含まれていないラベルを渡すと `Error::InvalidDataChannelLabel` を返す。`on_message` は `#` プレフィックスのユーザー定義 DataChannel 専用。
 - **JSON-RPC の id は SDK が管理する**: 利用側が `id` を組み立てる必要はない。`params` の中身だけ渡す。
 - **DataChannel の展開後サイズ上限**: `compress: true` の DataChannel メッセージは zlib 展開後 16 MiB まで。
@@ -581,6 +657,11 @@ if let Some(url) = handle.selected_signaling_url().await? {
 - **DataChannel シグナリングの切替条件**: WebSocket で `switched` を受信し、Offer の `data_channels` に含まれる全 DataChannel が Open になってから切り替える。
 - **DataChannel シグナリング中の Close**: `signaling` ラベルで Sora から `{"type": "close"}` を受信すると接続を終了する。
   他のラベルで受信した Close は接続終了として扱わない。
+- **DataChannel の Close による終了**: Offer の `data_channels` に含まれる DataChannel が接続中に閉じると接続を終了する。
+  対象は `signaling` / `stats` などの SDK 内部ラベルと `#` プレフィックスのユーザー定義ラベルのすべてで、一部だけが閉じた場合も接続全体を終了する。
+- **PeerConnection の失敗による終了**: 接続確立後に `PeerConnectionState` が `Failed` になると即座に接続を終了する。
+  `Disconnected` は回復し得るため、`Disconnected` のまま `disconnected_grace_period` (既定 10 秒) を超えた場合に終了する。`Connected` または `Connecting` へ戻ると猶予はリセットされる。
+  接続確立前の失敗は Sora サーバーの接続タイムアウトが WebSocket のクローズとして通知するため、SDK 側では終了しない。
 - **MP4 入力は映像専用**: 音声トラックは無視する。
   B フレームなどの非ゼロ composition time offset を含む映像は受理しない。
 - **ロギングは `shiguredo_webrtc` の `rtc_log_*` マクロ**: SDK 内のログは libwebrtc 側 (`rtc_log_verbose!` / `rtc_log_info!` / `rtc_log_warning!` / `rtc_log_error!`) に流れる。`log` / `tracing` クレートには依存していない。

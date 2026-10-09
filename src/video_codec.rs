@@ -5,26 +5,27 @@ use std::sync::{Arc, Mutex};
 use shiguredo_webrtc::{
     EnvironmentRef, SdpVideoFormat, SdpVideoFormatRef, SimulcastEncoderAdapter, VideoCodec,
     VideoCodecRef, VideoCodecStatus, VideoCodecType, VideoDecoder, VideoDecoderFactoryHandler,
-    VideoEncoder, VideoEncoderEncodedImageCallbackRef, VideoEncoderEncoderInfo,
+    VideoEncoder, VideoEncoderEncodedImageCallbackRefMut, VideoEncoderEncoderInfo,
     VideoEncoderFactory, VideoEncoderFactoryHandler, VideoEncoderHandler,
     VideoEncoderRateControlParametersRef, VideoEncoderSettingsRef, VideoFrame, VideoFrameRef,
     VideoFrameTypeVectorRef,
 };
 
-use crate::video_codec_capability::{CodecDirection, VideoCodecCapability, find_capability};
+use crate::codec_direction::CodecDirection;
+use crate::video_codec_capability::{VideoCodecCapability, find_capability};
 use crate::video_codec_preference::VideoCodecPreference;
 
 type VideoCodecCapabilities = Vec<Box<dyn VideoCodecCapability>>;
 type SharedVideoCodecCapabilities = Arc<Mutex<VideoCodecCapabilities>>;
 
 /// [VideoCodecPreference] に基づき、利用可能なビデオエンコーダーを提供するファクトリ。
-pub struct SoraVideoEncoderFactory {
+pub(crate) struct SoraVideoEncoderFactory {
     preference: VideoCodecPreference,
     capabilities: SharedVideoCodecCapabilities,
 }
 
 /// [VideoCodecPreference] に基づき、利用可能なビデオデコーダーを提供するファクトリ。
-pub struct SoraVideoDecoderFactory {
+pub(crate) struct SoraVideoDecoderFactory {
     preference: VideoCodecPreference,
     capabilities: SharedVideoCodecCapabilities,
 }
@@ -209,7 +210,7 @@ fn apply_alignment_to_codec(
     codec.set_width(aligned_codec_width);
     codec.set_height(aligned_codec_height);
     for (index, aligned_stream_width, aligned_stream_height) in stream_alignments {
-        if let Some(mut stream) = codec.simulcast_stream(index) {
+        if let Some(mut stream) = codec.simulcast_stream_mut(index) {
             stream.set_width(aligned_stream_width);
             stream.set_height(aligned_stream_height);
         }
@@ -341,7 +342,7 @@ impl VideoEncoderHandler for AlignmentEncoderAdapter {
 
     fn register_encode_complete_callback(
         &mut self,
-        callback: Option<VideoEncoderEncodedImageCallbackRef<'_>>,
+        callback: Option<VideoEncoderEncodedImageCallbackRefMut<'_>>,
     ) -> VideoCodecStatus {
         self.encoder.register_encode_complete_callback(callback)
     }
@@ -766,19 +767,19 @@ mod tests {
         codec.set_height(181);
         codec.set_number_of_simulcast_streams(2);
         codec
-            .simulcast_stream(0)
+            .simulcast_stream_mut(0)
             .expect("simulcast stream 0 が必要")
             .set_width(321);
         codec
-            .simulcast_stream(0)
+            .simulcast_stream_mut(0)
             .expect("simulcast stream 0 が必要")
             .set_height(181);
         codec
-            .simulcast_stream(1)
+            .simulcast_stream_mut(1)
             .expect("simulcast stream 1 が必要")
             .set_width(161);
         codec
-            .simulcast_stream(1)
+            .simulcast_stream_mut(1)
             .expect("simulcast stream 1 が必要")
             .set_height(91);
 
@@ -825,19 +826,19 @@ mod tests {
         codec.set_height(180);
         codec.set_number_of_simulcast_streams(2);
         codec
-            .simulcast_stream(0)
+            .simulcast_stream_mut(0)
             .expect("simulcast stream 0 が必要")
             .set_width(320);
         codec
-            .simulcast_stream(0)
+            .simulcast_stream_mut(0)
             .expect("simulcast stream 0 が必要")
             .set_height(180);
         codec
-            .simulcast_stream(1)
+            .simulcast_stream_mut(1)
             .expect("simulcast stream 1 が必要")
             .set_width(15);
         codec
-            .simulcast_stream(1)
+            .simulcast_stream_mut(1)
             .expect("simulcast stream 1 が必要")
             .set_height(10);
 
@@ -876,11 +877,11 @@ mod tests {
         codec.set_height(181);
         codec.set_number_of_simulcast_streams(1);
         codec
-            .simulcast_stream(0)
+            .simulcast_stream_mut(0)
             .expect("simulcast stream 0 が必要")
             .set_width(321);
         codec
-            .simulcast_stream(0)
+            .simulcast_stream_mut(0)
             .expect("simulcast stream 0 が必要")
             .set_height(181);
 

@@ -39,3 +39,12 @@
 - `cargo fmt --all -- --check` が通る
 - `cargo clippy --workspace --all-targets -- -D warnings` が通る
 - `cargo test -p sora_sdk` / `cargo test -p pbt` / `cargo test -p sumomo` が通る（既存テストが回帰検証になる）
+
+## pending にした理由
+
+- ファイルが 5,300 行に達しており分割の必要性自体は変わらないが、どの分割案も分割の基準としてしっくりこないため、方針が固まるまで実装を保留にする
+- 検討した案では、`SoraConnection` 本体の実装の一部（`run()` のシグナリング状態遷移、DataChannel 切替、ICE 設定、送信トラック設定）と、`SoraConnection` とは別の型（`SoraConnectionBuilder` / `SoraConnectionHandle`）が同じディレクトリに並ぶ。どのファイルが `SoraConnection` の一部なのかがパスから読み取れない
+- さらに、SoraConnection に依存しない要素（`TimerManager`、`ClientStream` による TCP / TLS 接続、プロキシ CONNECT、`SecureRandom`、シグナリング URL 解析）も同じディレクトリに混在しており、「SoraConnection の分割」という意図と一致しない
+- `observers.rs` に相当する Observer 実装は `SoraEvent` 経由でのみ接続本体と繋がり、`ParsedProxyInfo` は公開 API でありながらシグナリング接続の URL 解析と同じファイルに置かれており、責務の切り分けをどう表現するかが決まっていない
+- 再開時は実装の前に、モジュール境界の基準（`SoraConnection` の実装 / 別の型 / 汎用ユーティリティのいずれに置くかとその命名）を先に確定させる必要がある
+- 現状は保守性の課題が残るだけで、挙動やテストに問題はない

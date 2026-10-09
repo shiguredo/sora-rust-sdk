@@ -2,7 +2,7 @@
 
 - Priority: High
 - Created: 2026-08-06
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-26
 - Model: deepseek-v4-flash
 - Branch: feature/add-webrtc-encoded-transform
 - Polished: 2026-08-06
@@ -115,3 +115,14 @@ libwebrtc の `FrameTransformerInterface::Transform` は同期呼び出しだが
 - transform 内でエンコード済みフレームのデータを取得・書き換えでき、その結果が実メディアに反映される (e2e-tests で確認)
 - transform の処理が libwebrtc の呼び出しスレッドをブロックせず、タスクキューのワーカースレッドで実行される
 - `cargo test --workspace` が成功する
+
+## 解決方法
+
+shiguredo-webrtc 0.152 系で FrameTransformer の C ラッパーと Rust API を追加したうえで、sora-rust-sdk 側に送受信 transform の設定 API を追加した (PR #83)。
+
+- `Cargo.toml` の shiguredo_webrtc を `~0.152.1-canary.0` に更新する
+- `SoraConnectionBuilder` に `sender_video_transform` / `receiver_video_transform` を追加し、`FrameTransformerHandler` を `Box<dyn ... + Send>` で受け取る
+- 送信側は `add_sender_tracks` で `add_track` 直後に `RtpSender::set_frame_transformer` を呼び、最初のフレームから変換を適用する
+- 受信側は `SoraEvent::Track` 処理で受信ビデオトラックの `RtpReceiver` に transform を適用し、複数トラック間で 1 つの `FrameTransformer` インスタンスを共有する
+- `tests/test_connection.rs` にパススルー transform の設定 API 受け付けテストを追加する
+- `e2e-tests/tests/video_transform.rs` を追加し、送受信 transform の呼び出し・データ書き換え・メタデータ書き換え・ドロップを実メディアで検証する

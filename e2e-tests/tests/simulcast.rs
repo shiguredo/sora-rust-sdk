@@ -91,6 +91,7 @@ fn create_non_builtin_context(
         adm_config: AdmConfig::default(),
         video_codec_preference: preference,
         video_codec_capabilities: vec![capability],
+        ..SoraConnectionContextConfig::default()
     };
     SoraConnectionContext::new_with_config(config)
 }

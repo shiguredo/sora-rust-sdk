@@ -17,18 +17,17 @@ use shiguredo_webrtc::{
     H264PacketizationMode, NV12Buffer, SdpVideoFormat, SdpVideoFormatRef, VideoCodecRef,
     VideoCodecStatus, VideoCodecType, VideoDecoder, VideoDecoderDecodedImageCallbackPtr,
     VideoDecoderDecoderInfo, VideoDecoderHandler, VideoDecoderSettingsRef, VideoEncoder,
-    VideoEncoderEncodedImageCallbackPtr, VideoEncoderEncodedImageCallbackRef,
+    VideoEncoderEncodedImageCallbackPtr, VideoEncoderEncodedImageCallbackRefMut,
     VideoEncoderEncodedImageCallbackResultError, VideoEncoderEncoderInfo, VideoEncoderHandler,
     VideoEncoderRateControlParametersRef, VideoEncoderSettingsRef, VideoFrame, VideoFrameRef,
     VideoFrameType, VideoFrameTypeVectorRef, i420_to_nv12, nv12_copy, rtc_log_error,
     rtc_log_warning,
 };
 
+use crate::codec_direction::CodecDirection;
 use crate::error::Result;
 use crate::video_codec::{SimulcastCapabilityHelper, codec_type_from_format};
-use crate::video_codec_capability::{
-    CodecDirection, VideoCodecCapability, VideoCodecImplementation,
-};
+use crate::video_codec_capability::{VideoCodecCapability, VideoCodecImplementation};
 use crate::video_codecs::helpers;
 
 fn collect_supported_formats(
@@ -173,7 +172,8 @@ fn handle_vpl_encode_callback(
         codec_specific_info.set_end_of_picture(true);
         // num_spatial_layers を設定しないと first_active_layer / num_spatial_layers が不整合でエラーになる
         codec_specific_info.set_vp9_num_spatial_layers(1);
-        codec_specific_info.set_vp9_temporal_idx(shiguredo_webrtc::no_temporal_idx().into());
+        codec_specific_info
+            .set_vp9_temporal_idx(shiguredo_webrtc::constants::no_temporal_idx().into());
         // 実機で動作確認したところ、以下の設定は必須ではないことが分かっている。
         // ただ他の実機や libwebrtc の仕様変更のことを考えると、
         // 一応明示しておいた方が安定しそうなので設定しておく。
@@ -471,14 +471,14 @@ impl VideoEncoderHandler for VplVideoEncoder {
 
     fn register_encode_complete_callback(
         &mut self,
-        callback: Option<VideoEncoderEncodedImageCallbackRef<'_>>,
+        callback: Option<VideoEncoderEncodedImageCallbackRefMut<'_>>,
     ) -> VideoCodecStatus {
         let mut callback_state = self
             .callback_state
             .lock()
             .expect("callback_state should not be poisoned");
         callback_state.callback = callback
-            .map(|callback| unsafe { VideoEncoderEncodedImageCallbackPtr::from_ref(callback) });
+            .map(|callback| unsafe { VideoEncoderEncodedImageCallbackPtr::from_mut(&callback) });
         VideoCodecStatus::Ok
     }
 
@@ -596,7 +596,7 @@ fn handle_vpl_decode_callback(
     }
 
     let value = frame.user_data();
-    let decoded_frame = VideoFrame::builder(&nv12.cast_to_video_frame_buffer())
+    let mut decoded_frame = VideoFrame::builder(&nv12.cast_to_video_frame_buffer())
         .set_timestamp_us(value.render_time_ms.saturating_mul(1000))
         .set_rtp_timestamp(value.rtp_timestamp)
         .build();
@@ -608,7 +608,7 @@ fn handle_vpl_decode_callback(
         return;
     };
     unsafe {
-        callback.decoded(decoded_frame.as_ref());
+        callback.decoded(decoded_frame.as_mut());
     }
 }
 

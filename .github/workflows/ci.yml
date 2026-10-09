@@ -46,11 +46,11 @@ jobs:
             libdbus-1-dev libudev-dev libdrm-dev libgbm-dev \
             libclang-dev
 
-      - run: rustup update stable
+      - run: rustup show
       - uses: shiguredo/github-actions/.github/actions/rust-cache@main
         with:
           os: ${{ matrix.os }}
-          toolchain: stable
+          toolchain: "1.94"
 
       - uses: shiguredo/github-actions/.github/actions/download-openh264@main
         if: ${{ runner.environment != 'self-hosted' }}
@@ -108,6 +108,9 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
       - name: Update PATH
         run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+      # rust-toolchain.toml の固定 toolchain をインストールして以降のステップで使う
+      - name: Show Rust toolchain
+        run: rustup show
 
       - run: cp .cargo/config.toml.ci .cargo/config.toml
       - run: cargo fmt --all --check
@@ -135,18 +138,44 @@ jobs:
             libx11-dev \
             libasound2t64
 
-      - run: rustup update stable
+      - run: rustup show
       - uses: shiguredo/github-actions/.github/actions/rust-cache@main
         with:
           os: ubuntu-24.04
-          toolchain: stable
+          toolchain: "1.94"
 
       - run: cp .cargo/config.toml.ci .cargo/config.toml
       - run: cargo clippy -p sumomo --features raw-player --all-targets -- -D warnings
       - run: SDL_VIDEODRIVER=dummy cargo test -p sumomo --features raw-player
 
+  # 公開クレートの MSRV (Cargo.toml の rust-version) でコンパイルできることを検証する。
+  # rust-toolchain.toml は e2e-tests の依存 (raden) に合わせて 1.94 に固定しているため、
+  # MSRV 1.93 はこのジョブで別途検証する。
+  msrv:
+    name: msrv
+    needs: [ci]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install 1.93.0 --profile minimal
+      - run: cp .cargo/config.toml.ci .cargo/config.toml
+
+      - uses: shiguredo/github-actions/.github/actions/download-openh264@main
+        id: openh264
+        with:
+          openh264_version: ${{ env.OPENH264_VERSION }}
+          use-cache: true
+      - name: Set OpenH264 path
+        if: ${{ steps.openh264.outputs.openh264_path }}
+        run: echo "OPENH264_PATH=${{ steps.openh264.outputs.openh264_path }}" >> $GITHUB_ENV
+        shell: bash
+
+      - run: cargo +1.93.0 check -p sora_sdk
+
   slack_notify:
-    needs: [ci, ci-self-hosted, ci-raw-player]
+    needs: [ci, ci-self-hosted, ci-raw-player, msrv]
     runs-on: ubuntu-slim
     if: ${{ !cancelled() }}
     steps:

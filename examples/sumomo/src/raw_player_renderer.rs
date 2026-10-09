@@ -53,10 +53,12 @@ impl RawPlayerRenderer {
         if needs_recreate {
             self.window
                 .as_mut()
-                .expect("BUG: window が None です")
+                .expect("BUG: window must not be None")
                 .set_size(width, height)?;
             self.texture = Some(raw_player::Texture::new_yuv(
-                self.renderer.as_ref().expect("BUG: renderer が None です"),
+                self.renderer
+                    .as_ref()
+                    .expect("BUG: renderer must not be None"),
                 width,
                 height,
             )?);
@@ -72,7 +74,10 @@ impl RawPlayerRenderer {
                 frame.v_stride,
             )?;
 
-            let renderer = self.renderer.as_mut().expect("BUG: renderer が None です");
+            let renderer = self
+                .renderer
+                .as_mut()
+                .expect("BUG: renderer must not be None");
             renderer.set_draw_color(0, 0, 0, 255)?;
             renderer.clear()?;
             renderer.copy(texture)?;
