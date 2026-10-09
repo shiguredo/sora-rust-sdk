@@ -1,7 +1,7 @@
 # 接続確立後に PeerConnection が失敗したら接続を終了する
 
 - Created: 2026-10-05
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-08
 - Branch: feature/fix-disconnect-on-peerconnection-failure
 - Polished: {YYYY-MM-DD}
 
@@ -49,3 +49,18 @@ Wi-Fi からモバイルへの切り替え、NAT リバインディング、VPN 
 
 - `src/connection.rs` の `PcObserverHandler`、`SoraEvent`、`run`、`SoraConnectionBuilder`
 - `skills/sora-rust-sdk/SKILL.md` (設定と終了条件の記述)
+
+## 解決方法
+
+- `src/connection.rs`
+  - `PcObserverHandler::on_connection_change` の状態を `SoraEvent::ConnectionChange` として `run` のループに渡し、`MediaPathMonitor` で接続を終了する条件を判定するようにした。`on_connection_change` のログ出力は残した
+  - `Failed` は終端状態として、一度でも `Connected` になった後は即座に接続を終了する
+  - `Disconnected` は `disconnected_grace_period` の間だけ終了を待ち、`Connected` または `Connecting` に戻ったら猶予を無効化する
+  - 接続確立前の状態変化では接続を終了しない。接続確立前の失敗は Sora サーバーの `connection_created_wait_timeout` が WebSocket のクローズとして通知するため、既存の終了処理と二重に走らない
+  - 猶予タイマーは `tokio::spawn` したタスクで計測し、`SoraEvent::PeerConnectionDisconnectedTimeout` として `run` のループへ通知する。タイマーを開始するたびに世代を払い出し、稼働中の世代と照合することで、猶予が不要になった後に古いタイマーが発火しても接続を終了しない
+  - サーバーへ切断要求を送らずに終了する経路を `terminated_without_disconnect` で扱い、残りの DataChannel の close を待たずに close 通知を行って終了する
+  - redirect のドレインでは `ConnectionChange` を捨てず、メディア経路の監視に反映するようにした。redirect 後も同じ PeerConnection を使い続けるため
+  - `SoraConnectionBuilder::disconnected_grace_period` を追加した (既定値 10 秒)
+  - 単体テストを追加した。仮想時刻 (`start_paused`) で猶予時間の前後と世代の伝搬を確認し、猶予タイマーを開始していない世代や、回復して猶予が不要になった後の古い世代では接続を終了しないことを確認する
+- `skills/sora-rust-sdk/SKILL.md` のタイムアウト設定の表と終了条件の記述に `disconnected_grace_period` を追記した
+- `CHANGES.md` の `## develop` に `[ADD]` と `[FIX]` を追記した
