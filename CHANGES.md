@@ -11,6 +11,10 @@
 
 ## develop
 
+## 2026.2.0
+
+**リリース日**: 2026-10-10
+
 - [CHANGE] `Mp4Error::InconsistentSampleDescription` から `fields` を削除し、 `InvalidAv1Track` を追加する
   - サンプルエントリーの相違は `index` のみを報告する
   - AV1 track 検証の失敗は文脈入りのメッセージで報告する
