@@ -513,9 +513,8 @@ impl SoraConnectionBuilder {
 
 /// [SoraConnection::run] が接続終了時に返す切断理由。
 ///
-/// 接続がどのように終了したかを表す。接続終了の理由の正本はこの型であり、
-/// [SoraConnectionEventHandler::on_websocket_close] は WebSocket レベルの
-/// 切断だけを通知する。
+/// 接続終了の理由の正本はこの型であり、[SoraConnectionEventHandler::on_websocket_close] は
+/// WebSocket レベルの切断だけを通知する。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DisconnectReason {
     /// クライアントからの切断。
@@ -1005,14 +1004,12 @@ impl SoraConnection {
     /// 接続が終了するまでブロックするため、別の非同期タスクで呼び出すこと。
     ///
     /// 接続が終了すると、その理由を [DisconnectReason] として返す。
-    /// 異常終了の場合は `Err` を返し、切断理由は返さない。
+    /// 接続が異常終了した場合は `Err` を返す。この future を破棄または abort した場合は、
+    /// 切断理由を取得できない。
     ///
     /// 接続確立後に PeerConnection が `Failed` になった場合は即座に終了する。
     /// `Disconnected` のまま [SoraConnectionBuilder::disconnected_grace_period] を
     /// 超えた場合も終了する。
-    ///
-    /// この future を破棄または abort した場合は、接続が終了しても
-    /// 切断理由を取得できない。
     pub async fn run(mut self) -> Result<DisconnectReason> {
         let signaling_urls = self.config.signaling_urls.clone();
         let channel_id = self.config.channel_id.clone();
@@ -1627,6 +1624,8 @@ impl SoraConnection {
                                 IncomingMessageData::Close { code, reason } => {
                                     rtc_log_info!("Disconnected from Sora server");
                                     // close メッセージでは run ループを終了せず、理由だけを確定させる。
+                                    // WebSocket シグナリングでは、この後に Sora が送る Close フレーム
+                                    // (またはソケットの切断) を検知して run ループが終了する。
                                     set_disconnect_reason(
                                         &mut disconnect_reason,
                                         DisconnectReason::ServerClose { code, reason },
@@ -1666,9 +1665,9 @@ impl SoraConnection {
 
             // redirect メッセージを受信した場合、新しい WebSocket に再接続する
             if let Some(location) = redirect_location.take() {
-                // セッション状態をリセットする。
-                // 旧接続の状態が redirect 先に持ち越されると、switched フラグや
-                // DataChannel 状態が不整合を起こし、切断理由に旧接続の Close フレームが
+                // セッション状態をリセットする。旧接続の状態が redirect 先に持ち越されると、
+                // switched フラグや DataChannel 状態が不整合を起こす。また、旧接続で受信した
+                // Close フレームが残っていると、redirect 先の接続が終了したときの理由に
                 // 使われてしまう。
                 switched_received = false;
                 switched_ignore_disconnect_websocket = false;
@@ -1809,6 +1808,8 @@ impl SoraConnection {
                         websocket_closed = true;
                         continue;
                     } else {
+                        // 保持していた Close フレームがあればそれを理由に使い、無ければ
+                        // Close フレームを伴わない切断として扱う。
                         let reason = match websocket_close_frame.take() {
                             Some((code, reason)) => {
                                 disconnect_reason_from_websocket_close(code, &reason)
@@ -3728,11 +3729,11 @@ async fn flush_ws_output<R: RandomSource>(
 ///
 /// 引数:
 /// - `server_close_received`: DataChannel 経由の server Close による終了かどうか。
-///   相手からの Close フレームを `handler.on_websocket_close` で通知するかの判定と、
-///   I/O エラーを警告に落とすかの判定に使う。
-/// - `absorb_close_handshake_errors`: close handshake 中の I/O エラーを警告に落として
-///   `Ok(())` を返すべきかどうか。呼び出し元が、切断理由が確定している終了経路で
-///   `true` を渡す。
+///   相手からの Close フレームを `handler.on_websocket_close` で通知するかの判定に使う。
+/// - `absorb_close_handshake_errors`: 接続の終了が確定していて、ソケットが既に
+///   死んでいる可能性がある経路かどうか。呼び出し元が、ignore 構成で DataChannel
+///   シグナリングに切り替えた後、ユーザー主導の切断、Close フレームを伴わない
+///   WebSocket の切断で `true` を渡す。
 async fn close_websocket_handshake<R: RandomSource>(
     ws: &mut WebSocketClientConnection<R>,
     stream: &mut ClientStream,
@@ -3743,8 +3744,6 @@ async fn close_websocket_handshake<R: RandomSource>(
     websocket_close_timeout: Duration,
 ) -> Result<()> {
     if ws.state() == ConnectionState::Connected {
-        // server_close_received と absorb_close_handshake_errors はどちらも、接続の終了が
-        // 確定した経路で true になる。この後始末で発生するエラーは無視してよい。
         let close_result = tokio::time::timeout(websocket_close_timeout, async {
             ws.close(CloseCode::NORMAL, "shutdown")?;
             loop {

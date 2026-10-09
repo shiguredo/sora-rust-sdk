@@ -382,35 +382,18 @@ impl Drop for ProxyHarness {
 
 /// Proxy 用 URL に設定するホスト IP を推定する。
 ///
-/// 背景:
-/// - このテストは `libwebrtc` に HTTP Proxy を設定して通信させる。
-/// - Windows 環境では、`libwebrtc` 側が non-loopback のローカル IP に bind した
-///   ソケットで `127.0.0.1` へ connect しようとすると失敗するケースがある
-///   (`WSAEADDRNOTAVAIL / 10049`)。
-///   - 実際に bind している場所: https://source.chromium.org/chromium/chromium/src/+/main:third_party/webrtc/p2p/base/basic_packet_socket_factory.cc;l=156;drc=61721239a70cffde6dd7b56241f1e3360fb3d6ee
-/// - そのため proxy URL を常に `127.0.0.1` に固定すると、環境によっては
-///   `CONNECT` が proxy まで到達せず、テストが不安定になる。
-///
-/// 目的:
-/// - `libwebrtc` が実際に使いそうな経路に合わせて、proxy URL に使うホスト IP を
-///   できるだけ妥当に選ぶ。
-///
-/// 方式:
-/// - 各 signaling URL から `host:port` を取り出す。
-/// - `UdpSocket::bind("0.0.0.0:0")` でローカル UDP ソケットを作成し、
-///   その宛先へ `connect` する。
-/// - UDP の `connect` は TCP のような接続確立ではなく、主に「その宛先へ送るなら
-///   どのローカル IP / NIC を使うか」を OS に選ばせるために使う。
-/// - 直後に `local_addr()` を読むと、OS が選んだ送信元ローカル IP が取れる。
-/// - loopback ではない IP が得られたら、それを proxy URL の host として返す。
-///
-/// 失敗時方針:
-/// - URL 解析失敗、ソケット作成失敗、`connect` 失敗、`local_addr` 取得失敗は
-///   すべて「その URL では判定できない」とみなして次候補へ進む。
-/// - 最後まで有効な候補が得られない場合のみ `127.0.0.1` にフォールバックする。
-///   これは「最悪でもローカルだけで動かす」という保険であり、上記 Windows 問題を
-///   完全回避する保証ではない。
+/// `signaling_urls` の宛先へ送信するときに OS が選ぶローカル IP を取得し、loopback
+/// 以外の IP が得られたらそれを返す。いずれかの手順が失敗した候補は判定できない
+/// ものとして次の候補へ進み、どの候補でも得られない場合は `127.0.0.1` を返す。
 async fn detect_proxy_host(signaling_urls: &[String]) -> String {
+    // `127.0.0.1` ではなく loopback 以外のローカル IP を選ぶ理由:
+    // `libwebrtc` に HTTP Proxy を設定して通信させた場合、Windows では non-loopback の
+    // ローカル IP に bind したソケットで `127.0.0.1` へ connect しようとすると失敗する
+    // ことがある (`WSAEADDRNOTAVAIL / 10049`)。
+    // proxy URL を常に `127.0.0.1` に固定すると `CONNECT` が proxy まで到達せずテストが
+    // 不安定になる環境があるため、実際に使われる経路に合わせて IP を選ぶ。
+    // libwebrtc が bind している場所:
+    // https://source.chromium.org/chromium/chromium/src/+/main:third_party/webrtc/p2p/base/basic_packet_socket_factory.cc;l=156;drc=61721239a70cffde6dd7b56241f1e3360fb3d6ee
     for url in signaling_urls {
         // `ws://` / `wss://` を `host:port` へ変換できない URL は、
         // 経路判定の入力として使えないためスキップする。
@@ -439,10 +422,7 @@ async fn detect_proxy_host(signaling_urls: &[String]) -> String {
             continue;
         };
 
-        // loopback 以外のアドレスが得られた場合、その IP を proxy URL に採用する。
-        // - v4 / v6 の両方に対応する
-        // - loopback (`127.0.0.1` / `::1`) は意図的に除外する
-        //   (Windows の `non-loopback bind -> loopback connect` 問題を避けるため)
+        // loopback (`127.0.0.1` / `::1`) は Windows の connect 問題を避けるため意図的に除外する。
         match addr.ip() {
             std::net::IpAddr::V4(ip) if !ip.is_loopback() => return ip.to_string(),
             std::net::IpAddr::V6(ip) if !ip.is_loopback() => return ip.to_string(),
@@ -450,6 +430,7 @@ async fn detect_proxy_host(signaling_urls: &[String]) -> String {
         }
     }
 
-    // 候補が 1 つも得られない場合の最終フォールバック。
+    // 最後のフォールバック。最悪でもローカルだけで動かすための保険であり、
+    // 上記の Windows の connect 問題を完全に回避する保証はない。
     "127.0.0.1".to_string()
 }
