@@ -71,32 +71,18 @@
   - 接続確立後に PeerConnection が `Disconnected` のままであることを許容する時間を指定できる
   - 既定値は 10 秒で、`Connected` または `Connecting` へ戻ると経過はリセットされる
   - @melpon
-- [UPDATE] shiguredo_webrtc を 0.152.1-canary.2 から 0.154.0 に更新する
+- [UPDATE] shiguredo_webrtc を 0.150.3 から 0.154.1 に更新する
   - libwebrtc を m152 から m154 に更新する
   - 固定 libwebrtc の AV1 / H.264 source audit を m154 の commit で再検証する
-  - @voluntas
-- [UPDATE] shiguredo_mp4 を 2026.4.0 から 2026.5.0 に更新する
-  - @sile
-- [UPDATE] shiguredo_webrtc を 0.154.0 から 0.154.1-canary.0 に更新する
+  - `RtpEncodingParametersVector::get_mut` が追加されたことに追随する
+  - `SignalingState` と `PeerConnectionObserverHandler::on_signaling_change` が追加されたことに追随する
+  - `AudioDeviceModule::from_refcounted_ptr` が追加されたことに追随する
   - libwebrtc を m154.8037.1.1 から m154.8037.1.2 に更新する
   - 借用型 `XxxRef` が読み取り専用になり、書き換え用の `XxxRefMut` が追加されたことに追随する
   - `AudioDeviceModuleHandler` が `&mut self` と `AudioTransportPtr` を受け取るようになったことに追随する
-  - @melpon
-- [UPDATE] shiguredo_webrtc を 0.154.1-canary.0 から 0.154.1-canary.1 に更新する
-  - @melpon
-- [UPDATE] shiguredo_webrtc を 0.154.1-canary.1 から 0.154.1-canary.2 に更新する
-  - `RtpEncodingParametersVector::get_mut` が追加されたことに追随する
-  - @melpon
-- [UPDATE] shiguredo_webrtc を 0.154.1-canary.2 から 0.154.1-canary.3 に更新する
-  - libwebrtc を m154.8037.1.2 から m154.8037.3.0 に更新する
-  - @voluntas
-- [UPDATE] shiguredo_webrtc を 0.154.1-canary.3 から 0.154.1-canary.4 に更新する
-  - `SignalingState` と `PeerConnectionObserverHandler::on_signaling_change` が追加されたことに追随する
-  - @melpon
-- [UPDATE] shiguredo_webrtc を 0.154.1-canary.4 から 0.154.1-canary.5 に更新する
-  - libwebrtc を m154.8037.3.0 から m154.8037.4.1 に更新する
-  - `AudioDeviceModule::from_refcounted_ptr` が追加されたことに追随する
-  - @voluntas
+  - @voluntas @melpon
+- [UPDATE] shiguredo_mp4 を 2026.4.0 から 2026.5.0 に更新する
+  - @sile
 - [FIX] MP4 パススルーで encode 前に sample が欠落した場合、後続の delta sample を送信しないようにする
   - capturer は再生順を示す `playback_serial` を付与し、encoder は値の不連続を検出した場合、次のキーフレームまで待つ
   - 再生位置は変更せず、送信再開までの時間は入力 MP4 のキーフレーム間隔に依存する
