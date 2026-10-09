@@ -184,7 +184,20 @@ WebSocket TLS は PEM、TURN-TLS は DER である点に注意。
 
 ### 接続実行
 
-`SoraConnection::run(self) -> Result<()>` は `async fn` で、接続が終了するまでブロックする。通常は `tokio::spawn` で別タスクに渡し、`SoraConnectionHandle` で外部から `disconnect()` を呼び出す。Offer の `data_channels` に含まれる DataChannel が接続中に閉じた場合も接続を終了する。接続確立後に `PeerConnectionState` が `Failed` になった場合と、`Disconnected` のまま `disconnected_grace_period` を超えた場合も接続を終了する。
+`SoraConnection::run(self) -> Result<DisconnectReason>` は `async fn` で、接続が終了するまでブロックし、終了した理由を返す。通常は `tokio::spawn` で別タスクに渡し、`SoraConnectionHandle` で外部から `disconnect()` を呼び出す。Offer の `data_channels` に含まれる DataChannel が接続中に閉じた場合も接続を終了する。接続確立後に `PeerConnectionState` が `Failed` になった場合と、`Disconnected` のまま `disconnected_grace_period` を超えた場合も接続を終了する。
+
+#### 切断理由 (`DisconnectReason`)
+
+| 理由 | 内容 |
+|------|------|
+| `DisconnectReason::ClientDisconnect` | `disconnect()` による切断 |
+| `DisconnectReason::ServerClose { code, reason }` | Sora からの `close` メッセージによる終了 |
+| `DisconnectReason::SignalingError { reason }` | シグナリングエラー (WebSocket Close code 4490) による終了 |
+| `DisconnectReason::WebSocketClosed { code, reason }` | WebSocket の切断による終了。Close フレームを受信していない場合は `code` が `None`、`reason` が空文字列になる |
+| `DisconnectReason::DataChannelClosed { label }` | DataChannel が閉じられたことによる終了。`label` は閉じた DataChannel のラベル |
+| `DisconnectReason::PeerConnectionFailed` | 接続確立後の PeerConnection の失敗による終了 |
+
+`run()` が `Err` で終了した場合と、`run()` の future を破棄または abort した場合は、切断理由を取得できない。
 
 ## 接続設定の型
 
@@ -627,6 +640,7 @@ if let Some(url) = handle.selected_signaling_url().await? {
 
 - **コンテキスト生成は重い**: `SoraConnectionContext::new()` は内部スレッドを 2 本起動するため、プロセスあたり 1 つに集約し `Arc` で共有する。
 - **`connection.run()` はブロッキング**: 別タスクで実行し、外部制御は `SoraConnectionHandle` (Clone) を介する。
+- **接続終了の理由は `run()` の戻り値**: `on_websocket_close` は WebSocket レベルの切断だけを通知するため、接続全体の終了理由としては使えない。
 - **コールバックを長時間ブロックしない**: 内部タスクから呼ばれるため、重い処理は自分の async タスクへ転送する。
 - **HTTP プロキシは `http://` のみ**: `https://` プロキシ、パス、クエリ、userinfo はサポート外。
 - **TLS 設定の単位の違い**: WebSocket TLS の証明書は PEM、TURN-TLS の CA 証明書は DER。

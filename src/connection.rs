@@ -511,6 +511,49 @@ impl SoraConnectionBuilder {
     }
 }
 
+/// [SoraConnection::run] が接続終了時に返す切断理由。
+///
+/// 接続がどのように終了したかを表す。接続終了の理由の正本はこの型であり、
+/// [SoraConnectionEventHandler::on_websocket_close] は WebSocket レベルの
+/// 切断だけを通知する。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DisconnectReason {
+    /// クライアントからの切断。
+    ///
+    /// [SoraConnectionHandle::disconnect] による切断要求で終了した場合を表す。
+    ClientDisconnect,
+    /// Sora サーバーからの `close` メッセージによる終了。
+    ServerClose {
+        /// `close` メッセージの `code`。
+        code: u16,
+        /// `close` メッセージの `reason`。
+        reason: String,
+    },
+    /// シグナリングエラーによる終了。
+    ///
+    /// Sora サーバーはシグナリングの失敗を WebSocket の Close code 4490 で通知する。
+    SignalingError {
+        /// Sora サーバーが通知した Close reason。
+        reason: String,
+    },
+    /// WebSocket の切断による終了。
+    ///
+    /// 相手から Close フレームを受信した場合はその code と reason を保持する。
+    WebSocketClosed {
+        /// 相手から受信した Close code。Close フレームを受信していない場合は `None`。
+        code: Option<u16>,
+        /// 相手から受信した Close reason。Close フレームを受信していない場合は空文字列。
+        reason: String,
+    },
+    /// DataChannel が閉じられたことによる終了。
+    DataChannelClosed {
+        /// 閉じられた DataChannel のラベル。
+        label: String,
+    },
+    /// 接続確立後の PeerConnection の失敗による終了。
+    PeerConnectionFailed,
+}
+
 /// 外部から SoraConnection を制御するためのハンドル。
 ///
 /// `SoraConnection::run()` を別タスクで実行中に、このハンドルを使って
@@ -961,10 +1004,16 @@ impl SoraConnection {
     /// シグナリング接続を確立し、WebRTC ネゴシエーションを処理し、受信メッセージを処理する。
     /// 接続が終了するまでブロックするため、別の非同期タスクで呼び出すこと。
     ///
+    /// 接続が終了すると、その理由を [DisconnectReason] として返す。
+    /// 異常終了の場合は `Err` を返し、切断理由は返さない。
+    ///
     /// 接続確立後に PeerConnection が `Failed` になった場合は即座に終了する。
     /// `Disconnected` のまま [SoraConnectionBuilder::disconnected_grace_period] を
     /// 超えた場合も終了する。
-    pub async fn run(mut self) -> Result<()> {
+    ///
+    /// この future を破棄または abort した場合は、接続が終了しても
+    /// 切断理由を取得できない。
+    pub async fn run(mut self) -> Result<DisconnectReason> {
         let signaling_urls = self.config.signaling_urls.clone();
         let channel_id = self.config.channel_id.clone();
         let role = self.config.role;
@@ -1055,7 +1104,7 @@ impl SoraConnection {
         let mut ws = WebSocketClientConnection::new(options, secure_random.clone());
         ws.connect()?;
         if flush_ws_output(&mut ws, &mut stream, &mut timers).await? {
-            return Ok(());
+            return Ok(websocket_closed_without_close_frame());
         }
 
         let mut redirect_location: Option<String> = None;
@@ -1079,7 +1128,7 @@ impl SoraConnection {
         let mut server_close_received = false;
         // ユーザー主導の切断 (SoraConnectionCommand::Disconnect) による終了かどうか。
         // ユーザーが切断を要求している以上、終了処理の WebSocket close handshake で
-        // 発生する I/O エラーは warning に落として run の Ok(()) を覆さないために使う。
+        // 発生する I/O エラーは warning に落として run を Err にしないために使う。
         let mut user_initiated_disconnect = false;
         // サーバーへ切断要求を送らずに接続を終了したかどうか。
         // DataChannel が Closed になった場合と、接続確立後にメディア経路が死んだ場合が該当する。
@@ -1087,6 +1136,12 @@ impl SoraConnection {
         let mut terminated_without_disconnect = false;
         // 接続確立後のメディア経路 (ICE / DTLS) の死活を監視する状態。
         let mut media_path = MediaPathMonitor::new();
+        // WebSocket の Close フレームで受信した code と reason。
+        // run ループは Close フレームの受信時ではなく、ソケットが閉じたことを検知した時に
+        // 抜けるため、その時に切断理由として使えるよう閉じるまで保持する。
+        let mut websocket_close_frame: Option<(Option<u16>, String)> = None;
+        // 接続終了の理由。run の終了時に 1 回だけ返す。
+        let mut disconnect_reason: Option<DisconnectReason> = None;
 
         'run_loop: loop {
             // 期限切れの値を sleep_until で持つと即 Ready になりビジーループしてしまうため、
@@ -1134,6 +1189,10 @@ impl SoraConnection {
                             continue;
                         } else {
                             rtc_log_info!("Connection closed");
+                            set_disconnect_reason(
+                                &mut disconnect_reason,
+                                websocket_closed_without_close_frame(),
+                            );
                             break;
                         }
                     } else {
@@ -1179,6 +1238,10 @@ impl SoraConnection {
                                         reason
                                     );
                                     server_close_received = true;
+                                    set_disconnect_reason(
+                                        &mut disconnect_reason,
+                                        DisconnectReason::ServerClose { code, reason },
+                                    );
                                     // server Close は接続全体の終了通知であり、
                                     // 同一 iteration で終了処理へ移行する。
                                     // それ以降の redirect、WebSocket flush、command、
@@ -1228,6 +1291,10 @@ impl SoraConnection {
                                 &event_tx,
                                 disconnected_grace_period,
                             ) {
+                                set_disconnect_reason(
+                                    &mut disconnect_reason,
+                                    DisconnectReason::PeerConnectionFailed,
+                                );
                                 terminated_without_disconnect = true;
                                 break 'run_loop;
                             }
@@ -1238,6 +1305,10 @@ impl SoraConnection {
                             if media_path.should_terminate_on_timeout(generation) {
                                 rtc_log_info!(
                                     "PeerConnection did not recover from disconnected; terminating connection"
+                                );
+                                set_disconnect_reason(
+                                    &mut disconnect_reason,
+                                    DisconnectReason::PeerConnectionFailed,
                                 );
                                 terminated_without_disconnect = true;
                                 break 'run_loop;
@@ -1266,6 +1337,10 @@ impl SoraConnection {
                                 ),
                                 DataChannelStateResult::Terminate
                             ) {
+                                set_disconnect_reason(
+                                    &mut disconnect_reason,
+                                    DisconnectReason::DataChannelClosed { label },
+                                );
                                 terminated_without_disconnect = true;
                                 break 'run_loop;
                             }
@@ -1286,6 +1361,10 @@ impl SoraConnection {
                                 ),
                                 DataChannelStateResult::Terminate
                             ) {
+                                set_disconnect_reason(
+                                    &mut disconnect_reason,
+                                    DisconnectReason::DataChannelClosed { label },
+                                );
                                 terminated_without_disconnect = true;
                                 break 'run_loop;
                             }
@@ -1341,6 +1420,10 @@ impl SoraConnection {
                                 opened_data_channels.clear();
                             }
                             let _ = ack_tx.send(());
+                            set_disconnect_reason(
+                                &mut disconnect_reason,
+                                DisconnectReason::ClientDisconnect,
+                            );
                             break;
                         }
                         SoraConnectionCommand::GetStats(stats_response_tx) => {
@@ -1541,8 +1624,13 @@ impl SoraConnection {
                                     redirect_location = Some(location);
                                     break;
                                 }
-                                IncomingMessageData::Close { .. } => {
+                                IncomingMessageData::Close { code, reason } => {
                                     rtc_log_info!("Disconnected from Sora server");
+                                    // close メッセージでは run ループを終了せず、理由だけを確定させる。
+                                    set_disconnect_reason(
+                                        &mut disconnect_reason,
+                                        DisconnectReason::ServerClose { code, reason },
+                                    );
                                     break;
                                 }
                             }
@@ -1561,7 +1649,9 @@ impl SoraConnection {
                         }
                         ConnectionEvent::Close { code, reason } => {
                             rtc_log_info!("[WebSocket] Received Close: {:?} {}", code, reason);
-                            handler.on_websocket_close(code.map(|c| c.0), &reason);
+                            let code = code.map(|c| c.0);
+                            handler.on_websocket_close(code, &reason);
+                            websocket_close_frame = Some((code, reason));
                             break;
                         }
                         ConnectionEvent::StateChanged(state) => {
@@ -1577,11 +1667,13 @@ impl SoraConnection {
             // redirect メッセージを受信した場合、新しい WebSocket に再接続する
             if let Some(location) = redirect_location.take() {
                 // セッション状態をリセットする。
-                // 旧接続の状態が redirect 先に持ち越されると、
-                // switched フラグや DataChannel 状態が不整合を起こす。
+                // 旧接続の状態が redirect 先に持ち越されると、switched フラグや
+                // DataChannel 状態が不整合を起こし、切断理由に旧接続の Close フレームが
+                // 使われてしまう。
                 switched_received = false;
                 switched_ignore_disconnect_websocket = false;
                 use_data_channel_signaling = false;
+                websocket_close_frame = None;
 
                 // 古い DataChannel の close 通知をユーザーに送る。
                 // クリア前に通知することでハンドラが確実に呼ばれる。
@@ -1615,6 +1707,10 @@ impl SoraConnection {
                         &event_tx,
                         disconnected_grace_period,
                     ) {
+                        set_disconnect_reason(
+                            &mut disconnect_reason,
+                            DisconnectReason::PeerConnectionFailed,
+                        );
                         terminated_without_disconnect = true;
                         break 'run_loop;
                     }
@@ -1660,6 +1756,10 @@ impl SoraConnection {
                 websocket_closed = false;
                 redirect = true;
                 if flush_ws_output(&mut ws, &mut stream, &mut timers).await? {
+                    set_disconnect_reason(
+                        &mut disconnect_reason,
+                        websocket_closed_without_close_frame(),
+                    );
                     break;
                 }
                 continue;
@@ -1709,6 +1809,13 @@ impl SoraConnection {
                         websocket_closed = true;
                         continue;
                     } else {
+                        let reason = match websocket_close_frame.take() {
+                            Some((code, reason)) => {
+                                disconnect_reason_from_websocket_close(code, &reason)
+                            }
+                            None => websocket_closed_without_close_frame(),
+                        };
+                        set_disconnect_reason(&mut disconnect_reason, reason);
                         break;
                     }
                 }
@@ -1756,11 +1863,14 @@ impl SoraConnection {
         // 死んだソケットへの I/O が失敗し、ユーザー主導の正常切断にもかかわらず
         // run() が Err を返してしまうため、close handshake をスキップする。
         if !websocket_closed {
-            // close handshake 中の I/O エラーを吸収すべき終了経路を合成して渡す。
-            // ignore 構成とユーザー主導の切断は「接続を終了する意思が確定している」
-            // 点で共通するため、まとめて 1 つの吸収条件にする。server_close_received
-            // も吸収条件に含まれるが、close handshake 中に受信した WebSocket Close
-            // フレームで on_websocket_close を通知する判定にも使うため別引数のままにする。
+            // close handshake 中の I/O エラーを吸収する条件を渡す。
+            // - ignore 構成とユーザー主導の切断: 切断とサーバー側の RST が同時に起きると
+            //   websocket_closed が立つ前に close handshake へ入り、死んだソケットへの
+            //   書き込みが失敗しうる
+            // - Close フレームを伴わない WebSocket の切断: ソケットが既に死んでいる
+            // server_close_received も吸収条件に含まれるが、close handshake 中に受信した
+            // WebSocket Close フレームで on_websocket_close を通知する判定にも使うため、
+            // 別引数のままにする。
             close_websocket_handshake(
                 &mut ws,
                 &mut stream,
@@ -1768,14 +1878,20 @@ impl SoraConnection {
                 &mut *handler,
                 server_close_received,
                 (switched_ignore_disconnect_websocket && use_data_channel_signaling)
-                    || user_initiated_disconnect,
+                    || user_initiated_disconnect
+                    || matches!(
+                        disconnect_reason.as_ref(),
+                        Some(DisconnectReason::WebSocketClosed { code: None, .. })
+                    ),
                 websocket_close_timeout,
             )
             .await?;
         }
 
         rtc_log_info!("Shutting down");
-        Ok(())
+        // ループを抜けるすべての経路で理由を確定させているため、ここで None にはならない。
+        Ok(disconnect_reason
+            .expect("BUG: disconnect reason must be set before leaving the run loop"))
     }
 
     fn add_sender_tracks(&mut self) -> Result<()> {
@@ -2533,6 +2649,38 @@ fn resolve_ws_disconnect_delay_start(
         None
     } else {
         ws_disconnect_delay_start.or(Some(now))
+    }
+}
+
+/// Sora がシグナリングの失敗を通知する WebSocket Close code。
+const SIGNALING_ERROR_CLOSE_CODE: u16 = 4490;
+
+/// 接続終了の理由を、まだ確定していない場合だけ設定する。
+fn set_disconnect_reason(reason: &mut Option<DisconnectReason>, value: DisconnectReason) {
+    // WebSocket レベルの切断は他の終了要因の結果としても発生するため、
+    // すでに確定している理由を後から上書きしない。
+    reason.get_or_insert(value);
+}
+
+/// Close フレームを伴わない WebSocket の切断を表す理由を返す。
+fn websocket_closed_without_close_frame() -> DisconnectReason {
+    DisconnectReason::WebSocketClosed {
+        code: None,
+        reason: String::new(),
+    }
+}
+
+/// WebSocket の Close フレームで受信した code と reason から切断理由を求める。
+fn disconnect_reason_from_websocket_close(code: Option<u16>, reason: &str) -> DisconnectReason {
+    if code == Some(SIGNALING_ERROR_CLOSE_CODE) {
+        DisconnectReason::SignalingError {
+            reason: reason.to_string(),
+        }
+    } else {
+        DisconnectReason::WebSocketClosed {
+            code,
+            reason: reason.to_string(),
+        }
     }
 }
 
@@ -3583,9 +3731,8 @@ async fn flush_ws_output<R: RandomSource>(
 ///   相手からの Close フレームを `handler.on_websocket_close` で通知するかの判定と、
 ///   I/O エラーを警告に落とすかの判定に使う。
 /// - `absorb_close_handshake_errors`: close handshake 中の I/O エラーを警告に落として
-///   `Ok(())` を返すべきかどうか。呼び出し元が
-///   `(switched_ignore_disconnect_websocket && use_data_channel_signaling) ||
-///   user_initiated_disconnect` の結果を渡す。
+///   `Ok(())` を返すべきかどうか。呼び出し元が、切断理由が確定している終了経路で
+///   `true` を渡す。
 async fn close_websocket_handshake<R: RandomSource>(
     ws: &mut WebSocketClientConnection<R>,
     stream: &mut ClientStream,
@@ -3596,13 +3743,8 @@ async fn close_websocket_handshake<R: RandomSource>(
     websocket_close_timeout: Duration,
 ) -> Result<()> {
     if ws.state() == ConnectionState::Connected {
-        // server Close は server_close_received で終了経路が確定しているため、
-        // この後始末で発生するエラーは無視してよい。
-        // ignore 構成とユーザー主導の切断は、切断とサーバー側の RST が同時に
-        // 起きた場合に websocket_closed が立つ前に close handshake へ入り、
-        // 死んだソケットへの書き込みが失敗することがある。
-        // いずれも接続を終了する意思が確定しているため、close handshake の失敗は
-        // warning に落として run の Ok(()) を覆さない。
+        // server_close_received と absorb_close_handshake_errors はどちらも、接続の終了が
+        // 確定した経路で true になる。この後始末で発生するエラーは無視してよい。
         let close_result = tokio::time::timeout(websocket_close_timeout, async {
             ws.close(CloseCode::NORMAL, "shutdown")?;
             loop {
@@ -4320,6 +4462,79 @@ mod tests {
                 "label={label} の Close は接続を終了させない"
             );
         }
+    }
+
+    #[test]
+    fn websocket_close_with_signaling_error_code_is_signaling_error() {
+        assert_eq!(
+            disconnect_reason_from_websocket_close(Some(4490), "INTERNAL-ERROR"),
+            DisconnectReason::SignalingError {
+                reason: "INTERNAL-ERROR".to_string(),
+            },
+            "Close code 4490 はシグナリングエラーとして扱う"
+        );
+    }
+
+    #[test]
+    fn websocket_close_with_other_code_is_websocket_closed() {
+        for code in [1000, 1001, 4000] {
+            assert_eq!(
+                disconnect_reason_from_websocket_close(Some(code), "bye"),
+                DisconnectReason::WebSocketClosed {
+                    code: Some(code),
+                    reason: "bye".to_string(),
+                },
+                "code={code} は WebSocket レベルの切断として扱う"
+            );
+        }
+    }
+
+    #[test]
+    fn websocket_close_without_code_is_websocket_closed_without_code() {
+        assert_eq!(
+            disconnect_reason_from_websocket_close(None, ""),
+            websocket_closed_without_close_frame(),
+            "Close code が無い場合は Close フレームを伴わない切断として扱う"
+        );
+    }
+
+    #[test]
+    fn websocket_closed_without_close_frame_has_no_code_and_empty_reason() {
+        assert_eq!(
+            websocket_closed_without_close_frame(),
+            DisconnectReason::WebSocketClosed {
+                code: None,
+                reason: String::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn set_disconnect_reason_sets_reason_when_unset() {
+        let mut reason = None;
+        set_disconnect_reason(&mut reason, DisconnectReason::ClientDisconnect);
+        assert_eq!(reason, Some(DisconnectReason::ClientDisconnect));
+    }
+
+    #[test]
+    fn set_disconnect_reason_keeps_first_reason() {
+        let mut reason = None;
+        set_disconnect_reason(
+            &mut reason,
+            DisconnectReason::ServerClose {
+                code: 1000,
+                reason: "DISCONNECTED-API".to_string(),
+            },
+        );
+        set_disconnect_reason(&mut reason, websocket_closed_without_close_frame());
+        assert_eq!(
+            reason,
+            Some(DisconnectReason::ServerClose {
+                code: 1000,
+                reason: "DISCONNECTED-API".to_string(),
+            }),
+            "先に確定した理由を後から来た WebSocket の切断で上書きしない"
+        );
     }
 
     fn data_channel_config(labels: &[&str]) -> Vec<DataChannelConfig> {

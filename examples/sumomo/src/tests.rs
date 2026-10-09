@@ -1164,7 +1164,9 @@ async fn shutdown_connection_times_out() {
     // run() が command_rx を poll しないため disconnect の ack が返らず timeout する。
     let run_handle = tokio::spawn(async {
         std::future::pending::<()>().await;
-        Ok::<(), sora_sdk::Error>(())
+        Ok::<sora_sdk::DisconnectReason, sora_sdk::Error>(
+            sora_sdk::DisconnectReason::ClientDisconnect,
+        )
     });
     let _keep_connection = connection;
 

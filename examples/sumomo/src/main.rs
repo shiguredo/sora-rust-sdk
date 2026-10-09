@@ -597,7 +597,7 @@ fn build_and_run_connection(
     event_tx: mpsc::UnboundedSender<AppEvent>,
 ) -> Result<(
     SoraConnectionHandle,
-    tokio::task::JoinHandle<sora_sdk::Result<()>>,
+    tokio::task::JoinHandle<sora_sdk::Result<sora_sdk::DisconnectReason>>,
 )> {
     // 送信ロールかつ音声が有効で、--audio-input-device が指定された場合は SumomoAdm を使用する。
     #[cfg(feature = "media-device")]
@@ -665,27 +665,34 @@ fn build_and_run_connection(
 
 /// connection を終了する。
 ///
-/// `run()` が先に完了している場合は disconnect を送らず、その結果を返す。
+/// `run()` が先に完了している場合は disconnect を送らず、切断理由をログに出力して終了する。
 /// それ以外は disconnect command を送って `run()` の完了を、`deadline` の
 /// 内側で待つ。`run()` は別タスクで動いているため、disconnect を先に await しても
 /// command が処理されて deadlock しない。
 async fn shutdown_connection(
     handle: SoraConnectionHandle,
-    run_handle: tokio::task::JoinHandle<sora_sdk::Result<()>>,
+    run_handle: tokio::task::JoinHandle<sora_sdk::Result<sora_sdk::DisconnectReason>>,
     deadline: tokio::time::Instant,
 ) -> Result<()> {
     if run_handle.is_finished() {
         let result = run_handle.await.map_err(|_| AppError::WorkerPanic)?;
-        return result.map_err(AppError::Sora);
+        log_disconnect_reason(result.map_err(AppError::Sora)?);
+        return Ok(());
     }
 
     tokio::time::timeout_at(deadline, async {
         handle.disconnect().await?;
         let result = run_handle.await.map_err(|_| AppError::WorkerPanic)?;
-        result.map_err(AppError::Sora)
+        log_disconnect_reason(result.map_err(AppError::Sora)?);
+        Ok(())
     })
     .await
     .map_err(|_| AppError::ConnectionShutdownTimeout)?
+}
+
+/// 接続終了の理由をログに出力する。
+fn log_disconnect_reason(reason: sora_sdk::DisconnectReason) {
+    rtc_log_info!("Connection closed: reason={:?}", reason);
 }
 
 /// duration が指定されている場合はタイマーを設定する。
