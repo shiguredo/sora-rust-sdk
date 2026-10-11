@@ -11,7 +11,7 @@
 
 ## develop
 
-- [UPDATE] shiguredo_webrtc を 0.155.0 から 0.156.0 にアップデートする
+- [UPDATE] shiguredo_webrtc を 0.155.0 から 0.156.1-canary.0 にアップデートする
   - @melpon
 
 ## 2026.3.0
