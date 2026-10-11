@@ -1293,7 +1293,7 @@ dependencies = [
 
 [[package]]
 name = "sora_sdk"
-version = "2026.4.0-canary.0"
+version = "2026.4.0-canary.1"
 dependencies = [
  "aws-lc-rs",
  "libc",
