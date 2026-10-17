@@ -1,7 +1,7 @@
 # libwebrtc の worker_thread 削除に追随する
 
 - Created: 2026-09-15
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-17
 - Branch: feature/remove-worker-thread
 - Polished: {YYYY-MM-DD}
 
@@ -13,10 +13,10 @@ libwebrtc の issue 558821261「Deprecate and remove PeerConnectionFactoryDepend
 
 ## 現状
 
-- 0160-refactor-unify-worker-thread で専用の worker thread は廃止済みだが、`src/connection_context.rs` の `SoraConnectionContext::new_with_config` に `deps.set_worker_thread(&network)` が残る
-- 依存は crates.io の `shiguredo_webrtc = "~0.154"` であり、git 依存ではない
-- 前提条件は webrtc-rs が 558821261 を実装した libwebrtc に追随した `shiguredo_webrtc` をリリースしていることである。現時点では存在しないため、本 issue には着手できない
-- 0160-refactor-unify-worker-thread の完了後に `git grep worker_thread` で残るのは 1 件のみである
+- 0160-refactor-unify-worker-thread で専用の worker thread は廃止済みだが、`src/connection_context.rs` の `SoraConnectionContext::new_with_config` に `deps.set_worker_thread(&network)` が残っていた
+- 依存は crates.io の `shiguredo_webrtc` であり、git 依存ではない
+- 前提条件は webrtc-rs が 558821261 を実装した libwebrtc に追随した `shiguredo_webrtc` をリリースしていることであった
+- 0160-refactor-unify-worker-thread の完了後、`git grep worker_thread` で残るのは 1 件のみであった
 
 ## 設計方針
 
@@ -39,3 +39,17 @@ libwebrtc の issue 558821261「Deprecate and remove PeerConnectionFactoryDepend
 - `Cargo.toml` / `Cargo.lock`
 - `src/connection_context.rs` の `SoraConnectionContext::new_with_config`
 - `CHANGES.md`
+
+## 解決方法
+
+`shiguredo_webrtc` を 558821261 の削除系 CL に追随したバージョンに更新し、worker thread の設定を削除した。
+
+- `Cargo.toml` / `Cargo.lock` の `shiguredo_webrtc` を `0.156.1-canary.1` に更新した。このバージョンには削除系 CL が含まれており、`shiguredo_webrtc` 側に `set_worker_thread` は存在しない
+- `src/connection_context.rs` の `SoraConnectionContext::new_with_config` から `deps.set_worker_thread(&network)` を削除した。`PeerConnectionFactoryDependenciesParams` には `network_thread` / `signaling_thread` / `adm` を渡しており、依存の組み立てはこれで完結する
+- worker thread を設定しない場合は network thread が使われるため、挙動は変わらない
+- `CHANGES.md` の `## develop` に `shiguredo_webrtc` のアップデートとして追記した
+
+確認:
+
+- `git grep worker_thread` が issues 以外で 0 件であることを確認した
+- `cargo fmt --all --check` / `cargo clippy --workspace -- -D warnings` / `cargo test --workspace` が通ることを確認した
