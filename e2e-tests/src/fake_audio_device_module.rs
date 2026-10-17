@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use shiguredo_webrtc::{AudioDeviceModule, AudioDeviceModuleHandler, AudioTransportPtr};
+use shiguredo_webrtc::{AudioDeviceModule, AudioDeviceModuleHandler, AudioTransportPtr, Thread};
 
 /// FakeAudioDeviceModule の設定。
 #[derive(Clone)]
@@ -63,7 +63,7 @@ impl AudioDeviceModuleHandler for FakeAudioDeviceModuleHandler {
         0
     }
 
-    fn initialized(&mut self) -> bool {
+    fn initialized(&self) -> bool {
         true
     }
 
@@ -91,7 +91,7 @@ impl AudioDeviceModuleHandler for FakeAudioDeviceModuleHandler {
         0
     }
 
-    fn recording_is_initialized(&mut self) -> bool {
+    fn recording_is_initialized(&self) -> bool {
         true
     }
 
@@ -105,7 +105,7 @@ impl AudioDeviceModuleHandler for FakeAudioDeviceModuleHandler {
         0
     }
 
-    fn recording(&mut self) -> bool {
+    fn recording(&self) -> bool {
         self.recording.load(Ordering::SeqCst)
     }
 }
@@ -116,35 +116,53 @@ impl AudioDeviceModuleHandler for FakeAudioDeviceModuleHandler {
 /// バックグラウンドスレッドが指定周波数の正弦波を生成し、
 /// WebRTC の音声入力 (AudioTransport) へ流し込む。
 pub struct FakeAudioDeviceModule {
-    adm: AudioDeviceModule,
+    adm: Option<AudioDeviceModule>,
     state: Arc<FakeAudioDeviceModuleState>,
     joiner: Option<JoinHandle<()>>,
 }
 
 impl FakeAudioDeviceModule {
     /// 設定を指定してダミーの AudioDeviceModule を生成する。
-    pub fn new(config: FakeAudioDeviceModuleConfig) -> Self {
+    ///
+    /// `network_thread` は生成する ADM のメソッドを実行するスレッドである。start 済みで、
+    /// [FakeAudioDeviceModule::take_audio_device_module] が返す ADM より長く生存する必要がある。
+    pub fn new(network_thread: &Thread, config: FakeAudioDeviceModuleConfig) -> Self {
         let state = Arc::new(FakeAudioDeviceModuleState {
             recording: Arc::new(AtomicBool::new(false)),
             audio_transport: Arc::new(Mutex::new(None)),
             config,
             stop: Arc::new(AtomicBool::new(false)),
         });
-        let adm = AudioDeviceModule::new_with_handler(Box::new(FakeAudioDeviceModuleHandler {
-            recording: Arc::clone(&state.recording),
-            audio_transport: Arc::clone(&state.audio_transport),
-        }));
+        // Safety: network_thread は呼び出し側が ADM より長く生存させる。
+        let adm = unsafe {
+            AudioDeviceModule::new_with_handler(
+                network_thread,
+                Box::new(FakeAudioDeviceModuleHandler {
+                    recording: Arc::clone(&state.recording),
+                    audio_transport: Arc::clone(&state.audio_transport),
+                }),
+            )
+        };
         let joiner = Self::spawn_feeding_thread(Arc::clone(&state));
         Self {
-            adm,
+            adm: Some(adm),
             state,
             joiner: Some(joiner),
         }
     }
 
-    /// 音声入力として利用する [AudioDeviceModule] を返す。
-    pub fn audio_device_module(&self) -> AudioDeviceModule {
-        self.adm.clone()
+    /// 音声入力として利用する [AudioDeviceModule] を取り出す。
+    ///
+    /// 取り出した ADM はこの値より先に破棄すること。この値の drop は音声を流すスレッドを
+    /// 停止するため、先に停止すると ADM の破棄がそのスレッド上で実行できない。
+    ///
+    /// # Panics
+    ///
+    /// 既に取り出した後に呼び出した場合。
+    pub fn take_audio_device_module(&mut self) -> AudioDeviceModule {
+        self.adm
+            .take()
+            .expect("take_audio_device_module: audio device module is already taken")
     }
 
     fn spawn_feeding_thread(state: Arc<FakeAudioDeviceModuleState>) -> JoinHandle<()> {

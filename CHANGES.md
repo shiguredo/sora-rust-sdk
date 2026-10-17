@@ -11,7 +11,13 @@
 
 ## develop
 
-- [UPDATE] shiguredo_webrtc を 0.155.0 から 0.156.1-canary.0 にアップデートする
+- [ADD] `SoraConnectionContextConfig` に `network_thread` と `signaling_thread` を追加する
+  - `SoraConnectionContext` が使う network thread と signaling thread を利用者が指定できるようになる
+  - どちらも `None` の場合は `SoraConnectionContext` が生成して start する
+  - `Some` を指定する場合は start 済みのスレッドを渡す。 `SoraConnectionContext` は start を呼ばない
+  - `AdmConfig::UseExternal` の ADM は、その構築時に渡したスレッドを `network_thread` に渡す。一致しない場合は panic する
+  - @melpon
+- [UPDATE] shiguredo_webrtc を 0.155.0 から 0.156.1-canary.1 にアップデートする
   - @melpon
 
 ## 2026.3.0

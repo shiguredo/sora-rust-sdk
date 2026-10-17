@@ -52,7 +52,7 @@ WebRTC SFU Sora のクライアントを Rust で実装するための SDK。シ
 | 型 | 説明 | 主要メソッド |
 |----|------|-------------|
 | `SoraConnectionContext` | `PeerConnectionFactory` と内部スレッド (network / signaling) をまとめて保持。プロセス全体で 1 つ作って `Arc` で共有する | `new() -> Result<Arc<Self>>`, `new_with_config(SoraConnectionContextConfig) -> Result<Arc<Self>>`, `create_audio_source() -> Result<AudioTrackSource>`, `create_audio_track(&AudioTrackSource) -> Result<AudioTrack>`, `create_video_track(&VideoTrackSource) -> Result<VideoTrack>` |
-| `SoraConnectionContextConfig` | コンテキストの設定 (フィールド: `adm_config`, `environment`, `video_codec_preference`, `video_codec_capabilities`, `audio_codec_preference`, `audio_codec_capabilities`) | `Default::default()` (Internal / InternalApple / InternalAudio capabilities を自動登録) |
+| `SoraConnectionContextConfig` | コンテキストの設定 (フィールド: `adm_config`, `network_thread`, `signaling_thread`, `environment`, `video_codec_preference`, `video_codec_capabilities`, `audio_codec_preference`, `audio_codec_capabilities`) | `Default::default()` (Internal / InternalApple / InternalAudio capabilities を自動登録) |
 | `AdmConfig` | AudioDeviceModule の選択 | `NoAudioDevice` (既定、Dummy ADM), `UseBuiltIn` (OS 標準), `UseExternal(shiguredo_webrtc::AudioDeviceModule)` |
 
 `AudioTrackSource` はコンテキストから生成する。`VideoTrackSource` は `shiguredo_webrtc` 側 (`FakeVideoCapturer` / `AdaptedVideoTrackSource`) または本クレートの `Mp4VideoCapturer` / `LibcameraVideoCapturer` から生成する。
@@ -666,3 +666,19 @@ if let Some(url) = handle.selected_signaling_url().await? {
   B フレームなどの非ゼロ composition time offset を含む映像は受理しない。
 - **ロギングは `shiguredo_webrtc` の `rtc_log_*` マクロ**: SDK 内のログは libwebrtc 側 (`rtc_log_verbose!` / `rtc_log_info!` / `rtc_log_warning!` / `rtc_log_error!`) に流れる。`log` / `tracing` クレートには依存していない。
 - **デフォルトの ADM は Dummy**: マイク入力が必要な場合は `AdmConfig::UseBuiltIn` か `UseExternal` を明示する。
+- **`SoraConnectionContext` のスレッドは差し替え可能**: 既定では `SoraConnectionContext` が network thread と signaling thread を生成して start する。`SoraConnectionContextConfig::network_thread` / `signaling_thread` に `Some(Thread)` を指定すると、利用者が作ったスレッドを `SoraConnectionContext` が使う。この場合 `SoraConnectionContext` は start を呼ばないため、**渡す前に start 済みにしておくこと**。start 済みのスレッドに再度 start を呼ぶと libwebrtc の `RTC_DCHECK(!IsRunning())` に違反するため、`SoraConnectionContext` 側では呼べない。
+- **外部 ADM は network thread を揃える**: `shiguredo_webrtc::AudioDeviceModule` は生成時に、メソッドを実行するスレッドを指定する。`AdmConfig::UseExternal` を利用する場合は、その ADM の構築時に渡したスレッドを `SoraConnectionContextConfig::network_thread` に渡さなければならない。順序は次のとおり。
+
+  ```rust
+  let mut network_thread = shiguredo_webrtc::Thread::new_with_socket_server();
+  network_thread.start();
+  // ADM にも同じスレッドを渡す
+  let adm = unsafe { shiguredo_webrtc::AudioDeviceModule::new_with_handler(&network_thread, handler) };
+  let config = sora_sdk::SoraConnectionContextConfig {
+      adm_config: sora_sdk::AdmConfig::UseExternal(adm),
+      network_thread: Some(network_thread),
+      ..Default::default()
+  };
+  ```
+
+  スレッドが一致しない場合は `SoraConnectionContext::new_with_config` が panic する。`network_thread` を `None` にすると `SoraConnectionContext` が内部で生成するため、外部 ADM とは一致しない。

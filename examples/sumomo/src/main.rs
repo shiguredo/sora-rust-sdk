@@ -600,10 +600,19 @@ fn build_and_run_connection(
     tokio::task::JoinHandle<sora_sdk::Result<sora_sdk::DisconnectReason>>,
 )> {
     // 送信ロールかつ音声が有効で、--audio-input-device が指定された場合は SumomoAdm を使用する。
+    // 外部 ADM は SoraConnectionContext の network thread 上でメソッドを実行する必要があるため、
+    // 先に network thread を作って ADM と SoraConnectionContext の両方へ渡す。
     #[cfg(feature = "media-device")]
-    let external_adm =
+    let mut network_thread = shiguredo_webrtc::Thread::new_with_socket_server();
+    #[cfg(feature = "media-device")]
+    if !network_thread.start() {
+        return Err(sora_sdk::Error::Webrtc("network thread の起動に失敗しました".into()).into());
+    }
+
+    #[cfg(feature = "media-device")]
+    let mut external_adm =
         if args.role.wants_send() && args.audio_enabled() && args.audio_input_device.is_some() {
-            Some(SumomoAdm::new())
+            Some(SumomoAdm::new(&network_thread))
         } else {
             None
         };
@@ -612,8 +621,8 @@ fn build_and_run_connection(
     let mp4_state = prepare_mp4_state(args)?;
 
     #[cfg(feature = "media-device")]
-    let adm_config = if let Some(external_adm) = &external_adm {
-        sora_sdk::AdmConfig::UseExternal(external_adm.audio_device_module())
+    let adm_config = if let Some(external_adm) = external_adm.as_mut() {
+        sora_sdk::AdmConfig::UseExternal(external_adm.take_audio_device_module())
     } else {
         sora_sdk::AdmConfig::NoAudioDevice
     };
@@ -628,6 +637,11 @@ fn build_and_run_connection(
         args.openh264_path.as_deref(),
         args.video_codec_implementation.clone(),
     )?;
+    #[cfg(feature = "media-device")]
+    let context_config = SoraConnectionContextConfig {
+        network_thread: Some(network_thread),
+        ..context_config
+    };
     let context = SoraConnectionContext::new_with_config(context_config)?;
 
     // 送信ロールかつ音声が有効で、--audio-input-device が指定された場合は AudioDeviceCapturer を使用する。

@@ -4,15 +4,16 @@ use std::sync::{Arc, Mutex};
 use shiguredo_webrtc::{
     AudioDecoderFactory, AudioDeviceModule, AudioDeviceModuleAudioLayer, AudioEncoderFactory,
     AudioOptions, AudioProcessingBuilder, AudioTrack, AudioTrackSource, ConnectionContext,
-    Environment, PeerConnectionFactory, PeerConnectionFactoryDependencies, RtcEventLogFactory,
-    Thread, VideoDecoderFactory, VideoEncoderFactory, VideoTrack, VideoTrackSource, random_string,
+    Environment, PeerConnectionFactory, PeerConnectionFactoryDependencies,
+    PeerConnectionFactoryDependenciesParams, RtcEventLogFactory, Thread, VideoDecoderFactory,
+    VideoEncoderFactory, VideoTrack, VideoTrackSource, random_string,
 };
 
 use crate::audio_codec::{SoraAudioDecoderFactory, SoraAudioEncoderFactory};
 use crate::audio_codec_capability::AudioCodecCapability;
 use crate::audio_codec_preference::{AudioCodecPreference, validate_audio_codec_preference};
 use crate::audio_codecs::internal::InternalAudioCodecCapability;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::video_codec::{SoraVideoDecoderFactory, SoraVideoEncoderFactory};
 use crate::video_codec_capability::VideoCodecCapability;
 use crate::video_codec_preference::{VideoCodecPreference, validate_video_codec_preference};
@@ -29,6 +30,10 @@ pub enum AdmConfig {
     /// PlatformDefault の AudioDeviceModule を使用する。
     UseBuiltIn,
     /// 外部の AudioDeviceModule を使用する。
+    ///
+    /// この値を利用する場合、この ADM の構築時に渡したスレッドを
+    /// [SoraConnectionContextConfig::network_thread] に渡さなければならない。一致しない場合は
+    /// [SoraConnectionContext::new_with_config] が panic する。
     UseExternal(shiguredo_webrtc::AudioDeviceModule),
 }
 
@@ -36,6 +41,16 @@ pub enum AdmConfig {
 pub struct SoraConnectionContextConfig {
     /// AudioDeviceModule の設定。デフォルトは [AdmConfig::NoAudioDevice]。
     pub adm_config: AdmConfig,
+    /// [SoraConnectionContext] が使う network thread。デフォルトは `None`。
+    ///
+    /// `None` の場合は [SoraConnectionContext] が生成して start する。`Some` を指定する場合は、
+    /// そのスレッドが start 済みであること。[SoraConnectionContext] は start を呼ばない。
+    pub network_thread: Option<Thread>,
+    /// [SoraConnectionContext] が使う signaling thread。デフォルトは `None`。
+    ///
+    /// `None` の場合は [SoraConnectionContext] が生成して start する。`Some` を指定する場合は、
+    /// そのスレッドが start 済みであること。[SoraConnectionContext] は start を呼ばない。
+    pub signaling_thread: Option<Thread>,
     /// コンテキストが使う libwebrtc の [Environment]。デフォルトは `None`。
     pub environment: Option<Environment>,
     /// コーデックごとに使用する実装を指定する優先設定。
@@ -97,6 +112,8 @@ impl Default for SoraConnectionContextConfig {
 
         Self {
             adm_config: AdmConfig::default(),
+            network_thread: None,
+            signaling_thread: None,
             environment: None,
             video_codec_preference,
             video_codec_capabilities,
@@ -151,6 +168,8 @@ impl SoraConnectionContext {
     pub fn new_with_config(config: SoraConnectionContextConfig) -> Result<Arc<Self>> {
         let SoraConnectionContextConfig {
             adm_config,
+            network_thread,
+            signaling_thread,
             environment,
             video_codec_preference,
             video_codec_capabilities,
@@ -193,36 +212,73 @@ impl SoraConnectionContext {
         // フィールドトライアルなどの Environment の設定は利用側から受け取る。
         // 指定が無い場合だけ既定の Environment を生成する。
         let environment = environment.unwrap_or_else(Environment::new);
-        let mut network = Thread::new_with_socket_server();
-        let mut signaling = Thread::new();
-        network.start();
-        signaling.start();
+        // 依存と ADM はどちらも network thread を要求するため、この 2 つのスレッドを先に
+        // 確定させる。
+        //
+        // 利用者から渡されたスレッドは start 済みであることが前提であり、ここで start を
+        // 呼ぶと libwebrtc の RTC_DCHECK(!IsRunning()) に違反するため呼ばない。
+        let network = match network_thread {
+            Some(thread) => thread,
+            None => {
+                let mut thread = Thread::new_with_socket_server();
+                if !thread.start() {
+                    return Err(Error::Webrtc("network thread の起動に失敗しました".into()));
+                }
+                thread
+            }
+        };
+        let signaling = match signaling_thread {
+            Some(thread) => thread,
+            None => {
+                let mut thread = Thread::new();
+                if !thread.start() {
+                    return Err(Error::Webrtc(
+                        "signaling thread の起動に失敗しました".into(),
+                    ));
+                }
+                thread
+            }
+        };
 
-        let mut deps = PeerConnectionFactoryDependencies::new();
-        deps.set_network_thread(&network);
-        // worker thread には network thread を使う
-        deps.set_worker_thread(&network);
-        deps.set_signaling_thread(&signaling);
+        // ADM は生成時のスレッドがファクトリに設定する network thread と一致している必要が
+        // あるため、依存を組み立てる前に生成する。
+        let adm = match adm_config {
+            AdmConfig::NoAudioDevice => Some(
+                // Safety: network は ADM より長く生存し、ADM の生存中は停止しない。
+                unsafe {
+                    AudioDeviceModule::new(
+                        &network,
+                        &environment,
+                        AudioDeviceModuleAudioLayer::Dummy,
+                    )
+                }?,
+            ),
+            AdmConfig::UseBuiltIn => Some(
+                // Safety: network は ADM より長く生存し、ADM の生存中は停止しない。
+                unsafe {
+                    AudioDeviceModule::new(
+                        &network,
+                        &environment,
+                        AudioDeviceModuleAudioLayer::PlatformDefault,
+                    )
+                }?,
+            ),
+            AdmConfig::UseExternal(external_adm) => Some(external_adm),
+        };
+
+        // 依存は network thread と signaling thread の借用を保持するため、
+        // 依存を先に破棄してからスレッドを破棄する必要がある。
+        let mut deps = PeerConnectionFactoryDependencies::from_params(
+            PeerConnectionFactoryDependenciesParams {
+                network_thread: &network,
+                signaling_thread: &signaling,
+                adm,
+            },
+        );
         // AudioDeviceModule と同じ Environment を PeerConnectionFactory にも渡す。
         deps.set_env(Some(environment.clone()));
         let event_log = RtcEventLogFactory::new();
         deps.set_event_log_factory(event_log);
-        match adm_config {
-            AdmConfig::NoAudioDevice => {
-                let adm = AudioDeviceModule::new(&environment, AudioDeviceModuleAudioLayer::Dummy)?;
-                deps.set_audio_device_module(&adm);
-            }
-            AdmConfig::UseBuiltIn => {
-                let adm = AudioDeviceModule::new(
-                    &environment,
-                    AudioDeviceModuleAudioLayer::PlatformDefault,
-                )?;
-                deps.set_audio_device_module(&adm);
-            }
-            AdmConfig::UseExternal(external_adm) => {
-                deps.set_audio_device_module(&external_adm);
-            }
-        };
         deps.set_audio_encoder_factory(&audio_encoder_factory);
         deps.set_audio_decoder_factory(&audio_decoder_factory);
         deps.set_video_encoder_factory(video_encoder_factory);

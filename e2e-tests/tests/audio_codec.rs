@@ -7,6 +7,8 @@ use e2e_tests::{
 };
 use sora_sdk::{AdmConfig, Audio, Role, SoraConnectionContext, SoraConnectionContextConfig};
 
+use shiguredo_webrtc::Thread;
+
 /// テスト用のチャンネル ID を生成する (suffix 付き)
 fn test_channel_id(suffix: &str) -> String {
     let base = generate_channel_id();
@@ -19,9 +21,19 @@ fn connect_audio_sendrecv(
     channel_id: &str,
 ) -> (SoraTestConnection, FakeAudioDeviceModule) {
     // マイクが存在しない環境でも動くよう、正弦波を流すダミー AudioDeviceModule を使う。
-    let fake = FakeAudioDeviceModule::new(FakeAudioDeviceModuleConfig::default());
+    // ADM は SoraConnectionContext の network thread 上でメソッドを実行する必要があるため、
+    // 先に network thread を作って ADM と SoraConnectionContext の両方へ渡す。
+    let mut network_thread = Thread::new_with_socket_server();
+    assert!(
+        network_thread.start(),
+        "network thread の起動に失敗しました"
+    );
+    let mut fake =
+        FakeAudioDeviceModule::new(&network_thread, FakeAudioDeviceModuleConfig::default());
+    let adm = fake.take_audio_device_module();
     let config = SoraConnectionContextConfig {
-        adm_config: AdmConfig::UseExternal(fake.audio_device_module()),
+        adm_config: AdmConfig::UseExternal(adm),
+        network_thread: Some(network_thread),
         ..SoraConnectionContextConfig::default()
     };
     let context = SoraConnectionContext::new_with_config(config)

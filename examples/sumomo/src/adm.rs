@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use shiguredo_webrtc::{AudioDeviceModule, AudioDeviceModuleHandler, AudioTransportPtr};
+use shiguredo_webrtc::{AudioDeviceModule, AudioDeviceModuleHandler, AudioTransportPtr, Thread};
 
 #[derive(Clone)]
 pub(crate) struct SumomoAdmState {
@@ -52,9 +52,8 @@ impl SumomoAdmState {
     }
 }
 
-#[derive(Clone)]
 pub(crate) struct SumomoAdm {
-    adm: AudioDeviceModule,
+    adm: Option<AudioDeviceModule>,
     state: SumomoAdmState,
 }
 
@@ -80,7 +79,7 @@ impl AudioDeviceModuleHandler for SumomoAdmHandler {
         0
     }
 
-    fn initialized(&mut self) -> bool {
+    fn initialized(&self) -> bool {
         true
     }
 
@@ -108,7 +107,7 @@ impl AudioDeviceModuleHandler for SumomoAdmHandler {
         0
     }
 
-    fn recording_is_initialized(&mut self) -> bool {
+    fn recording_is_initialized(&self) -> bool {
         true
     }
 
@@ -122,26 +121,48 @@ impl AudioDeviceModuleHandler for SumomoAdmHandler {
         0
     }
 
-    fn recording(&mut self) -> bool {
+    fn recording(&self) -> bool {
         self.recording.load(Ordering::SeqCst)
     }
 }
 
 impl SumomoAdm {
-    pub(crate) fn new() -> Self {
+    /// 外部 AudioDeviceModule を生成する。
+    ///
+    /// `network_thread` は生成した ADM のメソッドを実行するスレッドである。start 済みで、
+    /// [SumomoAdm::take_audio_device_module] が返す ADM より長く生存する必要がある。
+    pub(crate) fn new(network_thread: &Thread) -> Self {
         let state = SumomoAdmState {
             recording: Arc::new(AtomicBool::new(false)),
             audio_transport: Arc::new(Mutex::new(None)),
         };
-        let adm = AudioDeviceModule::new_with_handler(Box::new(SumomoAdmHandler {
-            recording: Arc::clone(&state.recording),
-            audio_transport: Arc::clone(&state.audio_transport),
-        }));
-        Self { adm, state }
+        // Safety: network_thread は呼び出し側がこの ADM より長く生存させる。
+        let adm = unsafe {
+            AudioDeviceModule::new_with_handler(
+                network_thread,
+                Box::new(SumomoAdmHandler {
+                    recording: Arc::clone(&state.recording),
+                    audio_transport: Arc::clone(&state.audio_transport),
+                }),
+            )
+        };
+        Self {
+            adm: Some(adm),
+            state,
+        }
     }
 
-    pub(crate) fn audio_device_module(&self) -> AudioDeviceModule {
-        self.adm.clone()
+    /// この ADM を取り出す。
+    ///
+    /// 取り出した ADM はこの値より先に破棄すること。
+    ///
+    /// # Panics
+    ///
+    /// 既に取り出した後に呼び出した場合。
+    pub(crate) fn take_audio_device_module(&mut self) -> AudioDeviceModule {
+        self.adm
+            .take()
+            .expect("take_audio_device_module: audio device module is already taken")
     }
 
     pub(crate) fn state(&self) -> SumomoAdmState {
