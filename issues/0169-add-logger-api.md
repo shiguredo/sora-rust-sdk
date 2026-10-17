@@ -1,7 +1,7 @@
 # ロガー API を追加する
 
 - Created: 2026-10-05
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-18
 - Branch: feature/add-logger-api
 - Polished: {YYYY-MM-DD}
 
@@ -44,35 +44,17 @@ sora_sdk と libwebrtc のログを利用側から取得できるようにする
 
 ## 解決方法
 
-実装を行わない。目的・現状・設計方針の前提が成立していないと判断し、closed にする。
+対応しない。`shiguredo_webrtc::log` をそのまま使えば目的を達成でき、sora_sdk の型に包み直す価値が無いと判断した。
 
-### 前提 1: sora_sdk 利用者にログ設定・取得の手段が既にある
+- `shiguredo_webrtc::log` は `LoggingConfig` / `Severity` / `LogSink` / `LogSinkHandler` / `initialize_logging` を公開しており、ログレベルの指定と 1 行ごとのコールバック登録が既にできる。`examples/sumomo/src/main.rs` は `log::LoggingConfig::new()` に sink を登録して `log::initialize_logging()` を呼んでおり、この経路だけで完結している
+- sora_sdk の利用者は公開 API で `shiguredo_webrtc` の型を受け取るため、必ず `shiguredo_webrtc` に依存する。`log` モジュールを直接利用できない利用者はいない
+- `initialize_logging` は最初のログ出力前に 1 回だけ呼ぶ必要があり、アプリのログ出力先 (os.Logger / logcat / logging) を知っている利用者が呼ぶ。ラッパー API を追加しても呼び出しの主体と順序は変わらない
+- したがって追加されるのは全機能をそのまま転送する薄いラッパーであり、利用者が管理する項目は減らない
+- 「公開 API に shiguredo_webrtc の型は出さない」は、`SoraConnectionEventHandler::on_track` が `RtpTransceiver` を直接受けるなど現行慣行と一致しない。ログ設定だけを例外にする根拠が無い
+- 各言語 SDK への橋渡しは本 issue の範囲外であり、各 SDK 側で `webrtc_LogSink` 等を実装するか `shiguredo_webrtc::log` をバインディングするかは各 SDK の判断による
 
-- `shiguredo_webrtc` 0.154.1-canary.3 (本リポジトリの Cargo.toml で依存) は `log` モジュールを公開している (`src/rtc_base/logging.rs` の `LoggingConfig` / `Severity` / `LogSink` / `LogSinkHandler` / `initialize_logging` / `print`。`src/lib.rs` が `pub use rtc_base::{…, log, …}` しているため `shiguredo_webrtc::log::*` で利用できる)。
-- sora_sdk の利用者は公開 API で `shiguredo_webrtc` の型 (例: `RtpTransceiver` / `AudioDeviceModule`) を受け取るため、必ず `shiguredo_webrtc` に依存する (`skills/sora-rust-sdk/SKILL.md`「利用側の `Cargo.toml` に `shiguredo_webrtc` を追加する必要がある」)。
-- 実際に、本リポジトリの `examples/sumomo/src/main.rs` と、sora_sdk の実利用者である zakuro-rs の `src/main.rs` は `log::LoggingConfig::new()` / `log::initialize_logging()` を直接呼んでおり、ログレベル・タイムスタンプ・スレッド ID の設定と sink 登録が既に可能である。
-- したがって「sora_sdk は…ログレベルや出力先を設定する手段が無い」という現状認識は成立しない。
+### closed にした経緯について
 
-### 前提 2: 各言語 SDK が sora_sdk の API を経由する想定が実状と異なる
+一度 closed にしたのち reopened とし、再度 closed にしている。reopened の理由にあった「下層でできることは上層の公開 API が不要である証拠にならない」という指摘は論理として正しく、初回の解決方法が example の直接呼び出しを不要の証拠に使っていた点は誤りであった。また各言語 SDK の移行状況を閉じる根拠にした点も、橋渡しが範囲外である以上は根拠にならない。
 
-- Swift (sora-ios-sdk): sora-rust-sdk を利用していない。`Sora.swift` に `Sora.setWebRTCLogLevel(_: RTCLoggingSeverity)` (`RTCCallbackLogger`) が既にあり、libwebrtc のログを取得できる。バイナリは webrtc-rs の C API (libwebrtc_c.xcframework) へ移行する方針で、ロガーは C API の `webrtc_LogSink` / `webrtc_LoggingConfig_AddSink` で実装すると移行 issue 0070 に明記されている。「Sora Swift SDK のロードマップに…未着手で残っている」という記述は sora-ios-sdk の実状態と整合しない。
-- Kotlin (sora-android-sdk): sora-rust-sdk を利用していない。`SoraLogger` (Kotlin) で自 SDK のログを logcat へ出力しており、libwebrtc-c への書き換えは調査段階 (issue 0061) である。
-- Python (sora-python-sdk): sora-rust-sdk + PyO3 へ移行中だが、移行設計 (`docs/migration-to-sora-rust-sdk.md`) はログの受け口として `shiguredo_webrtc::log` を直接バインディングすると明記しており、sora_sdk へのラッパー API 追加を必要としていない。
-
-### 補足: 設計方針が現行 API 方針と矛盾
-
-- 「公開 API に shiguredo_webrtc の型は出さない」は現行慣行と異なる。`SoraConnectionEventHandler::on_track` は `shiguredo_webrtc::RtpTransceiver` を直接受けるなど、公開 API に `shiguredo_webrtc` の型が多数出ている。
-
-以上より、この issue が解決を目指していた問題は現行実装ですでに解消可能か、前提が成立しないものであり、対応は不要と判断した。
-
-## reopened にした理由
-
-closed 時の判断は、本 issue が求めるものを取り違えている。実装は行われておらず、問題は解消していない。
-
-closed 時の「解決方法」は `shiguredo_webrtc::log` が既に公開されていること、example と zakuro-rs がそれを直接呼んでいること、各言語 SDK が現状 sora-rust-sdk 経由でログを取っていないことを根拠に、sora_sdk へのロガー API 追加を不要とした。これは下層でできることを、上層の公開 API が不要であることの証拠にしている。
-
-本 issue の目的は、sora_sdk の公開 API としてログレベル指定とログ sink 登録を持つことである。example が `shiguredo_webrtc::log` を直接叩いているのは、その API が無いことの証拠であり、不要であることの証拠ではない。各言語 SDK が今まだ sora-rust-sdk を使っていないことも、このクレート側の API を closed にする理由にならない。issue は各言語への橋渡しを範囲外と既に書いている。
-
-「公開 API に shiguredo_webrtc の型は出さない」が `RtpTransceiver` などの現行漏洩と矛盾する、という補足も、メディアオブジェクトの型漏洩とログ設定のラッパーは別問題であり、本 issue を閉じる根拠にならない。
-
-したがって、目的・完了条件は起票時のまま有効であり、reopened にする。
+本 issue の目的は sora_sdk の公開 API としてログ設定を持つことであるが、上記のとおり包む対象の機能が利用者側で完結しており、ラッパーを追加しても利用者の手間が変わらないため対応しない。各言語 SDK が sora_sdk 経由でログを受け取る必要が生じた場合は、各 SDK 側の都合として改めて起票する。
