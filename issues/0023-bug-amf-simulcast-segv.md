@@ -2,7 +2,7 @@
 
 - Priority: Medium
 - Created: 2026-06-23
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-18
 - Model: Opus 4.7
 - Branch: feature/fix-amf-simulcast-segv
 - Polished: {YYYY-MM-DD}
@@ -65,8 +65,34 @@ Caused by:
 
 ## 解決方法
 
-調査結果に応じて以下のいずれか:
+AMD-AMF self-hosted ランナーで再現確認を行った結果、再現せず、CI でも約 2 か月間再発していないため flaky と判定して closed にする。
 
-- flaky 確定なら closed にして経過観察。再発したら reopened する
-- 上流の bug なら `shiguredo_amf` 側で修正してもらい、修正版が出るまで該当バージョンを避ける pin / skip を入れる
-- SDK 側の bug ならコードを修正してテストを追加する
+### 実機での再現確認
+
+`shiguredo-amd-um790` (AMD-AMF ランナー) の作業ツリーで、CI と同一の条件で確認した。SIGSEGV は一度も発生しなかった。
+
+- `simulcast` バイナリを CI と同じ `--skip test_video_capture_frame_received --skip test_video_capture_session_create` 付きで 15 回連続実行し、15 回とも成功
+- `cargo test --workspace --features amf` (CI と同一条件) が成功
+- `simulcast` と `amf_video_codec` を同時実行するラウンドを 12 回行い、全ラウンド成功 (`cargo test` のバイナリ並列実行に相当)
+- `test_sendonly_simulcast_outbound_layers_amf` を単体で 25 回連続実行し、25 回とも成功。ログで H.264 / H.265 / AV1 のエンコーダーが実際に生成されていることを確認済み
+- AMF の `supported_codecs` による capability probe と Encoder / Decoder の生成・破棄を 16 スレッドで高頻度に並行実行する負荷試験を 5 回行い、全て成功
+
+### 関連 issue 0024 の調査結果との整合
+
+`issues/closed/0024-bug-amf-encoder-hot-path-panic.md` で原因候補として挙がっていた `assert_eq!(surface_height, frame_height)` は、同 issue の調査で「`AMFPlane::GetHeight()` は要求した論理高さを返し、パディングは `GetVPitch()` が吸収する」と結論され、現在のコードでも `assert_eq!` ではなく `VideoCodecStatus::Error` を返す形になっている。
+
+実機で解像度ごとに `AMFPlane::GetHeight()` を実測し、要求した高さがそのまま返ることを確認した (`320x180` → 180、`1280x722` → 722 など)。この結果は 0024 の結論と一致し、AMF 側のコーデック実装に SIGSEGV を起こす経路は見つからなかった。
+
+### CI 履歴による切り分け
+
+直近 100 回の CI のうち AMD-AMF ジョブが失敗したのは 2 回だったが、いずれも本件とは別の原因だった。
+
+- 直近の失敗 run (`39030691927` / `34954196253` / `33835211681`) では AMD-AMF ジョブはいずれも success で、失敗していたのは Raspberry-Pi ジョブ
+- 2026-09-04 以降、AMD-AMF ジョブは 40 回以上連続で success
+
+これにより完了条件の「事象が flaky と判定され、一定期間 (例: 直近 10 回の AMD-AMF ジョブ) 再発しない」を満たす。
+
+### 補足
+
+- 本件の初報以降、`e2e-tests/tests/simulcast.rs` の各テストに `#[serial]` が付与され、映像ビットレートも 2500 kbps に引き上げられている。テスト間の排他が入ったことも再発しない要因になり得る
+- 再発した場合は reopened にし、`simulcast` バイナリで coredump を取得して stack trace から切り分ける
