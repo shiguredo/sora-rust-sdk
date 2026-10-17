@@ -1,7 +1,7 @@
 # 送信トラックのミュート操作 API を追加する
 
 - Created: 2026-10-04
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-18
 - Branch: feature/add-sender-track-mute
 - Polished: {YYYY-MM-DD}
 
@@ -32,3 +32,13 @@
 
 - `src/connection.rs` の `SoraConnectionHandle` と `SoraConnection` (送信トラックの保持)
 - `skills/sora-rust-sdk/SKILL.md` (API 一覧の更新)
+
+## 解決方法
+
+対応しない。ミュートは利用者が送信トラックの複製を保持して `shiguredo_webrtc::MediaStreamTrack::set_enabled` を呼ぶことで実現でき、SDK に API を追加する必要がないと判断した。
+
+- `VideoTrack` / `AudioTrack` は `Clone` でき、複製は `ScopedRef` により同じ実体を指す。`SoraConnectionBuilder::sender_video_track` / `sender_audio_track` にトラックを渡す前に複製を 1 つ残せば、接続後いつでも `set_enabled` を呼べる
+- `set_enabled` は `&self` であり、`SoraConnection::run()` が別タスクで動いていても同じ実体の状態を書き換えるため、そのまま反映される
+- `SoraConnection` がトラックを保持しなくてもこの操作は成立する。`RtpSender` からトラックを逆引きする API が無いことが「保持できない」理由にはなるが、「保持しなければならない」理由にはならない
+- SDK 側にミュート状態を持つ設計は、送信トラックを持たない `Role::RecvOnly` や送信トラック未指定の接続での挙動、Re-offer による sender の再構築といった分岐を SDK 内部に増やす。利用者が複製を 1 つ保持する手間に見合わない
+- ブリッジ間の実装重複はブリッジ側で共通化する話であり、SDK の公開 API を増やす根拠にはならない
