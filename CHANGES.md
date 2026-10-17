@@ -17,6 +17,8 @@
   - `Some` を指定する場合は start 済みのスレッドを渡す。 `SoraConnectionContext` は start を呼ばない
   - `AdmConfig::UseExternal` の ADM は、その構築時に渡したスレッドを `network_thread` に渡す。一致しない場合は panic する
   - @melpon
+- [UPDATE] shiguredo_libcamera を 2026.1.0 から 2026.2.0-canary.0 にアップデートする
+  - @melpon
 - [UPDATE] shiguredo_webrtc を 0.155.0 から 0.156.1-canary.1 にアップデートする
   - @melpon
 
