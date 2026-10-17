@@ -1,7 +1,7 @@
 # 接続情報の型付きアクセサを追加する
 
 - Created: 2026-10-04
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-18
 - Branch: feature/add-connection-info-accessors
 - Polished: {YYYY-MM-DD}
 
@@ -34,3 +34,14 @@ connection_id / session_id は notify (`connection.created`) の JSON にのみ�
 
 - `src/connection.rs` の `SoraConnectionHandle` (接続情報の保持とアクセサ)
 - `skills/sora-rust-sdk/SKILL.md` (API 一覧の更新)
+
+## 解決方法
+
+対応しない。connection_id / session_id は利用者が notify (`connection.created`) をパースすれば取得でき、SDK にアクセサを追加する必要がないと判断した。
+
+- 現状の記述にある「コアが保持している接続情報を利用者に再導出させている」は事実と異なる。`IncomingMessageData::Notify` は種別のみを判別してペイロードを保持せず、SDK は connection_id / session_id を一切パースしていない。SDK と利用者が同じ JSON を別々に読んでいる状態であり、再導出させているわけではない
+- SDK が持つ動機が無い。`selected_signaling_url` / `connected_signaling_url` は SDK 自身が接続処理で使う値を保持しているのに対し、connection_id / session_id は接続処理に使わないため、アクセサのために保存することになる
+- SDK に寄せても利用者が管理する項目は減らない。値を保持して返すだけであり、どちらに置いても同じ値を持つ
+- 追加する基準が SDK の中に無い。`connection.created` には channel_id / client_id / bundle_id / metadata なども含まれ、その一部だけをアクセサにする判断は利用者側の事情に依存する
+- パースの重複は解消しない。`connection.created` の他のフィールドを読む利用者は結局 notify をパースする
+- ブリッジ間の実装重複はブリッジ側で共通化する話であり、SDK の公開 API を増やす根拠にはならない
