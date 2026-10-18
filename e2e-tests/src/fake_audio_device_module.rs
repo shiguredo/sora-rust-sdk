@@ -205,7 +205,7 @@ impl FakeAudioDeviceModule {
                     transport.recorded_data_is_available(
                         buffer.as_ptr() as *const u8,
                         samples_per_channel,
-                        std::mem::size_of::<i16>(),
+                        std::mem::size_of::<i16>() * state.config.channels,
                         state.config.channels,
                         state.config.sample_rate,
                         0,
